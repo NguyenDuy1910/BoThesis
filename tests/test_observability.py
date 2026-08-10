@@ -9,7 +9,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from bothesis.agent.models import AgentContext
+from bothesis.agent.models import (
+    AgentContext,
+    Evidence,
+    ModelTurn,
+    ToolCall,
+    ToolResult,
+)
 from bothesis.observability import LangfuseTracing, _trace_name
 
 
@@ -40,7 +46,7 @@ class RecordingClient:
         self.flush_count += 1
 
 
-def test_agent_trace_uses_safe_correlations_without_content() -> None:
+def test_agent_trace_captures_content_with_safe_correlations() -> None:
     client = RecordingClient()
     tracing = LangfuseTracing(client)
     context = AgentContext(
@@ -55,6 +61,7 @@ def test_agent_trace_uses_safe_correlations_without_content() -> None:
         user_message="private enterprise question", ctx=context
     ) as trace:
         trace.complete(
+            answer="Grounded enterprise answer",
             answer_characters=120,
             turn_count=2,
             tool_call_count=1,
@@ -66,18 +73,16 @@ def test_agent_trace_uses_safe_correlations_without_content() -> None:
         {"starts": client.starts, "updates": client.observations[0].updates},
         default=str,
     )
-    assert "private enterprise question" not in serialized
+    assert "private enterprise question" in serialized
+    assert "Grounded enterprise answer" in serialized
     assert "employee@example.com" not in serialized
     assert "tenant-secret" not in serialized
     assert client.starts[0]["as_type"] == "agent"
     assert client.starts[0]["trace_context"] == {
         "trace_id": "0123456789abcdef0123456789abcdef"
     }
-    assert client.starts[0]["input"] == {
-        "message_characters": 27,
-        "history_message_count": 0,
-    }
-    assert client.observations[0].updates[-1]["output"]["status"] == "completed"
+    assert client.starts[0]["input"] == "private enterprise question"
+    assert client.observations[0].updates[-1]["output"] == "Grounded enterprise answer"
 
 
 def test_trace_name_uses_a_short_valid_request_id() -> None:
@@ -86,7 +91,7 @@ def test_trace_name_uses_a_short_valid_request_id() -> None:
     assert _trace_name(None) == "chat-request"
 
 
-def test_generation_trace_normalizes_openrouter_usage() -> None:
+def test_generation_trace_captures_messages_response_and_usage() -> None:
     client = RecordingClient()
     tracing = LangfuseTracing(client)
 
@@ -98,19 +103,34 @@ def test_generation_trace_normalizes_openrouter_usage() -> None:
         trace.mark_first_token()
         trace.mark_first_token()
         trace.complete(
-            model="openai/gpt-5.4-mini",
-            usage={"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
-            finish_reason="stop",
-            text_characters=42,
-            tool_call_count=0,
+            turn=ModelTurn(
+                text="I will search the knowledge base.",
+                tool_calls=[
+                    ToolCall(
+                        call_id="call-1",
+                        name="knowledge_search",
+                        arguments={"query": "leave policy"},
+                    )
+                ],
+                model="openai/gpt-5.4-mini",
+                usage={
+                    "prompt_tokens": 20,
+                    "completion_tokens": 8,
+                    "total_tokens": 28,
+                },
+                finish_reason="tool_calls",
+            )
         )
 
     serialized = json.dumps(
         {"starts": client.starts, "updates": client.observations[0].updates},
         default=str,
     )
-    assert "sensitive prompt" not in serialized
+    assert "sensitive prompt" in serialized
+    assert "I will search the knowledge base." in serialized
+    assert "leave policy" in serialized
     assert client.starts[0]["as_type"] == "generation"
+    assert client.starts[0]["name"] == "agent-model-turn"
     assert (
         sum(
             "completion_start_time" in update
@@ -123,26 +143,87 @@ def test_generation_trace_normalizes_openrouter_usage() -> None:
         "output_tokens": 8,
         "total_tokens": 28,
     }
+    assert client.observations[0].updates[-1]["name"] == "decide-next-step"
+    assert client.observations[0].updates[-1]["metadata"] == {
+        "turn": 1,
+        "generation_kind": "next_step",
+        "finish_reason": "tool_calls",
+        "tool_call_count": 1,
+        "selected_tools": ["knowledge_search"],
+    }
 
 
-def test_retrieval_trace_excludes_query_and_source_content() -> None:
+def test_generation_trace_names_a_final_response() -> None:
+    client = RecordingClient()
+    tracing = LangfuseTracing(client)
+
+    with tracing.generation(
+        turn=2,
+        messages=[{"role": "user", "content": "Summarize the evidence"}],
+        tool_count=1,
+    ) as trace:
+        trace.complete(
+            turn=ModelTurn(
+                text="Final grounded answer.",
+                tool_calls=[],
+                model="openai/gpt-5.4-mini",
+                usage={},
+                finish_reason="stop",
+            )
+        )
+
+    update = client.observations[0].updates[-1]
+    assert update["name"] == "generate-final-response"
+    assert update["metadata"]["generation_kind"] == "final_response"
+    assert update["metadata"]["selected_tools"] == []
+
+
+def test_tool_execution_trace_uses_the_tool_name() -> None:
+    client = RecordingClient()
+    tracing = LangfuseTracing(client)
+
+    with tracing.tool_execution(
+        name="calculate_metric",
+        arguments={"metric": "net_interest_margin"},
+    ) as trace:
+        trace.complete(
+            result=ToolResult(
+                call_id="call-1",
+                content="3.2%",
+                metadata={"outcome": "success"},
+            )
+        )
+
+    assert client.starts[0]["as_type"] == "tool"
+    assert client.starts[0]["name"] == "calculate_metric"
+    assert client.observations[0].updates[-1]["output"]["content"] == "3.2%"
+
+
+def test_retrieval_trace_captures_query_and_normalized_results() -> None:
     client = RecordingClient()
     tracing = LangfuseTracing(client)
 
     with tracing.retrieval(query="confidential policy terms", result_limit=5) as trace:
         trace.complete(
             outcome="success",
-            result_count=2,
-            source_types=["confluence", "confluence"],
+            result_count=1,
+            source_types=["confluence"],
+            results=[
+                Evidence(
+                    id="chunk-1",
+                    document_id="doc-1",
+                    title="Leave policy",
+                    content="Employees receive 20 days of annual leave.",
+                    source="confluence",
+                    relevance_score=0.91,
+                )
+            ],
         )
 
     serialized = json.dumps(
         {"starts": client.starts, "updates": client.observations[0].updates}
     )
-    assert "confidential policy terms" not in serialized
+    assert "confidential policy terms" in serialized
+    assert "Employees receive 20 days of annual leave." in serialized
     assert client.starts[0]["as_type"] == "retriever"
-    assert client.observations[0].updates[-1]["output"] == {
-        "outcome": "success",
-        "result_count": 2,
-        "source_types": ["confluence"],
-    }
+    assert client.observations[0].updates[-1]["output"][0]["id"] == "chunk-1"

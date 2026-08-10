@@ -4,7 +4,7 @@ import clsx from "clsx";
 import {
   AlertCircle,
   BookOpen,
-  ChevronDown,
+  Check,
   CircleStop,
   Clock3,
   Database,
@@ -16,8 +16,9 @@ import {
   Search,
   Sparkles,
   Wrench,
+  X,
 } from "lucide-react";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import { AgentActivityMapper } from "@/modules/chat/activity-mapper";
 import type { ActivityEntry, AgentRunStatus, SourceResult, SourceType } from "@/modules/chat/activity";
@@ -31,34 +32,59 @@ interface SourceFocus {
 interface AgentExecutionCardProps {
   message: ChatMessage;
   isStreaming: boolean;
-  sourceFocus?: SourceFocus;
+  onOpen: () => void;
 }
 
 export const AgentExecutionCard = memo(function AgentExecutionCard({
   message,
   isStreaming,
-  sourceFocus,
+  onOpen,
 }: AgentExecutionCardProps) {
   const run = useMemo(
     () => AgentActivityMapper.fromParts(message.parts, isStreaming),
     [message.parts, isStreaming],
   );
-  const [expanded, setExpanded] = useState(false);
+  if (!run.hasActivity) return null;
+
+  return (
+    <section className={clsx("assistant-activity", `assistant-activity--${run.status}`)}>
+      <button
+        aria-label="Open activity for this response"
+        className="assistant-activity__summary"
+        onClick={onOpen}
+        type="button"
+      >
+        <RunStatusIcon status={run.status} />
+        <span aria-live="polite" className="assistant-activity__summary-label">
+          {summaryLabel(run, isStreaming)}
+        </span>
+        <span aria-hidden="true" className="assistant-activity__open-indicator">Activity</span>
+      </button>
+    </section>
+  );
+});
+
+interface AgentActivityPanelProps {
+  message?: ChatMessage;
+  isStreaming: boolean;
+  onClose: () => void;
+  sourceFocus?: SourceFocus;
+}
+
+export const AgentActivityPanel = memo(function AgentActivityPanel({
+  message,
+  isStreaming,
+  onClose,
+  sourceFocus,
+}: AgentActivityPanelProps) {
+  const run = useMemo(
+    () => AgentActivityMapper.fromParts(message?.parts ?? [], isStreaming),
+    [message?.parts, isStreaming],
+  );
   const [highlightedSourceId, setHighlightedSourceId] = useState<string | null>(null);
-  const previousStatusRef = useRef(run.status);
-  const detailsId = `assistant-activity-${message.id}`;
 
   useEffect(() => {
-    const previousStatus = previousStatusRef.current;
-    if (previousStatus === "running" && run.status !== "running") {
-      setExpanded(false);
-    }
-    previousStatusRef.current = run.status;
-  }, [run.status]);
-
-  useEffect(() => {
-    if (!sourceFocus) return;
-    setExpanded(true);
+    if (!message || !sourceFocus) return;
     setHighlightedSourceId(sourceFocus.sourceId);
     const frame = requestAnimationFrame(() => {
       document
@@ -70,44 +96,57 @@ export const AgentExecutionCard = memo(function AgentExecutionCard({
       cancelAnimationFrame(frame);
       window.clearTimeout(timeout);
     };
-  }, [message.id, sourceFocus]);
-
-  if (!run.hasActivity) return null;
+  }, [message?.id, sourceFocus]);
 
   return (
-    <section className={clsx("assistant-activity", `assistant-activity--${run.status}`)}>
-      <button
-        aria-controls={detailsId}
-        aria-expanded={expanded}
-        className="assistant-activity__summary"
-        onClick={() => setExpanded((current) => !current)}
-        type="button"
-      >
-        <RunStatusIcon status={run.status} />
-        <span aria-live="polite" className="assistant-activity__summary-label">
-          {summaryLabel(run, isStreaming)}
-        </span>
-        <ChevronDown
-          aria-hidden="true"
-          className={clsx("assistant-activity__chevron", expanded && "assistant-activity__chevron--open")}
-          size={14}
-        />
-      </button>
-
-      {expanded && (
-        <div className="assistant-activity__details" id={detailsId}>
-          <ActivitySteps messageId={message.id} steps={run.steps} />
-          <SourceList
-            highlightedSourceId={highlightedSourceId}
-            messageId={message.id}
-            onHighlight={setHighlightedSourceId}
-            sources={run.sources}
-          />
+    <aside aria-label="Agent activity" className="activity-panel">
+      <header className="activity-panel__header">
+        <div className="activity-panel__title">
+          <h2>Activity</h2>
+          <span aria-live="polite" className={`activity-panel__status activity-panel__status--${run.status}`}>
+            <RunStatusIcon status={run.status} />
+            {panelStatusLabel(run)}
+          </span>
         </div>
-      )}
-    </section>
+        <button aria-label="Close activity" className="activity-panel__close" onClick={onClose} type="button">
+          <X aria-hidden="true" size={17} />
+        </button>
+      </header>
+      <div className="activity-panel__scroll">
+        {message && run.hasActivity ? (
+          <>
+            <RunSummary run={run} />
+            <ActivitySteps messageId={message.id} steps={run.steps} />
+            <SourceList
+              highlightedSourceId={highlightedSourceId}
+              messageId={message.id}
+              onHighlight={setHighlightedSourceId}
+              sources={run.sources}
+            />
+          </>
+        ) : (
+          <p className="activity-panel__empty">Select an assistant response to inspect its activity.</p>
+        )}
+      </div>
+    </aside>
   );
 });
+
+function RunSummary({ run }: { run: ReturnType<typeof AgentActivityMapper.fromParts> }) {
+  const metrics = [
+    run.toolCallCount !== undefined
+      ? `${run.toolCallCount} tool${run.toolCallCount === 1 ? "" : "s"}`
+      : undefined,
+    run.sourceCount > 0 ? `${run.sourceCount} sources found` : undefined,
+    run.usedSourceCount > 0 ? `${run.usedSourceCount} sources used` : undefined,
+  ].filter(Boolean);
+  return (
+    <section className="activity-panel__summary" aria-label="Run summary">
+      <strong>{panelStatusLabel(run)}</strong>
+      {metrics.length > 0 && <p>{metrics.join(" · ")}</p>}
+    </section>
+  );
+}
 
 function ActivitySteps({ messageId, steps }: { messageId: string; steps: ActivityEntry[] }) {
   if (steps.length === 0) return null;
@@ -126,7 +165,6 @@ function ActivitySteps({ messageId, steps }: { messageId: string; steps: Activit
               <span>{step.label}</span>
               {step.durationMs !== undefined && <small>{formatDuration(step.durationMs)}</small>}
             </span>
-            {step.query && <span className="assistant-activity__query">“{step.query}”</span>}
             {step.resultCount !== undefined && (
               <span className="assistant-activity__result">
                 {step.resultCount} source{step.resultCount === 1 ? "" : "s"} found
@@ -233,7 +271,9 @@ function SourceItem({
 }
 
 function RunStatusIcon({ status }: { status: AgentRunStatus }) {
-  if (status === "completed") return null;
+  if (status === "completed") {
+    return <Check aria-hidden="true" className="assistant-activity__status-icon" size={14} />;
+  }
   if (status === "running") {
     return <LoaderCircle aria-hidden="true" className="assistant-activity__status-icon assistant-activity__spin" size={14} />;
   }
@@ -249,10 +289,10 @@ function RunStatusIcon({ status }: { status: AgentRunStatus }) {
 function StepIcon({ step }: { step: ActivityEntry }) {
   if (step.status === "running") return <LoaderCircle aria-hidden="true" className="assistant-activity__spin" size={13} />;
   if (step.status === "failed") return <AlertCircle aria-hidden="true" size={13} />;
-  if (step.status === "completed") return <span aria-hidden="true" className="assistant-activity__step-dot" />;
+  if (step.status === "completed") return <Check aria-hidden="true" size={13} />;
   if (step.status === "skipped") return <CircleStop aria-hidden="true" size={13} />;
-  if (step.type === "retrieval") return <Search aria-hidden="true" size={13} />;
-  if (step.type === "tool") return <Wrench aria-hidden="true" size={13} />;
+  if (step.type === "knowledge_retrieval") return <Search aria-hidden="true" size={13} />;
+  if (step.type === "tool_execution") return <Wrench aria-hidden="true" size={13} />;
   return <Sparkles aria-hidden="true" size={13} />;
 }
 
@@ -262,8 +302,10 @@ function summaryLabel(
 ) {
   if (run.status === "running" || isStreaming) {
     const active = [...run.steps].reverse().find((step) => step.status === "running");
-    if (active?.type === "retrieval") return "Searching knowledge base…";
-    if (active?.type === "generation") return "Preparing answer…";
+    if (active?.type === "knowledge_retrieval") return "Searching knowledge base…";
+    if (active?.type === "next_step_generation") return "Determining next step…";
+    if (active?.type === "final_response_generation") return "Generating final response…";
+    if (active?.type === "tool_execution") return `${active.label}…`;
     return "Preparing response…";
   }
   if (run.status === "failed") return "Could not complete activity · View details";
@@ -273,6 +315,17 @@ function summaryLabel(
     return `Searched ${run.sourceCount} source${run.sourceCount === 1 ? "" : "s"}${duration ? ` · ${duration}` : ""}`;
   }
   return duration ? `Completed in ${duration}` : "View activity";
+}
+
+function panelStatusLabel(run: ReturnType<typeof AgentActivityMapper.fromParts>) {
+  if (run.status === "running") return "Running";
+  if (run.status === "failed") return "Failed";
+  if (run.status === "cancelled") return "Cancelled";
+  if (run.status === "completed" && run.durationMs !== undefined) {
+    return `Completed in ${formatDuration(run.durationMs)}`;
+  }
+  if (run.status === "completed") return "Completed";
+  return "Waiting";
 }
 
 function statusLabel(status: ActivityEntry["status"]) {

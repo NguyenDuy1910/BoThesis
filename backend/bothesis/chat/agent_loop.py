@@ -21,6 +21,8 @@ from bothesis.agent.models import (
     ConversationMessage,
     Evidence,
     EvidenceReference,
+    GenerationCompleted,
+    GenerationStarted,
     MessageDelta,
     ModelTurn,
     RunCompleted,
@@ -124,7 +126,11 @@ class _TurnAccumulator:
             function = raw_call
         raw_name = function.get("name")
         raw_arguments = function.get("arguments", raw_call.get("arguments", ""))
-        arguments = raw_arguments if isinstance(raw_arguments, str) else json.dumps(raw_arguments)
+        arguments = (
+            raw_arguments
+            if isinstance(raw_arguments, str)
+            else json.dumps(raw_arguments)
+        )
         pending = self._get_or_create(call_id)
         if isinstance(raw_name, str):
             pending.name = raw_name
@@ -171,7 +177,9 @@ def _parse_citations(
     if not marker.startswith(_CITATION_PREFIX) or not marker.endswith("]]"):
         return before + marker, [], remainder
     evidence_id = marker[len(_CITATION_PREFIX) : -2]
-    if not evidence_id or not all(char.isalnum() or char in "_.:-" for char in evidence_id):
+    if not evidence_id or not all(
+        char.isalnum() or char in "_.:-" for char in evidence_id
+    ):
         return before + marker, [], remainder
     if evidence_id not in known_evidence_ids:
         return before + marker, [], remainder
@@ -196,12 +204,15 @@ class AgentLoop:
             raise ValueError("max_turns must be at least one")
         if max_tool_calls < 1:
             raise ValueError("max_tool_calls must be at least one")
-        if min(
-            max_history_messages,
-            max_history_characters,
-            max_tool_result_characters,
-            max_user_message_characters,
-        ) < 1:
+        if (
+            min(
+                max_history_messages,
+                max_history_characters,
+                max_tool_result_characters,
+                max_user_message_characters,
+            )
+            < 1
+        ):
             raise ValueError("agent limits must be at least one")
         self._transport = transport
         self._registry = registry
@@ -214,7 +225,9 @@ class AgentLoop:
         self._max_user_message_characters = max_user_message_characters
         self._tracing = tracing
 
-    async def run_stream(self, user_message: str, ctx: AgentContext) -> AsyncIterator[AgentEvent]:
+    async def run_stream(
+        self, user_message: str, ctx: AgentContext
+    ) -> AsyncIterator[AgentEvent]:
         """Run one request, forwarding model text before a turn completes."""
         normalized_message = user_message.strip()
         if not normalized_message:
@@ -233,7 +246,9 @@ class AgentLoop:
             else nullcontext(None)
         )
         with trace_context as run_trace:
-            async for event in self._run_validated_stream(normalized_message, ctx, run_trace):
+            async for event in self._run_validated_stream(
+                normalized_message, ctx, run_trace
+            ):
                 yield event
 
     async def _run_validated_stream(
@@ -260,6 +275,7 @@ class AgentLoop:
         for turn_number in range(self._max_turns):
             state.turn = turn_number
             yield TurnStarted(turn=turn_number)
+            yield GenerationStarted(turn=turn_number)
             accumulator = _TurnAccumulator()
             citation_buffer = ""
             model_started_at = perf_counter()
@@ -299,13 +315,8 @@ class AgentLoop:
                                     yield event
                     completed_turn = accumulator.result()
                     if generation_trace is not None:
-                        generation_trace.complete(
-                            model=completed_turn.model,
-                            usage=completed_turn.usage,
-                            finish_reason=completed_turn.finish_reason,
-                            text_characters=len(completed_turn.text),
-                            tool_call_count=len(completed_turn.tool_calls),
-                        )
+                        generation_trace.complete(turn=completed_turn)
+                generation_duration_ms = _duration_ms(model_started_at)
             except LLMTransportError:
                 state.model_duration_ms += _duration_ms(model_started_at)
                 if run_trace is not None:
@@ -318,7 +329,18 @@ class AgentLoop:
                     run_trace.fail(stage="model")
                 yield RunFailed(error="model stream failed")
                 return
-            state.model_duration_ms += _duration_ms(model_started_at)
+            state.model_duration_ms += generation_duration_ms
+            selected_tools = [call.name for call in completed_turn.tool_calls]
+            yield GenerationCompleted(
+                turn=turn_number,
+                generation_kind=(
+                    "next_step" if completed_turn.tool_calls else "final_response"
+                ),
+                finish_reason=completed_turn.finish_reason,
+                tool_call_count=len(completed_turn.tool_calls),
+                selected_tools=selected_tools,
+                duration_ms=generation_duration_ms,
+            )
 
             # Any incomplete marker is visible as ordinary text at end of turn.
             if citation_buffer:
@@ -360,7 +382,19 @@ class AgentLoop:
                     else:
                         state.executed_tool_requests.add(signature)
                         state.tool_call_count += 1
-                        result = await self._registry.execute(tool_call, ctx)
+                        tool_trace_context = (
+                            self._tracing.tool_execution(
+                                name=tool_call.name,
+                                arguments=tool_call.arguments,
+                            )
+                            if self._tracing is not None
+                            and tool_call.name != "knowledge_search"
+                            else nullcontext(None)
+                        )
+                        with tool_trace_context as tool_trace:
+                            result = await self._registry.execute(tool_call, ctx)
+                            if tool_trace is not None:
+                                tool_trace.complete(result=result)
                         result = _with_call_id(result, tool_call.call_id)
                     duration_ms = _duration_ms(tool_started_at)
                     state.tool_duration_ms += duration_ms
@@ -386,6 +420,7 @@ class AgentLoop:
             run_duration_ms = _duration_ms(started_at)
             if run_trace is not None:
                 run_trace.complete(
+                    answer=completed_turn.text,
                     answer_characters=state.answer_character_count,
                     turn_count=turn_number + 1,
                     tool_call_count=state.tool_call_count,

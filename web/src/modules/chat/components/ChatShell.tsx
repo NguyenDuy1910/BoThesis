@@ -9,6 +9,7 @@ import {
   ListChecks,
   LoaderCircle,
   Menu,
+  PanelRight,
   Plus,
   RefreshCw,
   Send,
@@ -29,7 +30,7 @@ import {
 import { useBothesisChat } from "@/modules/chat/hooks/useBothesisChat";
 import { useSidebarState } from "@/modules/chat/hooks/useSidebarState";
 import type { ChatConversation, ChatMessage, ChatMessagePart } from "@/modules/chat/types";
-import { AgentExecutionCard } from "./AgentExecutionCard";
+import { AgentActivityPanel, AgentExecutionCard } from "./AgentExecutionCard";
 import { AppSidebar, BothesisMark } from "./AppSidebar";
 import { IncrementalMarkdown } from "./IncrementalMarkdown";
 
@@ -193,11 +194,14 @@ function ChatConversation({
     sourceId: string;
     nonce: number;
   } | null>(null);
+  const [activityOpen, setActivityOpen] = useState(false);
+  const [selectedActivityMessageId, setSelectedActivityMessageId] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const messageStackRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const positionedTurnRef = useRef<string | null>(null);
   const didInitialScrollRef = useRef(false);
+  const dismissedActivityRunRef = useRef<string | null>(null);
   const {
     messages,
     sendMessage,
@@ -226,6 +230,15 @@ function ChatConversation({
   const activeTurnId = latestUserMessageId && activeAssistantMessageId
     ? `${latestUserMessageId}:${activeAssistantMessageId}`
     : null;
+  const latestAssistantMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  const selectedActivityMessage = messages.find(
+    (message) => message.id === selectedActivityMessageId && message.role === "assistant",
+  ) ?? latestAssistantMessage;
+  const selectedActivityIsStreaming = Boolean(
+    isStreaming && selectedActivityMessage?.id === activeAssistantMessageId,
+  );
   const hasMessageError = messages.some((message) => (
     message.parts.some((part) => part.type === "data-stream-error")
   ));
@@ -236,6 +249,19 @@ function ChatConversation({
     textarea.style.height = "0px";
     textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
   }, [input]);
+
+  useEffect(() => {
+    if (!activeAssistantMessageId) return;
+    setSelectedActivityMessageId(activeAssistantMessageId);
+    if (dismissedActivityRunRef.current !== activeAssistantMessageId) {
+      setActivityOpen(true);
+    }
+  }, [activeAssistantMessageId]);
+
+  useEffect(() => {
+    if (selectedActivityMessageId || !latestAssistantMessage) return;
+    setSelectedActivityMessageId(latestAssistantMessage.id);
+  }, [latestAssistantMessage, selectedActivityMessageId]);
 
   useLayoutEffect(() => {
     if (!activeTurnId || positionedTurnRef.current === activeTurnId) return;
@@ -287,12 +313,28 @@ function ChatConversation({
   }, [clearError, isConfigured, isStreaming, sendMessage]);
 
   const focusSource = useCallback((messageId: string, sourceId: string) => {
+    setSelectedActivityMessageId(messageId);
+    setActivityOpen(true);
     setSourceFocus((current) => ({
       messageId,
       sourceId,
       nonce: (current?.nonce ?? 0) + 1,
     }));
   }, []);
+
+  const openActivity = useCallback((messageId?: string) => {
+    const targetId = messageId ?? activeAssistantMessageId ?? latestAssistantMessage?.id;
+    if (targetId) setSelectedActivityMessageId(targetId);
+    dismissedActivityRunRef.current = null;
+    setActivityOpen(true);
+  }, [activeAssistantMessageId, latestAssistantMessage?.id]);
+
+  const closeActivity = useCallback(() => {
+    if (activeAssistantMessageId) {
+      dismissedActivityRunRef.current = activeAssistantMessageId;
+    }
+    setActivityOpen(false);
+  }, [activeAssistantMessageId]);
 
   const handleRegenerate = useCallback((messageId: string) => {
     void regenerate({ messageId });
@@ -315,54 +357,84 @@ function ChatConversation({
           </div>
         </div>
         <div className="topbar__actions">
-          {isStreaming && (
-            <span aria-live="polite" className="topbar__working">
-              <LoaderCircle aria-hidden="true" size={14} /> Working
-            </span>
-          )}
+          <button
+            aria-label="Open agent activity"
+            aria-pressed={activityOpen}
+            className="topbar__activity"
+            onClick={() => openActivity()}
+            type="button"
+          >
+            <PanelRight aria-hidden="true" size={15} />
+            <span>Activity</span>
+            {isStreaming && <LoaderCircle aria-hidden="true" className="topbar__activity-spin" size={12} />}
+          </button>
         </div>
       </header>
 
-      <div
-        className="chat-scroll"
-        onScroll={(event) => {
-          const next = event.currentTarget.scrollTop > 4;
-          setHasScrolled((current) => current === next ? current : next);
-        }}
-        ref={chatScrollRef}
-      >
-        <div className="chat-inner">
-          {messages.length === 0 ? (
-            <Welcome onSelect={submit} />
-          ) : (
-            <MessageList
-              isStreaming={isStreaming}
-              lastMessageId={lastMessage?.id}
-              messages={messages}
-              onCitation={focusSource}
-              onRegenerate={handleRegenerate}
-              stackRef={messageStackRef}
-              sourceFocus={sourceFocus}
-            />
-          )}
-        </div>
-      </div>
+      <div className={clsx("chat-activity-layout", activityOpen && "chat-activity-layout--open")}>
+        <div className="conversation-pane">
+          <div
+            className="chat-scroll"
+            onScroll={(event) => {
+              const next = event.currentTarget.scrollTop > 4;
+              setHasScrolled((current) => current === next ? current : next);
+            }}
+            ref={chatScrollRef}
+          >
+            <div className="chat-inner">
+              {messages.length === 0 ? (
+                <Welcome onSelect={submit} />
+              ) : (
+                <MessageList
+                  isStreaming={isStreaming}
+                  lastMessageId={lastMessage?.id}
+                  messages={messages}
+                  onActivity={openActivity}
+                  onCitation={focusSource}
+                  onRegenerate={handleRegenerate}
+                  stackRef={messageStackRef}
+                />
+              )}
+            </div>
+          </div>
 
-      {error && !hasMessageError && <div className="chat-inner"><div className="error-box">{error.message}</div></div>}
-      {!isConfigured && (
-        <div className="chat-inner">
-          <div className="error-box">Chat is inactive until the BoThesis API URL and request context are configured.</div>
+          {error && !hasMessageError && <div className="chat-inner"><div className="error-box">{error.message}</div></div>}
+          {!isConfigured && (
+            <div className="chat-inner">
+              <div className="error-box">Chat is inactive until the BoThesis API URL and request context are configured.</div>
+            </div>
+          )}
+          <ChatComposer
+            input={input}
+            isConfigured={isConfigured}
+            isStreaming={isStreaming}
+            onChange={setInput}
+            onStop={stop}
+            onSubmit={submit}
+            textareaRef={textareaRef}
+          />
         </div>
-      )}
-      <ChatComposer
-        input={input}
-        isConfigured={isConfigured}
-        isStreaming={isStreaming}
-        onChange={setInput}
-        onStop={stop}
-        onSubmit={submit}
-        textareaRef={textareaRef}
-      />
+        {activityOpen && (
+          <>
+            <button
+              aria-label="Close activity"
+              className="activity-panel-overlay"
+              onClick={closeActivity}
+              type="button"
+            />
+            <AgentActivityPanel
+              isStreaming={selectedActivityIsStreaming}
+              message={selectedActivityMessage}
+              onClose={closeActivity}
+              sourceFocus={
+                sourceFocus && sourceFocus.messageId === selectedActivityMessage?.id
+                  ? sourceFocus
+                  : undefined
+              }
+            />
+          </>
+        )}
+      </div>
     </section>
   );
 }
@@ -371,18 +443,18 @@ function MessageList({
   isStreaming,
   lastMessageId,
   messages,
+  onActivity,
   onCitation,
   onRegenerate,
   stackRef,
-  sourceFocus,
 }: {
   isStreaming: boolean;
   lastMessageId?: string;
   messages: ChatMessage[];
+  onActivity: (messageId?: string) => void;
   onCitation: (messageId: string, sourceId: string) => void;
   onRegenerate: (messageId: string) => void;
   stackRef: RefObject<HTMLDivElement | null>;
-  sourceFocus: { messageId: string; sourceId: string; nonce: number } | null;
 }) {
   return (
     <div className="message-stack" ref={stackRef}>
@@ -391,9 +463,9 @@ function MessageList({
           isStreaming={isStreaming && message.id === lastMessageId}
           key={message.id}
           message={message}
+          onActivity={onActivity}
           onCitation={onCitation}
           onRegenerate={onRegenerate}
-          sourceFocus={sourceFocus?.messageId === message.id ? sourceFocus : undefined}
         />
       ))}
     </div>
@@ -403,15 +475,15 @@ function MessageList({
 const MessageView = memo(function MessageView({
   isStreaming,
   message,
+  onActivity,
   onCitation,
   onRegenerate,
-  sourceFocus,
 }: {
   isStreaming: boolean;
   message: ChatMessage;
+  onActivity: (messageId?: string) => void;
   onCitation: (messageId: string, sourceId: string) => void;
   onRegenerate: (messageId: string) => void;
-  sourceFocus?: { sourceId: string; nonce: number };
 }) {
   const { copy, copied } = useClipboard();
   const text = getMessageText(message);
@@ -430,7 +502,7 @@ const MessageView = memo(function MessageView({
         <AgentExecutionCard
           isStreaming={isStreaming}
           message={message}
-          sourceFocus={sourceFocus}
+          onOpen={() => onActivity(message.id)}
         />
         {text && (
           <div

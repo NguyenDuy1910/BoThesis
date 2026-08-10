@@ -1,6 +1,7 @@
 import type {
   ActivityEntry,
   ActivityStepStatus,
+  AgentActivityType,
   AgentRunStatus,
   AgentRunView,
   SourceResult,
@@ -21,39 +22,28 @@ export class AgentActivityMapper {
     const sourceById = new Map<string, SourceResult>();
     let activeRetrieval: ActivityEntry | undefined;
 
-    if (run || isStreaming) {
-      steps.push({
-        id: "planning",
-        type: "planning",
-        label: "Preparing response",
-        status: planningStatus(status),
-        sourceIds: [],
-      });
-    }
-
     for (const part of parts) {
       if (part.type === "data-status") {
-        if (part.data.phase !== "tool" && part.data.phase !== "retrieval") continue;
-        const type = part.data.phase;
-        const id = `${type}-${part.data.toolCallId ?? legacyToolCallId(part.id) ?? steps.length}`;
+        const type = activityTypeFromPart(part);
+        if (!type) continue;
+        const id = part.data.stepId
+          ?? `${type}-${part.data.toolCallId ?? legacyToolCallId(part.id) ?? steps.length}`;
         const existing = stepById.get(id);
         const nextStatus = statusFromPart(part.data.state);
         const nextStep: ActivityEntry = {
           id,
           type,
-          label: displayToolName(part.data.toolName, type),
+          label: part.data.label || defaultStepLabel(type, part.data.toolName),
           status: nextStatus,
           durationMs: part.data.durationMs,
           description: part.data.detail,
           toolName: part.data.toolName,
-          query: part.data.query,
           resultCount: part.data.resultCount,
           sourceIds: existing?.sourceIds ?? [],
         };
         if (existing) {
           Object.assign(existing, {
             ...nextStep,
-            query: nextStep.query ?? existing.query,
             description: nextStep.description ?? existing.description,
             resultCount: nextStep.resultCount ?? existing.resultCount,
           });
@@ -61,7 +51,7 @@ export class AgentActivityMapper {
           steps.push(nextStep);
           stepById.set(id, nextStep);
         }
-        if (type === "retrieval") activeRetrieval = existing ?? nextStep;
+        if (type === "knowledge_retrieval") activeRetrieval = existing ?? nextStep;
       }
 
       if (part.type === "data-source") {
@@ -79,55 +69,51 @@ export class AgentActivityMapper {
       }
 
       if (part.type === "data-stream-error") {
-        steps.push({
-          id: `generation-error-${steps.length}`,
-          type: "generation",
-          label: "Generating answer",
-          status: "failed",
-          description: part.data.message,
-          sourceIds: [],
-        });
+        const activeGeneration = [...steps].reverse().find((step) => (
+          step.status === "running"
+          && (step.type === "next_step_generation"
+            || step.type === "final_response_generation")
+        ));
+        if (activeGeneration) {
+          activeGeneration.status = "failed";
+          activeGeneration.description = part.data.message;
+        } else {
+          steps.push({
+            id: `generation-error-${steps.length}`,
+            type: "final_response_generation",
+            label: "Generating final response",
+            status: "failed",
+            description: part.data.message,
+            sourceIds: [],
+          });
+        }
       }
     }
 
     const hasAnswer = parts.some((part) => part.type === "text" && part.text.trim());
-    if (hasAnswer) {
+    const hasFinalGeneration = steps.some((step) => (
+      step.type === "final_response_generation"
+    ));
+    if (hasAnswer && !hasFinalGeneration) {
       steps.push({
         id: "generation",
-        type: "generation",
-        label: "Generating answer",
+        type: "final_response_generation",
+        label: status === "completed" ? "Generated final response" : "Generating final response",
         status: generationStatus(status),
         sourceIds: [],
       });
     }
 
-    if (status === "completed") {
-      steps.push({
-        id: "completion",
-        type: "completion",
-        label: "Answer ready",
-        status: "completed",
-        sourceIds: [],
-      });
-    }
-
     if (status === "cancelled") {
-      steps.push({
-        id: "cancelled",
-        type: "completion",
-        label: "Run cancelled",
-        status: "skipped",
-        sourceIds: [],
-      });
-    }
-
-    const planningStep = steps.find((step) => step.id === "planning");
-    if (planningStep && planningStep.status !== "skipped" && steps.length > 1) {
-      planningStep.status = "completed";
+      for (const step of steps) {
+        if (step.status === "running") step.status = "skipped";
+      }
     }
 
     const reportedSourceCount = steps.reduce(
-      (count, step) => count + (step.type === "retrieval" ? step.resultCount ?? 0 : 0),
+      (count, step) => count + (
+        step.type === "knowledge_retrieval" ? step.resultCount ?? 0 : 0
+      ),
       0,
     );
     const usedSourceCount = sources.filter((source) => source.status === "Used").length;
@@ -148,12 +134,6 @@ export class AgentActivityMapper {
   }
 }
 
-function planningStatus(status: AgentRunStatus): ActivityStepStatus {
-  if (status === "failed") return "failed";
-  if (status === "cancelled") return "skipped";
-  return status === "running" ? "running" : "completed";
-}
-
 function generationStatus(status: AgentRunStatus): ActivityStepStatus {
   if (status === "failed") return "failed";
   if (status === "cancelled") return "skipped";
@@ -166,10 +146,22 @@ function statusFromPart(status: "active" | "completed" | "error" | "skipped"): A
   return status;
 }
 
-function displayToolName(toolName: string | undefined, type: "tool" | "retrieval") {
-  if (toolName === "knowledge_search" || type === "retrieval") return "Search knowledge base";
-  if (!toolName) return "Run tool";
+function defaultStepLabel(type: AgentActivityType, toolName: string | undefined) {
+  if (type === "next_step_generation") return "Determining next step";
+  if (type === "final_response_generation") return "Generating final response";
+  if (type === "knowledge_retrieval") return "Searching knowledge base";
+  if (!toolName) return "Running tool";
   return toolName.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function activityTypeFromPart(
+  part: Extract<ChatMessagePart, { type: "data-status" }>,
+): AgentActivityType | undefined {
+  if (part.data.activityType) return part.data.activityType;
+  if (part.data.phase === "retrieval") return "knowledge_retrieval";
+  if (part.data.phase === "tool") return "tool_execution";
+  if (part.data.phase === "model") return "final_response_generation";
+  return undefined;
 }
 
 function legacyToolCallId(partId: string | undefined) {

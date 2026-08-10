@@ -1,6 +1,10 @@
 export type AgentRunStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 
-export type ActivityStepType = "planning" | "tool" | "retrieval" | "generation" | "completion";
+export type AgentActivityType =
+  | "next_step_generation"
+  | "tool_execution"
+  | "knowledge_retrieval"
+  | "final_response_generation";
 
 export type ActivityStepStatus = "pending" | "running" | "completed" | "failed" | "skipped";
 
@@ -27,13 +31,12 @@ export type SourceStatus = "Used" | "Found" | "Reviewed" | "Restricted";
 
 export interface ActivityEntry {
   id: string;
-  type: ActivityStepType;
+  type: AgentActivityType;
   label: string;
   status: ActivityStepStatus;
   durationMs?: number;
   description?: string;
   toolName?: string;
-  query?: string;
   resultCount?: number;
   sourceIds: string[];
 }

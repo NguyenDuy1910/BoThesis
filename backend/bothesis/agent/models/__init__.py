@@ -116,6 +116,26 @@ class TurnStarted:
     turn: int
 
 
+GenerationKind: TypeAlias = Literal["next_step", "final_response"]
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationStarted:
+    type: ClassVar[str] = "generation_started"
+    turn: int
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationCompleted:
+    type: ClassVar[str] = "generation_completed"
+    turn: int
+    generation_kind: GenerationKind
+    finish_reason: str | None
+    tool_call_count: int
+    selected_tools: list[str]
+    duration_ms: int
+
+
 @dataclass(frozen=True, slots=True)
 class MessageDelta:
     type: ClassVar[str] = "message_delta"
@@ -180,6 +200,8 @@ class RunFailed:
 AgentEvent: TypeAlias = (
     RunStarted
     | TurnStarted
+    | GenerationStarted
+    | GenerationCompleted
     | MessageDelta
     | ToolStarted
     | ToolCompleted
@@ -198,6 +220,9 @@ __all__ = [
     "ConversationMessage",
     "Evidence",
     "EvidenceReference",
+    "GenerationCompleted",
+    "GenerationKind",
+    "GenerationStarted",
     "MessageDelta",
     "ModelTurn",
     "RunCompleted",

@@ -1,3 +1,5 @@
+import type { AgentActivityType } from "./activity";
+
 export interface ChatConversation {
   id: string;
   sessionId: string;
@@ -32,9 +34,12 @@ export type ChatDataParts = {
     detail?: string;
     toolName?: string;
     toolCallId?: string;
-    query?: string;
     durationMs?: number;
     resultCount?: number;
+    activityType?: AgentActivityType;
+    stepId?: string;
+    turn?: number;
+    selectedTools?: string[];
   };
   source: {
     id: string;
@@ -83,6 +88,16 @@ export interface AgentHistoryMessage {
 export type AgentStreamEvent =
   | { type: "run_started"; conversation_id?: string | null; request_id?: string | null }
   | { type: "turn_started"; turn: number }
+  | { type: "generation_started"; turn: number }
+  | {
+      type: "generation_completed";
+      turn: number;
+      generation_kind: "next_step" | "final_response";
+      finish_reason?: string | null;
+      tool_call_count: number;
+      selected_tools: string[];
+      duration_ms: number;
+    }
   | { type: "message_delta"; text: string }
   | { type: "tool_started"; call_id: string; name: string; arguments: Record<string, unknown> }
   | {

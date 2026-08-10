@@ -57,14 +57,20 @@ class KnowledgeSearchTool(AgentTool):
         self._max_evidence_characters = max_evidence_characters
         self._tracing = tracing
 
-    async def execute(self, arguments: dict[str, object], ctx: AgentContext) -> ToolResult:
+    async def execute(
+        self, arguments: dict[str, object], ctx: AgentContext
+    ) -> ToolResult:
         query = arguments.get("query")
         if not isinstance(query, str) or not query.strip():
             return ToolResult(
                 call_id="",
                 content="",
                 error="knowledge_search requires a non-empty query.",
-                metadata={"outcome": "invalid_input", "result_count": 0, "duration_ms": 0},
+                metadata={
+                    "outcome": "invalid_input",
+                    "result_count": 0,
+                    "duration_ms": 0,
+                },
             )
         normalized_query = query.strip()
         if len(normalized_query) > 512:
@@ -72,7 +78,11 @@ class KnowledgeSearchTool(AgentTool):
                 call_id="",
                 content="",
                 error="knowledge_search query exceeds 512 characters.",
-                metadata={"outcome": "invalid_input", "result_count": 0, "duration_ms": 0},
+                metadata={
+                    "outcome": "invalid_input",
+                    "result_count": 0,
+                    "duration_ms": 0,
+                },
             )
 
         started_at = perf_counter()
@@ -111,7 +121,9 @@ class KnowledgeSearchTool(AgentTool):
                     retrieval_trace.fail(category="retrieval_failure")
                 return self._failure_result(
                     started_at,
-                    error="Knowledge search is temporarily unavailable. Please try again.",
+                    error=(
+                        "Knowledge search is temporarily unavailable. Please try again."
+                    ),
                     category="retrieval_failure",
                 )
 
@@ -122,7 +134,11 @@ class KnowledgeSearchTool(AgentTool):
                 return ToolResult(
                     call_id="",
                     content="No matching enterprise documents were found.",
-                    metadata={"outcome": "empty", "result_count": 0, "duration_ms": duration_ms},
+                    metadata={
+                        "outcome": "empty",
+                        "result_count": 0,
+                        "duration_ms": duration_ms,
+                    },
                 )
 
             evidence = [
@@ -133,11 +149,16 @@ class KnowledgeSearchTool(AgentTool):
                 retrieval_trace.complete(
                     outcome="success",
                     result_count=len(evidence),
-                    source_types=[document.source for document in documents if document.source],
+                    source_types=[
+                        document.source for document in documents if document.source
+                    ],
+                    results=evidence,
                 )
             return ToolResult(
                 call_id="",
-                content=_context_from_documents(documents, self._max_context_characters),
+                content=_context_from_documents(
+                    documents, self._max_context_characters
+                ),
                 evidence=evidence,
                 metadata={
                     "outcome": "success",
@@ -158,8 +179,13 @@ class KnowledgeSearchTool(AgentTool):
             call_id="",
             content="",
             error=error,
-            metadata={"outcome": category, "result_count": 0, "duration_ms": duration_ms},
+            metadata={
+                "outcome": category,
+                "result_count": 0,
+                "duration_ms": duration_ms,
+            },
         )
+
 
 def _context_from_documents(
     documents: list[RetrievedDocument],

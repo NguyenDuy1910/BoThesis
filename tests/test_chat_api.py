@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-import sys
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -37,7 +37,9 @@ class ScriptedTransport(LLMTransport):
     ) -> AsyncIterator[TextDelta | ToolCallDelta | TurnDone]:
         self.requests.append([dict(message) for message in messages])
         if len(self.requests) == 1:
-            yield ToolCallDelta("call-1", "knowledge_search", '{"query":"leave policy"}')
+            yield ToolCallDelta(
+                "call-1", "knowledge_search", '{"query":"leave policy"}'
+            )
             yield TurnDone("tool_calls")
             return
         yield TextDelta("Employees receive 20 days of annual leave [[cite:chunk-1]].")
@@ -94,20 +96,34 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     assert [event["type"] for event in events] == [
         "run_started",
         "turn_started",
+        "generation_started",
+        "generation_completed",
         "tool_started",
         "citation_available",
         "tool_completed",
         "turn_completed",
         "turn_started",
+        "generation_started",
         "message_delta",
         "citation",
         "message_delta",
+        "generation_completed",
         "turn_completed",
         "run_completed",
     ]
-    assert events[3]["evidence"]["source"] == "confluence"
-    assert "content" not in events[3]["evidence"]
-    assert events[4]["result_count"] == 1
+    generation_events = [
+        event for event in events if event["type"] == "generation_completed"
+    ]
+    assert generation_events[0]["generation_kind"] == "next_step"
+    assert generation_events[0]["selected_tools"] == ["knowledge_search"]
+    assert generation_events[1]["generation_kind"] == "final_response"
+    citation_event = next(
+        event for event in events if event["type"] == "citation_available"
+    )
+    assert citation_event["evidence"]["source"] == "confluence"
+    assert "content" not in citation_event["evidence"]
+    tool_event = next(event for event in events if event["type"] == "tool_completed")
+    assert tool_event["result_count"] == 1
     assert events[-1]["tool_call_count"] == 1
     assert transport.requests[0][1:4] == [
         {"role": "user", "content": "Earlier question"},
@@ -126,8 +142,7 @@ def test_chat_api_rejects_unbounded_history() -> None:
                 "user_id": "user-1",
                 "roles": [],
                 "history": [
-                    {"role": "user", "content": "previous turn"}
-                    for _ in range(9)
+                    {"role": "user", "content": "previous turn"} for _ in range(9)
                 ],
             },
         )

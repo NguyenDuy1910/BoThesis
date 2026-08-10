@@ -50,27 +50,77 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
       conversationId: event.conversation_id ?? undefined,
     });
   }
+  if (event.type === "generation_started") {
+    const activityType = hasCompletedToolStep(parts)
+      ? "final_response_generation"
+      : "next_step_generation";
+    return upsertStatus(parts, {
+      type: "data-status",
+      id: `generation-${event.turn}`,
+      data: {
+        phase: "model",
+        state: "active",
+        label: activityType === "final_response_generation"
+          ? "Generating final response"
+          : "Determining next step",
+        activityType,
+        stepId: `generation-${event.turn}`,
+        turn: event.turn,
+      },
+    });
+  }
+  if (event.type === "generation_completed") {
+    const activityType = event.generation_kind === "next_step"
+      ? "next_step_generation"
+      : "final_response_generation";
+    return upsertStatus(parts, {
+      type: "data-status",
+      id: `generation-${event.turn}`,
+      data: {
+        phase: "model",
+        state: "completed",
+        label: activityType === "next_step_generation"
+          ? "Determined next step"
+          : "Generated final response",
+        detail: activityType === "next_step_generation"
+          ? selectedToolSummary(event.selected_tools)
+          : undefined,
+        activityType,
+        stepId: `generation-${event.turn}`,
+        turn: event.turn,
+        selectedTools: event.selected_tools,
+        durationMs: event.duration_ms,
+      },
+    });
+  }
   if (event.type === "message_delta") {
-    const last = parts.at(-1);
+    const nextParts = promoteActiveGenerationToFinalResponse(parts);
+    const last = nextParts.at(-1);
     if (last?.type === "text") {
-      return [...parts.slice(0, -1), { ...last, text: last.text + event.text, state: "streaming" }];
+      return [
+        ...nextParts.slice(0, -1),
+        { ...last, text: last.text + event.text, state: "streaming" },
+      ];
     }
-    return [...parts, { type: "text", text: event.text, state: "streaming" }];
+    return [...nextParts, { type: "text", text: event.text, state: "streaming" }];
   }
   if (event.type === "tool_started") {
     const isRetrieval = event.name === "knowledge_search";
-    return [...parts, {
+    return upsertStatus(parts, {
       type: "data-status",
-      id: `tool-${event.call_id}-started`,
+      id: `tool-${event.call_id}`,
       data: {
         phase: isRetrieval ? "retrieval" : "tool",
         state: "active",
-        label: isRetrieval ? "Searching knowledge base" : `Using ${event.name}`,
+        label: isRetrieval
+          ? "Searching knowledge base"
+          : `Running ${displayToolName(event.name)}`,
         toolName: event.name,
         toolCallId: event.call_id,
-        query: displayableQuery(event.arguments),
+        activityType: isRetrieval ? "knowledge_retrieval" : "tool_execution",
+        stepId: `tool-${event.call_id}`,
       },
-    }];
+    });
   }
   if (event.type === "tool_completed") {
     const isRetrieval = event.name === "knowledge_search";
@@ -79,20 +129,26 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
       : event.result_count === undefined
         ? undefined
         : `Found ${event.result_count} source${event.result_count === 1 ? "" : "s"}.`;
-    return [...parts, {
+    return upsertStatus(parts, {
       type: "data-status",
-      id: `tool-${event.call_id}-complete`,
+      id: `tool-${event.call_id}`,
       data: {
         phase: isRetrieval ? "retrieval" : "tool",
         state: event.error ? "error" : "completed",
-        label: event.error ? `${event.name} could not complete` : `${event.name} completed`,
+        label: event.error
+          ? `${displayToolName(event.name)} could not complete`
+          : isRetrieval
+            ? "Searched knowledge base"
+            : `Ran ${displayToolName(event.name)}`,
         detail,
         toolName: event.name,
         toolCallId: event.call_id,
         durationMs: event.duration_ms ?? undefined,
         resultCount: event.result_count ?? undefined,
+        activityType: isRetrieval ? "knowledge_retrieval" : "tool_execution",
+        stepId: `tool-${event.call_id}`,
       },
-    }];
+    });
   }
   if (event.type === "citation_available") {
     return [...parts, sourcePart(event.evidence)];
@@ -122,6 +178,68 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
   return parts;
 }
 
+type StatusPart = Extract<ChatMessagePart, { type: "data-status" }>;
+
+function upsertStatus(parts: ChatMessagePart[], nextStatus: StatusPart) {
+  const stepId = nextStatus.data.stepId ?? nextStatus.id;
+  const index = parts.findIndex((part) => (
+    part.type === "data-status" && (part.data.stepId ?? part.id) === stepId
+  ));
+  if (index === -1) return [...parts, nextStatus];
+  const current = parts[index] as StatusPart;
+  return [
+    ...parts.slice(0, index),
+    {
+      ...current,
+      ...nextStatus,
+      data: { ...current.data, ...nextStatus.data },
+    },
+    ...parts.slice(index + 1),
+  ];
+}
+
+function promoteActiveGenerationToFinalResponse(parts: ChatMessagePart[]) {
+  return parts.map((part) => {
+    if (
+      part.type !== "data-status"
+      || part.data.phase !== "model"
+      || part.data.state !== "active"
+    ) {
+      return part;
+    }
+    return {
+      ...part,
+      data: {
+        ...part.data,
+        label: "Generating final response",
+        activityType: "final_response_generation" as const,
+      },
+    };
+  });
+}
+
+function hasCompletedToolStep(parts: ChatMessagePart[]) {
+  return parts.some((part) => (
+    part.type === "data-status"
+    && (part.data.activityType === "knowledge_retrieval"
+      || part.data.activityType === "tool_execution")
+    && part.data.state === "completed"
+  ));
+}
+
+function selectedToolSummary(selectedTools: string[]) {
+  if (selectedTools.length === 0) return undefined;
+  const labels = selectedTools.map(displayToolName);
+  return `Tool${labels.length === 1 ? "" : "s"}: ${labels.join(", ")}`;
+}
+
+function displayToolName(toolName: string) {
+  if (toolName === "knowledge_search") return "Search knowledge base";
+  return toolName
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 type RunPart = Extract<ChatMessagePart, { type: "data-run" }>;
 
 function updateRun(
@@ -144,13 +262,6 @@ function updateRun(
     run,
     ...parts.slice(index + 1),
   ];
-}
-
-function displayableQuery(arguments_: Record<string, unknown>) {
-  const query = arguments_.query;
-  if (typeof query !== "string") return undefined;
-  const normalizedQuery = query.trim();
-  return normalizedQuery ? normalizedQuery.slice(0, 512) : undefined;
 }
 
 function appendCitation(parts: ChatMessagePart[], evidenceId: string, title: string) {

@@ -1,9 +1,10 @@
-"""Privacy-safe Langfuse tracing for the chat and retrieval pipeline."""
+"""Langfuse tracing for the chat and retrieval pipeline."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from collections.abc import Iterator, Mapping, Sequence
@@ -12,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from bothesis.agent.models import AgentContext
+from bothesis.agent.models import AgentContext, Evidence, ModelTurn, ToolResult
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class AgentRunTrace:
     def complete(
         self,
         *,
+        answer: str,
         answer_characters: int,
         turn_count: int,
         tool_call_count: int,
@@ -39,7 +41,8 @@ class AgentRunTrace:
     ) -> None:
         _safe_update(
             self._observation,
-            output={
+            output=answer,
+            metadata={
                 "status": "completed",
                 "answer_characters": answer_characters,
                 "turn_count": turn_count,
@@ -74,6 +77,7 @@ class GenerationTrace:
     """Controlled updates for one model generation."""
 
     _observation: _Observation
+    _turn: int
     _first_token_recorded: bool = False
 
     def mark_first_token(self) -> None:
@@ -88,22 +92,47 @@ class GenerationTrace:
     def complete(
         self,
         *,
-        model: str | None,
-        usage: Mapping[str, int],
-        finish_reason: str | None,
-        text_characters: int,
-        tool_call_count: int,
+        turn: ModelTurn,
     ) -> None:
+        has_tool_calls = bool(turn.tool_calls)
+        observation_name = (
+            "decide-next-step" if has_tool_calls else "generate-final-response"
+        )
+        generation_kind = "next_step" if has_tool_calls else "final_response"
         _safe_update(
             self._observation,
-            model=model,
-            usage_details=_usage_details(usage),
-            output={
-                "finish_reason": finish_reason,
-                "text_characters": text_characters,
-                "tool_call_count": tool_call_count,
+            name=observation_name,
+            model=turn.model,
+            usage_details=_usage_details(turn.usage),
+            output=[_assistant_message(turn)],
+            metadata={
+                "turn": self._turn,
+                "generation_kind": generation_kind,
+                "finish_reason": turn.finish_reason,
+                "tool_call_count": len(turn.tool_calls),
+                "selected_tools": [call.name for call in turn.tool_calls],
             },
         )
+
+
+@dataclass(slots=True)
+class ToolExecutionTrace:
+    """Controlled updates for one non-retrieval agent tool call."""
+
+    _observation: _Observation
+
+    def complete(self, *, result: ToolResult) -> None:
+        update: dict[str, Any] = {
+            "output": {
+                "content": result.content,
+                "error": result.error,
+                "metadata": result.metadata,
+                "evidence_ids": [evidence.id for evidence in result.evidence],
+            }
+        }
+        if result.error:
+            update.update(level="ERROR", status_message=result.error)
+        _safe_update(self._observation, **update)
 
 
 @dataclass(slots=True)
@@ -118,10 +147,12 @@ class RetrievalTrace:
         outcome: str,
         result_count: int,
         source_types: Sequence[str] = (),
+        results: Sequence[Evidence] = (),
     ) -> None:
         _safe_update(
             self._observation,
-            output={
+            output=[_evidence_result(result) for result in results],
+            metadata={
                 "outcome": outcome,
                 "result_count": result_count,
                 "source_types": sorted(set(source_types)),
@@ -138,7 +169,7 @@ class RetrievalTrace:
 
 
 class LangfuseTracing:
-    """Small adapter around Langfuse v4 with explicit, content-free payloads."""
+    """Small adapter around Langfuse v4 with explicit chat payloads."""
 
     def __init__(self, client: Any) -> None:
         self._client = client
@@ -158,11 +189,11 @@ class LangfuseTracing:
             self._client.start_as_current_observation(
                 as_type="agent",
                 name="respond-to-chat",
-                input={
-                    "message_characters": len(user_message),
+                input=user_message,
+                metadata={
+                    "request_id": ctx.request_id,
                     "history_message_count": len(ctx.history),
                 },
-                metadata={"request_id": ctx.request_id} if ctx.request_id else None,
                 trace_context=trace_context,
             ) as observation,
             propagate_attributes(
@@ -213,6 +244,18 @@ class LangfuseTracing:
             result_limit=result_limit,
         )
 
+    def tool_execution(
+        self,
+        *,
+        name: str,
+        arguments: Mapping[str, Any],
+    ) -> AbstractContextManager[ToolExecutionTrace]:
+        return _tool_execution_context(
+            self._client,
+            name=name,
+            arguments=arguments,
+        )
+
     def flush(self) -> None:
         self._client.flush()
 
@@ -244,17 +287,26 @@ def _generation_context(
 ) -> Iterator[GenerationTrace]:
     with client.start_as_current_observation(
         as_type="generation",
-        name="generate-response",
-        input={
-            "message_count": len(messages),
-            "message_characters": sum(
-                _message_characters(message) for message in messages
-            ),
-            "available_tool_count": tool_count,
-        },
-        metadata={"turn": turn},
+        name="agent-model-turn",
+        input=[dict(message) for message in messages],
+        metadata={"turn": turn, "available_tool_count": tool_count},
     ) as observation:
-        yield GenerationTrace(observation)
+        yield GenerationTrace(observation, turn)
+
+
+@contextmanager
+def _tool_execution_context(
+    client: Any,
+    *,
+    name: str,
+    arguments: Mapping[str, Any],
+) -> Iterator[ToolExecutionTrace]:
+    with client.start_as_current_observation(
+        as_type="tool",
+        name=name,
+        input=dict(arguments),
+    ) as observation:
+        yield ToolExecutionTrace(observation)
 
 
 @contextmanager
@@ -267,10 +319,7 @@ def _retrieval_context(
     with client.start_as_current_observation(
         as_type="retriever",
         name="retrieve-knowledge",
-        input={
-            "query_characters": len(query),
-            "result_limit": result_limit,
-        },
+        input={"query": query, "result_limit": result_limit},
     ) as observation:
         yield RetrievalTrace(observation)
 
@@ -299,9 +348,38 @@ def _safe_update(observation: _Observation, **kwargs: Any) -> None:
         )
 
 
-def _message_characters(message: Mapping[str, Any]) -> int:
-    content = message.get("content")
-    return len(content) if isinstance(content, str) else 0
+def _assistant_message(turn: ModelTurn) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": turn.text or None,
+    }
+    if turn.tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": tool_call.call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": json.dumps(tool_call.arguments),
+                },
+            }
+            for tool_call in turn.tool_calls
+        ]
+    return message
+
+
+def _evidence_result(evidence: Evidence) -> dict[str, Any]:
+    return {
+        "id": evidence.id,
+        "document_id": evidence.document_id,
+        "title": evidence.title,
+        "content": evidence.content,
+        "page": evidence.page,
+        "section": evidence.section,
+        "uri": evidence.uri,
+        "source": evidence.source,
+        "relevance_score": evidence.relevance_score,
+    }
 
 
 def _pseudonymous_user_id(user_id: str) -> str:
@@ -330,5 +408,6 @@ __all__ = [
     "GenerationTrace",
     "LangfuseTracing",
     "RetrievalTrace",
+    "ToolExecutionTrace",
     "create_langfuse_tracing",
 ]

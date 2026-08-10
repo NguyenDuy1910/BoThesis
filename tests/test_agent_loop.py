@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-import sys
 from typing import Any
 
 import pytest
@@ -15,6 +15,8 @@ from bothesis.agent.models import (
     CitationEvent,
     ConversationMessage,
     Evidence,
+    GenerationCompleted,
+    GenerationStarted,
     MessageDelta,
     RunCompleted,
     RunFailed,
@@ -31,7 +33,6 @@ from bothesis.agent.models import (
 from bothesis.agent.tools import AgentTool, ToolRegistry
 from bothesis.agent.transports.base import ChatMessage, LLMResponse, LLMTransport
 from bothesis.chat.agent_loop import AgentLoop
-
 
 EVIDENCE = Evidence(
     id="ev_123",
@@ -74,8 +75,12 @@ class SearchTool(AgentTool):
     description = "Search enterprise documents."
     parameters = {"type": "object", "properties": {"query": {"type": "string"}}}
 
-    def __init__(self, *, result: ToolResult | None = None, raises: bool = False) -> None:
-        self._result = result or ToolResult(call_id="", content="Leave policy evidence", evidence=[EVIDENCE])
+    def __init__(
+        self, *, result: ToolResult | None = None, raises: bool = False
+    ) -> None:
+        self._result = result or ToolResult(
+            call_id="", content="Leave policy evidence", evidence=[EVIDENCE]
+        )
         self._raises = raises
         self.calls: list[tuple[dict[str, Any], AgentContext]] = []
 
@@ -106,7 +111,9 @@ def make_loop(
 
 
 async def collect(loop: AgentLoop) -> list[Any]:
-    return [event async for event in loop.run_stream("What is the leave policy?", CONTEXT)]
+    return [
+        event async for event in loop.run_stream("What is the leave policy?", CONTEXT)
+    ]
 
 
 @pytest.mark.asyncio
@@ -118,12 +125,17 @@ async def test_direct_final_answer_streams_and_completes() -> None:
     assert [type(event) for event in events] == [
         RunStarted,
         TurnStarted,
+        GenerationStarted,
         MessageDelta,
         MessageDelta,
+        GenerationCompleted,
         TurnCompleted,
         RunCompleted,
     ]
-    assert [event.text for event in events if isinstance(event, MessageDelta)] == ["Hello ", "there"]
+    assert [event.text for event in events if isinstance(event, MessageDelta)] == [
+        "Hello ",
+        "there",
+    ]
     assert events[-2].outcome == "final"
 
 
@@ -147,20 +159,39 @@ async def test_one_tool_call_then_grounded_answer() -> None:
         isinstance(event, CitationAvailable) and event.evidence.id == EVIDENCE.id
         for event in events
     )
-    assert any(isinstance(event, CitationEvent) and event.evidence_id == EVIDENCE.id for event in events)
-    assert "Employees receive leave " in [event.text for event in events if isinstance(event, MessageDelta)]
-    assert [event.outcome for event in events if isinstance(event, TurnCompleted)] == ["tool", "final"]
+    assert any(
+        isinstance(event, CitationEvent) and event.evidence_id == EVIDENCE.id
+        for event in events
+    )
+    assert "Employees receive leave " in [
+        event.text for event in events if isinstance(event, MessageDelta)
+    ]
+    assert [event.outcome for event in events if isinstance(event, TurnCompleted)] == [
+        "tool",
+        "final",
+    ]
 
 
 @pytest.mark.asyncio
 async def test_multiple_tool_turns_increment_the_turn_counter() -> None:
-    tool_turn = [ToolCallDelta("call-1", "knowledge_search", '{"query":"leave"}'), TurnDone("tool_calls")]
+    tool_turn = [
+        ToolCallDelta("call-1", "knowledge_search", '{"query":"leave"}'),
+        TurnDone("tool_calls"),
+    ]
     loop, _ = make_loop([tool_turn, tool_turn, [TextDelta("Done."), TurnDone("stop")]])
 
     events = await collect(loop)
 
-    assert [event.turn for event in events if isinstance(event, TurnStarted)] == [0, 1, 2]
-    assert [event.outcome for event in events if isinstance(event, TurnCompleted)] == ["tool", "tool", "final"]
+    assert [event.turn for event in events if isinstance(event, TurnStarted)] == [
+        0,
+        1,
+        2,
+    ]
+    assert [event.outcome for event in events if isinstance(event, TurnCompleted)] == [
+        "tool",
+        "tool",
+        "final",
+    ]
 
 
 @pytest.mark.asyncio
@@ -170,6 +201,7 @@ async def test_text_is_yielded_before_its_turn_completes() -> None:
 
     assert isinstance(await anext(stream), RunStarted)
     assert isinstance(await anext(stream), TurnStarted)
+    assert isinstance(await anext(stream), GenerationStarted)
     delta = await anext(stream)
 
     assert delta == MessageDelta("first token")
@@ -186,33 +218,46 @@ async def test_split_citation_marker_is_reassembled_without_buffering_text() -> 
                 ToolCallDelta("call-1", "knowledge_search", '{"query":"leave"}'),
                 TurnDone("tool_calls"),
             ],
-            [TextDelta("policy [[cite:ev"), TextDelta("_123]] applies"), TurnDone("stop")],
+            [
+                TextDelta("policy [[cite:ev"),
+                TextDelta("_123]] applies"),
+                TurnDone("stop"),
+            ],
         ]
     )
 
     events = await collect(loop)
 
-    relevant = [event for event in events if isinstance(event, (MessageDelta, CitationEvent))]
+    relevant = [
+        event for event in events if isinstance(event, (MessageDelta, CitationEvent))
+    ]
     assert isinstance(relevant[0], MessageDelta) and relevant[0].text == "policy "
-    assert isinstance(relevant[1], CitationEvent) and relevant[1].evidence_id == "ev_123"
+    assert (
+        isinstance(relevant[1], CitationEvent) and relevant[1].evidence_id == "ev_123"
+    )
     assert isinstance(relevant[2], MessageDelta) and relevant[2].text == " applies"
 
 
 @pytest.mark.asyncio
 async def test_unknown_citation_id_remains_visible_text() -> None:
-    loop, _ = make_loop([[TextDelta("No source [[cite:ev_unknown]] found"), TurnDone("stop")]])
+    loop, _ = make_loop(
+        [[TextDelta("No source [[cite:ev_unknown]] found"), TurnDone("stop")]]
+    )
 
     events = await collect(loop)
 
     assert not any(isinstance(event, CitationEvent) for event in events)
-    assert "".join(event.text for event in events if isinstance(event, MessageDelta)) == (
-        "No source [[cite:ev_unknown]] found"
-    )
+    assert "".join(
+        event.text for event in events if isinstance(event, MessageDelta)
+    ) == ("No source [[cite:ev_unknown]] found")
 
 
 @pytest.mark.asyncio
 async def test_max_turns_emits_failure() -> None:
-    tool_turn = [ToolCallDelta("call-1", "knowledge_search", '{"query":"leave"}'), TurnDone("tool_calls")]
+    tool_turn = [
+        ToolCallDelta("call-1", "knowledge_search", '{"query":"leave"}'),
+        TurnDone("tool_calls"),
+    ]
     loop, _ = make_loop([tool_turn, tool_turn], max_turns=2)
 
     events = await collect(loop)
