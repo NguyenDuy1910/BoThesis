@@ -24,7 +24,7 @@ async def test_stream_turn_requests_and_normalizes_usage() -> None:
             'data: {"model":"openai/gpt-5.4-mini","choices":'
             '[{"delta":{},"finish_reason":"stop"}],"usage":'
             '{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15,'
-            '"cost":0.001}}\n\n'
+            '"prompt_tokens_details":{"cached_tokens":8},"cost":0.001}}\n\n'
             "data: [DONE]\n\n"
         )
         return httpx.Response(200, text=stream)
@@ -46,6 +46,11 @@ async def test_stream_turn_requests_and_normalizes_usage() -> None:
     assert events[1] == TurnDone(
         finish_reason="stop",
         model="openai/gpt-5.4-mini",
-        usage={"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
+        usage={
+            "prompt_tokens": 12,
+            "completion_tokens": 3,
+            "total_tokens": 15,
+            "cached_prompt_tokens": 8,
+        },
     )
     assert len(events) == 2

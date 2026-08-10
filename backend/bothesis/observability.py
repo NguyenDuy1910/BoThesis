@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import os
 from collections.abc import Iterator, Mapping, Sequence
@@ -14,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from bothesis.agent.models import AgentContext, Evidence, ModelTurn, ToolResult
+from bothesis.agent.transports.base import LLMResponse
 
 log = logging.getLogger(__name__)
 
@@ -73,11 +73,11 @@ class AgentRunTrace:
 
 
 @dataclass(slots=True)
-class GenerationTrace:
-    """Controlled updates for one model generation."""
+class CapabilityTrace:
+    """Controlled updates for one named knowledge-agent LLM capability."""
 
     _observation: _Observation
-    _turn: int
+    _metadata: dict[str, Any]
     _first_token_recorded: bool = False
 
     def mark_first_token(self) -> None:
@@ -92,27 +92,59 @@ class GenerationTrace:
     def complete(
         self,
         *,
-        turn: ModelTurn,
+        response: LLMResponse | ModelTurn,
+        output: Any,
+        duration_ms: int,
     ) -> None:
-        has_tool_calls = bool(turn.tool_calls)
-        observation_name = (
-            "decide-next-step" if has_tool_calls else "generate-final-response"
-        )
-        generation_kind = "next_step" if has_tool_calls else "final_response"
+        usage = response.usage
+        metadata = {
+            **self._metadata,
+            "finish_reason": response.finish_reason,
+            "llm_latency_ms": duration_ms,
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "cached_prompt_tokens": usage.get("cached_prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+        }
         _safe_update(
             self._observation,
-            name=observation_name,
-            model=turn.model,
-            usage_details=_usage_details(turn.usage),
-            output=[_assistant_message(turn)],
-            metadata={
-                "turn": self._turn,
-                "generation_kind": generation_kind,
-                "finish_reason": turn.finish_reason,
-                "tool_call_count": len(turn.tool_calls),
-                "selected_tools": [call.name for call in turn.tool_calls],
-            },
+            model=response.model,
+            usage_details=_usage_details(usage),
+            output=output,
+            metadata=metadata,
         )
+
+    def fail(
+        self,
+        *,
+        category: str,
+        duration_ms: int,
+        response: LLMResponse | ModelTurn | None = None,
+        output: Any = None,
+    ) -> None:
+        update: dict[str, Any] = {
+            "metadata": {
+                **self._metadata,
+                "llm_latency_ms": duration_ms,
+                "outcome": category,
+            },
+            "level": "ERROR",
+            "status_message": category,
+        }
+        if response is not None:
+            usage = response.usage
+            update.update(
+                model=response.model,
+                usage_details=_usage_details(usage),
+                output=output,
+                metadata={
+                    **update["metadata"],
+                    "finish_reason": response.finish_reason,
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
+                    "cached_prompt_tokens": usage.get("cached_prompt_tokens", 0),
+                    "completion_tokens": usage.get("completion_tokens", 0),
+                },
+            )
+        _safe_update(self._observation, **update)
 
 
 @dataclass(slots=True)
@@ -140,6 +172,7 @@ class RetrievalTrace:
     """Controlled updates for one enterprise knowledge lookup."""
 
     _observation: _Observation
+    _metadata: dict[str, Any]
 
     def complete(
         self,
@@ -148,21 +181,30 @@ class RetrievalTrace:
         result_count: int,
         source_types: Sequence[str] = (),
         results: Sequence[Evidence] = (),
+        duration_ms: int = 0,
     ) -> None:
         _safe_update(
             self._observation,
             output=[_evidence_result(result) for result in results],
             metadata={
+                **self._metadata,
                 "outcome": outcome,
                 "result_count": result_count,
                 "source_types": sorted(set(source_types)),
+                "retrieval_latency_ms": duration_ms,
             },
         )
 
-    def fail(self, *, category: str) -> None:
+    def fail(self, *, category: str, duration_ms: int = 0) -> None:
         _safe_update(
             self._observation,
             output={"outcome": category, "result_count": 0},
+            metadata={
+                **self._metadata,
+                "outcome": category,
+                "result_count": 0,
+                "retrieval_latency_ms": duration_ms,
+            },
             level="ERROR",
             status_message=category,
         )
@@ -192,6 +234,7 @@ class LangfuseTracing:
                 input=user_message,
                 metadata={
                     "request_id": ctx.request_id,
+                    "conversation_id": ctx.conversation_id,
                     "history_message_count": len(ctx.history),
                 },
                 trace_context=trace_context,
@@ -218,30 +261,38 @@ class LangfuseTracing:
                 if not trace._finished:
                     trace.cancel()
 
-    def generation(
-        self,
-        *,
-        turn: int,
-        messages: Sequence[Mapping[str, Any]],
-        tool_count: int,
-    ) -> AbstractContextManager[GenerationTrace]:
-        return _generation_context(
-            self._client,
-            turn=turn,
-            messages=messages,
-            tool_count=tool_count,
-        )
-
     def retrieval(
         self,
         *,
         query: str,
         result_limit: int,
+        ctx: AgentContext,
     ) -> AbstractContextManager[RetrievalTrace]:
         return _retrieval_context(
             self._client,
             query=query,
             result_limit=result_limit,
+            ctx=ctx,
+        )
+
+    def capability(
+        self,
+        *,
+        capability: str,
+        prompt: str,
+        ctx: AgentContext,
+        step: int,
+        retrieval_round: int,
+        retrieval_query_count: int,
+    ) -> AbstractContextManager[CapabilityTrace]:
+        return _capability_context(
+            self._client,
+            capability=capability,
+            prompt=prompt,
+            ctx=ctx,
+            step=step,
+            retrieval_round=retrieval_round,
+            retrieval_query_count=retrieval_query_count,
         )
 
     def tool_execution(
@@ -278,20 +329,31 @@ def create_langfuse_tracing() -> LangfuseTracing | None:
 
 
 @contextmanager
-def _generation_context(
+def _capability_context(
     client: Any,
     *,
-    turn: int,
-    messages: Sequence[Mapping[str, Any]],
-    tool_count: int,
-) -> Iterator[GenerationTrace]:
+    capability: str,
+    prompt: str,
+    ctx: AgentContext,
+    step: int,
+    retrieval_round: int,
+    retrieval_query_count: int,
+) -> Iterator[CapabilityTrace]:
+    metadata = {
+        "request_id": ctx.request_id,
+        "conversation_id": ctx.conversation_id,
+        "step": step,
+        "capability": capability,
+        "retrieval_round": retrieval_round,
+        "retrieval_query_count": retrieval_query_count,
+    }
     with client.start_as_current_observation(
         as_type="generation",
-        name="agent-model-turn",
-        input=[dict(message) for message in messages],
-        metadata={"turn": turn, "available_tool_count": tool_count},
+        name=capability,
+        input=[{"role": "user", "content": prompt}],
+        metadata=metadata,
     ) as observation:
-        yield GenerationTrace(observation, turn)
+        yield CapabilityTrace(observation, metadata)
 
 
 @contextmanager
@@ -315,26 +377,40 @@ def _retrieval_context(
     *,
     query: str,
     result_limit: int,
+    ctx: AgentContext,
 ) -> Iterator[RetrievalTrace]:
+    metadata = {
+        "request_id": ctx.request_id,
+        "conversation_id": ctx.conversation_id,
+        "step": ctx.trace_step,
+        "capability": "retrieval",
+        "retrieval_round": ctx.retrieval_round,
+        "retrieval_query_count": ctx.retrieval_query_count,
+        "result_limit": result_limit,
+    }
     with client.start_as_current_observation(
         as_type="retriever",
         name="retrieve-knowledge",
         input={"query": query, "result_limit": result_limit},
+        metadata=metadata,
     ) as observation:
-        yield RetrievalTrace(observation)
+        yield RetrievalTrace(observation, metadata)
 
 
 def _usage_details(usage: Mapping[str, int]) -> dict[str, int] | None:
     details: dict[str, int] = {}
     prompt_tokens = usage.get("prompt_tokens")
+    cached_prompt_tokens = usage.get("cached_prompt_tokens", 0)
     completion_tokens = usage.get("completion_tokens")
     total_tokens = usage.get("total_tokens")
     if prompt_tokens is not None:
-        details["input_tokens"] = prompt_tokens
+        details["input"] = max(0, prompt_tokens - cached_prompt_tokens)
+    if cached_prompt_tokens:
+        details["input_cached_tokens"] = cached_prompt_tokens
     if completion_tokens is not None:
-        details["output_tokens"] = completion_tokens
+        details["output"] = completion_tokens
     if total_tokens is not None:
-        details["total_tokens"] = total_tokens
+        details["total"] = total_tokens
     return details or None
 
 
@@ -346,26 +422,6 @@ def _safe_update(observation: _Observation, **kwargs: Any) -> None:
             "langfuse_trace_update_failed error_category=%s",
             type(error).__name__,
         )
-
-
-def _assistant_message(turn: ModelTurn) -> dict[str, Any]:
-    message: dict[str, Any] = {
-        "role": "assistant",
-        "content": turn.text or None,
-    }
-    if turn.tool_calls:
-        message["tool_calls"] = [
-            {
-                "id": tool_call.call_id,
-                "type": "function",
-                "function": {
-                    "name": tool_call.name,
-                    "arguments": json.dumps(tool_call.arguments),
-                },
-            }
-            for tool_call in turn.tool_calls
-        ]
-    return message
 
 
 def _evidence_result(evidence: Evidence) -> dict[str, Any]:
@@ -405,7 +461,7 @@ def _trace_name(request_id: str | None) -> str:
 
 __all__ = [
     "AgentRunTrace",
-    "GenerationTrace",
+    "CapabilityTrace",
     "LangfuseTracing",
     "RetrievalTrace",
     "ToolExecutionTrace",

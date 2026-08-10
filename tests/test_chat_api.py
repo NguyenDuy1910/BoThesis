@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import main
-from bothesis.agent.models import TextDelta, ToolCallDelta, TurnDone
+from bothesis.agent.models import TextDelta, TurnDone
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
 from bothesis.agent.transports.base import ChatMessage, LLMResponse, LLMTransport
@@ -28,20 +28,21 @@ class ScriptedTransport(LLMTransport):
         messages: Sequence[ChatMessage | Mapping[str, Any]],
         **_: Any,
     ) -> LLMResponse:
-        raise AssertionError("the API integration path must stream")
+        self.requests.append([dict(message) for message in messages])
+        return LLMResponse(
+            id="rewrite-1",
+            model="openai/gpt-5.4-mini",
+            content='{"query":"leave policy"}',
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 3},
+        )
 
     async def stream_turn(
         self,
         messages: Sequence[ChatMessage | Mapping[str, Any]],
         **_: Any,
-    ) -> AsyncIterator[TextDelta | ToolCallDelta | TurnDone]:
+    ) -> AsyncIterator[TextDelta | TurnDone]:
         self.requests.append([dict(message) for message in messages])
-        if len(self.requests) == 1:
-            yield ToolCallDelta(
-                "call-1", "knowledge_search", '{"query":"leave policy"}'
-            )
-            yield TurnDone("tool_calls")
-            return
         yield TextDelta("Employees receive 20 days of annual leave [[cite:chunk-1]].")
         yield TurnDone("stop")
 
@@ -68,8 +69,9 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     registry = ToolRegistry()
     registry.register(KnowledgeSearchTool(StubRetriever()))
     transport = ScriptedTransport()
-    loop = AgentLoop(transport, registry, "Use enterprise evidence.")
+    loop = AgentLoop(transport, registry)
     monkeypatch.setattr(main, "_agent_loop", loop)
+    long_assistant_answer = f"Earlier answer\n{'A' * 5_000}"
 
     with TestClient(main.app) as client:
         response = client.post(
@@ -82,7 +84,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
                 "conversation_id": "conversation-1",
                 "history": [
                     {"role": "user", "content": "Earlier question"},
-                    {"role": "assistant", "content": "Earlier answer"},
+                    {"role": "assistant", "content": long_assistant_answer},
                 ],
             },
         )
@@ -125,11 +127,10 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     tool_event = next(event for event in events if event["type"] == "tool_completed")
     assert tool_event["result_count"] == 1
     assert events[-1]["tool_call_count"] == 1
-    assert transport.requests[0][1:4] == [
-        {"role": "user", "content": "Earlier question"},
-        {"role": "assistant", "content": "Earlier answer"},
-        {"role": "user", "content": "What is the leave policy?"},
-    ]
+    rewrite_prompt = transport.requests[0][0]["content"]
+    assert "Earlier question" in rewrite_prompt
+    assert "Earlier answer" in rewrite_prompt
+    assert "What is the leave policy?" in rewrite_prompt
 
 
 def test_chat_api_rejects_unbounded_history() -> None:
@@ -144,6 +145,22 @@ def test_chat_api_rejects_unbounded_history() -> None:
                 "history": [
                     {"role": "user", "content": "previous turn"} for _ in range(9)
                 ],
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_chat_api_rejects_history_message_over_context_budget() -> None:
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={
+                "message": "hello",
+                "tenant_id": "tenant-1",
+                "user_id": "user-1",
+                "roles": [],
+                "history": [{"role": "assistant", "content": "A" * 8_001}],
             },
         )
 

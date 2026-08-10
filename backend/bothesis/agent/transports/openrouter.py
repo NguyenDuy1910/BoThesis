@@ -79,7 +79,9 @@ class OpenRouterTransport(LLMTransport):
             "tools": list(tools) if tools is not None else None,
             "tool_choice": tool_choice,
         }
-        body.update({key: value for key, value in optional.items() if value is not None})
+        body.update(
+            {key: value for key, value in optional.items() if value is not None}
+        )
         if extra_body:
             body.update(extra_body)
         payload = await self.chat_completions(body)
@@ -93,10 +95,12 @@ class OpenRouterTransport(LLMTransport):
                 content=message.get("content"),
                 finish_reason=choice.get("finish_reason"),
                 tool_calls=tuple(message.get("tool_calls") or ()),
-                usage={key: int(value) for key, value in usage.items() if isinstance(value, (int, float))},
+                usage=_token_usage(usage) if isinstance(usage, Mapping) else {},
             )
         except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise LLMTransportError("OpenRouter returned an unexpected completion shape") from exc
+            raise LLMTransportError(
+                "OpenRouter returned an unexpected completion shape"
+            ) from exc
 
     async def chat_completions(self, body: dict[str, Any]) -> dict[str, Any]:
         """Make one non-streaming OpenRouter chat-completions request."""
@@ -109,7 +113,9 @@ class OpenRouterTransport(LLMTransport):
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise LLMTransportError("OpenRouter chat completion request failed") from exc
+            raise LLMTransportError(
+                "OpenRouter chat completion request failed"
+            ) from exc
         if not isinstance(payload, dict):
             raise LLMTransportError("OpenRouter returned a non-object completion")
         return payload
@@ -144,7 +150,9 @@ class OpenRouterTransport(LLMTransport):
             "tools": list(tools) if tools is not None else None,
             "tool_choice": tool_choice,
         }
-        body.update({key: value for key, value in optional.items() if value is not None})
+        body.update(
+            {key: value for key, value in optional.items() if value is not None}
+        )
         if extra_body:
             body.update(extra_body)
         body["stream"] = True
@@ -177,9 +185,13 @@ class OpenRouterTransport(LLMTransport):
                     try:
                         payload = json.loads(raw_data)
                     except json.JSONDecodeError as exc:
-                        raise LLMTransportError("OpenRouter returned invalid stream data") from exc
+                        raise LLMTransportError(
+                            "OpenRouter returned invalid stream data"
+                        ) from exc
                     if not isinstance(payload, Mapping):
-                        raise LLMTransportError("OpenRouter returned invalid stream data")
+                        raise LLMTransportError(
+                            "OpenRouter returned invalid stream data"
+                        )
                     raw_model = payload.get("model")
                     if isinstance(raw_model, str) and raw_model:
                         response_model = raw_model
@@ -202,7 +214,9 @@ class OpenRouterTransport(LLMTransport):
                             for position, raw_call in enumerate(raw_calls):
                                 if not isinstance(raw_call, Mapping):
                                     continue
-                                index = _tool_call_index(raw_call.get("index"), position)
+                                index = _tool_call_index(
+                                    raw_call.get("index"), position
+                                )
                                 pending = tool_calls.setdefault(
                                     index,
                                     {
@@ -220,7 +234,9 @@ class OpenRouterTransport(LLMTransport):
                                 name = function.get("name")
                                 arguments = function.get("arguments")
                                 name_delta = name if isinstance(name, str) else ""
-                                argument_delta = arguments if isinstance(arguments, str) else ""
+                                argument_delta = (
+                                    arguments if isinstance(arguments, str) else ""
+                                )
                                 pending["name"] += name_delta
                                 pending["arguments"] += argument_delta
                                 if pending["id"] and (name_delta or argument_delta):
@@ -255,7 +271,9 @@ def _tool_call_index(raw_index: Any, fallback: int) -> int:
         return fallback
 
 
-def _assembled_tool_calls(tool_calls: Mapping[int, Mapping[str, str]]) -> list[dict[str, Any]]:
+def _assembled_tool_calls(
+    tool_calls: Mapping[int, Mapping[str, str]],
+) -> list[dict[str, Any]]:
     return [
         {
             "id": tool_call["id"] or f"call_{index}",
@@ -270,10 +288,16 @@ def _assembled_tool_calls(tool_calls: Mapping[int, Mapping[str, str]]) -> list[d
 
 
 def _token_usage(raw_usage: Mapping[str, Any]) -> dict[str, int]:
-    return {
+    usage = {
         key: value
         for key, value in raw_usage.items()
         if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
         and isinstance(value, int)
         and not isinstance(value, bool)
     }
+    prompt_details = raw_usage.get("prompt_tokens_details")
+    if isinstance(prompt_details, Mapping):
+        cached_tokens = prompt_details.get("cached_tokens")
+        if isinstance(cached_tokens, int) and not isinstance(cached_tokens, bool):
+            usage["cached_prompt_tokens"] = cached_tokens
+    return usage

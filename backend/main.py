@@ -117,7 +117,7 @@ class ChatHistoryMessage(BaseModel):
     """A prior user or assistant turn retained by the browser conversation store."""
 
     role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=4_000)
+    content: str = Field(min_length=1, max_length=8_000)
 
 
 class ChatRequest(BaseModel):
@@ -407,9 +407,6 @@ def _get_agent_loop() -> Any:
         from bothesis.knowledge.document_index import QdrantSemanticRetriever
         from bothesis.observability import create_langfuse_tracing
 
-        system_prompt = (
-            Path(__file__).parent / "bothesis" / "agent" / "prompts" / "system.md"
-        ).read_text(encoding="utf-8")
         registry = ToolRegistry()
         retriever = QdrantSemanticRetriever(
             VectorStore.from_environment(timeout=8),
@@ -420,7 +417,12 @@ def _get_agent_loop() -> Any:
         _agent_loop = AgentLoop(
             transport=OpenRouterTransport(),
             registry=registry,
-            system_prompt=system_prompt,
+            max_retrieval_rounds=int(
+                os.getenv("BOTHESIS_MAX_RETRIEVAL_ROUNDS", "2")
+            ),
+            max_retrieval_queries=int(
+                os.getenv("BOTHESIS_MAX_RETRIEVAL_QUERIES", "3")
+            ),
             tracing=tracing,
         )
     return _agent_loop

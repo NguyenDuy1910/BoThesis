@@ -90,6 +90,7 @@ class KnowledgeSearchTool(AgentTool):
             self._tracing.retrieval(
                 query=normalized_query,
                 result_limit=self._result_limit,
+                ctx=ctx,
             )
             if self._tracing is not None
             else nullcontext(None)
@@ -102,7 +103,10 @@ class KnowledgeSearchTool(AgentTool):
                 )
             except TimeoutError:
                 if retrieval_trace is not None:
-                    retrieval_trace.fail(category="timeout")
+                    retrieval_trace.fail(
+                        category="timeout",
+                        duration_ms=_duration_ms(started_at),
+                    )
                 return self._failure_result(
                     started_at,
                     error="Knowledge search timed out. Please try again.",
@@ -110,7 +114,10 @@ class KnowledgeSearchTool(AgentTool):
                 )
             except ValueError:
                 if retrieval_trace is not None:
-                    retrieval_trace.fail(category="invalid_query")
+                    retrieval_trace.fail(
+                        category="invalid_query",
+                        duration_ms=_duration_ms(started_at),
+                    )
                 return self._failure_result(
                     started_at,
                     error="Knowledge search could not process that query.",
@@ -118,7 +125,10 @@ class KnowledgeSearchTool(AgentTool):
                 )
             except Exception:
                 if retrieval_trace is not None:
-                    retrieval_trace.fail(category="retrieval_failure")
+                    retrieval_trace.fail(
+                        category="retrieval_failure",
+                        duration_ms=_duration_ms(started_at),
+                    )
                 return self._failure_result(
                     started_at,
                     error=(
@@ -130,7 +140,11 @@ class KnowledgeSearchTool(AgentTool):
             duration_ms = _duration_ms(started_at)
             if not documents:
                 if retrieval_trace is not None:
-                    retrieval_trace.complete(outcome="empty", result_count=0)
+                    retrieval_trace.complete(
+                        outcome="empty",
+                        result_count=0,
+                        duration_ms=duration_ms,
+                    )
                 return ToolResult(
                     call_id="",
                     content="No matching enterprise documents were found.",
@@ -153,6 +167,7 @@ class KnowledgeSearchTool(AgentTool):
                         document.source for document in documents if document.source
                     ],
                     results=evidence,
+                    duration_ms=duration_ms,
                 )
             return ToolResult(
                 call_id="",

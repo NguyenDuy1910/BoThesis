@@ -53,6 +53,9 @@ class AgentContext:
     conversation_id: str | None = None
     request_id: str | None = None
     history: tuple[ConversationMessage, ...] = ()
+    trace_step: int | None = None
+    retrieval_round: int = 0
+    retrieval_query_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)

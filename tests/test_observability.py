@@ -12,10 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from bothesis.agent.models import (
     AgentContext,
     Evidence,
-    ModelTurn,
-    ToolCall,
     ToolResult,
 )
+from bothesis.agent.transports.base import LLMResponse
 from bothesis.observability import LangfuseTracing, _trace_name
 
 
@@ -82,6 +81,7 @@ def test_agent_trace_captures_content_with_safe_correlations() -> None:
         "trace_id": "0123456789abcdef0123456789abcdef"
     }
     assert client.starts[0]["input"] == "private enterprise question"
+    assert client.starts[0]["metadata"]["conversation_id"] == "conversation-1"
     assert client.observations[0].updates[-1]["output"] == "Grounded enterprise answer"
 
 
@@ -91,35 +91,42 @@ def test_trace_name_uses_a_short_valid_request_id() -> None:
     assert _trace_name(None) == "chat-request"
 
 
-def test_generation_trace_captures_messages_response_and_usage() -> None:
+def test_capability_trace_captures_model_usage_cache_and_execution_metadata() -> None:
     client = RecordingClient()
     tracing = LangfuseTracing(client)
+    context = AgentContext(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        roles=[],
+        request_id="request-1",
+        conversation_id="conversation-1",
+    )
 
-    with tracing.generation(
-        turn=1,
-        messages=[{"role": "user", "content": "sensitive prompt"}],
-        tool_count=1,
+    with tracing.capability(
+        capability="query_rewrite",
+        prompt="<task>Rewrite</task><input>sensitive prompt</input>",
+        ctx=context,
+        step=1,
+        retrieval_round=0,
+        retrieval_query_count=0,
     ) as trace:
         trace.mark_first_token()
         trace.mark_first_token()
         trace.complete(
-            turn=ModelTurn(
-                text="I will search the knowledge base.",
-                tool_calls=[
-                    ToolCall(
-                        call_id="call-1",
-                        name="knowledge_search",
-                        arguments={"query": "leave policy"},
-                    )
-                ],
+            response=LLMResponse(
+                id="response-1",
                 model="openai/gpt-5.4-mini",
+                content='{"query":"leave policy"}',
                 usage={
                     "prompt_tokens": 20,
+                    "cached_prompt_tokens": 12,
                     "completion_tokens": 8,
                     "total_tokens": 28,
                 },
                 finish_reason="tool_calls",
-            )
+            ),
+            output={"query": "leave policy"},
+            duration_ms=125,
         )
 
     serialized = json.dumps(
@@ -127,10 +134,9 @@ def test_generation_trace_captures_messages_response_and_usage() -> None:
         default=str,
     )
     assert "sensitive prompt" in serialized
-    assert "I will search the knowledge base." in serialized
     assert "leave policy" in serialized
     assert client.starts[0]["as_type"] == "generation"
-    assert client.starts[0]["name"] == "agent-model-turn"
+    assert client.starts[0]["name"] == "query_rewrite"
     assert (
         sum(
             "completion_start_time" in update
@@ -138,44 +144,65 @@ def test_generation_trace_captures_messages_response_and_usage() -> None:
         )
         == 1
     )
-    assert client.observations[0].updates[-1]["usage_details"] == {
-        "input_tokens": 20,
-        "output_tokens": 8,
-        "total_tokens": 28,
+    update = client.observations[0].updates[-1]
+    assert update["usage_details"] == {
+        "input": 8,
+        "input_cached_tokens": 12,
+        "output": 8,
+        "total": 28,
     }
-    assert client.observations[0].updates[-1]["name"] == "decide-next-step"
-    assert client.observations[0].updates[-1]["metadata"] == {
-        "turn": 1,
-        "generation_kind": "next_step",
+    assert update["metadata"] == {
+        "request_id": "request-1",
+        "conversation_id": "conversation-1",
+        "step": 1,
+        "capability": "query_rewrite",
+        "retrieval_round": 0,
+        "retrieval_query_count": 0,
         "finish_reason": "tool_calls",
-        "tool_call_count": 1,
-        "selected_tools": ["knowledge_search"],
+        "llm_latency_ms": 125,
+        "prompt_tokens": 20,
+        "cached_prompt_tokens": 12,
+        "completion_tokens": 8,
     }
 
 
-def test_generation_trace_names_a_final_response() -> None:
+def test_capability_trace_records_invalid_response_failure() -> None:
     client = RecordingClient()
     tracing = LangfuseTracing(client)
+    context = AgentContext(user_id="u", tenant_id="t", roles=[])
 
-    with tracing.generation(
-        turn=2,
-        messages=[{"role": "user", "content": "Summarize the evidence"}],
-        tool_count=1,
+    with tracing.capability(
+        capability="retrieval_evaluate",
+        prompt="prompt",
+        ctx=context,
+        step=4,
+        retrieval_round=1,
+        retrieval_query_count=2,
     ) as trace:
-        trace.complete(
-            turn=ModelTurn(
-                text="Final grounded answer.",
-                tool_calls=[],
+        trace.fail(
+            category="invalid_response",
+            duration_ms=20,
+            response=LLMResponse(
+                id="response-2",
                 model="openai/gpt-5.4-mini",
-                usage={},
-                finish_reason="stop",
-            )
+                content="truncated-json",
+                finish_reason="length",
+                usage={
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                },
+            ),
+            output="truncated-json",
         )
 
     update = client.observations[0].updates[-1]
-    assert update["name"] == "generate-final-response"
-    assert update["metadata"]["generation_kind"] == "final_response"
-    assert update["metadata"]["selected_tools"] == []
+    assert update["level"] == "ERROR"
+    assert update["output"] == "truncated-json"
+    assert update["model"] == "openai/gpt-5.4-mini"
+    assert update["metadata"]["outcome"] == "invalid_response"
+    assert update["metadata"]["retrieval_round"] == 1
+    assert update["metadata"]["completion_tokens"] == 50
 
 
 def test_tool_execution_trace_uses_the_tool_name() -> None:
@@ -203,7 +230,21 @@ def test_retrieval_trace_captures_query_and_normalized_results() -> None:
     client = RecordingClient()
     tracing = LangfuseTracing(client)
 
-    with tracing.retrieval(query="confidential policy terms", result_limit=5) as trace:
+    context = AgentContext(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        roles=[],
+        request_id="request-1",
+        conversation_id="conversation-1",
+        trace_step=3,
+        retrieval_round=1,
+        retrieval_query_count=2,
+    )
+    with tracing.retrieval(
+        query="confidential policy terms",
+        result_limit=5,
+        ctx=context,
+    ) as trace:
         trace.complete(
             outcome="success",
             result_count=1,
@@ -218,6 +259,7 @@ def test_retrieval_trace_captures_query_and_normalized_results() -> None:
                     relevance_score=0.91,
                 )
             ],
+            duration_ms=75,
         )
 
     serialized = json.dumps(
@@ -226,4 +268,9 @@ def test_retrieval_trace_captures_query_and_normalized_results() -> None:
     assert "confidential policy terms" in serialized
     assert "Employees receive 20 days of annual leave." in serialized
     assert client.starts[0]["as_type"] == "retriever"
+    assert client.starts[0]["name"] == "retrieve-knowledge"
     assert client.observations[0].updates[-1]["output"][0]["id"] == "chunk-1"
+    metadata = client.observations[0].updates[-1]["metadata"]
+    assert metadata["request_id"] == "request-1"
+    assert metadata["retrieval_latency_ms"] == 75
+    assert metadata["retrieval_query_count"] == 2
