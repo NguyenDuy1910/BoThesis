@@ -13,6 +13,7 @@ from bothesis.agent.models import (
     AgentContext,
     CitationAvailable,
     CitationEvent,
+    ConversationMessage,
     Evidence,
     MessageDelta,
     RunCompleted,
@@ -90,11 +91,18 @@ def make_loop(
     *,
     tool: AgentTool | None = None,
     max_turns: int = 6,
+    max_tool_calls: int = 3,
 ) -> tuple[AgentLoop, ScriptedTransport]:
     registry = ToolRegistry()
     registry.register(tool or SearchTool())
     transport = ScriptedTransport(turns)
-    return AgentLoop(transport, registry, "Use enterprise evidence.", max_turns=max_turns), transport
+    return AgentLoop(
+        transport,
+        registry,
+        "Use enterprise evidence.",
+        max_turns=max_turns,
+        max_tool_calls=max_tool_calls,
+    ), transport
 
 
 async def collect(loop: AgentLoop) -> list[Any]:
@@ -135,7 +143,10 @@ async def test_one_tool_call_then_grounded_answer() -> None:
 
     assert any(isinstance(event, ToolStarted) for event in events)
     assert any(isinstance(event, ToolCompleted) for event in events)
-    assert any(isinstance(event, CitationAvailable) and event.evidence == EVIDENCE for event in events)
+    assert any(
+        isinstance(event, CitationAvailable) and event.evidence.id == EVIDENCE.id
+        for event in events
+    )
     assert any(isinstance(event, CitationEvent) and event.evidence_id == EVIDENCE.id for event in events)
     assert "Employees receive leave " in [event.text for event in events if isinstance(event, MessageDelta)]
     assert [event.outcome for event in events if isinstance(event, TurnCompleted)] == ["tool", "final"]
@@ -232,3 +243,81 @@ async def test_tool_failure_is_observed_by_the_next_model_turn() -> None:
         "tool_call_id": "call-1",
         "content": "Tool error: Tool execution failed: knowledge_search",
     }
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tool_call_is_skipped_within_one_run() -> None:
+    tool_turn = [
+        ToolCallDelta("call-1", "knowledge_search", '{"query":"leave"}'),
+        TurnDone("tool_calls"),
+    ]
+    search_tool = SearchTool()
+    loop, _ = make_loop(
+        [
+            tool_turn,
+            [
+                ToolCallDelta("call-2", "knowledge_search", '{"query":"leave"}'),
+                TurnDone("tool_calls"),
+            ],
+            [TextDelta("Done."), TurnDone("stop")],
+        ],
+        tool=search_tool,
+    )
+
+    events = await collect(loop)
+
+    assert len(search_tool.calls) == 1
+    duplicate = next(
+        event
+        for event in events
+        if isinstance(event, ToolCompleted) and event.call_id == "call-2"
+    )
+    assert duplicate.error == "Duplicate tool request skipped for this run."
+
+
+@pytest.mark.asyncio
+async def test_tool_call_limit_prevents_extra_execution() -> None:
+    tool_turn = [
+        ToolCallDelta("call-1", "knowledge_search", '{"query":"leave"}'),
+        ToolCallDelta("call-2", "knowledge_search", '{"query":"policy"}'),
+        TurnDone("tool_calls"),
+    ]
+    search_tool = SearchTool()
+    loop, _ = make_loop(
+        [tool_turn, [TextDelta("Done."), TurnDone("stop")]],
+        tool=search_tool,
+        max_tool_calls=1,
+    )
+
+    events = await collect(loop)
+
+    assert len(search_tool.calls) == 1
+    limited = next(
+        event
+        for event in events
+        if isinstance(event, ToolCompleted) and event.call_id == "call-2"
+    )
+    assert limited.error == "Tool-call limit reached for this run."
+
+
+@pytest.mark.asyncio
+async def test_history_is_added_before_the_current_user_message() -> None:
+    loop, transport = make_loop([[TextDelta("Done."), TurnDone("stop")]])
+    context = AgentContext(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        roles=[],
+        history=(
+            ConversationMessage(role="user", content="Earlier question"),
+            ConversationMessage(role="assistant", content="Earlier answer"),
+        ),
+    )
+
+    events = [event async for event in loop.run_stream("Current question", context)]
+
+    assert isinstance(events[-1], RunCompleted)
+    assert transport.requests[0][1:] == [
+        {"role": "user", "content": "Earlier question"},
+        {"role": "assistant", "content": "Earlier answer"},
+        {"role": "user", "content": "Current question"},
+    ]

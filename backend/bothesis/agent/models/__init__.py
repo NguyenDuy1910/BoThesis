@@ -8,7 +8,7 @@ from typing import Any, ClassVar, Literal, TypeAlias
 
 @dataclass(frozen=True, slots=True)
 class Evidence:
-    """A permission-filtered source fragment available to the agent."""
+    """A source fragment available to the agent and citation UI."""
 
     id: str
     document_id: str
@@ -17,6 +17,30 @@ class Evidence:
     page: str | None = None
     section: str | None = None
     uri: str | None = None
+    source: str | None = None
+    relevance_score: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceReference:
+    """Source metadata that is safe and useful to send to the chat client."""
+
+    id: str
+    document_id: str
+    title: str
+    page: str | None = None
+    section: str | None = None
+    uri: str | None = None
+    source: str | None = None
+    relevance_score: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationMessage:
+    """A bounded prior turn supplied by the client for model context."""
+
+    role: Literal["user", "assistant"]
+    content: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +51,8 @@ class AgentContext:
     tenant_id: str
     roles: list[str]
     conversation_id: str | None = None
+    request_id: str | None = None
+    history: tuple[ConversationMessage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +68,7 @@ class ToolResult:
     content: str
     evidence: list[Evidence] = field(default_factory=list)
     error: str | None = None
+    metadata: dict[str, str | int | float | bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +103,7 @@ class TurnDone:
 class RunStarted:
     type: ClassVar[str] = "run_started"
     conversation_id: str | None = None
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,12 +132,14 @@ class ToolCompleted:
     call_id: str
     name: str
     error: str | None = None
+    duration_ms: int | None = None
+    result_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class CitationAvailable:
     type: ClassVar[str] = "citation_available"
-    evidence: Evidence
+    evidence: EvidenceReference
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +161,10 @@ class TurnCompleted:
 @dataclass(frozen=True, slots=True)
 class RunCompleted:
     type: ClassVar[str] = "run_completed"
+    duration_ms: int | None = None
+    model_duration_ms: int | None = None
+    tool_duration_ms: int | None = None
+    tool_call_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +191,9 @@ __all__ = [
     "AgentEvent",
     "CitationAvailable",
     "CitationEvent",
+    "ConversationMessage",
     "Evidence",
+    "EvidenceReference",
     "MessageDelta",
     "ModelTurn",
     "RunCompleted",

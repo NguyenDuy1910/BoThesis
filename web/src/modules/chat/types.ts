@@ -1,0 +1,106 @@
+export interface ChatConversation {
+  id: string;
+  sessionId: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CachedChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  parts: ChatMessagePart[];
+  createdAt: number;
+}
+
+export type ChatDataParts = {
+  run: {
+    status: "running" | "completed" | "failed" | "cancelled";
+    startedAt: number;
+    requestId?: string;
+    conversationId?: string;
+    durationMs?: number;
+    modelDurationMs?: number;
+    toolDurationMs?: number;
+    toolCallCount?: number;
+  };
+  status: {
+    phase: "run" | "preparing" | "model" | "tool" | "retrieval" | "done" | "cancelled" | "error";
+    state: "active" | "completed" | "error" | "skipped";
+    label: string;
+    detail?: string;
+    toolName?: string;
+    toolCallId?: string;
+    query?: string;
+    durationMs?: number;
+    resultCount?: number;
+  };
+  source: {
+    id: string;
+    title: string;
+    url?: string;
+    domain?: string;
+    description?: string;
+    mimeType?: string;
+    source?: string;
+    relevanceScore?: number;
+    status?: "Used" | "Found" | "Reviewed" | "Restricted";
+    restricted?: boolean;
+  };
+  "stream-error": { message: string; retryable?: boolean };
+};
+
+export type ChatMessagePart =
+  | { type: "text"; text: string; state: "streaming" | "done" }
+  | { type: "data-run"; id?: string; data: ChatDataParts["run"] }
+  | { type: "data-status"; id?: string; data: ChatDataParts["status"] }
+  | { type: "data-source"; id?: string; data: ChatDataParts["source"] }
+  | { type: "data-stream-error"; id?: string; data: ChatDataParts["stream-error"] };
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  parts: ChatMessagePart[];
+}
+
+export interface AgentEvidence {
+  id: string;
+  document_id: string;
+  title: string;
+  page?: string | null;
+  section?: string | null;
+  uri?: string | null;
+  source?: string | null;
+  relevance_score?: number | null;
+}
+
+export interface AgentHistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export type AgentStreamEvent =
+  | { type: "run_started"; conversation_id?: string | null; request_id?: string | null }
+  | { type: "turn_started"; turn: number }
+  | { type: "message_delta"; text: string }
+  | { type: "tool_started"; call_id: string; name: string; arguments: Record<string, unknown> }
+  | {
+      type: "tool_completed";
+      call_id: string;
+      name: string;
+      error?: string | null;
+      duration_ms?: number | null;
+      result_count?: number | null;
+    }
+  | { type: "citation_available"; evidence: AgentEvidence }
+  | { type: "citation"; evidence_id: string; title: string; page?: string | null; uri?: string | null }
+  | { type: "turn_completed"; turn: number; outcome: "tool" | "final" }
+  | {
+      type: "run_completed";
+      duration_ms?: number | null;
+      model_duration_ms?: number | null;
+      tool_duration_ms?: number | null;
+      tool_call_count?: number | null;
+    }
+  | { type: "run_failed"; error: string };

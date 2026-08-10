@@ -7,7 +7,9 @@ records each turn so the loop can decide whether to execute tools or finish.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, AsyncIterator, Mapping
 
 from bothesis.agent.models import (
@@ -15,7 +17,9 @@ from bothesis.agent.models import (
     AgentEvent,
     CitationAvailable,
     CitationEvent,
+    ConversationMessage,
     Evidence,
+    EvidenceReference,
     MessageDelta,
     ModelTurn,
     RunCompleted,
@@ -36,13 +40,18 @@ from bothesis.agent.transports.base import LLMTransport, LLMTransportError
 
 _CITATION_PREFIX = "[[cite:"
 _MAX_CITATION_MARKER_LENGTH = 256
+log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
 class AgentState:
     messages: list[dict[str, Any]]
     evidence: dict[str, Evidence] = field(default_factory=dict)
+    executed_tool_requests: set[str] = field(default_factory=set)
     turn: int = 0
+    tool_call_count: int = 0
+    model_duration_ms: int = 0
+    tool_duration_ms: int = 0
 
 
 @dataclass(slots=True)
@@ -167,36 +176,71 @@ class AgentLoop:
         registry: ToolRegistry,
         system_prompt: str,
         max_turns: int = 6,
+        max_tool_calls: int = 3,
+        max_history_messages: int = 8,
+        max_history_characters: int = 8_000,
+        max_tool_result_characters: int = 10_000,
+        max_user_message_characters: int = 4_000,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least one")
+        if max_tool_calls < 1:
+            raise ValueError("max_tool_calls must be at least one")
+        if min(
+            max_history_messages,
+            max_history_characters,
+            max_tool_result_characters,
+            max_user_message_characters,
+        ) < 1:
+            raise ValueError("agent limits must be at least one")
         self._transport = transport
         self._registry = registry
         self._system_prompt = system_prompt
         self._max_turns = max_turns
+        self._max_tool_calls = max_tool_calls
+        self._max_history_messages = max_history_messages
+        self._max_history_characters = max_history_characters
+        self._max_tool_result_characters = max_tool_result_characters
+        self._max_user_message_characters = max_user_message_characters
 
     async def run_stream(self, user_message: str, ctx: AgentContext) -> AsyncIterator[AgentEvent]:
         """Run one request, forwarding model text before a turn completes."""
-        if not user_message.strip():
+        normalized_message = user_message.strip()
+        if not normalized_message:
             yield RunFailed(error="message must not be empty")
+            return
+        if len(normalized_message) > self._max_user_message_characters:
+            yield RunFailed(error="message exceeds the allowed length")
             return
         if not ctx.tenant_id or not ctx.user_id:
             yield RunFailed(error="tenant and user context are required")
             return
 
+        started_at = perf_counter()
         state = AgentState(
             messages=[
                 {"role": "system", "content": self._system_prompt},
-                {"role": "user", "content": user_message},
+                *self._history_messages(ctx.history),
+                {"role": "user", "content": normalized_message},
             ]
         )
-        yield RunStarted(conversation_id=ctx.conversation_id)
+        log.info(
+            "agent_run_started request_id=%s conversation_id=%s history_message_count=%d",
+            ctx.request_id,
+            ctx.conversation_id,
+            len(ctx.history),
+        )
+        yield RunStarted(
+            conversation_id=ctx.conversation_id,
+            request_id=ctx.request_id,
+        )
 
         for turn_number in range(self._max_turns):
             state.turn = turn_number
             yield TurnStarted(turn=turn_number)
             accumulator = _TurnAccumulator()
             citation_buffer = ""
+            model_started_at = perf_counter()
             try:
                 async for stream_event in self._transport.stream_turn(
                     state.messages,
@@ -215,11 +259,16 @@ class AgentLoop:
                             else:
                                 yield event
             except LLMTransportError:
+                state.model_duration_ms += _duration_ms(model_started_at)
+                self._log_failure(ctx, state, started_at, stage="model")
                 yield RunFailed(error="model stream failed")
                 return
             except Exception:
+                state.model_duration_ms += _duration_ms(model_started_at)
+                self._log_failure(ctx, state, started_at, stage="model")
                 yield RunFailed(error="model stream failed")
                 return
+            state.model_duration_ms += _duration_ms(model_started_at)
 
             # Any incomplete marker is visible as ordinary text at end of turn.
             if citation_buffer:
@@ -234,25 +283,112 @@ class AgentLoop:
                         name=tool_call.name,
                         arguments=tool_call.arguments,
                     )
-                    result = await self._registry.execute(tool_call, ctx)
-                    result = _with_call_id(result, tool_call.call_id)
+                    tool_started_at = perf_counter()
+                    signature = _tool_request_signature(tool_call)
+                    if state.tool_call_count >= self._max_tool_calls:
+                        result = ToolResult(
+                            call_id=tool_call.call_id,
+                            content="",
+                            error="Tool-call limit reached for this run.",
+                            metadata={
+                                "outcome": "tool_limit",
+                                "result_count": 0,
+                                "duration_ms": 0,
+                            },
+                        )
+                    elif signature in state.executed_tool_requests:
+                        result = ToolResult(
+                            call_id=tool_call.call_id,
+                            content="",
+                            error="Duplicate tool request skipped for this run.",
+                            metadata={
+                                "outcome": "duplicate",
+                                "result_count": 0,
+                                "duration_ms": 0,
+                            },
+                        )
+                    else:
+                        state.executed_tool_requests.add(signature)
+                        state.tool_call_count += 1
+                        result = await self._registry.execute(tool_call, ctx)
+                        result = _with_call_id(result, tool_call.call_id)
+                    duration_ms = _duration_ms(tool_started_at)
+                    state.tool_duration_ms += duration_ms
+                    result = _limit_tool_result(
+                        result,
+                        self._max_tool_result_characters,
+                    )
                     for evidence in result.evidence:
                         state.evidence[evidence.id] = evidence
-                        yield CitationAvailable(evidence=evidence)
+                        yield CitationAvailable(evidence=_evidence_reference(evidence))
                     state.messages.append(_tool_result_message(result))
                     yield ToolCompleted(
                         call_id=tool_call.call_id,
                         name=tool_call.name,
                         error=result.error,
+                        duration_ms=duration_ms,
+                        result_count=_result_count(result),
                     )
                 yield TurnCompleted(turn=turn_number, outcome="tool")
                 continue
 
             yield TurnCompleted(turn=turn_number, outcome="final")
-            yield RunCompleted()
+            run_duration_ms = _duration_ms(started_at)
+            log.info(
+                "agent_run_completed request_id=%s conversation_id=%s outcome=success "
+                "duration_ms=%d model_duration_ms=%d tool_duration_ms=%d tool_call_count=%d",
+                ctx.request_id,
+                ctx.conversation_id,
+                run_duration_ms,
+                state.model_duration_ms,
+                state.tool_duration_ms,
+                state.tool_call_count,
+            )
+            yield RunCompleted(
+                duration_ms=run_duration_ms,
+                model_duration_ms=state.model_duration_ms,
+                tool_duration_ms=state.tool_duration_ms,
+                tool_call_count=state.tool_call_count,
+            )
             return
 
+        self._log_failure(ctx, state, started_at, stage="turn_limit")
         yield RunFailed(error="max_turns exceeded")
+
+    def _history_messages(
+        self,
+        history: tuple[ConversationMessage, ...],
+    ) -> list[dict[str, str]]:
+        remaining_characters = self._max_history_characters
+        bounded_messages: list[dict[str, str]] = []
+        for message in reversed(history[-self._max_history_messages :]):
+            content = message.content.strip()
+            if not content or remaining_characters <= 0:
+                continue
+            content = content[-remaining_characters:]
+            bounded_messages.append({"role": message.role, "content": content})
+            remaining_characters -= len(content)
+        return list(reversed(bounded_messages))
+
+    @staticmethod
+    def _log_failure(
+        ctx: AgentContext,
+        state: AgentState,
+        started_at: float,
+        *,
+        stage: str,
+    ) -> None:
+        log.warning(
+            "agent_run_failed request_id=%s conversation_id=%s stage=%s "
+            "duration_ms=%d model_duration_ms=%d tool_duration_ms=%d tool_call_count=%d",
+            ctx.request_id,
+            ctx.conversation_id,
+            stage,
+            _duration_ms(started_at),
+            state.model_duration_ms,
+            state.tool_duration_ms,
+            state.tool_call_count,
+        )
 
     async def _emit_citation_aware_text(
         self, buffer: str, evidence: Mapping[str, Evidence]
@@ -317,4 +453,48 @@ def _with_call_id(result: ToolResult, call_id: str) -> ToolResult:
         content=result.content,
         evidence=result.evidence,
         error=result.error,
+        metadata=result.metadata,
+    )
+
+
+def _tool_request_signature(tool_call: ToolCall) -> str:
+    arguments = dict(tool_call.arguments)
+    query = arguments.get("query")
+    if tool_call.name == "knowledge_search" and isinstance(query, str):
+        arguments["query"] = query.strip().casefold()
+    return f"{tool_call.name}:{json.dumps(arguments, sort_keys=True)}"
+
+
+def _limit_tool_result(result: ToolResult, max_characters: int) -> ToolResult:
+    if len(result.content) <= max_characters:
+        return result
+    truncated_content = f"{result.content[: max_characters - 1].rstrip()}…"
+    return ToolResult(
+        call_id=result.call_id,
+        content=truncated_content,
+        evidence=result.evidence,
+        error=result.error,
+        metadata=result.metadata,
+    )
+
+
+def _result_count(result: ToolResult) -> int | None:
+    value = result.metadata.get("result_count")
+    return value if isinstance(value, int) else None
+
+
+def _duration_ms(started_at: float) -> int:
+    return round((perf_counter() - started_at) * 1_000)
+
+
+def _evidence_reference(evidence: Evidence) -> EvidenceReference:
+    return EvidenceReference(
+        id=evidence.id,
+        document_id=evidence.document_id,
+        title=evidence.title,
+        page=evidence.page,
+        section=evidence.section,
+        uri=evidence.uri,
+        source=evidence.source,
+        relevance_score=evidence.relevance_score,
     )

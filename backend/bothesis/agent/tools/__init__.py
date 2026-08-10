@@ -77,6 +77,7 @@ class ToolRegistry:
             content=result.content,
             evidence=result.evidence,
             error=result.error,
+            metadata=result.metadata,
         )
 
 

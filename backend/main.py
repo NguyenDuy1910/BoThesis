@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
+import os
 from pathlib import Path
-from typing import Any
-from uuid import UUID
+from time import perf_counter
+from typing import Any, Literal
+from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRouter
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -111,14 +116,22 @@ class ThreadDetail(Thread):
     messages: list[Message]
 
 
-class ChatRequest(BaseModel):
-    """Authenticated request context until JWT authentication is connected."""
+class ChatHistoryMessage(BaseModel):
+    """A prior user or assistant turn retained by the browser conversation store."""
 
-    message: str
-    tenant_id: str
-    user_id: str
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4_000)
+
+
+class ChatRequest(BaseModel):
+    """A bounded chat turn submitted by the current WebUI."""
+
+    message: str = Field(min_length=1, max_length=4_000)
+    tenant_id: str = Field(min_length=1, max_length=256)
+    user_id: str = Field(min_length=1, max_length=256)
     roles: list[str]
     conversation_id: str | None = None
+    history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=8)
 
 
 # --- Connectors ---
@@ -386,16 +399,23 @@ def _get_agent_loop() -> Any:
     """Build the singleton agent loop without introducing a DI framework."""
     global _agent_loop
     if _agent_loop is None:
+        from bothesis.document_index.vector_store import VectorStore
         from bothesis.agent.tools import ToolRegistry
         from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
         from bothesis.agent.transports.openrouter import OpenRouterTransport
+        from bothesis.agent.transports.openrouter_embeddings import OpenRouterEmbeddingClient
         from bothesis.chat.agent_loop import AgentLoop
+        from bothesis.knowledge.document_index import QdrantSemanticRetriever
 
         system_prompt = (
             Path(__file__).parent / "bothesis" / "agent" / "prompts" / "system.md"
         ).read_text(encoding="utf-8")
         registry = ToolRegistry()
-        registry.register(KnowledgeSearchTool())
+        retriever = QdrantSemanticRetriever(
+            VectorStore.from_environment(timeout=8),
+            OpenRouterEmbeddingClient(),
+        )
+        registry.register(KnowledgeSearchTool(retriever))
         _agent_loop = AgentLoop(
             transport=OpenRouterTransport(),
             registry=registry,
@@ -407,26 +427,48 @@ def _get_agent_loop() -> Any:
 @agent_router.post("/chat")
 async def chat_stream(body: ChatRequest) -> StreamingResponse:
     """Return the agent event stream as server-sent events."""
-    from bothesis.agent.models import AgentContext
+    from bothesis.agent.models import AgentContext, ConversationMessage
 
+    request_id = uuid4().hex
+    started_at = perf_counter()
     context = AgentContext(
         user_id=body.user_id,
         tenant_id=body.tenant_id,
         roles=body.roles,
         conversation_id=body.conversation_id,
+        request_id=request_id,
+        history=tuple(
+            ConversationMessage(role=message.role, content=message.content)
+            for message in body.history
+        ),
     )
     try:
         loop = _get_agent_loop()
-    except ValueError as exc:
+    except (RuntimeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="agent transport is not configured",
+            detail="agent service is not configured",
         ) from exc
+    setup_duration_ms = round((perf_counter() - started_at) * 1_000)
+    log.info(
+        "agent_chat_request_started request_id=%s conversation_id=%s setup_duration_ms=%d",
+        request_id,
+        body.conversation_id,
+        setup_duration_ms,
+    )
 
     async def event_gen():
-        async for event in loop.run_stream(body.message, context):
-            payload = {"type": event.type, **dataclasses.asdict(event)}
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        try:
+            async for event in loop.run_stream(body.message, context):
+                payload = {"type": event.type, **dataclasses.asdict(event)}
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        finally:
+            log.info(
+                "agent_chat_request_finished request_id=%s conversation_id=%s total_duration_ms=%d",
+                request_id,
+                body.conversation_id,
+                round((perf_counter() - started_at) * 1_000),
+            )
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
@@ -691,3 +733,20 @@ app.include_router(bi_router, prefix=_PREFIX)
 @app.get("/health", tags=["health"])
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    logging.basicConfig(
+        level=os.getenv("BOTHESIS_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=int(os.getenv("BOTHESIS_PORT", "8000")),
+        env_file=Path(__file__).with_name(".env"),
+    )
