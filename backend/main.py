@@ -7,7 +7,6 @@ import json
 import logging
 import os
 from pathlib import Path
-from time import perf_counter
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -16,8 +15,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRouter
 from pydantic import BaseModel, EmailStr, Field
-
-log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -399,13 +396,16 @@ def _get_agent_loop() -> Any:
     """Build the singleton agent loop without introducing a DI framework."""
     global _agent_loop
     if _agent_loop is None:
-        from bothesis.document_index.vector_store import VectorStore
         from bothesis.agent.tools import ToolRegistry
         from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
         from bothesis.agent.transports.openrouter import OpenRouterTransport
-        from bothesis.agent.transports.openrouter_embeddings import OpenRouterEmbeddingClient
+        from bothesis.agent.transports.openrouter_embeddings import (
+            OpenRouterEmbeddingClient,
+        )
         from bothesis.chat.agent_loop import AgentLoop
+        from bothesis.document_index.vector_store import VectorStore
         from bothesis.knowledge.document_index import QdrantSemanticRetriever
+        from bothesis.observability import create_langfuse_tracing
 
         system_prompt = (
             Path(__file__).parent / "bothesis" / "agent" / "prompts" / "system.md"
@@ -415,11 +415,13 @@ def _get_agent_loop() -> Any:
             VectorStore.from_environment(timeout=8),
             OpenRouterEmbeddingClient(),
         )
-        registry.register(KnowledgeSearchTool(retriever))
+        tracing = create_langfuse_tracing()
+        registry.register(KnowledgeSearchTool(retriever, tracing=tracing))
         _agent_loop = AgentLoop(
             transport=OpenRouterTransport(),
             registry=registry,
             system_prompt=system_prompt,
+            tracing=tracing,
         )
     return _agent_loop
 
@@ -430,7 +432,6 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
     from bothesis.agent.models import AgentContext, ConversationMessage
 
     request_id = uuid4().hex
-    started_at = perf_counter()
     context = AgentContext(
         user_id=body.user_id,
         tenant_id=body.tenant_id,
@@ -449,26 +450,10 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="agent service is not configured",
         ) from exc
-    setup_duration_ms = round((perf_counter() - started_at) * 1_000)
-    log.info(
-        "agent_chat_request_started request_id=%s conversation_id=%s setup_duration_ms=%d",
-        request_id,
-        body.conversation_id,
-        setup_duration_ms,
-    )
-
     async def event_gen():
-        try:
-            async for event in loop.run_stream(body.message, context):
-                payload = {"type": event.type, **dataclasses.asdict(event)}
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-        finally:
-            log.info(
-                "agent_chat_request_finished request_id=%s conversation_id=%s total_duration_ms=%d",
-                request_id,
-                body.conversation_id,
-                round((perf_counter() - started_at) * 1_000),
-            )
+        async for event in loop.run_stream(body.message, context):
+            payload = {"type": event.type, **dataclasses.asdict(event)}
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 

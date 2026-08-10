@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import math
 import os
 from collections.abc import Mapping
-from time import perf_counter
 
 import httpx
-
-log = logging.getLogger(__name__)
 
 
 class EmbeddingError(RuntimeError):
@@ -49,7 +45,6 @@ class OpenRouterEmbeddingClient:
         if not normalized_query:
             raise ValueError("query must not be empty")
 
-        started_at = perf_counter()
         try:
             response = await self._client.post(
                 f"{self._base_url}/embeddings",
@@ -62,19 +57,8 @@ class OpenRouterEmbeddingClient:
             response.raise_for_status()
             vector = _response_vector(response.json())
         except (httpx.HTTPError, TypeError, ValueError) as error:
-            log.warning(
-                "embedding_request_failed model=%s error_category=%s",
-                self.model,
-                type(error).__name__,
-            )
             raise EmbeddingError("embedding request failed") from error
 
-        log.info(
-            "embedding_request_completed model=%s dimension_count=%d duration_ms=%d",
-            self.model,
-            len(vector),
-            _duration_ms(started_at),
-        )
         return vector
 
     async def aclose(self) -> None:
@@ -102,10 +86,5 @@ def _response_vector(payload: object) -> list[float]:
             raise ValueError("embedding response vector is invalid")
         vector.append(coordinate)
     return vector
-
-
-def _duration_ms(started_at: float) -> int:
-    return round((perf_counter() - started_at) * 1_000)
-
 
 __all__ = ["EmbeddingError", "OpenRouterEmbeddingClient"]

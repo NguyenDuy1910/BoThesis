@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
+from typing import Any
 
 import httpx
 
@@ -147,10 +148,12 @@ class OpenRouterTransport(LLMTransport):
         if extra_body:
             body.update(extra_body)
         body["stream"] = True
+        body.setdefault("usage", {"include": True})
 
         tool_calls: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
-        emitted_done = False
+        response_model: str | None = selected_model
+        usage: dict[str, int] = {}
         try:
             async with self._client.stream(
                 "POST",
@@ -164,11 +167,12 @@ class OpenRouterTransport(LLMTransport):
                         continue
                     raw_data = line[5:].lstrip()
                     if raw_data == "[DONE]":
-                        if not emitted_done:
-                            yield TurnDone(
-                                finish_reason=finish_reason or "stop",
-                                tool_calls=_assembled_tool_calls(tool_calls),
-                            )
+                        yield TurnDone(
+                            finish_reason=finish_reason or "stop",
+                            tool_calls=_assembled_tool_calls(tool_calls),
+                            model=response_model,
+                            usage=usage,
+                        )
                         return
                     try:
                         payload = json.loads(raw_data)
@@ -176,6 +180,12 @@ class OpenRouterTransport(LLMTransport):
                         raise LLMTransportError("OpenRouter returned invalid stream data") from exc
                     if not isinstance(payload, Mapping):
                         raise LLMTransportError("OpenRouter returned invalid stream data")
+                    raw_model = payload.get("model")
+                    if isinstance(raw_model, str) and raw_model:
+                        response_model = raw_model
+                    raw_usage = payload.get("usage")
+                    if isinstance(raw_usage, Mapping):
+                        usage = _token_usage(raw_usage)
                     choices = payload.get("choices")
                     if not isinstance(choices, list) or not choices:
                         continue
@@ -222,19 +232,15 @@ class OpenRouterTransport(LLMTransport):
                     raw_finish_reason = choice.get("finish_reason")
                     if raw_finish_reason is not None:
                         finish_reason = str(raw_finish_reason)
-                        yield TurnDone(
-                            finish_reason=finish_reason,
-                            tool_calls=_assembled_tool_calls(tool_calls),
-                        )
-                        emitted_done = True
         except httpx.HTTPError as exc:
             raise LLMTransportError("OpenRouter stream request failed") from exc
 
-        if not emitted_done:
-            yield TurnDone(
-                finish_reason=finish_reason or "stop",
-                tool_calls=_assembled_tool_calls(tool_calls),
-            )
+        yield TurnDone(
+            finish_reason=finish_reason or "stop",
+            tool_calls=_assembled_tool_calls(tool_calls),
+            model=response_model,
+            usage=usage,
+        )
 
     async def aclose(self) -> None:
         """Close the internally-created HTTP client when the app shuts down."""
@@ -263,4 +269,11 @@ def _assembled_tool_calls(tool_calls: Mapping[int, Mapping[str, str]]) -> list[d
     ]
 
 
-   
+def _token_usage(raw_usage: Mapping[str, Any]) -> dict[str, int]:
+    return {
+        key: value
+        for key, value in raw_usage.items()
+        if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+    }

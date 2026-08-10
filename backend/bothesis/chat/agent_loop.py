@@ -7,10 +7,11 @@ records each turn so the loop can decide whether to execute tools or finish.
 from __future__ import annotations
 
 import json
-import logging
+from collections.abc import AsyncIterator, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Any, AsyncIterator, Mapping
+from typing import Any
 
 from bothesis.agent.models import (
     AgentContext,
@@ -37,10 +38,10 @@ from bothesis.agent.models import (
 )
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.transports.base import LLMTransport, LLMTransportError
+from bothesis.observability import AgentRunTrace, LangfuseTracing
 
 _CITATION_PREFIX = "[[cite:"
 _MAX_CITATION_MARKER_LENGTH = 256
-log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -52,6 +53,8 @@ class AgentState:
     tool_call_count: int = 0
     model_duration_ms: int = 0
     tool_duration_ms: int = 0
+    answer_character_count: int = 0
+    used_evidence_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -68,6 +71,8 @@ class _TurnAccumulator:
         self._tool_calls: dict[str, _PendingToolCall] = {}
         self._tool_order: list[str] = []
         self._finish_reason: str | None = None
+        self._model: str | None = None
+        self._usage: dict[str, int] = {}
 
     def feed(self, event: TextDelta | ToolCallDelta | TurnDone) -> None:
         if isinstance(event, TextDelta):
@@ -80,6 +85,8 @@ class _TurnAccumulator:
             pending.arguments += event.arguments
             return
         self._finish_reason = event.finish_reason
+        self._model = event.model
+        self._usage = event.usage
         for raw_call in event.tool_calls:
             self._merge_complete_tool_call(raw_call)
 
@@ -98,6 +105,8 @@ class _TurnAccumulator:
             text="".join(self._text),
             tool_calls=calls,
             finish_reason=self._finish_reason,
+            model=self._model,
+            usage=self._usage,
         )
 
     def _get_or_create(self, call_id: str) -> _PendingToolCall:
@@ -181,6 +190,7 @@ class AgentLoop:
         max_history_characters: int = 8_000,
         max_tool_result_characters: int = 10_000,
         max_user_message_characters: int = 4_000,
+        tracing: LangfuseTracing | None = None,
     ) -> None:
         if max_turns < 1:
             raise ValueError("max_turns must be at least one")
@@ -202,6 +212,7 @@ class AgentLoop:
         self._max_history_characters = max_history_characters
         self._max_tool_result_characters = max_tool_result_characters
         self._max_user_message_characters = max_user_message_characters
+        self._tracing = tracing
 
     async def run_stream(self, user_message: str, ctx: AgentContext) -> AsyncIterator[AgentEvent]:
         """Run one request, forwarding model text before a turn completes."""
@@ -216,6 +227,23 @@ class AgentLoop:
             yield RunFailed(error="tenant and user context are required")
             return
 
+        trace_context = (
+            self._tracing.agent_run(user_message=normalized_message, ctx=ctx)
+            if self._tracing is not None
+            else nullcontext(None)
+        )
+        with trace_context as run_trace:
+            async for event in self._run_validated_stream(normalized_message, ctx, run_trace):
+                yield event
+
+    async def _run_validated_stream(
+        self,
+        normalized_message: str,
+        ctx: AgentContext,
+        run_trace: AgentRunTrace | None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Execute a validated request inside its optional trace context."""
+
         started_at = perf_counter()
         state = AgentState(
             messages=[
@@ -223,12 +251,6 @@ class AgentLoop:
                 *self._history_messages(ctx.history),
                 {"role": "user", "content": normalized_message},
             ]
-        )
-        log.info(
-            "agent_run_started request_id=%s conversation_id=%s history_message_count=%d",
-            ctx.request_id,
-            ctx.conversation_id,
-            len(ctx.history),
         )
         yield RunStarted(
             conversation_id=ctx.conversation_id,
@@ -241,40 +263,68 @@ class AgentLoop:
             accumulator = _TurnAccumulator()
             citation_buffer = ""
             model_started_at = perf_counter()
+            tool_schemas = self._registry.schemas()
+            generation_context = (
+                self._tracing.generation(
+                    turn=turn_number,
+                    messages=state.messages,
+                    tool_count=len(tool_schemas),
+                )
+                if self._tracing is not None
+                else nullcontext(None)
+            )
             try:
-                async for stream_event in self._transport.stream_turn(
-                    state.messages,
-                    tools=self._registry.schemas(),
-                ):
-                    # The accumulator and frontend forwarding intentionally run
-                    # side-by-side so text is not replayed after completion.
-                    accumulator.feed(stream_event)
-                    if isinstance(stream_event, TextDelta):
-                        citation_buffer += stream_event.delta
-                        async for event in self._emit_citation_aware_text(
-                            citation_buffer, state.evidence
-                        ):
-                            if isinstance(event, _CitationCarry):
-                                citation_buffer = event.value
-                            else:
-                                yield event
+                with generation_context as generation_trace:
+                    async for stream_event in self._transport.stream_turn(
+                        state.messages,
+                        tools=tool_schemas,
+                    ):
+                        # The accumulator and frontend forwarding intentionally run
+                        # side-by-side so text is not replayed after completion.
+                        accumulator.feed(stream_event)
+                        if isinstance(stream_event, TextDelta):
+                            if generation_trace is not None:
+                                generation_trace.mark_first_token()
+                            citation_buffer += stream_event.delta
+                            async for event in self._emit_citation_aware_text(
+                                citation_buffer, state.evidence
+                            ):
+                                if isinstance(event, _CitationCarry):
+                                    citation_buffer = event.value
+                                else:
+                                    if isinstance(event, MessageDelta):
+                                        state.answer_character_count += len(event.text)
+                                    elif isinstance(event, CitationEvent):
+                                        state.used_evidence_ids.add(event.evidence_id)
+                                    yield event
+                    completed_turn = accumulator.result()
+                    if generation_trace is not None:
+                        generation_trace.complete(
+                            model=completed_turn.model,
+                            usage=completed_turn.usage,
+                            finish_reason=completed_turn.finish_reason,
+                            text_characters=len(completed_turn.text),
+                            tool_call_count=len(completed_turn.tool_calls),
+                        )
             except LLMTransportError:
                 state.model_duration_ms += _duration_ms(model_started_at)
-                self._log_failure(ctx, state, started_at, stage="model")
+                if run_trace is not None:
+                    run_trace.fail(stage="model")
                 yield RunFailed(error="model stream failed")
                 return
             except Exception:
                 state.model_duration_ms += _duration_ms(model_started_at)
-                self._log_failure(ctx, state, started_at, stage="model")
+                if run_trace is not None:
+                    run_trace.fail(stage="model")
                 yield RunFailed(error="model stream failed")
                 return
             state.model_duration_ms += _duration_ms(model_started_at)
 
             # Any incomplete marker is visible as ordinary text at end of turn.
             if citation_buffer:
+                state.answer_character_count += len(citation_buffer)
                 yield MessageDelta(text=citation_buffer)
 
-            completed_turn = accumulator.result()
             if completed_turn.tool_calls:
                 state.messages.append(_assistant_tool_message(completed_turn))
                 for tool_call in completed_turn.tool_calls:
@@ -334,16 +384,14 @@ class AgentLoop:
 
             yield TurnCompleted(turn=turn_number, outcome="final")
             run_duration_ms = _duration_ms(started_at)
-            log.info(
-                "agent_run_completed request_id=%s conversation_id=%s outcome=success "
-                "duration_ms=%d model_duration_ms=%d tool_duration_ms=%d tool_call_count=%d",
-                ctx.request_id,
-                ctx.conversation_id,
-                run_duration_ms,
-                state.model_duration_ms,
-                state.tool_duration_ms,
-                state.tool_call_count,
-            )
+            if run_trace is not None:
+                run_trace.complete(
+                    answer_characters=state.answer_character_count,
+                    turn_count=turn_number + 1,
+                    tool_call_count=state.tool_call_count,
+                    sources_found=len(state.evidence),
+                    sources_used=len(state.used_evidence_ids),
+                )
             yield RunCompleted(
                 duration_ms=run_duration_ms,
                 model_duration_ms=state.model_duration_ms,
@@ -352,7 +400,8 @@ class AgentLoop:
             )
             return
 
-        self._log_failure(ctx, state, started_at, stage="turn_limit")
+        if run_trace is not None:
+            run_trace.fail(stage="turn_limit")
         yield RunFailed(error="max_turns exceeded")
 
     def _history_messages(
@@ -369,26 +418,6 @@ class AgentLoop:
             bounded_messages.append({"role": message.role, "content": content})
             remaining_characters -= len(content)
         return list(reversed(bounded_messages))
-
-    @staticmethod
-    def _log_failure(
-        ctx: AgentContext,
-        state: AgentState,
-        started_at: float,
-        *,
-        stage: str,
-    ) -> None:
-        log.warning(
-            "agent_run_failed request_id=%s conversation_id=%s stage=%s "
-            "duration_ms=%d model_duration_ms=%d tool_duration_ms=%d tool_call_count=%d",
-            ctx.request_id,
-            ctx.conversation_id,
-            stage,
-            _duration_ms(started_at),
-            state.model_duration_ms,
-            state.tool_duration_ms,
-            state.tool_call_count,
-        )
 
     async def _emit_citation_aware_text(
         self, buffer: str, evidence: Mapping[str, Evidence]

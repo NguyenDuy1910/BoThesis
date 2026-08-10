@@ -76,6 +76,8 @@ class ModelTurn:
     text: str
     tool_calls: list[ToolCall]
     finish_reason: str | None
+    model: str | None = None
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 # Internal transport stream events. These are never sent directly to clients.
@@ -95,6 +97,8 @@ class ToolCallDelta:
 class TurnDone:
     finish_reason: str | None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    model: str | None = None
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 # SSE events. ``type`` is deliberately a class variable; the HTTP layer adds

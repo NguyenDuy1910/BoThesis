@@ -15,7 +15,8 @@ import os
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
-from qdrant_client import AsyncQdrantClient, models as qmodels
+from qdrant_client import AsyncQdrantClient
+from qdrant_client import models as qmodels
 
 log = logging.getLogger(__name__)
 
@@ -191,11 +192,6 @@ class VectorStore:
             if self._api_key:
                 kwargs["api_key"] = self._api_key
             self._client = AsyncQdrantClient(**kwargs)
-            log.info(
-                "Configured Qdrant vector store: grpc=%s, collection=%s",
-                kwargs["prefer_grpc"],
-                self.collection_name,
-            )
         return self._client
 
     @property

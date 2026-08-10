@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+from contextlib import nullcontext
 from time import perf_counter
 
 from bothesis.agent.models import AgentContext, Evidence, ToolResult
 from bothesis.agent.tools import AgentTool
 from bothesis.knowledge.document_index import KnowledgeRetriever, RetrievedDocument
-
-log = logging.getLogger(__name__)
+from bothesis.observability import LangfuseTracing
 
 
 class KnowledgeSearchTool(AgentTool):
@@ -43,6 +42,7 @@ class KnowledgeSearchTool(AgentTool):
         timeout_seconds: float = 8.0,
         max_context_characters: int = 8_000,
         max_evidence_characters: int = 1_600,
+        tracing: LangfuseTracing | None = None,
     ) -> None:
         if result_limit < 1:
             raise ValueError("result_limit must be at least one")
@@ -55,6 +55,7 @@ class KnowledgeSearchTool(AgentTool):
         self._timeout_seconds = timeout_seconds
         self._max_context_characters = max_context_characters
         self._max_evidence_characters = max_evidence_characters
+        self._tracing = tracing
 
     async def execute(self, arguments: dict[str, object], ctx: AgentContext) -> ToolResult:
         query = arguments.get("query")
@@ -75,113 +76,90 @@ class KnowledgeSearchTool(AgentTool):
             )
 
         started_at = perf_counter()
-        log.info(
-            "knowledge_search_started request_id=%s conversation_id=%s "
-            "result_limit=%d timeout_ms=%d",
-            ctx.request_id,
-            ctx.conversation_id,
-            self._result_limit,
-            round(self._timeout_seconds * 1_000),
+        trace_context = (
+            self._tracing.retrieval(
+                query=normalized_query,
+                result_limit=self._result_limit,
+            )
+            if self._tracing is not None
+            else nullcontext(None)
         )
-        try:
-            documents = await asyncio.wait_for(
-                self._retriever.search(normalized_query, limit=self._result_limit),
-                timeout=self._timeout_seconds,
-            )
-        except TimeoutError:
-            return self._failure_result(
-                ctx,
-                started_at,
-                error="Knowledge search timed out. Please try again.",
-                category="timeout",
-            )
-        except ValueError:
-            return self._failure_result(
-                ctx,
-                started_at,
-                error="Knowledge search could not process that query.",
-                category="invalid_query",
-            )
-        except Exception as error:
-            log.warning(
-                "knowledge_search_failed request_id=%s conversation_id=%s "
-                "error_category=%s",
-                ctx.request_id,
-                ctx.conversation_id,
-                type(error).__name__,
-            )
-            return self._failure_result(
-                ctx,
-                started_at,
-                error="Knowledge search is temporarily unavailable. Please try again.",
-                category="retrieval_failure",
-            )
+        with trace_context as retrieval_trace:
+            try:
+                documents = await asyncio.wait_for(
+                    self._retriever.search(normalized_query, limit=self._result_limit),
+                    timeout=self._timeout_seconds,
+                )
+            except TimeoutError:
+                if retrieval_trace is not None:
+                    retrieval_trace.fail(category="timeout")
+                return self._failure_result(
+                    started_at,
+                    error="Knowledge search timed out. Please try again.",
+                    category="timeout",
+                )
+            except ValueError:
+                if retrieval_trace is not None:
+                    retrieval_trace.fail(category="invalid_query")
+                return self._failure_result(
+                    started_at,
+                    error="Knowledge search could not process that query.",
+                    category="invalid_query",
+                )
+            except Exception:
+                if retrieval_trace is not None:
+                    retrieval_trace.fail(category="retrieval_failure")
+                return self._failure_result(
+                    started_at,
+                    error="Knowledge search is temporarily unavailable. Please try again.",
+                    category="retrieval_failure",
+                )
 
-        duration_ms = _duration_ms(started_at)
-        if not documents:
-            self._log_result(ctx, outcome="empty", result_count=0, duration_ms=duration_ms)
+            duration_ms = _duration_ms(started_at)
+            if not documents:
+                if retrieval_trace is not None:
+                    retrieval_trace.complete(outcome="empty", result_count=0)
+                return ToolResult(
+                    call_id="",
+                    content="No matching enterprise documents were found.",
+                    metadata={"outcome": "empty", "result_count": 0, "duration_ms": duration_ms},
+                )
+
+            evidence = [
+                _evidence_from_document(document, self._max_evidence_characters)
+                for document in documents
+            ]
+            if retrieval_trace is not None:
+                retrieval_trace.complete(
+                    outcome="success",
+                    result_count=len(evidence),
+                    source_types=[document.source for document in documents if document.source],
+                )
             return ToolResult(
                 call_id="",
-                content="No matching enterprise documents were found.",
-                metadata={"outcome": "empty", "result_count": 0, "duration_ms": duration_ms},
+                content=_context_from_documents(documents, self._max_context_characters),
+                evidence=evidence,
+                metadata={
+                    "outcome": "success",
+                    "result_count": len(evidence),
+                    "duration_ms": duration_ms,
+                },
             )
-
-        evidence = [
-            _evidence_from_document(document, self._max_evidence_characters)
-            for document in documents
-        ]
-        self._log_result(
-            ctx,
-            outcome="success",
-            result_count=len(evidence),
-            duration_ms=duration_ms,
-        )
-        return ToolResult(
-            call_id="",
-            content=_context_from_documents(documents, self._max_context_characters),
-            evidence=evidence,
-            metadata={
-                "outcome": "success",
-                "result_count": len(evidence),
-                "duration_ms": duration_ms,
-            },
-        )
 
     def _failure_result(
         self,
-        ctx: AgentContext,
         started_at: float,
         *,
         error: str,
         category: str,
     ) -> ToolResult:
         duration_ms = _duration_ms(started_at)
-        self._log_result(ctx, outcome=category, result_count=0, duration_ms=duration_ms)
         return ToolResult(
             call_id="",
             content="",
             error=error,
             metadata={"outcome": category, "result_count": 0, "duration_ms": duration_ms},
         )
-
-    @staticmethod
-    def _log_result(
-        ctx: AgentContext,
-        *,
-        outcome: str,
-        result_count: int,
-        duration_ms: int,
-    ) -> None:
-        log.info(
-            "knowledge_search_completed request_id=%s conversation_id=%s "
-            "outcome=%s result_count=%d duration_ms=%d",
-            ctx.request_id,
-            ctx.conversation_id,
-            outcome,
-            result_count,
-            duration_ms,
-        )
-
 
 def _context_from_documents(
     documents: list[RetrievedDocument],
