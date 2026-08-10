@@ -21,18 +21,21 @@ from bothesis.knowledge.document_index import RetrievedDocument
 
 class ScriptedTransport(LLMTransport):
     def __init__(self) -> None:
-        self.requests: list[list[dict[str, Any]]] = []
+        self.complete_requests: list[list[dict[str, Any]]] = []
+        self.stream_requests: list[list[dict[str, Any]]] = []
 
     async def complete(
         self,
         messages: Sequence[ChatMessage | Mapping[str, Any]],
         **_: Any,
     ) -> LLMResponse:
-        self.requests.append([dict(message) for message in messages])
+        self.complete_requests.append([dict(message) for message in messages])
         return LLMResponse(
-            id="rewrite-1",
+            id="compression-1",
             model="openai/gpt-5.4-mini",
-            content='{"query":"leave policy"}',
+            content=(
+                '{"summary":"Earlier question and answer about the leave policy."}'
+            ),
             finish_reason="stop",
             usage={"prompt_tokens": 10, "completion_tokens": 3},
         )
@@ -42,7 +45,22 @@ class ScriptedTransport(LLMTransport):
         messages: Sequence[ChatMessage | Mapping[str, Any]],
         **_: Any,
     ) -> AsyncIterator[TextDelta | TurnDone]:
-        self.requests.append([dict(message) for message in messages])
+        self.stream_requests.append([dict(message) for message in messages])
+        if len(self.stream_requests) == 1:
+            yield TurnDone(
+                "tool_calls",
+                tool_calls=[
+                    {
+                        "id": "search-1",
+                        "type": "function",
+                        "function": {
+                            "name": "knowledge_search",
+                            "arguments": '{"query":"leave policy"}',
+                        },
+                    }
+                ],
+            )
+            return
         yield TextDelta("Employees receive 20 days of annual leave [[cite:chunk-1]].")
         yield TurnDone("stop")
 
@@ -127,10 +145,18 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     tool_event = next(event for event in events if event["type"] == "tool_completed")
     assert tool_event["result_count"] == 1
     assert events[-1]["tool_call_count"] == 1
-    rewrite_prompt = transport.requests[0][0]["content"]
-    assert "Earlier question" in rewrite_prompt
-    assert "Earlier answer" in rewrite_prompt
-    assert "What is the leave policy?" in rewrite_prompt
+    compression_prompt = transport.complete_requests[0][1]["content"]
+    model_request = transport.stream_requests[0]
+    assert "Compress the earlier conversation" in compression_prompt
+    assert "Earlier answer" in compression_prompt
+    assert (
+        "Earlier question and answer about the leave policy"
+        in model_request[1]["content"]
+    )
+    assert model_request[-1] == {
+        "role": "user",
+        "content": "What is the leave policy?",
+    }
 
 
 def test_chat_api_rejects_unbounded_history() -> None:

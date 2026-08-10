@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from bothesis.agent.models import (
     AgentContext,
     Evidence,
+    ModelTurn,
+    ToolCall,
     ToolResult,
 )
 from bothesis.agent.transports.base import LLMResponse
@@ -104,7 +106,13 @@ def test_capability_trace_captures_model_usage_cache_and_execution_metadata() ->
 
     with tracing.capability(
         capability="query_rewrite",
-        prompt="<task>Rewrite</task><input>sensitive prompt</input>",
+        messages=[
+            {"role": "system", "content": "BoThesis base prompt"},
+            {
+                "role": "user",
+                "content": "<task>Rewrite</task><input>sensitive prompt</input>",
+            },
+        ],
         ctx=context,
         step=1,
         retrieval_round=0,
@@ -137,6 +145,10 @@ def test_capability_trace_captures_model_usage_cache_and_execution_metadata() ->
     assert "leave policy" in serialized
     assert client.starts[0]["as_type"] == "generation"
     assert client.starts[0]["name"] == "query_rewrite"
+    assert client.starts[0]["input"][0] == {
+        "role": "system",
+        "content": "BoThesis base prompt",
+    }
     assert (
         sum(
             "completion_start_time" in update
@@ -173,7 +185,7 @@ def test_capability_trace_records_invalid_response_failure() -> None:
 
     with tracing.capability(
         capability="retrieval_evaluate",
-        prompt="prompt",
+        messages=[{"role": "user", "content": "prompt"}],
         ctx=context,
         step=4,
         retrieval_round=1,
@@ -203,6 +215,78 @@ def test_capability_trace_records_invalid_response_failure() -> None:
     assert update["metadata"]["outcome"] == "invalid_response"
     assert update["metadata"]["retrieval_round"] == 1
     assert update["metadata"]["completion_tokens"] == 50
+
+
+def test_model_turn_trace_is_named_from_the_returned_tool_calls() -> None:
+    client = RecordingClient()
+    tracing = LangfuseTracing(client)
+    context = AgentContext(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        roles=[],
+        request_id="request-1",
+        conversation_id="conversation-1",
+    )
+
+    with tracing.model_turn(
+        messages=[{"role": "user", "content": "What is our leave policy?"}],
+        ctx=context,
+        turn=0,
+        tool_round=0,
+    ) as trace:
+        trace.complete(
+            turn=ModelTurn(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        call_id="search-1",
+                        name="knowledge_search",
+                        arguments={"query": "annual leave policy"},
+                    )
+                ],
+                finish_reason="tool_calls",
+                model="openai/gpt-5.4-mini",
+                usage={"prompt_tokens": 20, "completion_tokens": 4},
+            ),
+            duration_ms=80,
+        )
+
+    assert client.starts[0]["name"] == "agent-model-turn"
+    update = client.observations[0].updates[-1]
+    assert update["name"] == "decide-next-step"
+    assert update["output"]["tool_calls"][0]["arguments"] == {
+        "query": "annual leave policy"
+    }
+    assert update["metadata"]["generation_kind"] == "next_step"
+    assert update["metadata"]["selected_tools"] == ["knowledge_search"]
+    assert update["metadata"]["tool_call_count"] == 1
+
+
+def test_model_turn_trace_names_a_text_response_as_final() -> None:
+    client = RecordingClient()
+    tracing = LangfuseTracing(client)
+    context = AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[])
+
+    with tracing.model_turn(
+        messages=[{"role": "user", "content": "Hello"}],
+        ctx=context,
+        turn=0,
+        tool_round=0,
+    ) as trace:
+        trace.complete(
+            turn=ModelTurn(
+                text="Hello!",
+                tool_calls=[],
+                finish_reason="stop",
+                model="openai/gpt-5.4-mini",
+            ),
+            duration_ms=30,
+        )
+
+    update = client.observations[0].updates[-1]
+    assert update["name"] == "generate-final-response"
+    assert update["output"] == "Hello!"
+    assert update["metadata"]["generation_kind"] == "final_response"
 
 
 def test_tool_execution_trace_uses_the_tool_name() -> None:

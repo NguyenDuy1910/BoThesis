@@ -10,11 +10,22 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRouter
 from pydantic import BaseModel, EmailStr, Field
+
+from bothesis.health import HealthReport, HealthService
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -206,7 +217,7 @@ class DocumentDetail(BaseModel):
 class CronCreate(BaseModel):
     name: str
     schedule: str  # cron expression, e.g. "0 2 * * *"
-    task: str      # registered task name
+    task: str  # registered task name
     params: dict[str, Any] = {}
     enabled: bool = True
 
@@ -291,7 +302,10 @@ class MetricResult(BaseModel):
 
 async def get_current_user() -> UserProfile:  # noqa: RUF029
     """Replace with JWT validation + DB lookup."""
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="auth service not implemented")
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="auth service not implemented",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -336,33 +350,43 @@ access_router = APIRouter(prefix="/access", tags=["access"])
 
 
 @access_router.get("/roles", response_model=list[Role])
-async def list_roles(current_user: UserProfile = Depends(get_current_user)) -> list[Role]:
+async def list_roles(
+    current_user: UserProfile = Depends(get_current_user),
+) -> list[Role]:
     # return await access_service.list_roles(current_user.tenant_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @access_router.post("/roles", response_model=Role, status_code=status.HTTP_201_CREATED)
-async def create_role(body: RoleCreate, current_user: UserProfile = Depends(get_current_user)) -> Role:
+async def create_role(
+    body: RoleCreate, current_user: UserProfile = Depends(get_current_user)
+) -> Role:
     # return await access_service.create_role(current_user.tenant_id, body)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @access_router.get("/roles/{role_id}", response_model=Role)
-async def get_role(role_id: UUID, current_user: UserProfile = Depends(get_current_user)) -> Role:
+async def get_role(
+    role_id: UUID, current_user: UserProfile = Depends(get_current_user)
+) -> Role:
     # return await access_service.get_role(current_user.tenant_id, role_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @access_router.put("/roles/{role_id}", response_model=Role)
 async def update_role(
-    role_id: UUID, body: RoleUpdate, current_user: UserProfile = Depends(get_current_user)
+    role_id: UUID,
+    body: RoleUpdate,
+    current_user: UserProfile = Depends(get_current_user),
 ) -> Role:
     # return await access_service.update_role(current_user.tenant_id, role_id, body)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @access_router.delete("/roles/{role_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_role(role_id: UUID, current_user: UserProfile = Depends(get_current_user)) -> None:
+async def delete_role(
+    role_id: UUID, current_user: UserProfile = Depends(get_current_user)
+) -> None:
     # await access_service.delete_role(current_user.tenant_id, role_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
@@ -377,7 +401,9 @@ async def get_user_permissions(
 
 @access_router.put("/users/{user_id}/permissions", response_model=EffectivePermissions)
 async def patch_user_permissions(
-    user_id: UUID, body: PermissionPatch, current_user: UserProfile = Depends(get_current_user)
+    user_id: UUID,
+    body: PermissionPatch,
+    current_user: UserProfile = Depends(get_current_user),
 ) -> EffectivePermissions:
     # return await access_service.patch_permissions(current_user.tenant_id, user_id, body)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
@@ -408,20 +434,27 @@ def _get_agent_loop() -> Any:
         from bothesis.observability import create_langfuse_tracing
 
         registry = ToolRegistry()
+        openrouter_base_url = os.getenv(
+            "OPEN_ROUTER_BASE_URL",
+            OpenRouterTransport.DEFAULT_BASE_URL,
+        )
         retriever = QdrantSemanticRetriever(
             VectorStore.from_environment(timeout=8),
-            OpenRouterEmbeddingClient(),
+            OpenRouterEmbeddingClient(base_url=openrouter_base_url),
         )
         tracing = create_langfuse_tracing()
         registry.register(KnowledgeSearchTool(retriever, tracing=tracing))
         _agent_loop = AgentLoop(
-            transport=OpenRouterTransport(),
+            transport=OpenRouterTransport(base_url=openrouter_base_url),
             registry=registry,
-            max_retrieval_rounds=int(
-                os.getenv("BOTHESIS_MAX_RETRIEVAL_ROUNDS", "2")
+            max_model_turns=int(os.getenv("BOTHESIS_MAX_MODEL_TURNS", "3")),
+            max_tool_rounds=int(os.getenv("BOTHESIS_MAX_TOOL_ROUNDS", "2")),
+            max_tool_calls=int(os.getenv("BOTHESIS_MAX_TOOL_CALLS", "6")),
+            history_compression_threshold=int(
+                os.getenv("BOTHESIS_HISTORY_COMPRESSION_THRESHOLD", "4000")
             ),
-            max_retrieval_queries=int(
-                os.getenv("BOTHESIS_MAX_RETRIEVAL_QUERIES", "3")
+            max_compressed_history_characters=int(
+                os.getenv("BOTHESIS_MAX_COMPRESSED_HISTORY_CHARACTERS", "2000")
             ),
             tracing=tracing,
         )
@@ -452,6 +485,7 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="agent service is not configured",
         ) from exc
+
     async def event_gen():
         async for event in loop.run_stream(body.message, context):
             payload = {"type": event.type, **dataclasses.asdict(event)}
@@ -460,8 +494,12 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
-@agent_router.post("/threads", response_model=Thread, status_code=status.HTTP_201_CREATED)
-async def create_thread(body: ThreadCreate, current_user: UserProfile = Depends(get_current_user)) -> Thread:
+@agent_router.post(
+    "/threads", response_model=Thread, status_code=status.HTTP_201_CREATED
+)
+async def create_thread(
+    body: ThreadCreate, current_user: UserProfile = Depends(get_current_user)
+) -> Thread:
     # return await agent_service.create_thread(current_user, body)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
@@ -477,20 +515,26 @@ async def list_threads(
 
 
 @agent_router.get("/threads/{thread_id}", response_model=ThreadDetail)
-async def get_thread(thread_id: UUID, current_user: UserProfile = Depends(get_current_user)) -> ThreadDetail:
+async def get_thread(
+    thread_id: UUID, current_user: UserProfile = Depends(get_current_user)
+) -> ThreadDetail:
     # return await agent_service.get_thread(current_user, thread_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @agent_router.delete("/threads/{thread_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_thread(thread_id: UUID, current_user: UserProfile = Depends(get_current_user)) -> None:
+async def delete_thread(
+    thread_id: UUID, current_user: UserProfile = Depends(get_current_user)
+) -> None:
     # await agent_service.delete_thread(current_user, thread_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @agent_router.post("/threads/{thread_id}/messages", response_model=Message)
 async def send_message(
-    thread_id: UUID, body: MessageSend, current_user: UserProfile = Depends(get_current_user)
+    thread_id: UUID,
+    body: MessageSend,
+    current_user: UserProfile = Depends(get_current_user),
 ) -> Message:
     """Send a user message and receive a grounded assistant reply (blocking)."""
     # return await agent_service.chat(current_user, thread_id, body)
@@ -499,7 +543,9 @@ async def send_message(
 
 @agent_router.get("/threads/{thread_id}/messages/{message_id}/stream")
 async def stream_message(
-    thread_id: UUID, message_id: UUID, current_user: UserProfile = Depends(get_current_user)
+    thread_id: UUID,
+    message_id: UUID,
+    current_user: UserProfile = Depends(get_current_user),
 ) -> StreamingResponse:
     """SSE stream of an in-progress assistant reply."""
     # async def event_gen():
@@ -517,12 +563,16 @@ connectors_router = APIRouter(prefix="/connectors", tags=["connectors"])
 
 
 @connectors_router.get("", response_model=list[Connector])
-async def list_connectors(current_user: UserProfile = Depends(get_current_user)) -> list[Connector]:
+async def list_connectors(
+    current_user: UserProfile = Depends(get_current_user),
+) -> list[Connector]:
     # return await connectors_service.list(current_user.tenant_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
-@connectors_router.post("", response_model=Connector, status_code=status.HTTP_201_CREATED)
+@connectors_router.post(
+    "", response_model=Connector, status_code=status.HTTP_201_CREATED
+)
 async def create_connector(
     body: ConnectorCreate, current_user: UserProfile = Depends(get_current_user)
 ) -> Connector:
@@ -540,7 +590,9 @@ async def get_connector(
 
 @connectors_router.put("/{connector_id}", response_model=Connector)
 async def update_connector(
-    connector_id: UUID, body: ConnectorUpdate, current_user: UserProfile = Depends(get_current_user)
+    connector_id: UUID,
+    body: ConnectorUpdate,
+    current_user: UserProfile = Depends(get_current_user),
 ) -> Connector:
     # return await connectors_service.update(current_user.tenant_id, connector_id, body)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
@@ -554,7 +606,11 @@ async def delete_connector(
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
-@connectors_router.post("/{connector_id}/sync", response_model=SyncStatus, status_code=status.HTTP_202_ACCEPTED)
+@connectors_router.post(
+    "/{connector_id}/sync",
+    response_model=SyncStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def trigger_sync(
     connector_id: UUID, current_user: UserProfile = Depends(get_current_user)
 ) -> SyncStatus:
@@ -587,7 +643,9 @@ async def search_documents(
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
-@documents_router.post("/ingest", response_model=DocumentDetail, status_code=status.HTTP_202_ACCEPTED)
+@documents_router.post(
+    "/ingest", response_model=DocumentDetail, status_code=status.HTTP_202_ACCEPTED
+)
 async def ingest_document(
     file: UploadFile = File(...), current_user: UserProfile = Depends(get_current_user)
 ) -> DocumentDetail:
@@ -597,13 +655,17 @@ async def ingest_document(
 
 
 @documents_router.get("/{doc_id}", response_model=DocumentDetail)
-async def get_document(doc_id: UUID, current_user: UserProfile = Depends(get_current_user)) -> DocumentDetail:
+async def get_document(
+    doc_id: UUID, current_user: UserProfile = Depends(get_current_user)
+) -> DocumentDetail:
     # return await document_index_service.get(current_user, doc_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @documents_router.delete("/{doc_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_document(doc_id: UUID, current_user: UserProfile = Depends(get_current_user)) -> None:
+async def delete_document(
+    doc_id: UUID, current_user: UserProfile = Depends(get_current_user)
+) -> None:
     # await document_index_service.delete(current_user, doc_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
@@ -616,39 +678,53 @@ crons_router = APIRouter(prefix="/crons", tags=["crons"])
 
 
 @crons_router.get("", response_model=list[CronJob])
-async def list_cron_jobs(current_user: UserProfile = Depends(get_current_user)) -> list[CronJob]:
+async def list_cron_jobs(
+    current_user: UserProfile = Depends(get_current_user),
+) -> list[CronJob]:
     # return await crons_service.list(current_user.tenant_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @crons_router.post("", response_model=CronJob, status_code=status.HTTP_201_CREATED)
-async def create_cron_job(body: CronCreate, current_user: UserProfile = Depends(get_current_user)) -> CronJob:
+async def create_cron_job(
+    body: CronCreate, current_user: UserProfile = Depends(get_current_user)
+) -> CronJob:
     # return await crons_service.create(current_user.tenant_id, body)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @crons_router.get("/{job_id}", response_model=CronJob)
-async def get_cron_job(job_id: UUID, current_user: UserProfile = Depends(get_current_user)) -> CronJob:
+async def get_cron_job(
+    job_id: UUID, current_user: UserProfile = Depends(get_current_user)
+) -> CronJob:
     # return await crons_service.get(current_user.tenant_id, job_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @crons_router.put("/{job_id}", response_model=CronJob)
 async def update_cron_job(
-    job_id: UUID, body: CronUpdate, current_user: UserProfile = Depends(get_current_user)
+    job_id: UUID,
+    body: CronUpdate,
+    current_user: UserProfile = Depends(get_current_user),
 ) -> CronJob:
     # return await crons_service.update(current_user.tenant_id, job_id, body)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @crons_router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_cron_job(job_id: UUID, current_user: UserProfile = Depends(get_current_user)) -> None:
+async def delete_cron_job(
+    job_id: UUID, current_user: UserProfile = Depends(get_current_user)
+) -> None:
     # await crons_service.delete(current_user.tenant_id, job_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
-@crons_router.post("/{job_id}/run", response_model=CronRunResult, status_code=status.HTTP_202_ACCEPTED)
-async def run_cron_job_now(job_id: UUID, current_user: UserProfile = Depends(get_current_user)) -> CronRunResult:
+@crons_router.post(
+    "/{job_id}/run", response_model=CronRunResult, status_code=status.HTTP_202_ACCEPTED
+)
+async def run_cron_job_now(
+    job_id: UUID, current_user: UserProfile = Depends(get_current_user)
+) -> CronRunResult:
     """Trigger an immediate out-of-schedule execution."""
     # return await crons_service.run_now(current_user.tenant_id, job_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
@@ -662,27 +738,35 @@ bi_router = APIRouter(prefix="/bi", tags=["bi"])
 
 
 @bi_router.post("/query", response_model=BIQueryResponse)
-async def bi_query(body: BIQueryRequest, current_user: UserProfile = Depends(get_current_user)) -> BIQueryResponse:
+async def bi_query(
+    body: BIQueryRequest, current_user: UserProfile = Depends(get_current_user)
+) -> BIQueryResponse:
     """Translate a natural-language question to validated SQL and return results."""
     # return await bi_service.nl_query(current_user, body)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @bi_router.get("/metrics", response_model=list[MetricDefinition])
-async def list_metrics(current_user: UserProfile = Depends(get_current_user)) -> list[MetricDefinition]:
+async def list_metrics(
+    current_user: UserProfile = Depends(get_current_user),
+) -> list[MetricDefinition]:
     # return await bi_service.list_metrics(current_user.tenant_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @bi_router.get("/metrics/{metric_id}", response_model=MetricDefinition)
-async def get_metric(metric_id: UUID, current_user: UserProfile = Depends(get_current_user)) -> MetricDefinition:
+async def get_metric(
+    metric_id: UUID, current_user: UserProfile = Depends(get_current_user)
+) -> MetricDefinition:
     # return await bi_service.get_metric(current_user.tenant_id, metric_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
 @bi_router.post("/metrics/{metric_id}/compute", response_model=MetricResult)
 async def compute_metric(
-    metric_id: UUID, body: MetricComputeRequest, current_user: UserProfile = Depends(get_current_user)
+    metric_id: UUID,
+    body: MetricComputeRequest,
+    current_user: UserProfile = Depends(get_current_user),
 ) -> MetricResult:
     """Compute a governed metric with optional dimension filters and date range."""
     # return await bi_service.compute(current_user, metric_id, body)
@@ -717,9 +801,25 @@ app.include_router(crons_router, prefix=_PREFIX)
 app.include_router(bi_router, prefix=_PREFIX)
 
 
-@app.get("/health", tags=["health"])
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+def _get_health_service() -> HealthService:
+    return HealthService.from_environment()
+
+
+@app.get(
+    "/health",
+    tags=["health"],
+    response_model=HealthReport,
+    response_model_exclude_none=True,
+    responses={status.HTTP_503_SERVICE_UNAVAILABLE: {"model": HealthReport}},
+)
+async def health(
+    response: Response,
+    health_service: HealthService = Depends(_get_health_service),
+) -> HealthReport:
+    report: HealthReport = await health_service.check()
+    if report.status == "unhealthy":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return report
 
 
 if __name__ == "__main__":

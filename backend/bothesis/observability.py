@@ -148,6 +148,75 @@ class CapabilityTrace:
 
 
 @dataclass(slots=True)
+class GenerationTrace:
+    """Trace one native model turn and name it from the observed outcome."""
+
+    _observation: _Observation
+    _metadata: dict[str, Any]
+    _first_token_recorded: bool = False
+
+    def mark_first_token(self) -> None:
+        if self._first_token_recorded:
+            return
+        _safe_update(
+            self._observation,
+            completion_start_time=datetime.now(UTC),
+        )
+        self._first_token_recorded = True
+
+    def complete(self, *, turn: ModelTurn, duration_ms: int) -> None:
+        if turn.tool_calls:
+            observation_name = "decide-next-step"
+            generation_kind = "next_step"
+            output: Any = {
+                "text": turn.text,
+                "tool_calls": [
+                    {
+                        "id": call.call_id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
+                    for call in turn.tool_calls
+                ],
+            }
+        else:
+            observation_name = "generate-final-response"
+            generation_kind = "final_response"
+            output = turn.text
+        usage = turn.usage
+        _safe_update(
+            self._observation,
+            name=observation_name,
+            model=turn.model,
+            usage_details=_usage_details(usage),
+            output=output,
+            metadata={
+                **self._metadata,
+                "generation_kind": generation_kind,
+                "finish_reason": turn.finish_reason,
+                "tool_call_count": len(turn.tool_calls),
+                "selected_tools": [call.name for call in turn.tool_calls],
+                "llm_latency_ms": duration_ms,
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "cached_prompt_tokens": usage.get("cached_prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+            },
+        )
+
+    def fail(self, *, category: str, duration_ms: int) -> None:
+        _safe_update(
+            self._observation,
+            metadata={
+                **self._metadata,
+                "outcome": category,
+                "llm_latency_ms": duration_ms,
+            },
+            level="ERROR",
+            status_message=category,
+        )
+
+
+@dataclass(slots=True)
 class ToolExecutionTrace:
     """Controlled updates for one non-retrieval agent tool call."""
 
@@ -279,7 +348,7 @@ class LangfuseTracing:
         self,
         *,
         capability: str,
-        prompt: str,
+        messages: Sequence[Mapping[str, Any]],
         ctx: AgentContext,
         step: int,
         retrieval_round: int,
@@ -288,11 +357,27 @@ class LangfuseTracing:
         return _capability_context(
             self._client,
             capability=capability,
-            prompt=prompt,
+            messages=messages,
             ctx=ctx,
             step=step,
             retrieval_round=retrieval_round,
             retrieval_query_count=retrieval_query_count,
+        )
+
+    def model_turn(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        ctx: AgentContext,
+        turn: int,
+        tool_round: int,
+    ) -> AbstractContextManager[GenerationTrace]:
+        return _model_turn_context(
+            self._client,
+            messages=messages,
+            ctx=ctx,
+            turn=turn,
+            tool_round=tool_round,
         )
 
     def tool_execution(
@@ -333,7 +418,7 @@ def _capability_context(
     client: Any,
     *,
     capability: str,
-    prompt: str,
+    messages: Sequence[Mapping[str, Any]],
     ctx: AgentContext,
     step: int,
     retrieval_round: int,
@@ -350,7 +435,7 @@ def _capability_context(
     with client.start_as_current_observation(
         as_type="generation",
         name=capability,
-        input=[{"role": "user", "content": prompt}],
+        input=[dict(message) for message in messages],
         metadata=metadata,
     ) as observation:
         yield CapabilityTrace(observation, metadata)
@@ -369,6 +454,30 @@ def _tool_execution_context(
         input=dict(arguments),
     ) as observation:
         yield ToolExecutionTrace(observation)
+
+
+@contextmanager
+def _model_turn_context(
+    client: Any,
+    *,
+    messages: Sequence[Mapping[str, Any]],
+    ctx: AgentContext,
+    turn: int,
+    tool_round: int,
+) -> Iterator[GenerationTrace]:
+    metadata = {
+        "request_id": ctx.request_id,
+        "conversation_id": ctx.conversation_id,
+        "turn": turn,
+        "tool_round": tool_round,
+    }
+    with client.start_as_current_observation(
+        as_type="generation",
+        name="agent-model-turn",
+        input=[dict(message) for message in messages],
+        metadata=metadata,
+    ) as observation:
+        yield GenerationTrace(observation, metadata)
 
 
 @contextmanager
@@ -462,6 +571,7 @@ def _trace_name(request_id: str | None) -> str:
 __all__ = [
     "AgentRunTrace",
     "CapabilityTrace",
+    "GenerationTrace",
     "LangfuseTracing",
     "RetrievalTrace",
     "ToolExecutionTrace",

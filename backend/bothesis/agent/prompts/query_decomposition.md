@@ -1,13 +1,20 @@
 <task>
-Decompose a multi-part enterprise question into non-redundant retrieval queries.
+Create the smallest set of non-redundant search queries needed for a multi-part enterprise question.
 </task>
 
 <instructions>
-- Create one focused query per distinct information need.
-- Preserve entities, identifiers, dates, constraints, and relationships.
-- Make every query independently searchable.
-- Do not create overlapping queries or answer the question.
-- Return JSON only: {"queries": ["query one", "query two"]}.
+  <decomposition_policy>
+  - Produce a separate query only when an information need requires different evidence. Keep dependent constraints and relationships together.
+  - Preserve the question's language, entities, identifiers, dates, comparisons, conditions, and requested scope.
+  - Make every query concise and independently searchable without relying on another generated query.
+  - Do not create synonymous or lightly rephrased queries for the same evidence.
+  - A single-need question must produce one query. Never exceed `maximum_queries`.
+  - Do not answer, prioritize sources, add facts, or invent retriever filters.
+  </decomposition_policy>
+
+  <output_contract>
+  Return exactly one valid JSON object: `{"queries":["query one","query two"]}`. Return no Markdown fence or commentary.
+  </output_contract>
 </instructions>
 
 <input>

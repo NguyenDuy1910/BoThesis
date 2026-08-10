@@ -1,17 +1,16 @@
-"""Typed executions for focused enterprise knowledge-agent capabilities."""
+"""Typed execution for optional structured agent capabilities."""
 
 from __future__ import annotations
 
-import json
 from contextlib import nullcontext
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from bothesis.agent.models import AgentContext
-from bothesis.agent.prompts.template_render import render_prompt
+from bothesis.agent.prompts.template_render import render_chat_base, render_prompt
 from bothesis.agent.transports.base import LLMResponse, LLMTransport, LLMTransportError
 from bothesis.observability import LangfuseTracing
 
@@ -20,31 +19,8 @@ class _CapabilityModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class QueryRewrite(_CapabilityModel):
-    query: str = Field(min_length=1, max_length=1_000)
-
-
-class QueryList(_CapabilityModel):
-    queries: list[str] = Field(max_length=12)
-
-
-class RetrievalEvaluation(_CapabilityModel):
-    sufficient: bool
-    covered: list[str] = Field(max_length=20)
-    missing: list[str] = Field(max_length=20)
-    conflicts: list[str] = Field(max_length=20)
-    requires_additional_retrieval: bool
-
-
-class SynthesizedFact(_CapabilityModel):
-    claim: str = Field(min_length=1, max_length=1_000)
-    evidence_ids: list[str] = Field(min_length=1, max_length=20)
-
-
-class EvidenceSynthesis(_CapabilityModel):
-    facts: list[SynthesizedFact] = Field(max_length=12)
-    conflicts: list[str] = Field(max_length=10)
-    missing: list[str] = Field(max_length=10)
+class ConversationCompression(_CapabilityModel):
+    summary: str = Field(min_length=1, max_length=4_000)
 
 
 OutputModel = TypeVar("OutputModel", bound=_CapabilityModel)
@@ -61,8 +37,8 @@ class CapabilityResult(Generic[OutputModel]):
     duration_ms: int
 
 
-class KnowledgeCapabilityExecutor:
-    """Render one capability prompt and normalize its structured response."""
+class StructuredCapabilityExecutor:
+    """Render an optional capability and normalize its structured response."""
 
     def __init__(
         self,
@@ -82,6 +58,14 @@ class KnowledgeCapabilityExecutor:
     def render(self, capability: str, /, **values: object) -> str:
         return render_prompt(capability, **values)
 
+    def model_messages(self, capability_prompt: str) -> list[dict[str, str]]:
+        """Build the common system context plus one focused capability prompt."""
+
+        return [
+            {"role": "system", "content": render_chat_base()},
+            {"role": "user", "content": capability_prompt},
+        ]
+
     async def structured(
         self,
         capability: str,
@@ -94,11 +78,12 @@ class KnowledgeCapabilityExecutor:
         retrieval_query_count: int = 0,
     ) -> CapabilityResult[OutputModel]:
         prompt = self.render(capability, **values)
+        messages = self.model_messages(prompt)
         started_at = perf_counter()
         trace_context = (
             self._tracing.capability(
                 capability=capability,
-                prompt=prompt,
+                messages=messages,
                 ctx=ctx,
                 step=step,
                 retrieval_round=retrieval_round,
@@ -110,7 +95,7 @@ class KnowledgeCapabilityExecutor:
         with trace_context as trace:
             try:
                 response = await self._transport.complete(
-                    [{"role": "user", "content": prompt}],
+                    messages,
                     model=self._model,
                     max_tokens=self._max_tokens,
                     response_format={"type": "json_object"},
@@ -154,12 +139,6 @@ class KnowledgeCapabilityExecutor:
             )
 
 
-def compact_json(value: Any) -> str:
-    """Serialize dynamic prompt data predictably and without Python repr noise."""
-
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
 def _json_response_text(content: str | None) -> str:
     if content is None:
         raise ValueError("empty model response")
@@ -182,11 +161,6 @@ def _duration_ms(started_at: float) -> int:
 __all__ = [
     "CapabilityExecutionError",
     "CapabilityResult",
-    "EvidenceSynthesis",
-    "KnowledgeCapabilityExecutor",
-    "QueryList",
-    "QueryRewrite",
-    "RetrievalEvaluation",
-    "SynthesizedFact",
-    "compact_json",
+    "ConversationCompression",
+    "StructuredCapabilityExecutor",
 ]

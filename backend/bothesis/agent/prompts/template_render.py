@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -47,4 +48,18 @@ def render_prompt(name: str, /, **values: object) -> str:
     return _VARIABLE_PATTERN.sub(replace, template)
 
 
-__all__ = ["PromptRenderError", "load_prompt", "render_prompt"]
+def render_chat_base(*, current_datetime: str | None = None) -> str:
+    """Render the shared system prompt with volatile context at the end."""
+
+    runtime_datetime = current_datetime or datetime.now().astimezone().isoformat(
+        timespec="minutes"
+    )
+    return render_prompt("chat_base", current_datetime=runtime_datetime)
+
+
+__all__ = [
+    "PromptRenderError",
+    "load_prompt",
+    "render_chat_base",
+    "render_prompt",
+]
