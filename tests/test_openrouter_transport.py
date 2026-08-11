@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from bothesis.agent.models import TextDelta, TurnDone
+from bothesis.agent.models import ProviderReasoningDelta, TextDelta, TurnDone
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 
 
@@ -54,3 +54,40 @@ async def test_stream_turn_requests_and_normalizes_usage() -> None:
         },
     )
     assert len(events) == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_emits_only_official_reasoning_summary_blocks() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        stream = (
+            'data: {"choices":[{"delta":{"reasoning":"raw chain",'
+            '"reasoning_details":['
+            '{"type":"reasoning.summary","summary":"Compared the constraints."},'
+            '{"type":"reasoning.text","text":"private step-by-step reasoning"},'
+            '{"type":"reasoning.encrypted","data":"secret"}'
+            ']}}]}\n\n'
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            "data: [DONE]\n\n"
+        )
+        return httpx.Response(200, text=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = OpenRouterTransport(
+            api_key="test-key",
+            model="openai/gpt-5.4-mini",
+            client=client,
+        )
+        events = [
+            event
+            async for event in transport.stream_turn(
+                [{"role": "user", "content": "Compare"}],
+            )
+        ]
+
+    assert events == [
+        ProviderReasoningDelta("Compared the constraints."),
+        TurnDone(
+            finish_reason="stop",
+            model="openai/gpt-5.4-mini",
+        ),
+    ]

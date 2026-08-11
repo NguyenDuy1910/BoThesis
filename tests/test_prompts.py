@@ -24,52 +24,33 @@ from bothesis.agent.prompts.template_render import (
 from bothesis.agent.transports.base import ChatMessage, LLMResponse, LLMTransport
 
 PROMPT_NAMES = {
-    "query_rewrite",
-    "query_decomposition",
-    "retrieval_plan",
-    "retrieval_evaluate",
-    "retrieval_refine",
-    "evidence_synthesis",
-    "answer_grounded",
-    "clarification",
+    "agent_plan",
+    "capability_base",
     "chat_base",
     "conversation_compression",
+    "step_critic",
 }
 CONTEXT = AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[])
 PROMPT_VALUES: dict[str, dict[str, object]] = {
-    "answer_grounded": {
-        "question": "question",
-        "evidence": "[]",
-        "synthesis": "{}",
-        "missing_information": "[]",
-        "source_conflicts": "[]",
+    "agent_plan": {
+        "available_tools": "[]",
+        "conversation_context": "{}",
+        "maximum_steps": 3,
+        "request": "Compare the policies",
     },
+    "capability_base": {},
     "chat_base": {"current_datetime": "2026-08-10T20:30+07:00"},
-    "clarification": {"conversation": "[]", "query": "query"},
     "conversation_compression": {
         "conversation": "[]",
         "current_query": "query",
         "maximum_characters": 2_000,
     },
-    "evidence_synthesis": {"question": "question", "evidence": "[]"},
-    "query_decomposition": {"query": "query", "maximum_queries": 3},
-    "query_rewrite": {"conversation": "[]", "query": "query"},
-    "retrieval_evaluate": {
-        "question": "question",
-        "searched_queries": "[]",
-        "evidence": "[]",
-        "retrieval_round": 1,
-    },
-    "retrieval_plan": {
-        "question": "question",
-        "candidate_queries": "[]",
-        "maximum_queries": 3,
-    },
-    "retrieval_refine": {
-        "question": "question",
-        "missing_evidence": "[]",
-        "previous_queries": "[]",
-        "maximum_queries": 3,
+    "step_critic": {
+        "step": "Find the leave policy",
+        "success_criteria": "At least one grounded source",
+        "tool_name": "knowledge_search",
+        "arguments": '{"query":"leave"}',
+        "outcome": '{"result_count":0}',
     },
 }
 
@@ -116,9 +97,10 @@ def test_capability_prompt_set_has_stable_xml_prefix_and_runtime_input_last() ->
         prompt = load_prompt(prompt_name)
         assert prompt.startswith("<task>")
         assert "<instructions>" in prompt
-        assert prompt.rstrip().endswith("</input>")
-        assert prompt.index("<instructions>") < prompt.index("<input>")
-        if prompt_name != "chat_base":
+        if prompt_name != "capability_base":
+            assert prompt.rstrip().endswith("</input>")
+            assert prompt.index("<instructions>") < prompt.index("<input>")
+        if prompt_name not in {"chat_base", "capability_base"}:
             assert "<output_contract>" in prompt
 
 
@@ -128,21 +110,23 @@ def test_every_prompt_renders_all_runtime_values_without_placeholders() -> None:
     for prompt_name, values in PROMPT_VALUES.items():
         rendered = render_prompt(prompt_name, **values)
         assert "{{" not in rendered
-        assert rendered.rstrip().endswith("</input>")
+        if prompt_name != "capability_base":
+            assert rendered.rstrip().endswith("</input>")
 
 
 def test_renderer_escapes_runtime_xml_and_rejects_invalid_values() -> None:
     rendered = render_prompt(
-        "query_rewrite",
-        conversation='[{"content":"A < B"}]',
-        query='What about "A&B"?',
+        "conversation_compression",
+        conversation='[{"content":"A < B & A&B"}]',
+        current_query='What about "A&B"?',
+        maximum_characters=2_000,
     )
 
     assert "A &lt; B" in rendered
     assert "A&amp;B" in rendered
     assert "&quot;" in rendered
     with pytest.raises(PromptRenderError, match="missing prompt values"):
-        render_prompt("query_rewrite", query="missing conversation")
+        render_prompt("conversation_compression", current_query="missing conversation")
     with pytest.raises(PromptRenderError, match="invalid prompt name"):
         load_prompt("../system")
 
@@ -166,7 +150,19 @@ def test_chat_base_defines_optional_retrieval_grounding_and_concise_answers() ->
     assert "[[cite:EVIDENCE_ID]]" in prompt
     assert "add an unsolicited next-step offer" in prompt
     assert "Prior assistant messages provide conversational context" in prompt
+    assert "brief public progress note before calling tools" in prompt
+    assert "one or two short sentences" in prompt
+    assert "Do not claim that information was found" in prompt
     assert "When a capability requires structured output" not in prompt
+
+
+def test_agent_plan_routes_semantically_without_keyword_matching() -> None:
+    prompt = render_prompt("agent_plan", **PROMPT_VALUES["agent_plan"])
+
+    assert "Infer the user's intent semantically" in prompt
+    assert "Do not route by matching words" in prompt
+    assert "requires_knowledge_retrieval" in prompt
+    assert "retrieval_required" not in prompt
 
 
 @pytest.mark.asyncio
@@ -189,7 +185,7 @@ async def test_capability_executor_returns_typed_output() -> None:
     assert result.value == ConversationCompression(summary="Policy LP-42 context")
     system_request, capability_request = transport.requests[0]
     assert system_request["role"] == "system"
-    assert "You are BoThesis" in system_request["content"]
+    assert "private structured capability" in system_request["content"]
     assert capability_request["role"] == "user"
     assert capability_request["content"].index("<instructions>") < capability_request[
         "content"

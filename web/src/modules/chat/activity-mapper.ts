@@ -4,6 +4,8 @@ import type {
   AgentActivityType,
   AgentRunStatus,
   AgentRunView,
+  FindingEntry,
+  ReasoningEntry,
   SourceResult,
   SourceStatus,
   SourceType,
@@ -20,6 +22,8 @@ export class AgentActivityMapper {
     const stepById = new Map<string, ActivityEntry>();
     const sources: SourceResult[] = [];
     const sourceById = new Map<string, SourceResult>();
+    const reasoning: ReasoningEntry[] = [];
+    const findings: FindingEntry[] = [];
     let activeRetrieval: ActivityEntry | undefined;
 
     for (const part of parts) {
@@ -66,6 +70,22 @@ export class AgentActivityMapper {
         if (activeRetrieval && !activeRetrieval.sourceIds.includes(source.id)) {
           activeRetrieval.sourceIds.push(source.id);
         }
+      }
+
+      if (part.type === "data-reasoning" && part.data.text.trim()) {
+        reasoning.push({
+          id: part.id ?? `reasoning-${part.data.source}-${part.data.turn}`,
+          source: part.data.source,
+          turn: part.data.turn,
+          text: part.data.text.trim(),
+        });
+      }
+
+      if (part.type === "data-finding" && part.data.text.trim()) {
+        findings.push({
+          id: part.id ?? `finding-${findings.length}`,
+          text: part.data.text.trim(),
+        });
       }
 
       if (part.type === "data-stream-error") {
@@ -117,6 +137,16 @@ export class AgentActivityMapper {
       0,
     );
     const usedSourceCount = sources.filter((source) => source.status === "Used").length;
+    const hasMeaningfulStep = steps.some((step) => (
+      step.type === "knowledge_retrieval"
+      || step.type === "tool_execution"
+      || step.type === "next_step_generation"
+    ));
+    const isClassifying = status === "running" && steps.some((step) => (
+      step.type === "next_step_generation" && step.status === "running"
+    ));
+    const isWaitingForFirstOutput = status === "running" && isStreaming && !hasAnswer;
+    const hasStreamError = parts.some((part) => part.type === "data-stream-error");
 
     return {
       status,
@@ -125,11 +155,21 @@ export class AgentActivityMapper {
       modelDurationMs: run?.data.modelDurationMs,
       toolDurationMs: run?.data.toolDurationMs,
       toolCallCount: run?.data.toolCallCount,
+      reasoning,
+      findings,
       steps,
       sources,
       sourceCount: reportedSourceCount || sources.length,
       usedSourceCount,
-      hasActivity: Boolean(run || steps.length || sources.length),
+      hasActivity: Boolean(
+        reasoning.length
+        || findings.length
+        || hasMeaningfulStep
+        || isClassifying
+        || isWaitingForFirstOutput
+        || sources.length
+        || hasStreamError
+      ),
     };
   }
 }
@@ -191,9 +231,25 @@ function sourceFromPart(part: Extract<ChatMessagePart, { type: "data-source" }>)
     type: sourceType(part.data.source),
     provider,
     fileType: fileTypeFromTitle(part.data.title),
+    location: sourceLocation(part.data.page, part.data.section, part.data.description),
+    snippet: part.data.restricted ? undefined : part.data.snippet,
     relevanceScore: part.data.relevanceScore,
     status: sourceStatus(part.data.status, part.data.restricted),
   };
+}
+
+function sourceLocation(
+  page: string | undefined,
+  section: string | undefined,
+  legacyDescription: string | undefined,
+) {
+  const values: string[] = [];
+  if (section?.trim()) values.push(section.trim());
+  if (page?.trim()) {
+    const value = page.trim();
+    values.push(/^page\b/i.test(value) ? value : `Page ${value}`);
+  }
+  return values.join(" · ") || legacyDescription?.trim() || undefined;
 }
 
 function sourceStatus(

@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +18,14 @@ from bothesis.agent.models import (
     CitationEvent,
     ConversationMessage,
     Evidence,
+    ExecutionMode,
     GenerationCompleted,
     MessageDelta,
+    ProviderReasoningDelta,
+    ProviderReasoningSummaryDelta,
+    PublicReasoningCompleted,
+    PublicReasoningDelta,
+    PublicReasoningStarted,
     RunCompleted,
     RunFailed,
     RunStarted,
@@ -92,6 +99,13 @@ def final_turn(text: str) -> list[TextDelta | TurnDone]:
     ]
 
 
+def tool_turn_with_preamble(
+    preamble: str,
+    *calls: tuple[str, str],
+) -> list[TextDelta | TurnDone]:
+    return [TextDelta(preamble), *tool_turn(*calls)]
+
+
 def _messages(
     values: Sequence[ChatMessage | Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -104,7 +118,7 @@ def _messages(
 class ScriptedTransport(LLMTransport):
     def __init__(
         self,
-        streams: list[list[TextDelta | TurnDone]],
+        streams: list[list[ProviderReasoningDelta | TextDelta | TurnDone]],
         completions: list[LLMResponse] | None = None,
     ) -> None:
         self.streams = streams
@@ -128,7 +142,7 @@ class ScriptedTransport(LLMTransport):
         self,
         messages: Sequence[ChatMessage | Mapping[str, Any]],
         **options: Any,
-    ) -> AsyncIterator[TextDelta | TurnDone]:
+    ) -> AsyncIterator[ProviderReasoningDelta | TextDelta | TurnDone]:
         self.stream_requests.append(_messages(messages))
         self.stream_options.append(options)
         if not self.streams:
@@ -204,16 +218,70 @@ class SearchTool(AgentTool):
         )
 
 
+class CapturingRunTrace:
+    def __init__(self) -> None:
+        self.completed: dict[str, Any] | None = None
+
+    def complete(
+        self,
+        *,
+        answer: str,
+        answer_characters: int,
+        turn_count: int,
+        tool_call_count: int,
+        sources_found: int,
+        sources_used: int,
+        execution_mode: ExecutionMode | None = None,
+    ) -> None:
+        self.completed = {
+            "answer": answer,
+            "answer_characters": answer_characters,
+            "turn_count": turn_count,
+            "tool_call_count": tool_call_count,
+            "sources_found": sources_found,
+            "sources_used": sources_used,
+            "execution_mode": execution_mode,
+        }
+
+    def fail(self, **_: Any) -> None:
+        pass
+
+
+class CapturingGenerationTrace:
+    def mark_first_token(self) -> None:
+        pass
+
+    def complete(self, **_: Any) -> None:
+        pass
+
+    def fail(self, **_: Any) -> None:
+        pass
+
+
+class CapturingTracing:
+    def __init__(self) -> None:
+        self.run_trace = CapturingRunTrace()
+        self.generation_trace = CapturingGenerationTrace()
+
+    def agent_run(self, **_: Any) -> Any:
+        return nullcontext(self.run_trace)
+
+    def model_turn(self, **_: Any) -> Any:
+        return nullcontext(self.generation_trace)
+
+
 def make_loop(
-    streams: list[list[TextDelta | TurnDone]],
+    streams: list[list[ProviderReasoningDelta | TextDelta | TurnDone]],
     *,
     completions: list[LLMResponse] | None = None,
     tool: SearchTool | None = None,
     max_model_turns: int = 3,
     max_tool_rounds: int = 2,
     max_tool_calls: int = 6,
+    recent_history_messages: int = 6,
     history_compression_threshold: int = 4_000,
     max_compressed_history_characters: int = 2_000,
+    tracing: Any | None = None,
 ) -> tuple[AgentLoop, ScriptedTransport, SearchTool]:
     search_tool = tool or SearchTool()
     registry = ToolRegistry()
@@ -225,8 +293,11 @@ def make_loop(
         max_model_turns=max_model_turns,
         max_tool_rounds=max_tool_rounds,
         max_tool_calls=max_tool_calls,
+        recent_history_messages=recent_history_messages,
         history_compression_threshold=history_compression_threshold,
         max_compressed_history_characters=max_compressed_history_characters,
+        enable_interleaved=False,
+        tracing=tracing,
     )
     return loop, transport, search_tool
 
@@ -261,6 +332,17 @@ async def test_direct_answer_uses_one_model_turn_without_tools() -> None:
     assert isinstance(events[0], RunStarted)
     assert isinstance(events[-1], RunCompleted)
     assert events[-1].tool_call_count == 0
+    assert not any(
+        isinstance(
+            event,
+            (
+                PublicReasoningStarted,
+                PublicReasoningDelta,
+                PublicReasoningCompleted,
+            ),
+        )
+        for event in events
+    )
 
 
 @pytest.mark.asyncio
@@ -295,6 +377,111 @@ async def test_single_knowledge_search_uses_two_model_turns_and_citations() -> N
         "final_response",
     ]
     assert generations[0].selected_tools == ["knowledge_search"]
+
+
+@pytest.mark.asyncio
+async def test_text_before_tool_calls_is_not_exposed_as_public_reasoning() -> None:
+    preamble = (
+        "This depends on internal documentation, so I’ll check the available "
+        "sources before answering."
+    )
+    tracing = CapturingTracing()
+    loop, _, _ = make_loop(
+        [
+            tool_turn_with_preamble(
+                preamble,
+                ("search-1", "annual leave policy"),
+            ),
+            [TextDelta("Employees "), TextDelta("receive leave."), TurnDone("stop")],
+        ],
+        tracing=tracing,
+    )
+
+    events = await collect(loop)
+
+    assert not any(
+        isinstance(
+            event,
+            (PublicReasoningStarted, PublicReasoningDelta, PublicReasoningCompleted),
+        )
+        for event in events
+    )
+    assert preamble not in "".join(
+        event.text for event in events if isinstance(event, MessageDelta)
+    )
+    assert "".join(
+        event.text for event in events if isinstance(event, MessageDelta)
+    ) == "Employees receive leave."
+    assert tracing.run_trace.completed is not None
+    assert tracing.run_trace.completed["answer_characters"] == len(
+        "Employees receive leave."
+    )
+    completed_tool = next(
+        event for event in events if isinstance(event, ToolCompleted)
+    )
+    assert completed_tool.result_count == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_preamble_does_not_parse_citations_or_expose_arguments() -> None:
+    unsafe_preamble = (
+        'I will call knowledge_search with query="annual leave policy" '
+        "[[cite:ev-private]]."
+    )
+    loop, _, _ = make_loop(
+        [
+            tool_turn_with_preamble(
+                unsafe_preamble,
+                ("search-1", "annual leave policy"),
+            ),
+            final_turn("Grounded answer without a citation marker."),
+        ]
+    )
+
+    events = await collect(loop)
+
+    assert not any(isinstance(event, PublicReasoningDelta) for event in events)
+    assert not any(isinstance(event, CitationEvent) for event in events)
+    assert unsafe_preamble not in "".join(
+        event.text for event in events if isinstance(event, MessageDelta)
+    )
+
+
+@pytest.mark.asyncio
+async def test_only_explicit_provider_summary_is_exposed_during_tool_turn() -> None:
+    custom_preamble = (
+        "This depends on internal documentation, so I’ll check the available "
+        "sources before answering."
+    )
+    loop, _, _ = make_loop(
+        [
+            [
+                ProviderReasoningDelta("Checking the relevant context."),
+                *tool_turn_with_preamble(
+                    custom_preamble,
+                    ("search-1", "annual leave policy"),
+                ),
+            ],
+            final_turn("Grounded answer."),
+        ]
+    )
+
+    events = await collect(loop)
+
+    assert [
+        event
+        for event in events
+        if isinstance(event, ProviderReasoningSummaryDelta)
+    ] == [
+        ProviderReasoningSummaryDelta(
+            turn=0,
+            text="Checking the relevant context.",
+        )
+    ]
+    assert not any(isinstance(event, PublicReasoningDelta) for event in events)
+    assert custom_preamble not in "".join(
+        event.text for event in events if isinstance(event, MessageDelta)
+    )
 
 
 @pytest.mark.asyncio
@@ -463,18 +650,19 @@ async def test_empty_search_result_does_not_crash_the_final_response() -> None:
 
 
 @pytest.mark.asyncio
-async def test_final_answer_streams_before_model_turn_completes() -> None:
-    loop, transport, _ = make_loop([final_turn("first token")])
-    stream = loop.run_stream("Hello", CONTEXT)
+async def test_final_answer_deltas_stream_independently_after_classification() -> None:
+    loop, transport, _ = make_loop(
+        [[TextDelta("first "), TextDelta("token"), TurnDone("stop")]]
+    )
 
-    while True:
-        event = await anext(stream)
-        if isinstance(event, MessageDelta):
-            break
+    events = await collect(loop, "Hello")
 
-    assert event == MessageDelta("first token")
-    assert transport.finished_streams == 0
-    await stream.aclose()
+    assert [event for event in events if isinstance(event, MessageDelta)] == [
+        MessageDelta("first "),
+        MessageDelta("token"),
+    ]
+    assert transport.finished_streams == 1
+    assert not any(isinstance(event, PublicReasoningDelta) for event in events)
 
 
 @pytest.mark.asyncio
@@ -521,6 +709,7 @@ async def test_long_history_is_compressed_without_replacing_current_user_message
                 }
             )
         ],
+        recent_history_messages=2,
         history_compression_threshold=200,
         max_compressed_history_characters=500,
     )
@@ -530,11 +719,15 @@ async def test_long_history_is_compressed_without_replacing_current_user_message
         roles=[],
         history=(
             ConversationMessage(
-                role="assistant",
-                content=(
-                    "Policy LP-42 is discussed in [[cite:ev-9]]. " + "detail " * 100
-                ),
+                role="user",
+                content="Explain policy LP-42. " + "detail " * 100,
             ),
+            ConversationMessage(
+                role="assistant",
+                content="Policy LP-42 is discussed in [[cite:ev-9]].",
+            ),
+            ConversationMessage(role="user", content="When does it begin?"),
+            ConversationMessage(role="assistant", content="It begins on 1 July."),
         ),
     )
 
@@ -566,13 +759,19 @@ async def test_compressed_history_cannot_break_its_context_boundary() -> None:
                 }
             )
         ],
+        recent_history_messages=2,
         history_compression_threshold=100,
     )
     context = AgentContext(
         user_id="user-1",
         tenant_id="tenant-1",
         roles=[],
-        history=(ConversationMessage(role="assistant", content="detail " * 40),),
+        history=(
+            ConversationMessage(role="user", content="Earlier question " + "detail " * 40),
+            ConversationMessage(role="assistant", content="Earlier answer."),
+            ConversationMessage(role="user", content="Recent question"),
+            ConversationMessage(role="assistant", content="Recent answer"),
+        ),
     )
 
     events = await collect(loop, "Continue", context)
@@ -589,6 +788,7 @@ async def test_invalid_history_compression_falls_back_to_bounded_history() -> No
     loop, transport, _ = make_loop(
         [final_turn("Answer from the available conversation.")],
         completions=[completion({"unexpected": "value"})],
+        recent_history_messages=2,
         history_compression_threshold=100,
     )
     context = AgentContext(
@@ -597,16 +797,19 @@ async def test_invalid_history_compression_falls_back_to_bounded_history() -> No
         roles=[],
         history=(
             ConversationMessage(
-                role="assistant",
+                role="user",
                 content="Policy LP-42 context " + "detail " * 30,
             ),
+            ConversationMessage(role="assistant", content="Earlier policy response"),
+            ConversationMessage(role="user", content="Recent scope question"),
+            ConversationMessage(role="assistant", content="Recent scope response"),
         ),
     )
 
     events = await collect(loop, "Does that policy apply?", context)
 
     request = transport.stream_requests[0]
-    assert request[1]["role"] == "assistant"
+    assert request[1]["role"] == "user"
     assert "Policy LP-42 context" in request[1]["content"]
     assert request[-1]["content"] == "Does that policy apply?"
     assert isinstance(events[-1], RunCompleted)
@@ -621,7 +824,7 @@ async def test_transport_failure_returns_retryable_run_failure() -> None:
 
     registry = ToolRegistry()
     registry.register(SearchTool())
-    loop = AgentLoop(FailingTransport([]), registry)
+    loop = AgentLoop(FailingTransport([]), registry, enable_interleaved=False)
 
     events = await collect(loop)
 

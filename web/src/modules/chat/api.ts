@@ -1,4 +1,5 @@
 import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type { AgentHistoryMessage, AgentStreamEvent } from "./types";
 
 export class ChatConfigurationError extends Error {
@@ -42,6 +43,7 @@ export async function streamAgentResponse(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const deduplicator = new StreamEventDeduplicator();
 
   while (true) {
     const { done, value } = await reader.read();
@@ -55,7 +57,9 @@ export async function streamAgentResponse(
       const payload = line.slice(5).trim();
       if (!payload) continue;
       try {
-        options.onEvent(JSON.parse(payload) as AgentStreamEvent);
+        const event = JSON.parse(payload) as AgentStreamEvent;
+        if (!deduplicator.shouldAccept(event)) continue;
+        options.onEvent(event);
       } catch {
         throw new Error("Received an invalid agent stream event.");
       }

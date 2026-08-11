@@ -5,12 +5,12 @@ from __future__ import annotations
 from contextlib import nullcontext
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from bothesis.agent.models import AgentContext
-from bothesis.agent.prompts.template_render import render_chat_base, render_prompt
+from bothesis.agent.models import AgentContext, ExecutionMode
+from bothesis.agent.prompts.template_render import load_prompt, render_prompt
 from bothesis.agent.transports.base import LLMResponse, LLMTransport, LLMTransportError
 from bothesis.observability import LangfuseTracing
 
@@ -21,6 +21,69 @@ class _CapabilityModel(BaseModel):
 
 class ConversationCompression(_CapabilityModel):
     summary: str = Field(min_length=1, max_length=4_000)
+
+
+class PlanStep(_CapabilityModel):
+    """One small, independently executable unit in a Phase 1 plan."""
+
+    id: str = Field(pattern=r"^step_[1-9][0-9]*$")
+    title: str = Field(min_length=1, max_length=120)
+    tool_name: str = Field(min_length=1, max_length=80)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    success_criteria: str = Field(min_length=1, max_length=240)
+    depends_on: list[str] = Field(default_factory=list, max_length=6)
+
+
+class AgentPlan(_CapabilityModel):
+    """Adaptive execution decision and its minimal public-safe plan."""
+
+    mode: ExecutionMode
+    requires_knowledge_retrieval: bool
+    commentary: str | None = Field(default=None, max_length=320)
+    steps: list[PlanStep] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> AgentPlan:
+        if self.mode is ExecutionMode.DIRECT:
+            if self.requires_knowledge_retrieval:
+                raise ValueError("knowledge retrieval requires planned execution")
+            if self.steps:
+                raise ValueError("direct plans must not contain steps")
+            return self
+        if not self.steps:
+            raise ValueError("planned execution requires at least one step")
+        uses_knowledge_retrieval = any(
+            step.tool_name == "knowledge_search" for step in self.steps
+        )
+        if self.requires_knowledge_retrieval != uses_knowledge_retrieval:
+            raise ValueError(
+                "knowledge retrieval decision must match the planned tools"
+            )
+        seen: set[str] = set()
+        for step in self.steps:
+            if step.id in seen:
+                raise ValueError("plan step IDs must be unique")
+            if any(dependency not in seen for dependency in step.depends_on):
+                raise ValueError("plan dependencies must refer to earlier steps")
+            seen.add(step.id)
+        return self
+
+
+class CriticEvaluation(_CapabilityModel):
+    """A bounded decision about one weak step result."""
+
+    sufficient: bool
+    action: Literal["accept", "refine", "stop"]
+    refined_arguments: dict[str, Any] | None = None
+    reason: str = Field(min_length=1, max_length=240)
+
+    @model_validator(mode="after")
+    def validate_refinement(self) -> CriticEvaluation:
+        if self.action == "refine" and not self.refined_arguments:
+            raise ValueError("refinement requires arguments")
+        if self.sufficient and self.action == "refine":
+            raise ValueError("sufficient results must not be refined")
+        return self
 
 
 OutputModel = TypeVar("OutputModel", bound=_CapabilityModel)
@@ -62,7 +125,7 @@ class StructuredCapabilityExecutor:
         """Build the common system context plus one focused capability prompt."""
 
         return [
-            {"role": "system", "content": render_chat_base()},
+            {"role": "system", "content": load_prompt("capability_base")},
             {"role": "user", "content": capability_prompt},
         ]
 
@@ -161,6 +224,9 @@ def _duration_ms(started_at: float) -> int:
 __all__ = [
     "CapabilityExecutionError",
     "CapabilityResult",
+    "AgentPlan",
     "ConversationCompression",
+    "CriticEvaluation",
+    "PlanStep",
     "StructuredCapabilityExecutor",
 ]

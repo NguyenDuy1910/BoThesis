@@ -41,6 +41,18 @@ export interface ActivityEntry {
   sourceIds: string[];
 }
 
+export interface ReasoningEntry {
+  id: string;
+  source: "model" | "provider";
+  turn: number;
+  text: string;
+}
+
+export interface FindingEntry {
+  id: string;
+  text: string;
+}
+
 export interface SourceResult {
   id: string;
   title: string;
@@ -50,6 +62,8 @@ export interface SourceResult {
   type: SourceType;
   provider?: string;
   fileType?: string;
+  location?: string;
+  snippet?: string;
   relevanceScore?: number;
   status: SourceStatus;
 }
@@ -61,6 +75,8 @@ export interface AgentRunView {
   modelDurationMs?: number;
   toolDurationMs?: number;
   toolCallCount?: number;
+  reasoning: ReasoningEntry[];
+  findings: FindingEntry[];
   steps: ActivityEntry[];
   sources: SourceResult[];
   sourceCount: number;

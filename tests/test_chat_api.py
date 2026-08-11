@@ -83,11 +83,55 @@ class StubRetriever:
         ]
 
 
+class InterleavedTransport(LLMTransport):
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage | Mapping[str, Any]],
+        **_: Any,
+    ) -> LLMResponse:
+        return LLMResponse(
+            id="plan-1",
+            model="openai/gpt-5.4-mini",
+            content=json.dumps(
+                {
+                    "mode": "planned",
+                    "requires_knowledge_retrieval": True,
+                    "commentary": "I’ll check the relevant source.",
+                    "steps": [
+                        {
+                            "id": "step_1",
+                            "title": "Check leave policy",
+                            "tool_name": "knowledge_search",
+                            "arguments": {"query": "leave policy"},
+                            "success_criteria": "At least one source",
+                            "depends_on": [],
+                        }
+                    ],
+                }
+            ),
+            finish_reason="stop",
+        )
+
+    async def stream_turn(
+        self,
+        messages: Sequence[ChatMessage | Mapping[str, Any]],
+        **_: Any,
+    ) -> AsyncIterator[TextDelta | TurnDone]:
+        yield TextDelta("Employees receive 20 days ")
+        yield TextDelta("[[cite:chunk-1]].")
+        yield TurnDone("stop")
+
+
 def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     registry = ToolRegistry()
     registry.register(KnowledgeSearchTool(StubRetriever()))
     transport = ScriptedTransport()
-    loop = AgentLoop(transport, registry)
+    loop = AgentLoop(
+        transport,
+        registry,
+        recent_history_messages=2,
+        enable_interleaved=False,
+    )
     monkeypatch.setattr(main, "_agent_loop", loop)
     long_assistant_answer = f"Earlier answer\n{'A' * 5_000}"
 
@@ -103,6 +147,8 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
                 "history": [
                     {"role": "user", "content": "Earlier question"},
                     {"role": "assistant", "content": long_assistant_answer},
+                    {"role": "user", "content": "Recent scope question"},
+                    {"role": "assistant", "content": "Recent scope answer"},
                 ],
             },
         )
@@ -141,6 +187,9 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         event for event in events if event["type"] == "citation_available"
     )
     assert citation_event["evidence"]["source"] == "confluence"
+    assert citation_event["evidence"]["snippet"] == (
+        "Employees receive 20 days of annual leave."
+    )
     assert "content" not in citation_event["evidence"]
     tool_event = next(event for event in events if event["type"] == "tool_completed")
     assert tool_event["result_count"] == 1
@@ -153,10 +202,68 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         "Earlier question and answer about the leave policy"
         in model_request[1]["content"]
     )
+    assert model_request[2:4] == [
+        {"role": "user", "content": "Recent scope question"},
+        {"role": "assistant", "content": "Recent scope answer"},
+    ]
     assert model_request[-1] == {
         "role": "user",
         "content": "What is the leave policy?",
     }
+
+
+def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
+    registry = ToolRegistry()
+    registry.register(KnowledgeSearchTool(StubRetriever()))
+    loop = AgentLoop(InterleavedTransport(), registry, enable_interleaved=True)
+    monkeypatch.setattr(main, "_agent_loop", loop)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={
+                "message": "What is the internal leave policy?",
+                "tenant_id": "tenant-1",
+                "user_id": "user-1",
+                "roles": [],
+                "history": [],
+            },
+        )
+
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert response.headers["cache-control"] == "no-cache, no-transform"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert [event["sequence"] for event in events] == list(
+        range(1, len(events) + 1)
+    )
+    assert len({event["event_id"] for event in events}) == len(events)
+    assert [event["type"] for event in events] == [
+        "run_started",
+        "commentary_delta",
+        "tool_started",
+        "tool_completed",
+        "citation_available",
+        "intermediate_finding_delta",
+        "final_answer_delta",
+        "citation",
+        "final_answer_delta",
+        "run_completed",
+    ]
+    tool_event = next(event for event in events if event["type"] == "tool_started")
+    assert "arguments" not in tool_event
+    assert "call_id" not in tool_event
+    citation = next(
+        event for event in events if event["type"] == "citation_available"
+    )
+    assert "document_id" not in citation["evidence"]
+    assert "relevance_score" not in citation["evidence"]
+    assert citation["evidence"]["snippet"] == (
+        "Employees receive 20 days of annual leave."
+    )
 
 
 def test_chat_api_rejects_unbounded_history() -> None:
@@ -169,7 +276,7 @@ def test_chat_api_rejects_unbounded_history() -> None:
                 "user_id": "user-1",
                 "roles": [],
                 "history": [
-                    {"role": "user", "content": "previous turn"} for _ in range(9)
+                    {"role": "user", "content": "previous turn"} for _ in range(25)
                 ],
             },
         )

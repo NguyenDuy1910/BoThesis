@@ -19,6 +19,7 @@ import {
 import { memo, type FormEvent, type MouseEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
+import { getBothesisChatConfiguration } from "@/lib/api/config";
 import {
   cachedToUIMessage,
   conversationAdapter,
@@ -88,7 +89,7 @@ export default function ChatShell() {
   }, []);
 
   useEffect(() => {
-    setConversationUser(null);
+    setConversationUser(getBothesisChatConfiguration()?.userId);
     void refresh();
   }, [refresh]);
 
@@ -188,7 +189,6 @@ function ChatConversation({
   onOpenSidebar: () => void;
 }) {
   const [input, setInput] = useState("");
-  const [hasScrolled, setHasScrolled] = useState(false);
   const [sourceFocus, setSourceFocus] = useState<{
     messageId: string;
     sourceId: string;
@@ -201,7 +201,6 @@ function ChatConversation({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const positionedTurnRef = useRef<string | null>(null);
   const didInitialScrollRef = useRef(false);
-  const dismissedActivityRunRef = useRef<string | null>(null);
   const {
     messages,
     sendMessage,
@@ -251,11 +250,7 @@ function ChatConversation({
   }, [input]);
 
   useEffect(() => {
-    if (!activeAssistantMessageId) return;
-    setSelectedActivityMessageId(activeAssistantMessageId);
-    if (dismissedActivityRunRef.current !== activeAssistantMessageId) {
-      setActivityOpen(true);
-    }
+    if (activeAssistantMessageId) setSelectedActivityMessageId(activeAssistantMessageId);
   }, [activeAssistantMessageId]);
 
   useEffect(() => {
@@ -325,16 +320,13 @@ function ChatConversation({
   const openActivity = useCallback((messageId?: string) => {
     const targetId = messageId ?? activeAssistantMessageId ?? latestAssistantMessage?.id;
     if (targetId) setSelectedActivityMessageId(targetId);
-    dismissedActivityRunRef.current = null;
+    setSourceFocus(null);
     setActivityOpen(true);
   }, [activeAssistantMessageId, latestAssistantMessage?.id]);
 
   const closeActivity = useCallback(() => {
-    if (activeAssistantMessageId) {
-      dismissedActivityRunRef.current = activeAssistantMessageId;
-    }
     setActivityOpen(false);
-  }, [activeAssistantMessageId]);
+  }, []);
 
   const handleRegenerate = useCallback((messageId: string) => {
     void regenerate({ messageId });
@@ -342,7 +334,7 @@ function ChatConversation({
 
   return (
     <section className="main-pane">
-      <header className={clsx("topbar", hasScrolled && "topbar--scrolled")}>
+      <header className="topbar">
         <div className="topbar__left">
           <button
             aria-label="Open conversation sidebar"
@@ -358,7 +350,7 @@ function ChatConversation({
         </div>
         <div className="topbar__actions">
           <button
-            aria-label="Open agent activity"
+            aria-label="Open activity and sources"
             aria-pressed={activityOpen}
             className="topbar__activity"
             onClick={() => openActivity()}
@@ -375,10 +367,6 @@ function ChatConversation({
         <div className="conversation-pane">
           <div
             className="chat-scroll"
-            onScroll={(event) => {
-              const next = event.currentTarget.scrollTop > 4;
-              setHasScrolled((current) => current === next ? current : next);
-            }}
             ref={chatScrollRef}
           >
             <div className="chat-inner">

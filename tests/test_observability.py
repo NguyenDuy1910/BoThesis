@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from bothesis.agent.models import (
     AgentContext,
     Evidence,
+    ExecutionMode,
     ModelTurn,
     ToolCall,
     ToolResult,
@@ -68,6 +69,7 @@ def test_agent_trace_captures_content_with_safe_correlations() -> None:
             tool_call_count=1,
             sources_found=5,
             sources_used=2,
+            execution_mode=ExecutionMode.PLANNED,
         )
 
     serialized = json.dumps(
@@ -84,7 +86,9 @@ def test_agent_trace_captures_content_with_safe_correlations() -> None:
     }
     assert client.starts[0]["input"] == "private enterprise question"
     assert client.starts[0]["metadata"]["conversation_id"] == "conversation-1"
-    assert client.observations[0].updates[-1]["output"] == "Grounded enterprise answer"
+    completion_update = client.observations[0].updates[-1]
+    assert completion_update["output"] == "Grounded enterprise answer"
+    assert completion_update["metadata"]["execution_mode"] == "planned"
 
 
 def test_trace_name_uses_a_short_valid_request_id() -> None:

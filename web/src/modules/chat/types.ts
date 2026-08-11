@@ -47,12 +47,22 @@ export type ChatDataParts = {
     url?: string;
     domain?: string;
     description?: string;
+    page?: string;
+    section?: string;
+    snippet?: string;
     mimeType?: string;
     source?: string;
     relevanceScore?: number;
     status?: "Used" | "Found" | "Reviewed" | "Restricted";
     restricted?: boolean;
   };
+  reasoning: {
+    source: "model" | "provider";
+    turn: number;
+    text: string;
+    state: "streaming" | "done";
+  };
+  finding: { text: string };
   "stream-error": { message: string; retryable?: boolean };
 };
 
@@ -61,6 +71,8 @@ export type ChatMessagePart =
   | { type: "data-run"; id?: string; data: ChatDataParts["run"] }
   | { type: "data-status"; id?: string; data: ChatDataParts["status"] }
   | { type: "data-source"; id?: string; data: ChatDataParts["source"] }
+  | { type: "data-reasoning"; id?: string; data: ChatDataParts["reasoning"] }
+  | { type: "data-finding"; id?: string; data: ChatDataParts["finding"] }
   | { type: "data-stream-error"; id?: string; data: ChatDataParts["stream-error"] };
 
 export interface ChatMessage {
@@ -71,12 +83,13 @@ export interface ChatMessage {
 
 export interface AgentEvidence {
   id: string;
-  document_id: string;
+  document_id?: string;
   title: string;
   page?: string | null;
   section?: string | null;
   uri?: string | null;
   source?: string | null;
+  snippet?: string | null;
   relevance_score?: number | null;
 }
 
@@ -85,7 +98,11 @@ export interface AgentHistoryMessage {
   content: string;
 }
 
-export type AgentStreamEvent =
+export type AssistantPhase = "commentary" | "tool_activity" | "intermediate_finding" | "final_answer";
+
+type StreamEventMetadata = { sequence?: number; event_id?: string };
+
+export type AgentStreamEvent = StreamEventMetadata & (
   | { type: "run_started"; conversation_id?: string | null; request_id?: string | null }
   | { type: "turn_started"; turn: number }
   | { type: "generation_started"; turn: number }
@@ -99,11 +116,33 @@ export type AgentStreamEvent =
       duration_ms: number;
     }
   | { type: "message_delta"; text: string }
-  | { type: "tool_started"; call_id: string; name: string; arguments: Record<string, unknown> }
+  | { type: "final_answer_delta"; text: string }
+  | { type: "commentary_delta"; text: string }
+  | { type: "intermediate_finding_delta"; text: string }
+  | { type: "public_reasoning_started"; turn: number }
+  | { type: "public_reasoning_delta"; turn: number; text: string }
+  | { type: "public_reasoning_completed"; turn: number }
+  | { type: "provider_reasoning_summary_delta"; turn: number; text: string }
+  | {
+      type: "tool_started";
+      activity_id?: string;
+      label?: string;
+      category?: "retrieval" | "tool";
+      attempt?: number;
+      call_id?: string;
+      name?: string;
+      arguments?: Record<string, unknown>;
+    }
   | {
       type: "tool_completed";
-      call_id: string;
-      name: string;
+      activity_id?: string;
+      label?: string;
+      category?: "retrieval" | "tool";
+      status?: "completed" | "failed" | "timeout" | "skipped";
+      attempt?: number;
+      message?: string | null;
+      call_id?: string;
+      name?: string;
       error?: string | null;
       duration_ms?: number | null;
       result_count?: number | null;
@@ -118,4 +157,5 @@ export type AgentStreamEvent =
       tool_duration_ms?: number | null;
       tool_call_count?: number | null;
     }
-  | { type: "run_failed"; error: string };
+  | { type: "run_failed"; error: string }
+);

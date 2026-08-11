@@ -139,7 +139,7 @@ class ChatRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=256)
     roles: list[str]
     conversation_id: str | None = None
-    history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=8)
+    history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=24)
 
 
 # --- Connectors ---
@@ -450,12 +450,25 @@ def _get_agent_loop() -> Any:
             max_model_turns=int(os.getenv("BOTHESIS_MAX_MODEL_TURNS", "3")),
             max_tool_rounds=int(os.getenv("BOTHESIS_MAX_TOOL_ROUNDS", "2")),
             max_tool_calls=int(os.getenv("BOTHESIS_MAX_TOOL_CALLS", "6")),
+            max_history_messages=int(
+                os.getenv("BOTHESIS_MAX_HISTORY_MESSAGES", "24")
+            ),
+            max_history_characters=int(
+                os.getenv("BOTHESIS_MAX_HISTORY_CHARACTERS", "24000")
+            ),
+            recent_history_messages=int(
+                os.getenv("BOTHESIS_RECENT_HISTORY_MESSAGES", "6")
+            ),
             history_compression_threshold=int(
                 os.getenv("BOTHESIS_HISTORY_COMPRESSION_THRESHOLD", "4000")
             ),
             max_compressed_history_characters=int(
                 os.getenv("BOTHESIS_MAX_COMPRESSED_HISTORY_CHARACTERS", "2000")
             ),
+            tool_timeout_seconds=float(
+                os.getenv("BOTHESIS_TOOL_TIMEOUT_SECONDS", "8")
+            ),
+            enable_interleaved=True,
             tracing=tracing,
         )
     return _agent_loop
@@ -488,10 +501,44 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
 
     async def event_gen():
         async for event in loop.run_stream(body.message, context):
-            payload = {"type": event.type, **dataclasses.asdict(event)}
+            event_data = _public_agent_event_data(event)
+            payload = {"type": event.type, **event_data}
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _public_agent_event_data(event: object) -> dict[str, Any]:
+    """Remove private correlation data and empty optional fields from SSE."""
+
+    event_data = _without_none(dataclasses.asdict(event))
+    event_data.pop("request_id", None)
+    event_data.pop("call_id", None)
+    event_data.pop("arguments", None)
+    evidence = event_data.get("evidence")
+    if isinstance(evidence, dict):
+        evidence.pop("document_id", None)
+        evidence.pop("relevance_score", None)
+    return event_data
+
+
+def _without_none(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _without_none(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [_without_none(item) for item in value]
+    return value
 
 
 @agent_router.post(

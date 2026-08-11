@@ -22,9 +22,10 @@ from bothesis.chat.event_emitter import ModelTurnAccumulator
 def test_conversation_policy_keeps_newest_content_within_budget() -> None:
     policy = ConversationContextPolicy(
         max_messages=2,
-        max_characters=5,
+        max_characters=9,
         compression_threshold=10,
         max_compressed_characters=4,
+        recent_messages=2,
     )
     history = (
         ConversationMessage(role="user", content="abcdef"),
@@ -34,10 +35,34 @@ def test_conversation_policy_keeps_newest_content_within_budget() -> None:
     bounded = policy.bounded(history)
 
     assert json.loads(bounded) == [
-        {"role": "user", "content": "ef"},
+        {"role": "user", "content": "abcdef"},
         {"role": "assistant", "content": "xyz"},
     ]
-    assert policy.needs_compression(bounded)
+    assert not policy.needs_compression(policy.window(history))
+
+
+def test_conversation_policy_preserves_recent_turn_and_summarizes_only_older() -> None:
+    policy = ConversationContextPolicy(
+        max_messages=6,
+        max_characters=200,
+        compression_threshold=10,
+        max_compressed_characters=50,
+        recent_messages=2,
+    )
+    history = (
+        ConversationMessage(role="user", content="Earlier product question"),
+        ConversationMessage(role="assistant", content="Earlier product answer"),
+        ConversationMessage(role="user", content="What are its fees?"),
+        ConversationMessage(role="assistant", content="The fee is documented."),
+    )
+
+    window = policy.window(history)
+
+    assert [message.content for message in window.recent_messages] == [
+        "What are its fees?",
+        "The fee is documented.",
+    ]
+    assert policy.needs_compression(window)
 
 
 def test_citation_processor_carries_split_markers_between_deltas() -> None:

@@ -9,7 +9,12 @@ from typing import Any
 
 import httpx
 
-from bothesis.agent.models import TextDelta, ToolCallDelta, TurnDone
+from bothesis.agent.models import (
+    ProviderReasoningDelta,
+    TextDelta,
+    ToolCallDelta,
+    TurnDone,
+)
 
 from .base import ChatMessage, LLMResponse, LLMTransport, LLMTransportError
 
@@ -130,7 +135,9 @@ class OpenRouterTransport(LLMTransport):
         tools: Sequence[Mapping[str, Any]] | None = None,
         tool_choice: str | Mapping[str, Any] | None = None,
         extra_body: Mapping[str, Any] | None = None,
-    ) -> AsyncIterator[TextDelta | ToolCallDelta | TurnDone]:
+    ) -> AsyncIterator[
+        ProviderReasoningDelta | TextDelta | ToolCallDelta | TurnDone
+    ]:
         """Normalize OpenRouter SSE into a single model-turn event stream."""
         selected_model = model or self.model
         if not messages:
@@ -206,6 +213,10 @@ class OpenRouterTransport(LLMTransport):
                         continue
                     delta = choice.get("delta")
                     if isinstance(delta, Mapping):
+                        for summary_delta in _reasoning_summary_deltas(
+                            delta.get("reasoning_details")
+                        ):
+                            yield ProviderReasoningDelta(summary_delta)
                         content = delta.get("content")
                         if isinstance(content, str) and content:
                             yield TextDelta(content)
@@ -301,3 +312,20 @@ def _token_usage(raw_usage: Mapping[str, Any]) -> dict[str, int]:
         if isinstance(cached_tokens, int) and not isinstance(cached_tokens, bool):
             usage["cached_prompt_tokens"] = cached_tokens
     return usage
+
+
+def _reasoning_summary_deltas(raw_details: Any) -> list[str]:
+    """Return official summary blocks while ignoring raw/encrypted reasoning."""
+
+    if not isinstance(raw_details, list):
+        return []
+    summaries: list[str] = []
+    for detail in raw_details:
+        if not isinstance(detail, Mapping):
+            continue
+        if detail.get("type") != "reasoning.summary":
+            continue
+        summary = detail.get("summary")
+        if isinstance(summary, str) and summary:
+            summaries.append(summary)
+    return summaries

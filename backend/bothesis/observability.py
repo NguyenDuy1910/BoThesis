@@ -12,7 +12,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from bothesis.agent.models import AgentContext, Evidence, ModelTurn, ToolResult
+from bothesis.agent.models import (
+    AgentContext,
+    Evidence,
+    ExecutionMode,
+    ModelTurn,
+    ToolResult,
+)
 from bothesis.agent.transports.base import LLMResponse
 
 log = logging.getLogger(__name__)
@@ -38,18 +44,22 @@ class AgentRunTrace:
         tool_call_count: int,
         sources_found: int,
         sources_used: int,
+        execution_mode: ExecutionMode | None = None,
     ) -> None:
+        metadata: dict[str, Any] = {
+            "status": "completed",
+            "answer_characters": answer_characters,
+            "turn_count": turn_count,
+            "tool_call_count": tool_call_count,
+            "sources_found": sources_found,
+            "sources_used": sources_used,
+        }
+        if execution_mode is not None:
+            metadata["execution_mode"] = execution_mode.value
         _safe_update(
             self._observation,
             output=answer,
-            metadata={
-                "status": "completed",
-                "answer_characters": answer_characters,
-                "turn_count": turn_count,
-                "tool_call_count": tool_call_count,
-                "sources_found": sources_found,
-                "sources_used": sources_used,
-            },
+            metadata=metadata,
         )
         self._finished = True
 

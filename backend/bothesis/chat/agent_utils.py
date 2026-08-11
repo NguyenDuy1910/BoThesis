@@ -53,8 +53,18 @@ def evidence_reference(evidence: Evidence) -> EvidenceReference:
         section=evidence.section,
         uri=evidence.uri,
         source=evidence.source,
+        snippet=_evidence_snippet(evidence.content),
         relevance_score=evidence.relevance_score,
     )
+
+
+def _evidence_snippet(content: str, max_characters: int = 220) -> str | None:
+    normalized = " ".join(content.split())
+    if not normalized:
+        return None
+    if len(normalized) <= max_characters:
+        return normalized
+    return f"{normalized[: max_characters - 1].rstrip()}…"
 
 
 def tool_signature(call: ToolCall) -> str:

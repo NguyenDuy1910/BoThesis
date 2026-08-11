@@ -6,7 +6,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal, Mapping, Sequence
 
-from bothesis.agent.models import TextDelta, ToolCallDelta, TurnDone
+from bothesis.agent.models import (
+    ProviderReasoningDelta,
+    TextDelta,
+    ToolCallDelta,
+    TurnDone,
+)
 
 MessageRole = Literal["system", "user", "assistant", "tool"]
 MessageContent = str | Sequence[Mapping[str, Any]]
@@ -97,7 +102,8 @@ class LLMTransport(ABC):
         tools: Sequence[Mapping[str, Any]] | None = None,
         tool_choice: str | Mapping[str, Any] | None = None,
         extra_body: Mapping[str, Any] | None = None,
-    ) -> AsyncIterator[TextDelta | ToolCallDelta | TurnDone]:
+    ) -> AsyncIterator[
+        ProviderReasoningDelta | TextDelta | ToolCallDelta | TurnDone
+    ]:
         """Yield normalized stream events for one model turn."""
         raise NotImplementedError
-

@@ -3,7 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, ClassVar, Literal, TypeAlias
+
+
+class ExecutionMode(StrEnum):
+    """Top-level route selected for an agent request."""
+
+    DIRECT = "direct"
+    PLANNED = "planned"
+
+
+class AssistantPhase(StrEnum):
+    """Public phases that can contribute to one assistant turn."""
+
+    COMMENTARY = "commentary"
+    TOOL_ACTIVITY = "tool_activity"
+    INTERMEDIATE_FINDING = "intermediate_finding"
+    FINAL_ANSWER = "final_answer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +49,7 @@ class EvidenceReference:
     section: str | None = None
     uri: str | None = None
     source: str | None = None
+    snippet: str | None = None
     relevance_score: float | None = None
 
 
@@ -75,6 +93,18 @@ class ToolResult:
 
 
 @dataclass(frozen=True, slots=True)
+class StepResult:
+    """One planned step's bounded execution outcome."""
+
+    step_id: str
+    title: str
+    tool_name: str | None
+    result: ToolResult | None
+    success: bool
+    attempts: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class ModelTurn:
     text: str
     tool_calls: list[ToolCall]
@@ -86,6 +116,16 @@ class ModelTurn:
 # Internal transport stream events. These are never sent directly to clients.
 @dataclass(frozen=True, slots=True)
 class TextDelta:
+    delta: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderReasoningDelta:
+    """An official provider-supplied reasoning summary fragment.
+
+    Provider adapters must never populate this event from raw reasoning text.
+    """
+
     delta: str
 
 
@@ -105,16 +145,24 @@ class TurnDone:
 
 
 # SSE events. ``type`` is deliberately a class variable; the HTTP layer adds
-# it while serializing the dataclass payload.
+# it while serializing the dataclass payload. Sequence metadata is public and
+# deliberately excluded from equality so existing event-level tests remain
+# focused on behavior rather than transport decoration.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StreamEvent:
+    sequence: int = field(default=0, compare=False)
+    event_id: str = field(default="", compare=False)
+
+
 @dataclass(frozen=True, slots=True)
-class RunStarted:
+class RunStarted(StreamEvent):
     type: ClassVar[str] = "run_started"
     conversation_id: str | None = None
     request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class TurnStarted:
+class TurnStarted(StreamEvent):
     type: ClassVar[str] = "turn_started"
     turn: int
 
@@ -123,13 +171,13 @@ GenerationKind: TypeAlias = Literal["next_step", "final_response"]
 
 
 @dataclass(frozen=True, slots=True)
-class GenerationStarted:
+class GenerationStarted(StreamEvent):
     type: ClassVar[str] = "generation_started"
     turn: int
 
 
 @dataclass(frozen=True, slots=True)
-class GenerationCompleted:
+class GenerationCompleted(StreamEvent):
     type: ClassVar[str] = "generation_completed"
     turn: int
     generation_kind: GenerationKind
@@ -140,13 +188,39 @@ class GenerationCompleted:
 
 
 @dataclass(frozen=True, slots=True)
-class MessageDelta:
+class MessageDelta(StreamEvent):
     type: ClassVar[str] = "message_delta"
     text: str
 
 
 @dataclass(frozen=True, slots=True)
-class ToolStarted:
+class PublicReasoningStarted(StreamEvent):
+    type: ClassVar[str] = "public_reasoning_started"
+    turn: int
+
+
+@dataclass(frozen=True, slots=True)
+class PublicReasoningDelta(StreamEvent):
+    type: ClassVar[str] = "public_reasoning_delta"
+    turn: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublicReasoningCompleted(StreamEvent):
+    type: ClassVar[str] = "public_reasoning_completed"
+    turn: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderReasoningSummaryDelta(StreamEvent):
+    type: ClassVar[str] = "provider_reasoning_summary_delta"
+    turn: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolStarted(StreamEvent):
     type: ClassVar[str] = "tool_started"
     call_id: str
     name: str
@@ -154,7 +228,7 @@ class ToolStarted:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolCompleted:
+class ToolCompleted(StreamEvent):
     type: ClassVar[str] = "tool_completed"
     call_id: str
     name: str
@@ -164,13 +238,13 @@ class ToolCompleted:
 
 
 @dataclass(frozen=True, slots=True)
-class CitationAvailable:
+class CitationAvailable(StreamEvent):
     type: ClassVar[str] = "citation_available"
     evidence: EvidenceReference
 
 
 @dataclass(frozen=True, slots=True)
-class CitationEvent:
+class CitationEvent(StreamEvent):
     type: ClassVar[str] = "citation"
     evidence_id: str
     title: str
@@ -179,14 +253,14 @@ class CitationEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class TurnCompleted:
+class TurnCompleted(StreamEvent):
     type: ClassVar[str] = "turn_completed"
     turn: int
     outcome: Literal["tool", "final"]
 
 
 @dataclass(frozen=True, slots=True)
-class RunCompleted:
+class RunCompleted(StreamEvent):
     type: ClassVar[str] = "run_completed"
     duration_ms: int | None = None
     model_duration_ms: int | None = None
@@ -195,9 +269,51 @@ class RunCompleted:
 
 
 @dataclass(frozen=True, slots=True)
-class RunFailed:
+class RunFailed(StreamEvent):
     type: ClassVar[str] = "run_failed"
     error: str
+
+
+@dataclass(frozen=True, slots=True)
+class CommentaryDelta(StreamEvent):
+    type: ClassVar[str] = "commentary_delta"
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class IntermediateFindingDelta(StreamEvent):
+    type: ClassVar[str] = "intermediate_finding_delta"
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class FinalAnswerDelta(StreamEvent):
+    type: ClassVar[str] = "final_answer_delta"
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class InterleavedToolStarted(StreamEvent):
+    """Safe public tool activity without arguments or provider call IDs."""
+
+    type: ClassVar[str] = "tool_started"
+    activity_id: str
+    label: str
+    category: Literal["retrieval", "tool"]
+    attempt: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class InterleavedToolCompleted(StreamEvent):
+    type: ClassVar[str] = "tool_completed"
+    activity_id: str
+    label: str
+    category: Literal["retrieval", "tool"]
+    status: Literal["completed", "failed", "timeout", "skipped"]
+    attempt: int = 1
+    duration_ms: int | None = None
+    result_count: int | None = None
+    message: str | None = None
 
 
 AgentEvent: TypeAlias = (
@@ -206,6 +322,10 @@ AgentEvent: TypeAlias = (
     | GenerationStarted
     | GenerationCompleted
     | MessageDelta
+    | PublicReasoningStarted
+    | PublicReasoningDelta
+    | PublicReasoningCompleted
+    | ProviderReasoningSummaryDelta
     | ToolStarted
     | ToolCompleted
     | CitationAvailable
@@ -213,24 +333,43 @@ AgentEvent: TypeAlias = (
     | TurnCompleted
     | RunCompleted
     | RunFailed
+    | CommentaryDelta
+    | IntermediateFindingDelta
+    | FinalAnswerDelta
+    | InterleavedToolStarted
+    | InterleavedToolCompleted
 )
 
 __all__ = [
     "AgentContext",
     "AgentEvent",
+    "AssistantPhase",
     "CitationAvailable",
     "CitationEvent",
+    "CommentaryDelta",
     "ConversationMessage",
     "Evidence",
     "EvidenceReference",
+    "ExecutionMode",
+    "FinalAnswerDelta",
     "GenerationCompleted",
     "GenerationKind",
     "GenerationStarted",
     "MessageDelta",
     "ModelTurn",
+    "IntermediateFindingDelta",
+    "InterleavedToolCompleted",
+    "InterleavedToolStarted",
+    "ProviderReasoningDelta",
+    "ProviderReasoningSummaryDelta",
+    "PublicReasoningCompleted",
+    "PublicReasoningDelta",
+    "PublicReasoningStarted",
     "RunCompleted",
     "RunFailed",
     "RunStarted",
+    "StepResult",
+    "StreamEvent",
     "TextDelta",
     "ToolCall",
     "ToolCallDelta",

@@ -151,6 +151,7 @@ class KnowledgeSearchTool(AgentTool):
                     metadata={
                         "outcome": "empty",
                         "result_count": 0,
+                        "success_criteria_met": False,
                         "duration_ms": duration_ms,
                     },
                 )
@@ -178,6 +179,7 @@ class KnowledgeSearchTool(AgentTool):
                 metadata={
                     "outcome": "success",
                     "result_count": len(evidence),
+                    "success_criteria_met": True,
                     "duration_ms": duration_ms,
                 },
             )
@@ -197,6 +199,7 @@ class KnowledgeSearchTool(AgentTool):
             metadata={
                 "outcome": category,
                 "result_count": 0,
+                "success_criteria_met": False,
                 "duration_ms": duration_ms,
             },
         )

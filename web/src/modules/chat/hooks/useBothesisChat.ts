@@ -3,43 +3,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
 import { streamAgentResponse } from "../api";
+import { historyFromMessages, regenerationContext } from "../conversation-history";
 import type {
   AgentEvidence,
-  AgentHistoryMessage,
   AgentStreamEvent,
   ChatMessage,
   ChatMessagePart,
 } from "../types";
 
 type ChatStatus = "ready" | "submitted" | "streaming";
-const MAX_HISTORY_MESSAGES = 8;
-const MAX_HISTORY_CHARACTERS = 8_000;
 
 function messageId(prefix: string) {
   return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function messageText(message: ChatMessage) {
-  return message.parts
-    .filter((part): part is Extract<ChatMessagePart, { type: "text" }> => part.type === "text")
-    .map((part) => part.text)
-    .join("");
-}
-
-function historyFromMessages(messages: ChatMessage[]): AgentHistoryMessage[] {
-  let remainingCharacters = MAX_HISTORY_CHARACTERS;
-  const history: AgentHistoryMessage[] = [];
-  for (const message of [...messages].reverse()) {
-    const content = messageText(message).trim();
-    if (!content || remainingCharacters <= 0) continue;
-    history.push({
-      role: message.role,
-      content: content.slice(-remainingCharacters),
-    });
-    remainingCharacters -= content.length;
-    if (history.length === MAX_HISTORY_MESSAGES) break;
-  }
-  return history.reverse();
 }
 
 function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMessagePart[] {
@@ -61,8 +36,8 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
         phase: "model",
         state: "active",
         label: activityType === "final_response_generation"
-          ? "Generating final response"
-          : "Determining next step",
+          ? "Preparing the answer"
+          : "Analyzing your request",
         activityType,
         stepId: `generation-${event.turn}`,
         turn: event.turn,
@@ -73,7 +48,7 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
     const activityType = event.generation_kind === "next_step"
       ? "next_step_generation"
       : "final_response_generation";
-    return upsertStatus(parts, {
+    return completeReasoningForTurn(upsertStatus(parts, {
       type: "data-status",
       id: `generation-${event.turn}`,
       data: {
@@ -91,10 +66,42 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
         selectedTools: event.selected_tools,
         durationMs: event.duration_ms,
       },
-    });
+    }), event.turn);
   }
-  if (event.type === "message_delta") {
-    const nextParts = promoteActiveGenerationToFinalResponse(parts);
+  if (event.type === "public_reasoning_started") {
+    return startReasoning(parts, "model", event.turn);
+  }
+  if (event.type === "public_reasoning_delta") {
+    return appendReasoningDelta(parts, "model", event.turn, event.text);
+  }
+  if (event.type === "public_reasoning_completed") {
+    return completeReasoningForTurn(parts, event.turn, "model");
+  }
+  if (event.type === "provider_reasoning_summary_delta") {
+    return appendReasoningDelta(parts, "provider", event.turn, event.text);
+  }
+  if (event.type === "commentary_delta") {
+    return appendReasoningDelta(parts, "model", 0, event.text);
+  }
+  if (event.type === "intermediate_finding_delta") {
+    return [...parts, {
+      type: "data-finding",
+      id: event.event_id,
+      data: { text: event.text },
+    }];
+  }
+  if (event.type === "message_delta" || event.type === "final_answer_delta") {
+    const nextParts = upsertStatus(promoteActiveGenerationToFinalResponse(parts), {
+      type: "data-status",
+      id: "final-response",
+      data: {
+        phase: "model",
+        state: "active",
+        label: "Generating final response",
+        activityType: "final_response_generation",
+        stepId: "final-response",
+      },
+    });
     const last = nextParts.at(-1);
     if (last?.type === "text") {
       return [
@@ -105,48 +112,47 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
     return [...nextParts, { type: "text", text: event.text, state: "streaming" }];
   }
   if (event.type === "tool_started") {
-    const isRetrieval = event.name === "knowledge_search";
+    const activityId = event.activity_id ?? event.call_id ?? `activity-${event.sequence ?? 0}`;
+    const isRetrieval = event.category === "retrieval" || event.name === "knowledge_search";
+    const label = event.label ?? (event.name ? displayToolName(event.name) : "Run tool");
     return upsertStatus(parts, {
       type: "data-status",
-      id: `tool-${event.call_id}`,
+      id: `tool-${activityId}`,
       data: {
         phase: isRetrieval ? "retrieval" : "tool",
         state: "active",
-        label: isRetrieval
-          ? "Searching knowledge base"
-          : `Running ${displayToolName(event.name)}`,
+        label: event.attempt && event.attempt > 1 ? `${label} · retry` : label,
         toolName: event.name,
-        toolCallId: event.call_id,
+        toolCallId: activityId,
         activityType: isRetrieval ? "knowledge_retrieval" : "tool_execution",
-        stepId: `tool-${event.call_id}`,
+        stepId: `tool-${activityId}`,
       },
     });
   }
   if (event.type === "tool_completed") {
-    const isRetrieval = event.name === "knowledge_search";
-    const detail = event.error
+    const activityId = event.activity_id ?? event.call_id ?? `activity-${event.sequence ?? 0}`;
+    const isRetrieval = event.category === "retrieval" || event.name === "knowledge_search";
+    const failed = event.status === "failed" || event.status === "timeout" || Boolean(event.error);
+    const label = event.label ?? (event.name ? displayToolName(event.name) : "Tool activity");
+    const detail = event.message ?? (event.error
       ? event.error
       : event.result_count === undefined
         ? undefined
-        : `Found ${event.result_count} source${event.result_count === 1 ? "" : "s"}.`;
+        : `Found ${event.result_count} source${event.result_count === 1 ? "" : "s"}.`);
     return upsertStatus(parts, {
       type: "data-status",
-      id: `tool-${event.call_id}`,
+      id: `tool-${activityId}`,
       data: {
         phase: isRetrieval ? "retrieval" : "tool",
-        state: event.error ? "error" : "completed",
-        label: event.error
-          ? `${displayToolName(event.name)} could not complete`
-          : isRetrieval
-            ? "Searched knowledge base"
-            : `Ran ${displayToolName(event.name)}`,
+        state: failed ? "error" : event.status === "skipped" ? "skipped" : "completed",
+        label: failed ? `${label} could not complete` : label,
         detail,
         toolName: event.name,
-        toolCallId: event.call_id,
+        toolCallId: activityId,
         durationMs: event.duration_ms ?? undefined,
         resultCount: event.result_count ?? undefined,
         activityType: isRetrieval ? "knowledge_retrieval" : "tool_execution",
-        stepId: `tool-${event.call_id}`,
+        stepId: `tool-${activityId}`,
       },
     });
   }
@@ -165,7 +171,23 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
   }
   if (event.type === "run_completed") {
     return updateRun(
-      parts.map((part) => part.type === "text" ? { ...part, state: "done" } : part),
+      parts.map((part) => {
+        if (part.type === "text") return { ...part, state: "done" };
+        if (part.type === "data-reasoning") {
+          return { ...part, data: { ...part.data, state: "done" } };
+        }
+        if (
+          part.type === "data-status"
+          && part.data.activityType === "final_response_generation"
+          && part.data.state === "active"
+        ) {
+          return {
+            ...part,
+            data: { ...part.data, state: "completed", label: "Generated final response" },
+          };
+        }
+        return part;
+      }),
       {
         status: "completed",
         durationMs: event.duration_ms ?? undefined,
@@ -179,6 +201,81 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
 }
 
 type StatusPart = Extract<ChatMessagePart, { type: "data-status" }>;
+type ReasoningPart = Extract<ChatMessagePart, { type: "data-reasoning" }>;
+
+function startReasoning(
+  parts: ChatMessagePart[],
+  source: ReasoningPart["data"]["source"],
+  turn: number,
+): ChatMessagePart[] {
+  if (
+    source === "model"
+    && parts.some((part) => (
+      part.type === "data-reasoning"
+      && part.data.source === "provider"
+      && part.data.turn === turn
+    ))
+  ) {
+    return parts;
+  }
+  const id = `reasoning-${source}-${turn}`;
+  if (parts.some((part) => part.type === "data-reasoning" && part.id === id)) {
+    return parts;
+  }
+  const reasoning: ReasoningPart = {
+    type: "data-reasoning",
+    id,
+    data: { source, turn, text: "", state: "streaming" },
+  };
+  return [...parts, reasoning];
+}
+
+function appendReasoningDelta(
+  parts: ChatMessagePart[],
+  source: ReasoningPart["data"]["source"],
+  turn: number,
+  text: string,
+): ChatMessagePart[] {
+  if (!text) return parts;
+  let nextParts = source === "provider"
+    ? parts.filter((part) => !(
+      part.type === "data-reasoning"
+      && part.data.source === "model"
+      && part.data.turn === turn
+    ))
+    : parts;
+  if (
+    source === "model"
+    && nextParts.some((part) => (
+      part.type === "data-reasoning"
+      && part.data.source === "provider"
+      && part.data.turn === turn
+    ))
+  ) {
+    return nextParts;
+  }
+  nextParts = startReasoning(nextParts, source, turn);
+  const id = `reasoning-${source}-${turn}`;
+  return nextParts.map((part) => (
+    part.type === "data-reasoning" && part.id === id
+      ? { ...part, data: { ...part.data, text: part.data.text + text } }
+      : part
+  ));
+}
+
+function completeReasoningForTurn(
+  parts: ChatMessagePart[],
+  turn: number,
+  source?: ReasoningPart["data"]["source"],
+): ChatMessagePart[] {
+  return parts.map((part) => (
+    part.type === "data-reasoning"
+    && part.data.turn === turn
+    && (source === undefined || part.data.source === source)
+      ? { ...part, data: { ...part.data, state: "done" as const } }
+      : part
+  ));
+}
 
 function upsertStatus(parts: ChatMessagePart[], nextStatus: StatusPart) {
   const stepId = nextStatus.data.stepId ?? nextStatus.id;
@@ -292,6 +389,9 @@ function sourcePart(evidence: AgentEvidence): Extract<ChatMessagePart, { type: "
       title: evidence.title,
       url: evidence.uri ?? undefined,
       description: evidence.section ?? evidence.page ?? undefined,
+      page: evidence.page ?? undefined,
+      section: evidence.section ?? undefined,
+      snippet: evidence.snippet ?? undefined,
       status: "Found",
       source: evidence.source ?? undefined,
       relevanceScore: evidence.relevance_score ?? undefined,
@@ -337,9 +437,16 @@ export function useBothesisChat({
     });
   }, []);
 
-  const run = useCallback(async (text: string, includeUserMessage: boolean) => {
+  const run = useCallback(async (
+    text: string,
+    includeUserMessage: boolean,
+    options: {
+      historyMessages?: ChatMessage[];
+      displayMessages?: ChatMessage[];
+    } = {},
+  ) => {
     if (controllerRef.current) return;
-    const history = historyFromMessages(messagesRef.current);
+    const history = historyFromMessages(options.historyMessages ?? messagesRef.current);
     const controller = new AbortController();
     controllerRef.current = controller;
     setError(null);
@@ -357,9 +464,10 @@ export function useBothesisChat({
     };
     activeAssistantIdRef.current = assistantId;
     setMessages((current) => {
+      const baseMessages = options.displayMessages ?? current;
       const next = includeUserMessage
-        ? [...current, { id: messageId("user"), role: "user" as const, parts: [{ type: "text" as const, text, state: "done" as const }] }, assistant]
-        : [...current, assistant];
+        ? [...baseMessages, { id: messageId("user"), role: "user" as const, parts: [{ type: "text" as const, text, state: "done" as const }] }, assistant]
+        : [...baseMessages, assistant];
       messagesRef.current = next;
       return next;
     });
@@ -370,7 +478,9 @@ export function useBothesisChat({
         history,
         signal: controller.signal,
         onEvent: (event) => {
-          if (event.type === "message_delta") setStatus("streaming");
+          if (event.type === "message_delta" || event.type === "final_answer_delta") {
+            setStatus("streaming");
+          }
           updateAssistant(assistantId, event);
           if (event.type === "run_failed") setError(new Error(event.error));
         },
@@ -418,14 +528,12 @@ export function useBothesisChat({
   }, []);
   const clearError = useCallback(() => setError(null), []);
   const regenerate = useCallback(async ({ messageId: targetId }: { messageId?: string } = {}) => {
-    const current = messagesRef.current;
-    const targetIndex = targetId ? current.findIndex((message) => message.id === targetId) : current.length;
-    const user = current.slice(0, targetIndex).reverse().find((message) => message.role === "user");
-    if (!user) return;
-    const userText = messageText(user);
-    if (!userText) return;
-    setMessages(current.slice(0, current.indexOf(user) + 1));
-    await run(userText, false);
+    const context = regenerationContext(messagesRef.current, targetId);
+    if (!context) return;
+    await run(context.userText, false, {
+      historyMessages: context.historyMessages,
+      displayMessages: context.displayMessages,
+    });
   }, [run]);
 
   return { messages, sendMessage, regenerate, status, stop, error, clearError, isConfigured };
