@@ -678,7 +678,8 @@ a {
 }
 
 .sidebar-conversation-item:hover .sidebar-conversation-menu,
-.sidebar-conversation-item:focus-within .sidebar-conversation-menu {
+.sidebar-conversation-item:focus-within .sidebar-conversation-menu,
+.sidebar-conversation-menu:has(> button[aria-expanded="true"]) {
   opacity: 1;
 }
 
@@ -688,6 +689,89 @@ a {
   background: rgba(15, 23, 42, 0.065);
   color: var(--text);
   box-shadow: none;
+}
+
+.sidebar-popover--conversation {
+  min-width: 13rem;
+  padding: 0.375rem;
+  border: 0;
+  border-radius: 0.75rem;
+  background: var(--surface);
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.08);
+}
+
+.sidebar-popover--conversation .sidebar-popover__item {
+  min-height: 2.25rem;
+  justify-content: flex-start;
+  gap: 0.625rem;
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 450;
+}
+
+.sidebar-popover--conversation .sidebar-popover__item svg {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  stroke-width: 1.8;
+}
+
+.sidebar-popover--conversation .sidebar-popover__item:disabled {
+  background: transparent;
+  color: color-mix(in srgb, var(--text-muted) 55%, transparent);
+}
+
+.sidebar-popover--conversation .sidebar-popover__item:disabled svg {
+  color: color-mix(in srgb, var(--text-muted) 45%, transparent);
+}
+
+.sidebar-popover--conversation .sidebar-popover__item--delete {
+  margin-top: 0.25rem;
+  color: #dc2626;
+}
+
+.sidebar-popover--conversation .sidebar-popover__item--delete svg {
+  color: currentColor;
+}
+
+.sidebar-popover--conversation .sidebar-popover__item--delete:hover {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.conversation-action-dialog {
+  max-width: 25rem;
+  border: 0;
+  border-radius: 0.875rem;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.18);
+}
+
+.conversation-action-dialog__label {
+  display: block;
+  margin-bottom: 0.375rem;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.conversation-action-dialog__copy,
+.conversation-action-dialog__error {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.conversation-action-dialog__error {
+  margin-top: 0.625rem;
+  color: #b91c1c;
+}
+
+.conversation-action-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
 }
 
 .sidebar-list__empty {

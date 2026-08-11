@@ -4,6 +4,7 @@ export interface ChatConversation {
   id: string;
   sessionId: string;
   title: string;
+  titleSource?: "generated" | "custom";
   createdAt: number;
   updatedAt: number;
 }

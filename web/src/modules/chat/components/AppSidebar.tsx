@@ -1,21 +1,21 @@
 "use client";
 
 import clsx from "clsx";
-import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
-  LoaderCircle,
   MessageSquare,
-  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   Search,
-  Trash2,
   UserCircle,
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { Button } from "@/components/ui/Button";
+import { Dialog } from "@/components/ui/Dialog";
 import { Dropdown, DropdownItem } from "@/components/ui/Dropdown";
+import { Input } from "@/components/ui/Input";
 import { appBrand } from "@/lib/brand";
 import {
   sidebarNavigationItems,
@@ -23,6 +23,7 @@ import {
   type SidebarNavigationItem,
 } from "@/modules/chat/sidebar-navigation";
 import type { ChatConversation } from "@/modules/chat/types";
+import { ConversationActionsMenu } from "./ConversationActionsMenu";
 
 export function BothesisMark({
   className,
@@ -69,6 +70,7 @@ interface AppSidebarProps {
   onCloseMobile: () => void;
   onNewChat: () => void;
   onSelectConversation: (id: string) => void;
+  onRenameConversation: (id: string, title: string) => void | Promise<void>;
   onDeleteConversation: (id: string) => void | Promise<void>;
 }
 
@@ -82,6 +84,7 @@ export function AppSidebar({
   onCloseMobile,
   onNewChat,
   onSelectConversation,
+  onRenameConversation,
   onDeleteConversation,
 }: AppSidebarProps) {
   const isCollapsed = collapsed && !mobileOpen;
@@ -154,9 +157,8 @@ export function AppSidebar({
           onSelectConversation(id);
           onCloseMobile();
         }}
-        onDelete={(id) => {
-          onDeleteConversation(id);
-        }}
+        onRename={onRenameConversation}
+        onDelete={onDeleteConversation}
       />
 
       <SidebarFooter collapsed={isCollapsed} />
@@ -385,6 +387,7 @@ function RecentChatList({
   activeId,
   isLoading,
   onSelect,
+  onRename,
   onDelete,
 }: {
   query: string;
@@ -393,9 +396,17 @@ function RecentChatList({
   activeId: string | null;
   isLoading: boolean;
   onSelect: (id: string) => void;
+  onRename: (id: string, title: string) => void | Promise<void>;
   onDelete: (id: string) => void | Promise<void>;
 }) {
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+  const [renameTarget, setRenameTarget] = useState<ChatConversation | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ChatConversation | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [savingRename, setSavingRename] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
   const groupedConversations = useMemo(
     () => groupConversations(conversations, query),
     [conversations, query]
@@ -403,9 +414,16 @@ function RecentChatList({
   const hasConversations = conversations.length > 0;
   const hasResults = groupedConversations.some((group) => group.items.length > 0);
 
+  useEffect(() => {
+    setOpenMenuId(null);
+  }, [collapsed, query]);
+
   return (
     <div className="sidebar-list">
-      <div className="sidebar-list__scroll">
+      <div
+        className="sidebar-list__scroll"
+        onScroll={() => setOpenMenuId(null)}
+      >
         {isLoading ? (
           collapsed ? null : <SkeletonRows />
         ) : !hasConversations ? (
@@ -451,7 +469,10 @@ function RecentChatList({
                     >
                       <button
                         className="sidebar-conversation-btn"
-                        onClick={() => onSelect(conversation.id)}
+                        onClick={() => {
+                          setOpenMenuId(null);
+                          onSelect(conversation.id);
+                        }}
                         aria-current={conversation.id === activeId ? "page" : undefined}
                         aria-label={collapsed ? displayTitle : undefined}
                         title={displayTitle}
@@ -466,38 +487,27 @@ function RecentChatList({
                         )}
                       </button>
                       {!collapsed && (
-                        <Dropdown
-                          ariaLabel={`Actions for ${displayTitle}`}
-                          buttonClassName="sidebar-conversation-menu__trigger"
-                          className="sidebar-conversation-menu"
-                          label={isDeleting
-                            ? <LoaderCircle aria-hidden="true" className="spin" size={14} />
-                            : <MoreHorizontal aria-hidden="true" size={15} />}
-                          menuClassName="sidebar-popover sidebar-popover--conversation"
-                          showChevron={false}
-                        >
-                          <DropdownItem
-                            className="sidebar-popover__item"
-                            destructive
-                            disabled={isDeleting}
-                            onClick={async () => {
-                              if (isDeleting) return;
-                              setDeletingIds((current) => new Set(current).add(conversation.id));
-                              try {
-                                await onDelete(conversation.id);
-                              } finally {
-                                setDeletingIds((current) => {
-                                  const next = new Set(current);
-                                  next.delete(conversation.id);
-                                  return next;
-                                });
-                              }
-                            }}
-                          >
-                            <Trash2 aria-hidden="true" size={14} />
-                            <span>Delete</span>
-                          </DropdownItem>
-                        </Dropdown>
+                        <ConversationActionsMenu
+                          conversationTitle={displayTitle}
+                          deleting={isDeleting}
+                          onDelete={() => {
+                            setOpenMenuId(null);
+                            setActionError(null);
+                            setDeleteTarget(conversation);
+                          }}
+                          onOpenChange={(open) => {
+                            setOpenMenuId((current) => open
+                              ? conversation.id
+                              : current === conversation.id ? null : current);
+                          }}
+                          onRename={() => {
+                            setOpenMenuId(null);
+                            setActionError(null);
+                            setRenameTarget(conversation);
+                            setRenameValue(conversation.title);
+                          }}
+                          open={openMenuId === conversation.id}
+                        />
                       )}
                     </div>
                   );
@@ -507,6 +517,107 @@ function RecentChatList({
           })
         )}
       </div>
+
+      <Dialog
+        className="conversation-action-dialog"
+        initialFocusRef={renameInputRef}
+        onClose={() => {
+          if (!savingRename) setRenameTarget(null);
+        }}
+        open={Boolean(renameTarget)}
+        title="Rename conversation"
+      >
+        <form
+          id="rename-conversation-form"
+          onSubmit={async (event: FormEvent<HTMLFormElement>) => {
+            event.preventDefault();
+            const nextTitle = renameValue.replace(/\s+/g, " ").trim();
+            if (!renameTarget || !nextTitle || savingRename) return;
+            setSavingRename(true);
+            setActionError(null);
+            try {
+              await onRename(renameTarget.id, nextTitle);
+              setRenameTarget(null);
+            } catch {
+              setActionError("Could not rename this conversation.");
+            } finally {
+              setSavingRename(false);
+            }
+          }}
+        >
+          <label className="conversation-action-dialog__label" htmlFor="conversation-title">
+            Name
+          </label>
+          <Input
+            autoComplete="off"
+            id="conversation-title"
+            maxLength={120}
+            onChange={(event) => setRenameValue(event.target.value)}
+            ref={renameInputRef}
+            value={renameValue}
+          />
+          {actionError && <p className="conversation-action-dialog__error" role="alert">{actionError}</p>}
+          <div className="conversation-action-dialog__actions">
+            <Button disabled={savingRename} onClick={() => setRenameTarget(null)} variant="ghost">
+              Cancel
+            </Button>
+            <Button
+              disabled={!renameValue.trim()}
+              loading={savingRename}
+              type="submit"
+            >
+              Save
+            </Button>
+          </div>
+        </form>
+      </Dialog>
+
+      <Dialog
+        className="conversation-action-dialog"
+        onClose={() => {
+          if (!deleteTarget || !deletingIds.has(deleteTarget.id)) setDeleteTarget(null);
+        }}
+        open={Boolean(deleteTarget)}
+        title="Delete conversation?"
+      >
+        <p className="conversation-action-dialog__copy">
+          This will permanently remove “{deleteTarget?.title}” and its locally stored messages.
+        </p>
+        {actionError && <p className="conversation-action-dialog__error" role="alert">{actionError}</p>}
+        <div className="conversation-action-dialog__actions">
+          <Button
+            disabled={Boolean(deleteTarget && deletingIds.has(deleteTarget.id))}
+            onClick={() => setDeleteTarget(null)}
+            variant="ghost"
+          >
+            Cancel
+          </Button>
+          <Button
+            loading={Boolean(deleteTarget && deletingIds.has(deleteTarget.id))}
+            onClick={async () => {
+              if (!deleteTarget || deletingIds.has(deleteTarget.id)) return;
+              const target = deleteTarget;
+              setDeletingIds((current) => new Set(current).add(target.id));
+              setActionError(null);
+              try {
+                await onDelete(target.id);
+                setDeleteTarget(null);
+              } catch {
+                setActionError("Could not delete this conversation.");
+              } finally {
+                setDeletingIds((current) => {
+                  const next = new Set(current);
+                  next.delete(target.id);
+                  return next;
+                });
+              }
+            }}
+            variant="danger"
+          >
+            Delete
+          </Button>
+        </div>
+      </Dialog>
     </div>
   );
 }

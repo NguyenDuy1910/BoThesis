@@ -2,7 +2,7 @@
 
 import { cn } from "@/lib/cn";
 import { ChevronDown } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 interface DropdownProps {
@@ -16,12 +16,14 @@ interface DropdownProps {
   menuClassName?: string;
   showChevron?: boolean;
   title?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  closeOnScroll?: boolean;
 }
 
 interface MenuPosition {
   top: number;
-  left?: number;
-  right?: number;
+  left: number;
   maxHeight: number;
   openUp: boolean;
 }
@@ -42,11 +44,23 @@ export function Dropdown({
   menuClassName,
   showChevron = true,
   title,
+  open: controlledOpen,
+  onOpenChange,
+  closeOnScroll = false,
 }: DropdownProps) {
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
   const [position, setPosition] = useState<MenuPosition | null>(null);
+  const open = controlledOpen ?? internalOpen;
+  const menuId = useId();
   const triggerRef = useRef<HTMLDivElement | null>(null);
+  const triggerButtonRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const initialFocusRef = useRef<"first" | "last">("first");
+
+  const setOpen = useCallback((nextOpen: boolean) => {
+    if (controlledOpen === undefined) setInternalOpen(nextOpen);
+    onOpenChange?.(nextOpen);
+  }, [controlledOpen, onOpenChange]);
 
   // Anchor the menu to the trigger in viewport coordinates so a portal-rendered
   // menu can never be clipped by an ancestor's overflow (tables, scroll panes).
@@ -57,15 +71,19 @@ export function Dropdown({
     const spaceBelow = window.innerHeight - rect.bottom;
     const spaceAbove = rect.top;
     const menuHeight = menuRef.current?.offsetHeight ?? 0;
+    const menuWidth = menuRef.current?.offsetWidth ?? 192;
     const openUp = menuHeight > 0 && spaceBelow < menuHeight + MENU_GAP && spaceAbove > spaceBelow;
     const available = (openUp ? spaceAbove : spaceBelow) - MENU_GAP - VIEWPORT_MARGIN;
+    const preferredLeft = align === "right" ? rect.right - menuWidth : rect.left;
     const next: MenuPosition = {
       top: openUp ? rect.top - MENU_GAP : rect.bottom + MENU_GAP,
+      left: Math.min(
+        Math.max(VIEWPORT_MARGIN, preferredLeft),
+        Math.max(VIEWPORT_MARGIN, window.innerWidth - menuWidth - VIEWPORT_MARGIN),
+      ),
       maxHeight: Math.max(120, available),
       openUp,
     };
-    if (align === "right") next.right = window.innerWidth - rect.right;
-    else next.left = rect.left;
     setPosition(next);
   }, [align]);
 
@@ -75,14 +93,27 @@ export function Dropdown({
       return;
     }
     computePosition();
-    const reposition = () => computePosition();
-    window.addEventListener("scroll", reposition, true);
-    window.addEventListener("resize", reposition);
-    return () => {
-      window.removeEventListener("scroll", reposition, true);
-      window.removeEventListener("resize", reposition);
+    const handleScroll = () => {
+      if (closeOnScroll) setOpen(false);
+      else computePosition();
     };
-  }, [open, computePosition]);
+    window.addEventListener("scroll", handleScroll, true);
+    window.addEventListener("resize", computePosition);
+    return () => {
+      window.removeEventListener("scroll", handleScroll, true);
+      window.removeEventListener("resize", computePosition);
+    };
+  }, [closeOnScroll, computePosition, open, setOpen]);
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => {
+      const items = enabledMenuItems(menuRef.current);
+      const target = initialFocusRef.current === "last" ? items.at(-1) : items[0];
+      target?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -94,7 +125,11 @@ export function Dropdown({
       setOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+        triggerButtonRef.current?.focus();
+      }
     };
 
     document.addEventListener("pointerdown", onPointerDown, true);
@@ -103,14 +138,13 @@ export function Dropdown({
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [open]);
+  }, [open, setOpen]);
 
   const menuStyle: React.CSSProperties = position
     ? {
         position: "fixed",
         top: position.top,
         left: position.left,
-        right: position.right,
         maxHeight: position.maxHeight,
         transform: position.openUp ? "translateY(-100%)" : undefined,
         visibility: "visible",
@@ -120,13 +154,24 @@ export function Dropdown({
   return (
     <div ref={triggerRef} className={cn("relative inline-flex", className)}>
       <button
+        ref={triggerButtonRef}
         type="button"
         disabled={disabled}
         aria-label={ariaLabel}
+        aria-controls={open ? menuId : undefined}
         aria-expanded={open}
         aria-haspopup="menu"
         title={title}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          initialFocusRef.current = "first";
+          setOpen(!open);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          event.preventDefault();
+          initialFocusRef.current = event.key === "ArrowUp" ? "last" : "first";
+          setOpen(true);
+        }}
         className={cn(
           "inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/25 disabled:pointer-events-none disabled:bg-slate-100 disabled:text-slate-400",
           buttonClassName
@@ -139,12 +184,17 @@ export function Dropdown({
         typeof document !== "undefined" &&
         createPortal(
           <div
+            id={menuId}
             ref={menuRef}
             role="menu"
             onClick={(event) => {
               if ((event.target as HTMLElement).closest('[role="menuitem"]')) {
                 setOpen(false);
               }
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Tab") setOpen(false);
+              else handleMenuKeyDown(event, menuRef.current);
             }}
             style={menuStyle}
             className={cn(
@@ -158,6 +208,33 @@ export function Dropdown({
         )}
     </div>
   );
+}
+
+function enabledMenuItems(menu: HTMLDivElement | null) {
+  if (!menu) return [];
+  return Array.from(
+    menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'),
+  );
+}
+
+function handleMenuKeyDown(
+  event: React.KeyboardEvent<HTMLDivElement>,
+  menu: HTMLDivElement | null,
+) {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const items = enabledMenuItems(menu);
+  if (!items.length) return;
+  event.preventDefault();
+  const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+  if (event.key === "Home") items[0]?.focus();
+  else if (event.key === "End") items.at(-1)?.focus();
+  else {
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    const nextIndex = currentIndex < 0
+      ? delta > 0 ? 0 : items.length - 1
+      : (currentIndex + delta + items.length) % items.length;
+    items[nextIndex]?.focus();
+  }
 }
 
 interface DropdownItemProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {

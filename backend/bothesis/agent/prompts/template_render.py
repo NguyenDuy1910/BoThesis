@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from functools import lru_cache
@@ -30,7 +31,7 @@ def load_prompt(name: str) -> str:
 
 
 def render_prompt(name: str, /, **values: object) -> str:
-    """Render XML-safe runtime values without embedding instructions in Python."""
+    """Render typed runtime values without double-encoding structured JSON."""
 
     template = load_prompt(name)
     expected = set(_VARIABLE_PATTERN.findall(template))
@@ -43,9 +44,34 @@ def render_prompt(name: str, /, **values: object) -> str:
         raise PromptRenderError(f"unexpected prompt values: {names}")
 
     def replace(match: re.Match[str]) -> str:
-        return escape(str(values[match.group(1)]), entities={'"': "&quot;"})
+        variable = match.group(1)
+        return _render_value(variable, values[variable])
 
     return _VARIABLE_PATTERN.sub(replace, template)
+
+
+def _render_value(variable: str, value: object) -> str:
+    if isinstance(value, str):
+        # Prompt values are element text, not XML attributes, so quotes do not
+        # need entity encoding. Escaping tag delimiters keeps the XML boundary.
+        return escape(value)
+    try:
+        serialized = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise PromptRenderError(
+            f"prompt value is not JSON serializable: {variable}"
+        ) from exc
+    # Keep the rendered value valid JSON while preventing nested data from
+    # closing or opening prompt XML elements. json.loads restores the original.
+    return (
+        serialized.replace("&", r"\u0026")
+        .replace("<", r"\u003c")
+        .replace(">", r"\u003e")
+    )
 
 
 def render_chat_base(*, current_datetime: str | None = None) -> str:

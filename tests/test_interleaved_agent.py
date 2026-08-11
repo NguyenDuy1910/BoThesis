@@ -407,17 +407,30 @@ async def test_interleaved_completion_records_typed_execution_mode() -> None:
 @pytest.mark.asyncio
 async def test_planned_steps_run_in_parallel_without_unnecessary_critic() -> None:
     transport = ScriptedTransport(
-        completions=[plan(step("step_1", "annual leave"), step("step_2", "sick leave"))],
+        completions=[
+            plan(
+                step("step_1", "annual leave eligibility"),
+                step("step_2", "annual leave entitlement"),
+                step("step_3", "annual leave exceptions"),
+            )
+        ],
         streams=[[TextDelta("Comparison complete."), TurnDone("stop")]],
     )
     loop, tool = make_loop(transport, SearchTool(delay=0.01))
 
-    events = await collect(loop, "Compare the annual and sick leave policies")
+    events = await collect(loop, "Explain the annual leave policy")
 
-    assert tool.max_active == 2
+    assert tool.max_active == 3
+    assert set(tool.calls) == {
+        "annual leave eligibility",
+        "annual leave entitlement",
+        "annual leave exceptions",
+    }
     assert len(transport.complete_requests) == 1
-    assert sum(isinstance(event, InterleavedToolStarted) for event in events) == 2
-    assert sum(isinstance(event, IntermediateFindingDelta) for event in events) == 2
+    planner_prompt = transport.complete_requests[0][-1]["content"]
+    assert "<retrieval_query_count>3</retrieval_query_count>" in planner_prompt
+    assert sum(isinstance(event, InterleavedToolStarted) for event in events) == 3
+    assert sum(isinstance(event, IntermediateFindingDelta) for event in events) == 3
     assert isinstance(events[-1], RunCompleted)
 
 

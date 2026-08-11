@@ -20,19 +20,20 @@ class ConversationWindow:
         return (*self.older_messages, *self.recent_messages)
 
     def older_json(self) -> str:
-        return _messages_json(self.older_messages)
+        return _compact_json(self.older_payload())
+
+    def older_payload(self) -> list[dict[str, str]]:
+        return _message_payload(self.older_messages)
 
     def context_json(self, *, summary: str | None = None) -> str:
+        return _compact_json(self.context_payload(summary=summary))
+
+    def context_payload(self, *, summary: str | None = None) -> dict[str, object]:
         messages = self.recent_messages if summary is not None else self.messages
-        return _compact_json(
-            {
-                "older_summary": summary,
-                "messages": [
-                    {"role": message.role, "content": message.content}
-                    for message in messages
-                ],
-            }
-        )
+        return {
+            "older_summary": summary,
+            "messages": _message_payload(messages),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,12 +111,16 @@ class ConversationContextPolicy:
 
 
 def _messages_json(messages: tuple[ConversationMessage, ...]) -> str:
-    return _compact_json(
-        [
-            {"role": message.role, "content": message.content}
-            for message in messages
-        ]
-    )
+    return _compact_json(_message_payload(messages))
+
+
+def _message_payload(
+    messages: tuple[ConversationMessage, ...],
+) -> list[dict[str, str]]:
+    return [
+        {"role": message.role, "content": message.content}
+        for message in messages
+    ]
 
 
 def _compact_json(value: object) -> str:

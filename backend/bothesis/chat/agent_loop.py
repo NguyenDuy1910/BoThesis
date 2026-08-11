@@ -70,6 +70,7 @@ from bothesis.observability import AgentRunTrace, LangfuseTracing
 
 ModelMessage = dict[str, Any]
 _MAX_PUBLIC_REASONING_CHARACTERS = 360
+_MAX_PARALLEL_RETRIEVAL_QUERIES = 3
 
 
 class AgentExecutionError(RuntimeError):
@@ -99,7 +100,7 @@ class PreparedConversation:
     """Canonical context rendered consistently for routing and answering."""
 
     messages: list[ModelMessage]
-    capability_context: str
+    capability_context: dict[str, object]
 
 
 class AgentLoop:
@@ -123,7 +124,7 @@ class AgentLoop:
         max_tool_context_characters: int = 12_000,
         max_user_message_characters: int = 4_000,
         tool_timeout_seconds: float = 8.0,
-        enable_interleaved: bool = False,
+        enable_interleaved: bool = True,
         tracing: LangfuseTracing | None = None,
     ) -> None:
         if max_model_turns < 1:
@@ -305,11 +306,12 @@ class AgentLoop:
     async def _create_plan(
         self,
         user_message: str,
-        conversation_context: str,
+        conversation_context: dict[str, object],
         ctx: AgentContext,
         state: KnowledgeAgentState,
     ) -> AgentPlan:
         state.step += 1
+        maximum_steps = min(self._max_tool_calls, 6)
         try:
             result = await self._capabilities.structured(
                 "agent_plan",
@@ -317,12 +319,12 @@ class AgentLoop:
                 values={
                     "conversation_context": conversation_context,
                     "request": user_message,
-                    "available_tools": json.dumps(
-                        self._registry.schemas(),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
+                    "available_tools": self._registry.schemas(),
+                    "maximum_steps": maximum_steps,
+                    "retrieval_query_count": min(
+                        _MAX_PARALLEL_RETRIEVAL_QUERIES,
+                        maximum_steps,
                     ),
-                    "maximum_steps": min(self._max_tool_calls, 6),
                 },
                 ctx=ctx,
                 step=state.step,
@@ -648,16 +650,8 @@ class AgentLoop:
                     "step": step.title,
                     "success_criteria": step.success_criteria,
                     "tool_name": step.tool_name,
-                    "arguments": json.dumps(
-                        step.arguments,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    "outcome": json.dumps(
-                        outcome,
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
+                    "arguments": step.arguments,
+                    "outcome": outcome,
                 },
                 ctx=ctx,
                 step=state.step,
@@ -849,7 +843,7 @@ class AgentLoop:
         summary: str | None = None
         if self._conversation_context.needs_compression(window):
             summary = await self._compress_history(
-                conversation=window.older_json(),
+                conversation=window.older_payload(),
                 current_query=user_message,
                 ctx=ctx,
                 state=state,
@@ -875,13 +869,13 @@ class AgentLoop:
         messages.append({"role": "user", "content": user_message})
         return PreparedConversation(
             messages=messages,
-            capability_context=window.context_json(summary=summary),
+            capability_context=window.context_payload(summary=summary),
         )
 
     async def _compress_history(
         self,
         *,
-        conversation: str,
+        conversation: list[dict[str, str]],
         current_query: str,
         ctx: AgentContext,
         state: KnowledgeAgentState,

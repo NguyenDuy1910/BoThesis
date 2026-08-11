@@ -119,6 +119,14 @@ export default function ChatShell() {
     await refresh(id === activeId ? undefined : activeId);
   }, [activeId, refresh]);
 
+  const renameConversation = useCallback(async (id: string, title: string) => {
+    await conversationAdapter.updateConversation(id, {
+      title,
+      titleSource: "custom",
+    });
+    await refresh(activeId);
+  }, [activeId, refresh]);
+
   const saveMessages = useCallback(async (conversationId: string, messages: ChatMessage[]) => {
     const firstUserMessage = messages.find((message) => message.role === "user");
     if (!firstUserMessage) return;
@@ -135,9 +143,15 @@ export default function ChatShell() {
       persistedId,
       messages.map(uiToCachedMessage),
     );
-    await conversationAdapter.updateConversation(persistedId, {
-      title: titleFromMessage(getMessageText(firstUserMessage)),
-    });
+    const existingConversation = conversations.find(
+      (conversation) => conversation.id === persistedId,
+    );
+    if (existingConversation?.titleSource !== "custom") {
+      await conversationAdapter.updateConversation(persistedId, {
+        title: titleFromMessage(getMessageText(firstUserMessage)),
+        titleSource: "generated",
+      });
+    }
     await refresh(persistedId);
   }, [conversations, refresh]);
 
@@ -152,6 +166,7 @@ export default function ChatShell() {
         onCloseMobile={sidebar.closeMobile}
         onDeleteConversation={deleteConversation}
         onNewChat={startNewChat}
+        onRenameConversation={renameConversation}
         onSelectConversation={(id) => void selectConversation(id)}
         onToggleCollapse={sidebar.toggleCollapse}
       />

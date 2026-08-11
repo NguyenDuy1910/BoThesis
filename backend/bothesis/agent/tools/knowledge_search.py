@@ -25,7 +25,11 @@ class KnowledgeSearchTool(AgentTool):
         "properties": {
             "query": {
                 "type": "string",
-                "description": "A focused search query using the user's key terms.",
+                "description": (
+                    "A focused standalone query that preserves the user's exact "
+                    "entities, identifiers, dates, and constraints and complements "
+                    "other parallel retrieval queries."
+                ),
                 "minLength": 1,
                 "maxLength": 512,
             }

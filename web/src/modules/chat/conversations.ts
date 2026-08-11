@@ -1,11 +1,11 @@
 "use client";
 
-import {
-  type CachedChatMessage,
-  type ChatMessage,
-  type ChatMessagePart,
-  type ChatConversation,
-} from "@/modules/chat/types";
+import type {
+  CachedChatMessage,
+  ChatMessage,
+  ChatMessagePart,
+  ChatConversation,
+} from "./types";
 
 const CONVERSATIONS_KEY_BASE = "bothesis-conversations";
 const MESSAGE_PREFIX_BASE = "bothesis-messages:";
@@ -48,7 +48,7 @@ export interface ConversationAdapter {
   updateConversation(
     id: string,
     patch: Partial<
-      Pick<ChatConversation, "title" | "updatedAt">
+      Pick<ChatConversation, "title" | "titleSource" | "updatedAt">
     >
   ): Promise<ChatConversation | null>;
   deleteConversation(id: string): Promise<void>;
@@ -188,6 +188,7 @@ export const conversationAdapter: ConversationAdapter = {
       id,
       sessionId,
       title,
+      titleSource: "generated",
       createdAt: now,
       updatedAt: now,
     };

@@ -60,12 +60,32 @@ class AgentPlan(_CapabilityModel):
                 "knowledge retrieval decision must match the planned tools"
             )
         seen: set[str] = set()
+        retrieval_queries: set[str] = set()
+        retrieval_steps = [
+            step for step in self.steps if step.tool_name == "knowledge_search"
+        ]
         for step in self.steps:
             if step.id in seen:
                 raise ValueError("plan step IDs must be unique")
             if any(dependency not in seen for dependency in step.depends_on):
                 raise ValueError("plan dependencies must refer to earlier steps")
+            if step.tool_name == "knowledge_search":
+                query = step.arguments.get("query")
+                if not isinstance(query, str) or not query.strip():
+                    raise ValueError(
+                        "knowledge retrieval steps require a non-empty query"
+                    )
+                normalized_query = " ".join(query.split()).casefold()
+                if normalized_query in retrieval_queries:
+                    raise ValueError("knowledge retrieval queries must be unique")
+                retrieval_queries.add(normalized_query)
             seen.add(step.id)
+        if len(retrieval_steps) > 1 and any(
+            step.depends_on for step in retrieval_steps
+        ):
+            raise ValueError(
+                "expanded knowledge retrieval steps must be independent"
+            )
         return self
 
 
