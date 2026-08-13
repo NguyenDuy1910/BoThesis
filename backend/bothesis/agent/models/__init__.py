@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from collections.abc import Mapping
 from typing import Any, ClassVar, Literal, TypeAlias
 
 
@@ -62,6 +63,22 @@ class ConversationMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationAttachment:
+    """Server-validated attachment context available to one model run."""
+
+    id: str
+    title: str
+    content_type: str
+    mode: Literal["direct", "indexed", "lazy"]
+    citation_id: str
+    content_block: Mapping[str, Any] | None = None
+    extracted_text: str | None = None
+    evidence: tuple[Evidence, ...] = ()
+    provider_annotations: tuple[Mapping[str, Any], ...] = ()
+    background_index: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class AgentContext:
     """The authenticated scope for a single agent request."""
 
@@ -74,6 +91,8 @@ class AgentContext:
     trace_step: int | None = None
     retrieval_round: int = 0
     retrieval_query_count: int = 0
+    attachments: tuple[ConversationAttachment, ...] = ()
+    model_extra_body: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +130,7 @@ class ModelTurn:
     finish_reason: str | None
     model: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
+    annotations: list[dict[str, Any]] = field(default_factory=list)
 
 
 # Internal transport stream events. These are never sent directly to clients.
@@ -142,6 +162,7 @@ class TurnDone:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     model: str | None = None
     usage: dict[str, int] = field(default_factory=dict)
+    annotations: list[dict[str, Any]] = field(default_factory=list)
 
 
 # SSE events. ``type`` is deliberately a class variable; the HTTP layer adds
@@ -266,6 +287,7 @@ class RunCompleted(StreamEvent):
     model_duration_ms: int | None = None
     tool_duration_ms: int | None = None
     tool_call_count: int | None = None
+    provider_annotations: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +312,16 @@ class IntermediateFindingDelta(StreamEvent):
 class FinalAnswerDelta(StreamEvent):
     type: ClassVar[str] = "final_answer_delta"
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class AttachmentProgress(StreamEvent):
+    type: ClassVar[str] = "attachment_progress"
+    attachment_id: str
+    file_name: str
+    status: Literal["preparing", "ready", "indexing", "skipped", "failed"]
+    mode: Literal["direct", "indexed", "lazy"]
+    message: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +370,7 @@ AgentEvent: TypeAlias = (
     | FinalAnswerDelta
     | InterleavedToolStarted
     | InterleavedToolCompleted
+    | AttachmentProgress
 )
 
 __all__ = [
@@ -347,11 +380,13 @@ __all__ = [
     "CitationAvailable",
     "CitationEvent",
     "CommentaryDelta",
+    "ConversationAttachment",
     "ConversationMessage",
     "Evidence",
     "EvidenceReference",
     "ExecutionMode",
     "FinalAnswerDelta",
+    "AttachmentProgress",
     "GenerationCompleted",
     "GenerationKind",
     "GenerationStarted",

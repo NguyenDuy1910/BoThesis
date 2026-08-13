@@ -40,6 +40,23 @@ class StubRetriever:
         return self.documents
 
 
+class ScopedStubRetriever(StubRetriever):
+    def __init__(self, documents: list[RetrievedDocument]) -> None:
+        super().__init__(documents)
+        self.contexts: list[AgentContext] = []
+
+    async def search_scoped(
+        self,
+        query: str,
+        *,
+        limit: int,
+        ctx: AgentContext,
+    ) -> list[RetrievedDocument]:
+        self.calls.append((query, limit))
+        self.contexts.append(ctx)
+        return self.documents
+
+
 class FailingRetriever:
     async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
         raise RuntimeError("Qdrant unavailable")
@@ -152,6 +169,19 @@ async def test_knowledge_search_returns_bounded_evidence_and_source_metadata() -
     assert evidence.source == "confluence"
     assert evidence.uri == "https://knowledge.example/leave-policy"
     assert evidence.section == "Annual leave"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_search_prefers_permission_scoped_retrieval() -> None:
+    retriever = ScopedStubRetriever([DOCUMENT])
+
+    result = await KnowledgeSearchTool(retriever).execute(
+        {"query": "annual leave"},
+        CONTEXT,
+    )
+
+    assert result.error is None
+    assert retriever.contexts == [CONTEXT]
 
 
 @pytest.mark.asyncio

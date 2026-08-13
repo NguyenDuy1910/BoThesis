@@ -8,7 +8,11 @@ from time import perf_counter
 
 from bothesis.agent.models import AgentContext, Evidence, ToolResult
 from bothesis.agent.tools import AgentTool
-from bothesis.knowledge.document_index import KnowledgeRetriever, RetrievedDocument
+from bothesis.knowledge.document_index import (
+    KnowledgeRetriever,
+    RetrievedDocument,
+    ScopedKnowledgeRetriever,
+)
 from bothesis.observability import LangfuseTracing
 
 
@@ -101,8 +105,20 @@ class KnowledgeSearchTool(AgentTool):
         )
         with trace_context as retrieval_trace:
             try:
+                retrieval = (
+                    self._retriever.search_scoped(
+                        normalized_query,
+                        limit=self._result_limit,
+                        ctx=ctx,
+                    )
+                    if isinstance(self._retriever, ScopedKnowledgeRetriever)
+                    else self._retriever.search(
+                        normalized_query,
+                        limit=self._result_limit,
+                    )
+                )
                 documents = await asyncio.wait_for(
-                    self._retriever.search(normalized_query, limit=self._result_limit),
+                    retrieval,
                     timeout=self._timeout_seconds,
                 )
             except TimeoutError:

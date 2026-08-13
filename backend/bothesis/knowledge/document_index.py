@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
+from bothesis.agent.models import AgentContext
 from bothesis.document_index.vector_store import VectorStore
 
 
@@ -28,6 +29,20 @@ class KnowledgeRetriever(Protocol):
 
     async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
         """Return the most relevant indexed document chunks for a query."""
+
+
+@runtime_checkable
+class ScopedKnowledgeRetriever(Protocol):
+    """Retrieval boundary that enforces the authenticated agent scope."""
+
+    async def search_scoped(
+        self,
+        query: str,
+        *,
+        limit: int,
+        ctx: AgentContext,
+    ) -> list[RetrievedDocument]:
+        """Return only documents visible to the supplied agent context."""
 
 
 class QueryEmbedder(Protocol):
@@ -65,6 +80,31 @@ class QdrantSemanticRetriever:
         self._embedder = embedder
 
     async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
+        """Compatibility search; callers handling private data use search_scoped."""
+
+        return await self._search(query, limit=limit, query_filter=None)
+
+    async def search_scoped(
+        self,
+        query: str,
+        *,
+        limit: int,
+        ctx: AgentContext,
+    ) -> list[RetrievedDocument]:
+        access = _retrieval_access(ctx)
+        query_filter = self._store.build_retrieval_filter(
+            None,
+            access_context=access,
+        )
+        return await self._search(query, limit=limit, query_filter=query_filter)
+
+    async def _search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        query_filter: object | None,
+    ) -> list[RetrievedDocument]:
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("query must not be empty")
@@ -74,10 +114,34 @@ class QdrantSemanticRetriever:
         query_vector = await self._embedder.embed_query(normalized_query)
         points = await self._store.semantic_search(
             query_vector,
-            query_filter=None,
+            query_filter=query_filter,
             limit=limit,
         )
         return _normalise_points(points)
+
+
+@dataclass(frozen=True, slots=True)
+class _RetrievalAccess:
+    tenant_id: str
+    reader_ids: tuple[str, ...]
+    space_keys: tuple[str, ...] = ()
+    is_admin: bool = False
+
+
+def _retrieval_access(ctx: AgentContext) -> _RetrievalAccess:
+    user = ctx.user_id.strip().lower()
+    reader_ids = {"public", user}
+    if "@" in user:
+        reader_ids.add(f"email:{user}")
+    reader_ids.update(
+        f"external_group:{role.strip().lower()}"
+        for role in ctx.roles
+        if role.strip()
+    )
+    return _RetrievalAccess(
+        tenant_id=ctx.tenant_id,
+        reader_ids=tuple(sorted(reader_ids)),
+    )
 
 
 def _normalise_points(points: Sequence[object]) -> list[RetrievedDocument]:
@@ -136,4 +200,5 @@ __all__ = [
     "QdrantKeywordRetriever",
     "QdrantSemanticRetriever",
     "RetrievedDocument",
+    "ScopedKnowledgeRetriever",
 ]

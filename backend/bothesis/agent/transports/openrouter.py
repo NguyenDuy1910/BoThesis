@@ -169,6 +169,7 @@ class OpenRouterTransport(LLMTransport):
         finish_reason: str | None = None
         response_model: str | None = selected_model
         usage: dict[str, int] = {}
+        annotations: list[dict[str, Any]] = []
         try:
             async with self._client.stream(
                 "POST",
@@ -187,6 +188,7 @@ class OpenRouterTransport(LLMTransport):
                             tool_calls=_assembled_tool_calls(tool_calls),
                             model=response_model,
                             usage=usage,
+                            annotations=annotations,
                         )
                         return
                     try:
@@ -213,6 +215,7 @@ class OpenRouterTransport(LLMTransport):
                         continue
                     delta = choice.get("delta")
                     if isinstance(delta, Mapping):
+                        annotations.extend(_file_annotations(delta.get("annotations")))
                         for summary_delta in _reasoning_summary_deltas(
                             delta.get("reasoning_details")
                         ):
@@ -259,6 +262,11 @@ class OpenRouterTransport(LLMTransport):
                     raw_finish_reason = choice.get("finish_reason")
                     if raw_finish_reason is not None:
                         finish_reason = str(raw_finish_reason)
+                    message = choice.get("message")
+                    if isinstance(message, Mapping):
+                        annotations.extend(
+                            _file_annotations(message.get("annotations"))
+                        )
         except httpx.HTTPError as exc:
             raise LLMTransportError("OpenRouter stream request failed") from exc
 
@@ -267,6 +275,7 @@ class OpenRouterTransport(LLMTransport):
             tool_calls=_assembled_tool_calls(tool_calls),
             model=response_model,
             usage=usage,
+            annotations=annotations,
         )
 
     async def aclose(self) -> None:
@@ -329,3 +338,30 @@ def _reasoning_summary_deltas(raw_details: Any) -> list[str]:
         if isinstance(summary, str) and summary:
             summaries.append(summary)
     return summaries
+
+
+def _file_annotations(raw_annotations: Any) -> list[dict[str, Any]]:
+    """Keep provider file annotations for tenant-scoped reuse, not public SSE."""
+
+    if not isinstance(raw_annotations, list):
+        return []
+    annotations: list[dict[str, Any]] = []
+    for annotation in raw_annotations:
+        if not isinstance(annotation, Mapping) or annotation.get("type") != "file":
+            continue
+        file_value = annotation.get("file")
+        if not isinstance(file_value, Mapping):
+            continue
+        file_hash = file_value.get("hash")
+        content = file_value.get("content")
+        if not isinstance(file_hash, str) or not file_hash.strip():
+            continue
+        if not isinstance(content, list):
+            continue
+        annotations.append(
+            {
+                "type": "file",
+                "file": {str(key): value for key, value in file_value.items()},
+            }
+        )
+    return annotations

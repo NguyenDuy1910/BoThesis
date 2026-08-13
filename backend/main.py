@@ -16,6 +16,7 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Request,
     Response,
     UploadFile,
     status,
@@ -23,7 +24,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRouter
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from bothesis.health import HealthReport, HealthService
 
@@ -140,6 +141,57 @@ class ChatRequest(BaseModel):
     roles: list[str]
     conversation_id: str | None = None
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=24)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("attachment_ids")
+    @classmethod
+    def _unique_attachment_ids(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value or len(value) > 128 for value in normalized):
+            raise ValueError("attachment IDs must be non-empty and bounded")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("attachment IDs must be unique")
+        return normalized
+
+
+class AttachmentUploadStart(BaseModel):
+    file_name: str = Field(min_length=1, max_length=240)
+    content_type: str = Field(min_length=1, max_length=160)
+    size_bytes: int = Field(ge=1)
+    sha256: str = Field(pattern=r"^[A-Fa-f0-9]{64}$")
+    tenant_id: str = Field(min_length=1, max_length=256)
+    user_id: str = Field(min_length=1, max_length=256)
+    conversation_id: str = Field(min_length=1, max_length=256)
+
+
+class AttachmentScope(BaseModel):
+    tenant_id: str = Field(min_length=1, max_length=256)
+    user_id: str = Field(min_length=1, max_length=256)
+    conversation_id: str = Field(min_length=1, max_length=256)
+
+
+class PresignedUpload(BaseModel):
+    url: str
+    method: str
+    headers: dict[str, str]
+    expires_at: str
+
+
+class AttachmentMetadata(BaseModel):
+    id: str
+    file_name: str
+    content_type: str
+    size_bytes: int
+    mode: str
+    status: str
+    created_at: str
+
+
+class AttachmentUploadStartResponse(BaseModel):
+    upload_id: str | None = None
+    upload_required: bool
+    upload: PresignedUpload | None = None
+    attachment: AttachmentMetadata | None = None
 
 
 # --- Connectors ---
@@ -414,8 +466,10 @@ async def patch_user_permissions(
 # ---------------------------------------------------------------------------
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
+attachments_router = APIRouter(prefix="/attachments", tags=["attachments"])
 
 _agent_loop: Any | None = None
+_attachment_service: Any | None = None
 
 
 def _get_agent_loop() -> Any:
@@ -474,8 +528,154 @@ def _get_agent_loop() -> Any:
     return _agent_loop
 
 
+def _get_attachment_service() -> Any:
+    """Build attachment infrastructure only when an attachment path is used."""
+
+    global _attachment_service
+    if _attachment_service is None:
+        from bothesis.agent.transports.openrouter import OpenRouterTransport
+        from bothesis.agent.transports.openrouter_embeddings import (
+            OpenRouterEmbeddingClient,
+        )
+        from bothesis.chat.attachment_service import AttachmentService
+
+        openrouter_base_url = os.getenv(
+            "OPEN_ROUTER_BASE_URL",
+            OpenRouterTransport.DEFAULT_BASE_URL,
+        )
+        _attachment_service = AttachmentService.from_environment(
+            embedder=OpenRouterEmbeddingClient(base_url=openrouter_base_url)
+        )
+    return _attachment_service
+
+
+def _attachment_metadata(record: Any) -> AttachmentMetadata:
+    return AttachmentMetadata(
+        id=record.id,
+        file_name=record.file_name,
+        content_type=record.content_type,
+        size_bytes=record.size_bytes,
+        mode=record.mode.value,
+        status=record.status.value,
+        created_at=record.created_at.isoformat(),
+    )
+
+
+def _attachment_http_error(exc: Exception) -> HTTPException:
+    from bothesis.chat.attachment_repository import AttachmentAccessError
+    from bothesis.chat.attachment_service import AttachmentError
+    from bothesis.chat.attachment_storage import ObjectStorageError
+
+    if isinstance(exc, AttachmentAccessError):
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    if isinstance(exc, AttachmentError):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        )
+    if isinstance(exc, ObjectStorageError):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="attachment storage is temporarily unavailable",
+        )
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="attachment service is not configured",
+    )
+
+
+@attachments_router.post(
+    "/uploads",
+    response_model=AttachmentUploadStartResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def start_attachment_upload(
+    body: AttachmentUploadStart,
+) -> AttachmentUploadStartResponse:
+    """Create a direct-to-object-storage upload request or reuse cached content."""
+
+    try:
+        service = _get_attachment_service()
+        result = await service.start_upload(
+            tenant_id=body.tenant_id,
+            owner_user_id=body.user_id,
+            conversation_id=body.conversation_id,
+            file_name=body.file_name,
+            content_type=body.content_type,
+            size_bytes=body.size_bytes,
+            checksum=body.sha256,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise _attachment_http_error(exc) from exc
+    upload = result.request
+    return AttachmentUploadStartResponse(
+        upload_id=result.upload_id,
+        upload_required=result.upload_required,
+        upload=(
+            PresignedUpload(
+                url=upload.url,
+                method=upload.method,
+                headers=upload.headers,
+                expires_at=upload.expires_at.isoformat(),
+            )
+            if upload is not None
+            else None
+        ),
+        attachment=(
+            _attachment_metadata(result.attachment)
+            if result.attachment is not None
+            else None
+        ),
+    )
+
+
+@attachments_router.post(
+    "/uploads/{upload_id}/complete",
+    response_model=AttachmentMetadata,
+)
+async def complete_attachment_upload(
+    upload_id: str,
+    body: AttachmentScope,
+) -> AttachmentMetadata:
+    """Validate object metadata, then expose the attachment to the conversation."""
+
+    try:
+        record = await _get_attachment_service().complete_upload(
+            upload_id,
+            tenant_id=body.tenant_id,
+            owner_user_id=body.user_id,
+            conversation_id=body.conversation_id,
+        )
+    except (RuntimeError, ValueError, PermissionError) as exc:
+        raise _attachment_http_error(exc) from exc
+    return _attachment_metadata(record)
+
+
+@attachments_router.delete(
+    "/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def release_attachment(
+    attachment_id: str,
+    tenant_id: str = Query(min_length=1, max_length=256),
+    user_id: str = Query(min_length=1, max_length=256),
+    conversation_id: str = Query(min_length=1, max_length=256),
+) -> None:
+    try:
+        released = await _get_attachment_service().release_attachment(
+            attachment_id,
+            tenant_id=tenant_id,
+            owner_user_id=user_id,
+            conversation_id=conversation_id,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise _attachment_http_error(exc) from exc
+    if not released:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+
+
 @agent_router.post("/chat")
-async def chat_stream(body: ChatRequest) -> StreamingResponse:
+async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
     """Return the agent event stream as server-sent events."""
     from bothesis.agent.models import AgentContext, ConversationMessage
 
@@ -499,11 +699,37 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
             detail="agent service is not configured",
         ) from exc
 
+    message_processor: Any | None = None
+    if body.attachment_ids:
+        try:
+            from bothesis.chat.message_processing import MessageProcessor
+
+            message_processor = MessageProcessor(loop, _get_attachment_service())
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="attachment service is not configured",
+            ) from exc
+
     async def event_gen():
-        async for event in loop.run_stream(body.message, context):
-            event_data = _public_agent_event_data(event)
-            payload = {"type": event.type, **event_data}
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        stream = (
+            message_processor.run_stream(
+                body.message,
+                body.attachment_ids,
+                context,
+            )
+            if message_processor is not None
+            else loop.run_stream(body.message, context)
+        )
+        try:
+            async for event in stream:
+                if await request.is_disconnected():
+                    break
+                event_data = _public_agent_event_data(event)
+                payload = {"type": event.type, **event_data}
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        finally:
+            await stream.aclose()
 
     return StreamingResponse(
         event_gen(),
@@ -522,6 +748,7 @@ def _public_agent_event_data(event: object) -> dict[str, Any]:
     event_data.pop("request_id", None)
     event_data.pop("call_id", None)
     event_data.pop("arguments", None)
+    event_data.pop("provider_annotations", None)
     evidence = event_data.get("evidence")
     if isinstance(evidence, dict):
         evidence.pop("document_id", None)
@@ -842,6 +1069,7 @@ _PREFIX = "/api/v1"
 app.include_router(auth_router, prefix=_PREFIX)
 app.include_router(access_router, prefix=_PREFIX)
 app.include_router(agent_router, prefix=_PREFIX)
+app.include_router(attachments_router, prefix=_PREFIX)
 app.include_router(connectors_router, prefix=_PREFIX)
 app.include_router(documents_router, prefix=_PREFIX)
 app.include_router(crons_router, prefix=_PREFIX)

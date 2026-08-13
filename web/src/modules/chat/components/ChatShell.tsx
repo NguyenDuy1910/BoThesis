@@ -15,11 +15,16 @@ import {
   Send,
   Sparkles,
   Square,
+  X,
 } from "lucide-react";
 import { memo, type FormEvent, type MouseEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
+import {
+  releaseConversationAttachment,
+  uploadConversationAttachment,
+} from "@/modules/chat/api";
 import {
   cachedToUIMessage,
   conversationAdapter,
@@ -30,7 +35,12 @@ import {
 } from "@/modules/chat/conversations";
 import { useBothesisChat } from "@/modules/chat/hooks/useBothesisChat";
 import { useSidebarState } from "@/modules/chat/hooks/useSidebarState";
-import type { ChatConversation, ChatMessage, ChatMessagePart } from "@/modules/chat/types";
+import type {
+  ChatConversation,
+  ChatMessage,
+  ChatMessagePart,
+  ConversationAttachment,
+} from "@/modules/chat/types";
 import { AgentActivityPanel, AgentExecutionCard } from "./AgentExecutionCard";
 import { AppSidebar, BothesisMark } from "./AppSidebar";
 import { IncrementalMarkdown } from "./IncrementalMarkdown";
@@ -61,6 +71,15 @@ const suggestions = [
     icon: ListChecks,
   },
 ];
+
+interface ComposerAttachment {
+  key: string;
+  fileName: string;
+  sizeBytes: number;
+  progress: "hashing" | "uploading" | "validating" | "ready" | "failed";
+  attachment?: ConversationAttachment;
+  error?: string;
+}
 
 function createDraftConversationId() {
   return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -115,6 +134,17 @@ export default function ChatShell() {
   }, [refresh, sidebar]);
 
   const deleteConversation = useCallback(async (id: string) => {
+    const storedMessages = await conversationAdapter.getConversationMessages(id);
+    const attachmentIds = new Set(
+      storedMessages.flatMap((message) => message.parts.flatMap((part) => (
+        part.type === "data-attachment" ? [part.data.id] : []
+      ))),
+    );
+    await Promise.allSettled(
+      [...attachmentIds].map((attachmentId) => (
+        releaseConversationAttachment(attachmentId, id)
+      )),
+    );
     await conversationAdapter.deleteConversation(id);
     await refresh(id === activeId ? undefined : activeId);
   }, [activeId, refresh]);
@@ -204,6 +234,7 @@ function ChatConversation({
   onOpenSidebar: () => void;
 }) {
   const [input, setInput] = useState("");
+  const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [sourceFocus, setSourceFocus] = useState<{
     messageId: string;
     sourceId: string;
@@ -214,6 +245,7 @@ function ChatConversation({
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const messageStackRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const uploadControllersRef = useRef(new Map<string, AbortController>());
   const positionedTurnRef = useRef<string | null>(null);
   const didInitialScrollRef = useRef(false);
   const {
@@ -256,6 +288,14 @@ function ChatConversation({
   const hasMessageError = messages.some((message) => (
     message.parts.some((part) => part.type === "data-stream-error")
   ));
+  const isUploading = composerAttachments.some((item) => (
+    item.progress !== "ready" && item.progress !== "failed"
+  ));
+
+  useEffect(() => () => {
+    for (const controller of uploadControllersRef.current.values()) controller.abort();
+    uploadControllersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -315,12 +355,67 @@ function ChatConversation({
   }, [messages.length]);
 
   const submit = useCallback(async (value: string) => {
-    const text = value.trim();
-    if (!text || isStreaming || !isConfigured) return;
+    const readyAttachments = composerAttachments
+      .flatMap((item) => item.attachment ? [item.attachment] : []);
+    const text = value.trim() || (readyAttachments.length
+      ? "Please analyze the attached file."
+      : "");
+    if (!text || isUploading || isStreaming || !isConfigured) return;
     clearError();
     setInput("");
-    await sendMessage({ text });
-  }, [clearError, isConfigured, isStreaming, sendMessage]);
+    setComposerAttachments([]);
+    await sendMessage({ text, attachments: readyAttachments });
+  }, [
+    clearError,
+    composerAttachments,
+    isConfigured,
+    isStreaming,
+    isUploading,
+    sendMessage,
+  ]);
+
+  const selectAttachments = useCallback((files: FileList) => {
+    const availableSlots = Math.max(0, 12 - composerAttachments.length);
+    for (const file of Array.from(files).slice(0, availableSlots)) {
+      const key = `${file.name}:${file.size}:${file.lastModified}:${Math.random().toString(36).slice(2)}`;
+      const controller = new AbortController();
+      uploadControllersRef.current.set(key, controller);
+      setComposerAttachments((current) => [...current, {
+        key,
+        fileName: file.name,
+        sizeBytes: file.size,
+        progress: "hashing",
+      }]);
+      void uploadConversationAttachment(file, conversationId, {
+        signal: controller.signal,
+        onProgress: (progress) => setComposerAttachments((current) => (
+          current.map((item) => item.key === key ? { ...item, progress } : item)
+        )),
+      }).then((attachment) => {
+        setComposerAttachments((current) => current.map((item) => (
+          item.key === key ? { ...item, attachment, progress: "ready" } : item
+        )));
+      }).catch((cause) => {
+        if (controller.signal.aborted) return;
+        const message = cause instanceof Error ? cause.message : "Attachment upload failed.";
+        setComposerAttachments((current) => current.map((item) => (
+          item.key === key ? { ...item, error: message, progress: "failed" } : item
+        )));
+      }).finally(() => {
+        uploadControllersRef.current.delete(key);
+      });
+    }
+  }, [composerAttachments.length, conversationId]);
+
+  const removeAttachment = useCallback((key: string) => {
+    const item = composerAttachments.find((candidate) => candidate.key === key);
+    uploadControllersRef.current.get(key)?.abort();
+    uploadControllersRef.current.delete(key);
+    setComposerAttachments((current) => current.filter((candidate) => candidate.key !== key));
+    if (item?.attachment) {
+      void releaseConversationAttachment(item.attachment.id, conversationId);
+    }
+  }, [composerAttachments, conversationId]);
 
   const focusSource = useCallback((messageId: string, sourceId: string) => {
     setSelectedActivityMessageId(messageId);
@@ -408,10 +503,14 @@ function ChatConversation({
             </div>
           )}
           <ChatComposer
+            attachments={composerAttachments}
             input={input}
             isConfigured={isConfigured}
             isStreaming={isStreaming}
+            isUploading={isUploading}
             onChange={setInput}
+            onFiles={selectAttachments}
+            onRemoveAttachment={removeAttachment}
             onStop={stop}
             onSubmit={submit}
             textareaRef={textareaRef}
@@ -493,9 +592,29 @@ const MessageView = memo(function MessageView({
   const streamError = message.parts.find(
     (part): part is Extract<ChatMessagePart, { type: "data-stream-error" }> => part.type === "data-stream-error",
   );
+  const messageAttachments = message.parts
+    .filter((part): part is Extract<ChatMessagePart, { type: "data-attachment" }> => (
+      part.type === "data-attachment"
+    ));
 
   if (message.role === "user") {
-    return <div className="message-row user" data-chat-role="user"><div className="user-bubble">{text}</div></div>;
+    return (
+      <div className="message-row user" data-chat-role="user">
+        <div className="user-bubble">
+          {messageAttachments.length > 0 && (
+            <div className="message-attachments">
+              {messageAttachments.map((part) => (
+                <span className="message-attachment" key={part.data.id}>
+                  <FileSearch aria-hidden="true" size={13} />
+                  <span title={part.data.fileName}>{part.data.fileName}</span>
+                </span>
+              ))}
+            </div>
+          )}
+          {text && <span>{text}</span>}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -569,22 +688,31 @@ function handleCitationClick(
 }
 
 function ChatComposer({
+  attachments,
   input,
   isConfigured,
   isStreaming,
+  isUploading,
   onChange,
+  onFiles,
+  onRemoveAttachment,
   onStop,
   onSubmit,
   textareaRef,
 }: {
+  attachments: ComposerAttachment[];
   input: string;
   isConfigured: boolean;
   isStreaming: boolean;
+  isUploading: boolean;
   onChange: (value: string) => void;
+  onFiles: (files: FileList) => void;
+  onRemoveAttachment: (key: string) => void;
   onStop: () => void;
   onSubmit: (text: string) => Promise<void>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
 }) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     await onSubmit(input);
@@ -592,7 +720,52 @@ function ChatComposer({
   return (
     <div className="composer-wrap">
       <form className="composer" onSubmit={submit}>
-        <button aria-label="Attachments are not available" className="composer-tool" disabled title="Attachments are not available yet" type="button">
+        {attachments.length > 0 && (
+          <div className="composer-attachments">
+            {attachments.map((item) => (
+              <span
+                className={clsx(
+                  "composer-attachment",
+                  item.progress === "failed" && "composer-attachment--failed",
+                )}
+                key={item.key}
+                title={item.error ?? item.fileName}
+              >
+                {item.progress !== "ready" && item.progress !== "failed"
+                  ? <LoaderCircle aria-hidden="true" className="composer-attachment__spin" size={13} />
+                  : <FileSearch aria-hidden="true" size={13} />}
+                <span>{item.fileName}</span>
+                <small>{attachmentProgressLabel(item)}</small>
+                <button
+                  aria-label={`Remove ${item.fileName}`}
+                  onClick={() => onRemoveAttachment(item.key)}
+                  type="button"
+                >
+                  <X aria-hidden="true" size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <input
+          accept=".avif,.bmp,.csv,.docx,.gif,.htm,.html,.jpeg,.jpg,.json,.jsonl,.log,.markdown,.md,.pdf,.png,.pptx,.rst,.sql,.tif,.tiff,.tsv,.txt,.webp,.xlsx,.xml,.yaml,.yml"
+          hidden
+          multiple
+          onChange={(event) => {
+            if (event.target.files?.length) onFiles(event.target.files);
+            event.target.value = "";
+          }}
+          ref={fileInputRef}
+          type="file"
+        />
+        <button
+          aria-label="Attach files"
+          className="composer-tool"
+          disabled={isStreaming || !isConfigured || attachments.length >= 12}
+          onClick={() => fileInputRef.current?.click()}
+          title="Attach files"
+          type="button"
+        >
           <Plus size={15} />
         </button>
         <textarea
@@ -613,7 +786,11 @@ function ChatComposer({
         <button
           aria-label={isStreaming ? "Stop generating" : "Send message"}
           className={clsx("composer-send", isStreaming && "composer-send--stop")}
-          disabled={!isStreaming && (!input.trim() || !isConfigured)}
+          disabled={!isStreaming && (
+            isUploading
+            || (!input.trim() && !attachments.some((item) => item.progress === "ready"))
+            || !isConfigured
+          )}
           onClick={isStreaming ? onStop : undefined}
           type={isStreaming ? "button" : "submit"}
         >
@@ -622,6 +799,20 @@ function ChatComposer({
       </form>
     </div>
   );
+}
+
+function attachmentProgressLabel(item: ComposerAttachment) {
+  if (item.progress === "hashing") return "Checking";
+  if (item.progress === "uploading") return "Uploading";
+  if (item.progress === "validating") return "Validating";
+  if (item.progress === "failed") return "Failed";
+  return formatFileSize(item.sizeBytes);
+}
+
+function formatFileSize(sizeBytes: number) {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${Math.ceil(sizeBytes / 1024)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {

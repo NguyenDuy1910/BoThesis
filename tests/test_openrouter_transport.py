@@ -91,3 +91,45 @@ async def test_stream_turn_emits_only_official_reasoning_summary_blocks() -> Non
             model="openai/gpt-5.4-mini",
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_preserves_file_annotations_for_private_cache() -> None:
+    annotation = {
+        "type": "file",
+        "file": {
+            "hash": "provider-file-hash",
+            "name": "report.pdf",
+            "content": [{"type": "text", "text": "Parsed report"}],
+        },
+    }
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        stream = (
+            f'data: {json.dumps({"choices": [{"delta": {"content": "Done", "annotations": [annotation]}}]})}\n\n'
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            "data: [DONE]\n\n"
+        )
+        return httpx.Response(200, text=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transport = OpenRouterTransport(
+            api_key="test-key",
+            model="openai/gpt-5.4-mini",
+            client=client,
+        )
+        events = [
+            event
+            async for event in transport.stream_turn(
+                [{"role": "user", "content": "Summarize the PDF"}],
+            )
+        ]
+
+    assert events == [
+        TextDelta("Done"),
+        TurnDone(
+            finish_reason="stop",
+            model="openai/gpt-5.4-mini",
+            annotations=[annotation],
+        ),
+    ]

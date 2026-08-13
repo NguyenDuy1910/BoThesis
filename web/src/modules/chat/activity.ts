@@ -1,6 +1,7 @@
 export type AgentRunStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
 
 export type AgentActivityType =
+  | "attachment_preparation"
   | "next_step_generation"
   | "tool_execution"
   | "knowledge_retrieval"

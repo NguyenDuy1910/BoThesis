@@ -71,6 +71,20 @@ QDRANT_COLLECTION=bothesis
 QDRANT_API_KEY=  # set a key only when authentication is enabled
 ```
 
+Conversation attachments additionally require an S3-compatible object store.
+The browser uploads bytes directly to its presigned URL; configure the bucket's
+CORS policy to allow `PUT` from the WebUI origin with `Content-Type` and
+`x-amz-meta-sha256` request headers.
+
+```dotenv
+BOTHESIS_OBJECT_STORAGE_ENDPOINT=https://s3.example.com
+BOTHESIS_OBJECT_STORAGE_BUCKET=bothesis-attachments
+BOTHESIS_OBJECT_STORAGE_ACCESS_KEY=...
+BOTHESIS_OBJECT_STORAGE_SECRET_KEY=...
+BOTHESIS_OBJECT_STORAGE_REGION=us-east-1
+BOTHESIS_OBJECT_STORAGE_PATH_STYLE=true
+```
+
 The API starts at `http://127.0.0.1:8000`.
 
 - Health: `http://127.0.0.1:8000/health`

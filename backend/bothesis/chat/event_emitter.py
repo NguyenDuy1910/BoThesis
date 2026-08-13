@@ -30,6 +30,7 @@ class ModelTurnAccumulator:
         self._finish_reason: str | None = None
         self._model: str | None = None
         self._usage: dict[str, int] = {}
+        self._annotations: list[dict[str, Any]] = []
         self._tool_call_deltas: dict[str, dict[str, str]] = {}
         self._tool_calls: list[ToolCall] = []
 
@@ -48,6 +49,7 @@ class ModelTurnAccumulator:
         self._finish_reason = event.finish_reason
         self._model = event.model
         self._usage = event.usage
+        self._annotations = event.annotations
         self._tool_calls = _normalize_tool_calls(event.tool_calls)
 
     def result(self) -> ModelTurn:
@@ -58,6 +60,7 @@ class ModelTurnAccumulator:
             finish_reason=self._finish_reason,
             model=self._model,
             usage=self._usage,
+            annotations=self._annotations,
         )
 
 

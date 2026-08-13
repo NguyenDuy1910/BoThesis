@@ -17,6 +17,15 @@ export interface CachedChatMessage {
   createdAt: number;
 }
 
+export interface ConversationAttachment {
+  id: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  mode: "direct" | "indexed" | "lazy";
+  status: "available" | "preparing" | "indexed" | "failed";
+}
+
 export type ChatDataParts = {
   run: {
     status: "running" | "completed" | "failed" | "cancelled";
@@ -29,7 +38,7 @@ export type ChatDataParts = {
     toolCallCount?: number;
   };
   status: {
-    phase: "run" | "preparing" | "model" | "tool" | "retrieval" | "done" | "cancelled" | "error";
+    phase: "run" | "preparing" | "attachment" | "model" | "tool" | "retrieval" | "done" | "cancelled" | "error";
     state: "active" | "completed" | "error" | "skipped";
     label: string;
     detail?: string;
@@ -69,6 +78,7 @@ export type ChatDataParts = {
 
 export type ChatMessagePart =
   | { type: "text"; text: string; state: "streaming" | "done" }
+  | { type: "data-attachment"; id?: string; data: ConversationAttachment }
   | { type: "data-run"; id?: string; data: ChatDataParts["run"] }
   | { type: "data-status"; id?: string; data: ChatDataParts["status"] }
   | { type: "data-source"; id?: string; data: ChatDataParts["source"] }
@@ -120,6 +130,14 @@ export type AgentStreamEvent = StreamEventMetadata & (
   | { type: "final_answer_delta"; text: string }
   | { type: "commentary_delta"; text: string }
   | { type: "intermediate_finding_delta"; text: string }
+  | {
+      type: "attachment_progress";
+      attachment_id: string;
+      file_name: string;
+      status: "preparing" | "ready" | "indexing" | "skipped" | "failed";
+      mode: "direct" | "indexed" | "lazy";
+      message: string;
+    }
   | { type: "public_reasoning_started"; turn: number }
   | { type: "public_reasoning_delta"; turn: number; text: string }
   | { type: "public_reasoning_completed"; turn: number }

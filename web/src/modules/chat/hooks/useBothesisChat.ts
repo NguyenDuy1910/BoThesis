@@ -9,6 +9,7 @@ import type {
   AgentStreamEvent,
   ChatMessage,
   ChatMessagePart,
+  ConversationAttachment,
 } from "../types";
 
 type ChatStatus = "ready" | "submitted" | "streaming";
@@ -89,6 +90,30 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
       id: event.event_id,
       data: { text: event.text },
     }];
+  }
+  if (event.type === "attachment_progress") {
+    const failed = event.status === "failed";
+    const completed = event.status === "ready" || event.status === "skipped";
+    return upsertStatus(parts, {
+      type: "data-status",
+      id: `attachment-${event.attachment_id}`,
+      data: {
+        phase: "attachment",
+        state: failed ? "error" : completed ? (event.status === "skipped" ? "skipped" : "completed") : "active",
+        label: event.status === "indexing"
+          ? `Finding relevant content in ${event.file_name}`
+          : event.status === "ready"
+            ? `${event.file_name} is ready`
+            : event.status === "skipped"
+              ? `${event.file_name} stored for later`
+              : failed
+                ? `${event.file_name} could not be prepared`
+                : `Preparing ${event.file_name}`,
+        detail: event.message,
+        activityType: "attachment_preparation",
+        stepId: `attachment-${event.attachment_id}`,
+      },
+    });
   }
   if (event.type === "message_delta" || event.type === "final_answer_delta") {
     const nextParts = upsertStatus(promoteActiveGenerationToFinalResponse(parts), {
@@ -443,6 +468,7 @@ export function useBothesisChat({
     options: {
       historyMessages?: ChatMessage[];
       displayMessages?: ChatMessage[];
+      attachments?: ConversationAttachment[];
     } = {},
   ) => {
     if (controllerRef.current) return;
@@ -466,7 +492,18 @@ export function useBothesisChat({
     setMessages((current) => {
       const baseMessages = options.displayMessages ?? current;
       const next = includeUserMessage
-        ? [...baseMessages, { id: messageId("user"), role: "user" as const, parts: [{ type: "text" as const, text, state: "done" as const }] }, assistant]
+        ? [...baseMessages, {
+            id: messageId("user"),
+            role: "user" as const,
+            parts: [
+              { type: "text" as const, text, state: "done" as const },
+              ...(options.attachments ?? []).map((attachment) => ({
+                type: "data-attachment" as const,
+                id: attachment.id,
+                data: attachment,
+              })),
+            ],
+          }, assistant]
         : [...baseMessages, assistant];
       messagesRef.current = next;
       return next;
@@ -476,6 +513,7 @@ export function useBothesisChat({
       await streamAgentResponse(text, {
         conversationId,
         history,
+        attachmentIds: options.attachments?.map((attachment) => attachment.id),
         signal: controller.signal,
         onEvent: (event) => {
           if (event.type === "message_delta" || event.type === "final_answer_delta") {
@@ -509,7 +547,13 @@ export function useBothesisChat({
     }
   }, [conversationId, updateAssistant]);
 
-  const sendMessage = useCallback(async ({ text }: { text: string }) => run(text, true), [run]);
+  const sendMessage = useCallback(async ({
+    text,
+    attachments = [],
+  }: {
+    text: string;
+    attachments?: ConversationAttachment[];
+  }) => run(text, true, { attachments }), [run]);
   const stop = useCallback(() => {
     const activeAssistantId = activeAssistantIdRef.current;
     controllerRef.current?.abort();
@@ -533,6 +577,7 @@ export function useBothesisChat({
     await run(context.userText, false, {
       historyMessages: context.historyMessages,
       displayMessages: context.displayMessages,
+      attachments: context.attachments,
     });
   }, [run]);
 
