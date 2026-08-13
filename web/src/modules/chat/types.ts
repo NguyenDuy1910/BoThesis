@@ -7,6 +7,7 @@ export interface ChatConversation {
   titleSource?: "generated" | "custom";
   createdAt: number;
   updatedAt: number;
+  deletedAt?: number;
 }
 
 export interface CachedChatMessage {
@@ -17,13 +18,13 @@ export interface CachedChatMessage {
   createdAt: number;
 }
 
-export interface ConversationAttachment {
+export interface ConversationDocument {
   id: string;
   fileName: string;
   contentType: string;
   sizeBytes: number;
-  mode: "direct" | "indexed" | "lazy";
-  status: "available" | "preparing" | "indexed" | "failed";
+  mode: "direct" | "indexed";
+  status: "available" | "failed";
 }
 
 export type ChatDataParts = {
@@ -38,7 +39,7 @@ export type ChatDataParts = {
     toolCallCount?: number;
   };
   status: {
-    phase: "run" | "preparing" | "attachment" | "model" | "tool" | "retrieval" | "done" | "cancelled" | "error";
+    phase: "run" | "preparing" | "document" | "model" | "tool" | "retrieval" | "done" | "cancelled" | "error";
     state: "active" | "completed" | "error" | "skipped";
     label: string;
     detail?: string;
@@ -78,7 +79,7 @@ export type ChatDataParts = {
 
 export type ChatMessagePart =
   | { type: "text"; text: string; state: "streaming" | "done" }
-  | { type: "data-attachment"; id?: string; data: ConversationAttachment }
+  | { type: "data-document"; id?: string; data: ConversationDocument }
   | { type: "data-run"; id?: string; data: ChatDataParts["run"] }
   | { type: "data-status"; id?: string; data: ChatDataParts["status"] }
   | { type: "data-source"; id?: string; data: ChatDataParts["source"] }
@@ -131,11 +132,11 @@ export type AgentStreamEvent = StreamEventMetadata & (
   | { type: "commentary_delta"; text: string }
   | { type: "intermediate_finding_delta"; text: string }
   | {
-      type: "attachment_progress";
-      attachment_id: string;
+      type: "document_progress";
+      document_id: string;
       file_name: string;
       status: "preparing" | "ready" | "indexing" | "skipped" | "failed";
-      mode: "direct" | "indexed" | "lazy";
+      mode: "direct" | "indexed";
       message: string;
     }
   | { type: "public_reasoning_started"; turn: number }

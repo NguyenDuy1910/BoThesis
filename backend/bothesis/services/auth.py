@@ -9,12 +9,11 @@ permissions, and effective enterprise principal tokens.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -26,57 +25,15 @@ from bothesis.db.models import (
     User,
     UserPrincipalToken,
 )
-
-ADMIN_PERMISSION = "admin"
-ACTIVE_STATUS = "active"
-
-
-class AuthServiceError(Exception):
-    """Base exception for identity and authorization failures."""
-
-
-class IdentityNotFoundError(AuthServiceError):
-    """Raised when a requested user, tenant, role, or connector does not exist."""
-
-
-class IdentityConflictError(AuthServiceError):
-    """Raised when a unique identity or membership already exists."""
-
-
-class IdentityInactiveError(AuthServiceError):
-    """Raised when an identity exists but is not active."""
-
-
-class AuthorizationError(AuthServiceError):
-    """Raised when an identity lacks the required tenant permission."""
-
-
-@dataclass(frozen=True, slots=True)
-class AuthContext:
-    """Resolved identity used at service and retrieval permission boundaries."""
-
-    user_id: UUID
-    email: str
-    display_name: str | None
-    tenant_id: UUID | None
-    role_id: UUID | None
-    role_code: str | None
-    permission_codes: tuple[str, ...]
-    principal_tokens: tuple[str, ...]
-
-    @property
-    def is_enterprise_user(self) -> bool:
-        return self.tenant_id is not None
-
-    @property
-    def is_admin(self) -> bool:
-        return ADMIN_PERMISSION in self.permission_codes
-
-    def has_permissions(self, *permission_codes: str) -> bool:
-        required = {
-            _normalize_code(code, "permission code") for code in permission_codes
-        }
-        return self.is_admin or required.issubset(self.permission_codes)
+from bothesis.services import (
+    ACTIVE_STATUS,
+    AuthContext,
+    AuthorizationError,
+    IdentityConflictError,
+    IdentityInactiveError,
+    IdentityNotFoundError,
+    INACTIVE_STATUS,
+)
 
 
 class AuthService:
@@ -319,15 +276,12 @@ class AuthService:
             self._session.add(membership)
         else:
             if membership.tenant_id != tenant_id:
-                await self._session.execute(
-                    delete(UserPrincipalToken).where(
-                        UserPrincipalToken.user_id == user_id
-                    )
-                )
+                await self._soft_delete_principal_tokens(user_id)
             membership.tenant_id = tenant_id
             membership.role_id = role_id
             membership.status = ACTIVE_STATUS
             membership.joined_at = membership.joined_at or datetime.now(UTC)
+            membership.deleted_at = None
         await self._session.flush()
         return membership
 
@@ -335,10 +289,11 @@ class AuthService:
         membership = await self._session.get(TenantMembership, user_id)
         if membership is None:
             raise IdentityNotFoundError(f"membership not found for user: {user_id}")
-        await self._session.execute(
-            delete(UserPrincipalToken).where(UserPrincipalToken.user_id == user_id)
-        )
-        await self._session.delete(membership)
+        if membership.deleted_at is not None:
+            return
+        membership.status = INACTIVE_STATUS
+        membership.deleted_at = datetime.now(UTC)
+        await self._soft_delete_principal_tokens(user_id)
         await self._session.flush()
 
     async def replace_principal_tokens(
@@ -361,6 +316,7 @@ class AuthService:
             conflict_statement = select(UserPrincipalToken.principal_token).where(
                 UserPrincipalToken.user_id == user_id,
                 UserPrincipalToken.principal_token.in_(tokens),
+                UserPrincipalToken.deleted_at.is_(None),
             )
             if connector_id is None:
                 conflict_statement = conflict_statement.where(
@@ -380,27 +336,50 @@ class AuthService:
                     f"principal tokens already belong to another source: {conflicts}"
                 )
 
-        delete_statement = delete(UserPrincipalToken).where(
+        scope_statement = select(UserPrincipalToken).where(
             UserPrincipalToken.user_id == user_id
         )
         if connector_id is None:
-            delete_statement = delete_statement.where(
+            scope_statement = scope_statement.where(
                 UserPrincipalToken.connector_id.is_(None)
             )
         else:
-            delete_statement = delete_statement.where(
+            scope_statement = scope_statement.where(
                 UserPrincipalToken.connector_id == connector_id
             )
-        await self._session.execute(delete_statement)
-
-        self._session.add_all(
-            UserPrincipalToken(
-                user_id=user_id,
-                principal_token=token,
-                connector_id=connector_id,
-            )
-            for token in tokens
+        scoped_records = list(
+            await self._session.scalars(scope_statement.with_for_update())
         )
+        desired_tokens = set(tokens)
+        deleted_at = datetime.now(UTC)
+        for record in scoped_records:
+            if record.principal_token not in desired_tokens:
+                record.deleted_at = deleted_at
+
+        existing_by_token = {
+            record.principal_token: record
+            for record in await self._session.scalars(
+                select(UserPrincipalToken)
+                .where(
+                    UserPrincipalToken.user_id == user_id,
+                    UserPrincipalToken.principal_token.in_(tokens),
+                )
+                .with_for_update()
+            )
+        }
+        for token in tokens:
+            record = existing_by_token.get(token)
+            if record is None:
+                self._session.add(
+                    UserPrincipalToken(
+                        user_id=user_id,
+                        principal_token=token,
+                        connector_id=connector_id,
+                    )
+                )
+                continue
+            record.connector_id = connector_id
+            record.deleted_at = None
         await self._session.flush()
         return tokens
 
@@ -420,7 +399,7 @@ class AuthService:
             raise IdentityInactiveError(f"user is not active: {user_id}")
 
         membership = user.tenant_membership
-        if membership is None:
+        if membership is None or membership.deleted_at is not None:
             return AuthContext(
                 user_id=user.id,
                 email=user.email,
@@ -443,7 +422,8 @@ class AuthService:
 
         principal_tokens = await self._session.scalars(
             select(UserPrincipalToken.principal_token).where(
-                UserPrincipalToken.user_id == user_id
+                UserPrincipalToken.user_id == user_id,
+                UserPrincipalToken.deleted_at.is_(None),
             )
         )
 
@@ -456,6 +436,16 @@ class AuthService:
             role_code=membership.role.code,
             permission_codes=tuple(sorted(set(membership.role.permission_codes))),
             principal_tokens=tuple(sorted(set(principal_tokens))),
+        )
+
+    async def _soft_delete_principal_tokens(self, user_id: UUID) -> None:
+        await self._session.execute(
+            update(UserPrincipalToken)
+            .where(
+                UserPrincipalToken.user_id == user_id,
+                UserPrincipalToken.deleted_at.is_(None),
+            )
+            .values(deleted_at=datetime.now(UTC))
         )
 
     async def require_permissions(
@@ -508,14 +498,4 @@ def _optional_text(
     return _required_text(value, field_name, max_length)
 
 
-__all__ = [
-    "ACTIVE_STATUS",
-    "ADMIN_PERMISSION",
-    "AuthContext",
-    "AuthService",
-    "AuthServiceError",
-    "AuthorizationError",
-    "IdentityConflictError",
-    "IdentityInactiveError",
-    "IdentityNotFoundError",
-]
+__all__ = ["AuthService"]

@@ -32,7 +32,7 @@ class RecordingSink:
         self.write_batches.append(list(records))
         return len(records)
 
-    async def delete_document(
+    async def soft_delete_document(
         self,
         *,
         tenant_id: str,

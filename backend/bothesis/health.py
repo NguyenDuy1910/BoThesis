@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
@@ -55,28 +54,6 @@ class HealthSettings:
     langfuse_public_key: str | None
     langfuse_secret_key: str | None
 
-    @classmethod
-    def from_environment(cls) -> HealthSettings:
-        return cls(
-            qdrant_url=os.getenv("QDRANT_URL") or None,
-            qdrant_api_key=os.getenv("QDRANT_API_KEY") or None,
-            qdrant_collection=os.getenv("QDRANT_COLLECTION") or None,
-            openrouter_base_url=(
-                os.getenv("OPEN_ROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
-            ),
-            openrouter_api_key=os.getenv("OPENROUTER_API_KEY") or None,
-            chat_model=os.getenv("OPENROUTER_MODEL") or None,
-            embedding_model=os.getenv("EMBEDDING_MODEL") or None,
-            langfuse_base_url=(
-                os.getenv("LANGFUSE_BASE_URL")
-                or os.getenv("LANGFUSE_HOST")
-                or "https://cloud.langfuse.com"
-            ),
-            langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY") or None,
-            langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY") or None,
-        )
-
-
 class HealthService:
     """Probe independent dependencies without executing user workloads."""
 
@@ -92,10 +69,6 @@ class HealthService:
         self._settings = settings
         self._timeout_seconds = timeout_seconds
         self._transport = transport
-
-    @classmethod
-    def from_environment(cls) -> HealthService:
-        return cls(HealthSettings.from_environment())
 
     async def check(self) -> HealthReport:
         started_at = perf_counter()

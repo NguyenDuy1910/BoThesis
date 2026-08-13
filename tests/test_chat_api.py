@@ -4,19 +4,24 @@ import json
 import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import main
+import bothesis.db.engine as db_engine
 from bothesis.agent.models import TextDelta, TurnDone
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
 from bothesis.agent.transports.base import ChatMessage, LLMResponse, LLMTransport
 from bothesis.chat.agent_loop import AgentLoop
+from bothesis.connector.document_pipeline import PreparedDocuments
 from bothesis.knowledge.document_index import RetrievedDocument
+from bothesis.services import AuthContext
 
 
 class ScriptedTransport(LLMTransport):
@@ -122,6 +127,59 @@ class InterleavedTransport(LLMTransport):
         yield TurnDone("stop")
 
 
+class _SessionContext:
+    async def __aenter__(self) -> object:
+        return object()
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+class _DocumentPipeline:
+    async def prepare_for_message(self, *args: Any, **kwargs: Any) -> PreparedDocuments:
+        return PreparedDocuments(contexts=(), source_fingerprints={})
+
+    async def cache_provider_annotations(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+class _Conversations:
+    async def start_turn(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def finish_turn(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def _install_document_runtime(monkeypatch: Any) -> tuple[UUID, UUID]:
+    user_id = uuid4()
+    tenant_id = uuid4()
+
+    async def resolve_access(*args: Any, **kwargs: Any) -> AuthContext:
+        return AuthContext(
+            user_id=user_id,
+            email="person@example.test",
+            display_name="Person",
+            tenant_id=tenant_id,
+            role_id=uuid4(),
+            role_code="analyst",
+            permission_codes=("knowledge.read",),
+            principal_tokens=(),
+        )
+
+    monkeypatch.setattr(main, "_resolve_access", resolve_access)
+    monkeypatch.setattr(
+        main,
+        "_get_document_runtime",
+        lambda: SimpleNamespace(
+            pipeline=_DocumentPipeline(),
+            conversations=_Conversations(),
+        ),
+    )
+    monkeypatch.setattr(db_engine, "get_session_factory", lambda: _SessionContext)
+    return user_id, tenant_id
+
+
 def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     registry = ToolRegistry()
     registry.register(KnowledgeSearchTool(StubRetriever()))
@@ -133,6 +191,8 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         enable_interleaved=False,
     )
     monkeypatch.setattr(main, "_agent_loop", loop)
+    user_id, tenant_id = _install_document_runtime(monkeypatch)
+    conversation_id = uuid4()
     long_assistant_answer = f"Earlier answer\n{'A' * 5_000}"
 
     with TestClient(main.app) as client:
@@ -140,10 +200,10 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
             "/api/v1/agent/chat",
             json={
                 "message": "What is the leave policy?",
-                "tenant_id": "tenant-1",
-                "user_id": "user-1",
+                "tenant_id": str(tenant_id),
+                "user_id": str(user_id),
                 "roles": [],
-                "conversation_id": "conversation-1",
+                "conversation_id": str(conversation_id),
                 "history": [
                     {"role": "user", "content": "Earlier question"},
                     {"role": "assistant", "content": long_assistant_answer},
@@ -217,14 +277,15 @@ def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     registry.register(KnowledgeSearchTool(StubRetriever()))
     loop = AgentLoop(InterleavedTransport(), registry, enable_interleaved=True)
     monkeypatch.setattr(main, "_agent_loop", loop)
+    user_id, tenant_id = _install_document_runtime(monkeypatch)
 
     with TestClient(main.app) as client:
         response = client.post(
             "/api/v1/agent/chat",
             json={
                 "message": "What is the internal leave policy?",
-                "tenant_id": "tenant-1",
-                "user_id": "user-1",
+                "tenant_id": str(tenant_id),
+                "user_id": str(user_id),
                 "roles": [],
                 "history": [],
             },
@@ -237,9 +298,7 @@ def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     ]
     assert response.headers["cache-control"] == "no-cache, no-transform"
     assert response.headers["x-accel-buffering"] == "no"
-    assert [event["sequence"] for event in events] == list(
-        range(1, len(events) + 1)
-    )
+    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
     assert len({event["event_id"] for event in events}) == len(events)
     assert [event["type"] for event in events] == [
         "run_started",
@@ -256,9 +315,7 @@ def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     tool_event = next(event for event in events if event["type"] == "tool_started")
     assert "arguments" not in tool_event
     assert "call_id" not in tool_event
-    citation = next(
-        event for event in events if event["type"] == "citation_available"
-    )
+    citation = next(event for event in events if event["type"] == "citation_available")
     assert "document_id" not in citation["evidence"]
     assert "relevance_score" not in citation["evidence"]
     assert citation["evidence"]["snippet"] == (

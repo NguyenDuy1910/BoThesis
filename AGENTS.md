@@ -24,6 +24,16 @@ Primary source types:
 ## Coding rules
 - Reuse existing patterns before adding new ones.
 - Keep public interfaces stable and typed.
+- Parse boolean configuration once at the application composition boundary,
+  then pass typed `bool` values into services. Never use ad-hoc truthy string
+  comparisons or collections.
+- Never physically delete persisted business data, raw document objects,
+  provider references, or vector points. Delete actions must use a lifecycle
+  status or `deleted_at` tombstone, and normal reads must exclude tombstones.
+- Each `backend/bothesis/services/<name>.py` module defines only its primary
+  `<Name>Service` class. Put service contexts, DTOs, errors, and shared service
+  constants in `backend/bothesis/services/__init__.py`, and import them through
+  the `bothesis.services` package boundary.
 - Separate ingestion, indexing, retrieval, agent orchestration, and BI logic.
 - Validate inputs at API boundaries.
 - Enforce permissions before retrieval results or BI data reach the agent.
@@ -34,3 +44,12 @@ Primary source types:
 - For connector changes, verify extraction, normalization, lineage, and permission mapping.
 - For retrieval changes, verify citations and permission filtering.
 - For BI changes, verify generated SQL or query plans before presenting insights.
+## Test rules
+    All test files must be located under:
+    /Users/duynguyen/Documents/vikki-bank-code/ai-team/BoThesis/tests
+    Never create test files inside application/source directories such as backend/, bothesis/, feature modules, or temporary folders.
+    Mirror the application structure under tests/ when useful for clarity.
+    Reuse existing test modules before creating new test files.
+    Do not create duplicate, temporary, ad-hoc, or one-off test files when an existing test module can cover the scenario.
+    Do not leave debugging scripts or temporary verification files scattered across the repository.
+    If a temporary script is strictly necessary for local verification, remove it after verification unless the user explicitly asks to keep it.

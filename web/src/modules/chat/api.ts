@@ -1,15 +1,20 @@
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import {
+  getBothesisChatConfiguration,
+  type BothesisChatConfiguration,
+} from "@/lib/api/config";
 import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type {
   AgentHistoryMessage,
   AgentStreamEvent,
-  ConversationAttachment,
+  ConversationDocument,
 } from "./types";
+
+const uploadIdempotencyKeys = new WeakMap<File, string>();
 
 export class ChatConfigurationError extends Error {
   constructor() {
     super(
-      "Chat is not configured. Set NEXT_PUBLIC_BOTHESIS_API_URL, NEXT_PUBLIC_BOTHESIS_TENANT_ID, NEXT_PUBLIC_BOTHESIS_USER_ID, and NEXT_PUBLIC_BOTHESIS_ROLES."
+      "Chat is not configured. Set NEXT_PUBLIC_BOTHESIS_API_URL, NEXT_PUBLIC_BOTHESIS_TENANT_ID, and NEXT_PUBLIC_BOTHESIS_USER_ID."
     );
   }
 }
@@ -19,7 +24,7 @@ export async function streamAgentResponse(
   options: {
     conversationId?: string | null;
     history: AgentHistoryMessage[];
-    attachmentIds?: string[];
+    documentIds?: string[];
     signal: AbortSignal;
     onEvent: (event: AgentStreamEvent) => void;
   }
@@ -29,16 +34,16 @@ export async function streamAgentResponse(
 
   const response = await fetch(`${configuration.apiUrl}/api/v1/agent/chat`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...developmentIdentityHeaders(configuration),
+    },
     signal: options.signal,
     body: JSON.stringify({
       message,
-      tenant_id: configuration.tenantId,
-      user_id: configuration.userId,
-      roles: configuration.roles,
       conversation_id: options.conversationId ?? null,
       history: options.history,
-      attachment_ids: options.attachmentIds ?? [],
+      document_ids: options.documentIds ?? [],
     }),
   });
   if (!response.ok || !response.body) {
@@ -74,127 +79,209 @@ export async function streamAgentResponse(
   }
 }
 
-interface AttachmentUploadStartResponse {
-  upload_id?: string | null;
+interface DocumentUploadStartResponse {
   upload_required: boolean;
-  upload?: {
-    url: string;
-    method: string;
-    headers: Record<string, string>;
-    expires_at: string;
-  } | null;
-  attachment?: AttachmentMetadataResponse | null;
+  target?: DocumentUploadTarget | null;
+  document: DocumentMetadataResponse;
 }
 
-interface AttachmentMetadataResponse {
+interface DocumentUploadTarget {
+  mode: "presigned" | "api";
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  expires_at: string;
+}
+
+interface DocumentMetadataResponse {
   id: string;
   file_name: string;
   content_type: string;
   size_bytes: number;
-  mode: ConversationAttachment["mode"];
-  status: ConversationAttachment["status"];
+  upload_status: "not_applicable" | "pending" | "available" | "failed";
+  indexing_status: string;
 }
 
-export async function uploadConversationAttachment(
+export async function uploadConversationDocument(
   file: File,
-  conversationId: string,
   options: {
     signal: AbortSignal;
-    onProgress?: (status: "hashing" | "uploading" | "validating") => void;
+    onProgress?: (status: "starting" | "uploading" | "validating") => void;
   },
-): Promise<ConversationAttachment> {
+): Promise<ConversationDocument> {
   const configuration = getBothesisChatConfiguration();
   if (!configuration) throw new ChatConfigurationError();
-  options.onProgress?.("hashing");
-  const sha256 = await fileSha256(file);
-  const scope = {
-    tenant_id: configuration.tenantId,
-    user_id: configuration.userId,
-    conversation_id: conversationId,
-  };
-  const startResponse = await fetch(`${configuration.apiUrl}/api/v1/attachments/uploads`, {
+  options.onProgress?.("starting");
+  const identityHeaders = developmentIdentityHeaders(configuration);
+  const startResponse = await fetch(`${configuration.apiUrl}/api/v1/documents/uploads`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": uploadIdempotencyKey(file),
+      ...identityHeaders,
+    },
     signal: options.signal,
     body: JSON.stringify({
-      ...scope,
       file_name: file.name,
       content_type: file.type || "application/octet-stream",
       size_bytes: file.size,
-      sha256,
     }),
   });
-  if (!startResponse.ok) throw await responseError(startResponse, "Could not start attachment upload.");
-  const started = await startResponse.json() as AttachmentUploadStartResponse;
-  if (!started.upload_required && started.attachment) {
-    return attachmentFromResponse(started.attachment);
+  if (!startResponse.ok) {
+    throw await responseError(startResponse, "Could not start document upload.");
   }
-  if (!started.upload || !started.upload_id) {
-    throw new Error("Attachment upload did not return a storage destination.");
+  const started = await startResponse.json() as DocumentUploadStartResponse;
+  if (!started.upload_required) return documentFromResponse(started.document);
+  if (!started.target) {
+    throw new Error("Document upload did not return a storage destination.");
   }
 
   options.onProgress?.("uploading");
-  const uploadResponse = await fetch(started.upload.url, {
-    method: started.upload.method,
-    headers: started.upload.headers,
-    body: file,
-    signal: options.signal,
-  });
+  let uploadResponse: Response;
+  try {
+    uploadResponse = await uploadToTarget(
+      started.target,
+      started.document.id,
+      file,
+      configuration,
+      identityHeaders,
+      options.signal,
+    );
+  } catch (cause) {
+    if (options.signal.aborted || started.target.mode !== "presigned") throw cause;
+    uploadResponse = await uploadToApiFallback(
+      started.document.id,
+      file,
+      configuration,
+      identityHeaders,
+      options.signal,
+    );
+  }
+  if (!uploadResponse.ok && started.target.mode === "presigned") {
+    uploadResponse = await uploadToApiFallback(
+      started.document.id,
+      file,
+      configuration,
+      identityHeaders,
+      options.signal,
+    );
+  }
   if (!uploadResponse.ok) {
-    throw new Error(`Object storage rejected the attachment (${uploadResponse.status}).`);
+    throw await responseError(uploadResponse, "Document storage rejected the upload.");
   }
 
   options.onProgress?.("validating");
   const completeResponse = await fetch(
-    `${configuration.apiUrl}/api/v1/attachments/uploads/${encodeURIComponent(started.upload_id)}/complete`,
+    `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(started.document.id)}/complete`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: identityHeaders,
       signal: options.signal,
-      body: JSON.stringify(scope),
     },
   );
   if (!completeResponse.ok) {
-    throw await responseError(completeResponse, "Could not validate the uploaded attachment.");
+    throw await responseError(completeResponse, "Could not validate the uploaded document.");
   }
-  return attachmentFromResponse(await completeResponse.json() as AttachmentMetadataResponse);
+  return documentFromResponse(await completeResponse.json() as DocumentMetadataResponse);
 }
 
-export async function releaseConversationAttachment(
-  attachmentId: string,
-  conversationId: string,
-): Promise<void> {
+export async function releaseConversationDocument(documentId: string): Promise<void> {
   const configuration = getBothesisChatConfiguration();
   if (!configuration) throw new ChatConfigurationError();
-  const query = new URLSearchParams({
-    tenant_id: configuration.tenantId,
-    user_id: configuration.userId,
-    conversation_id: conversationId,
-  });
   const response = await fetch(
-    `${configuration.apiUrl}/api/v1/attachments/${encodeURIComponent(attachmentId)}?${query}`,
-    { method: "DELETE" },
+    `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(documentId)}`,
+    {
+      method: "DELETE",
+      headers: developmentIdentityHeaders(configuration),
+    },
   );
   if (!response.ok && response.status !== 404) {
-    throw await responseError(response, "Could not remove the attachment.");
+    throw await responseError(response, "Could not remove the document.");
   }
 }
 
-async function fileSha256(file: File) {
-  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-  return [...new Uint8Array(digest)]
-    .map((value) => value.toString(16).padStart(2, "0"))
-    .join("");
+async function uploadToTarget(
+  target: DocumentUploadTarget,
+  documentId: string,
+  file: File,
+  configuration: BothesisChatConfiguration,
+  identityHeaders: Record<string, string>,
+  signal: AbortSignal,
+) {
+  if (target.mode === "api") {
+    return uploadToApiFallback(
+      documentId,
+      file,
+      configuration,
+      identityHeaders,
+      signal,
+    );
+  }
+  return fetch(target.url, {
+    method: target.method,
+    headers: target.headers,
+    body: file,
+    signal,
+  });
 }
 
-function attachmentFromResponse(value: AttachmentMetadataResponse): ConversationAttachment {
+function uploadToApiFallback(
+  documentId: string,
+  file: File,
+  configuration: BothesisChatConfiguration,
+  identityHeaders: Record<string, string>,
+  signal: AbortSignal,
+) {
+  return fetch(
+    `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(documentId)}/content`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        ...identityHeaders,
+      },
+      body: file,
+      signal,
+    },
+  );
+}
+
+function developmentIdentityHeaders(configuration: {
+  userId: string;
+  tenantId: string;
+}): Record<string, string> {
+  return {
+    "X-Bothesis-User-Id": configuration.userId,
+    "X-Bothesis-Tenant-Id": configuration.tenantId,
+  };
+}
+
+function uploadIdempotencyKey(file: File): string {
+  const existing = uploadIdempotencyKeys.get(file);
+  if (existing) return existing;
+  const created = crypto.randomUUID();
+  uploadIdempotencyKeys.set(file, created);
+  return created;
+}
+
+function documentFromResponse(value: DocumentMetadataResponse): ConversationDocument {
+  const directTypes = new Set([
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/gif",
+  ]);
+  const direct = value.size_bytes <= 20 * 1024 * 1024 && (
+    directTypes.has(value.content_type)
+  );
   return {
     id: value.id,
     fileName: value.file_name,
     contentType: value.content_type,
     sizeBytes: value.size_bytes,
-    mode: value.mode,
-    status: value.status,
+    mode: direct ? "direct" : "indexed",
+    status: value.upload_status === "available" ? "available" : "failed",
   };
 }
 

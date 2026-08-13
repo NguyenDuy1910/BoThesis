@@ -33,20 +33,24 @@ class RecordingClient:
         return SimpleNamespace(points=["point-1"])
 
 
-def test_store_can_be_configured_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_store_can_be_configured_through_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured_kwargs: dict[str, Any] = {}
 
     def make_client(**kwargs: Any) -> RecordingClient:
         captured_kwargs.update(kwargs)
         return RecordingClient()
 
-    monkeypatch.setenv("QDRANT_URL", "http://qdrant.internal:6333")
-    monkeypatch.setenv("QDRANT_API_KEY", "test-key")
-    monkeypatch.setenv("QDRANT_COLLECTION", "tenant_chunks")
-    monkeypatch.setenv("QDRANT_PREFER_GRPC", "true")
     monkeypatch.setattr(vector_store_module, "AsyncQdrantClient", make_client)
 
-    store = VectorStore.from_environment(timeout=15)
+    store = VectorStore(
+        collection_name="tenant_chunks",
+        url="http://qdrant.internal:6333",
+        api_key="test-key",
+        prefer_grpc=True,
+        timeout=15,
+    )
 
     assert store.collection_name == "tenant_chunks"
     assert isinstance(store.client, RecordingClient)

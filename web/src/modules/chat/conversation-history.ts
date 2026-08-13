@@ -2,7 +2,7 @@ import type {
   AgentHistoryMessage,
   ChatMessage,
   ChatMessagePart,
-  ConversationAttachment,
+  ConversationDocument,
 } from "./types";
 
 export const MAX_HISTORY_MESSAGES = 24;
@@ -54,7 +54,7 @@ export function regenerationContext(
   userText: string;
   historyMessages: ChatMessage[];
   displayMessages: ChatMessage[];
-  attachments: ConversationAttachment[];
+  documents: ConversationDocument[];
 } | null {
   const targetIndex = targetId
     ? messages.findIndex((message) => message.id === targetId)
@@ -71,9 +71,9 @@ export function regenerationContext(
     userText,
     historyMessages: messages.slice(0, userIndex),
     displayMessages: messages.slice(0, userIndex + 1),
-    attachments: user.parts
-      .filter((part): part is Extract<ChatMessagePart, { type: "data-attachment" }> => (
-        part.type === "data-attachment"
+    documents: user.parts
+      .filter((part): part is Extract<ChatMessagePart, { type: "data-document" }> => (
+        part.type === "data-document"
       ))
       .map((part) => part.data),
   };

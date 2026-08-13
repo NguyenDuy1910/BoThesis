@@ -38,7 +38,20 @@ test("conversation adapter persists custom rename metadata and confirmed deletio
   assert.equal(renamed?.title, "Quarterly planning");
   assert.equal(renamed?.titleSource, "custom");
   assert.equal((await conversationAdapter.listConversations()).length, 1);
+  await conversationAdapter.saveConversationMessages("chat-1", [
+    {
+      id: "message-1",
+      role: "user",
+      content: "Retain this message",
+      parts: [{ type: "text", text: "Retain this message", state: "done" }],
+      createdAt: Date.now(),
+    },
+  ]);
 
   await conversationAdapter.deleteConversation("chat-1");
   assert.deepEqual(await conversationAdapter.listConversations(), []);
+  assert.equal(
+    (await conversationAdapter.getConversationMessages("chat-1"))[0]?.content,
+    "Retain this message",
+  );
 });

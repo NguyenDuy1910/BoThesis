@@ -99,6 +99,7 @@ Table tenant_memberships {
   status varchar(16) [not null, default: 'active']
 
   joined_at timestamptz
+  deleted_at timestamptz
 
   created_at timestamptz [not null, default: `now()`]
   updated_at timestamptz [not null, default: `now()`]
@@ -469,7 +470,7 @@ Table documents {
   //
   // Cheap provider hints only.
   //
-  // No content_hash.
+  // No eager content hash on the upload-start path.
   // No chunk_hash.
   // --------------------------------------------------------------------------
 
@@ -494,7 +495,7 @@ Table documents {
   // RAW CONTENT
   //
   // Object Storage:
-  // documents/<id>/raw
+  // users/<owner_user_id>/documents/<id>/raw
   //
   // Nullable if:
   // - raw bytes live temporarily in PostgreSQL document_blobs
@@ -502,6 +503,17 @@ Table documents {
   // --------------------------------------------------------------------------
 
   raw_storage_key text
+
+  // not_applicable | pending | available | failed
+  upload_status varchar(16) [not null, default: 'not_applicable']
+
+  // Populated when the service has read and verified the raw content.
+  content_sha256 varchar(64)
+
+  // Retry key supplied by the uploader. Unique within one personal owner.
+  upload_idempotency_key varchar(128)
+
+  uploaded_at timestamptz
 
 
   // --------------------------------------------------------------------------
@@ -582,6 +594,10 @@ Table documents {
 
     (connector_scope_id, generation, indexing_status)
 
+    (owner_user_id, upload_status)
+
+    (owner_user_id, upload_idempotency_key) [unique]
+
     parent_document_id
   }
 
@@ -608,6 +624,12 @@ Table documents {
 
   connector_scope_id IS NULL implies:
   - generation IS NULL
+
+  Upload state:
+
+  upload_status IN (not_applicable, pending, available, failed)
+
+  content_sha256 IS NULL OR it is a lowercase 64-character SHA-256 digest
 
   Application must guarantee:
   documents.connector_scope_id -> connector_scopes.id
@@ -651,12 +673,16 @@ Table document_chunks {
 
   metadata jsonb [not null, default: '{}']
 
+  deleted_at timestamptz
+
   created_at timestamptz [not null, default: `now()`]
 
   indexes {
     (document_id, chunk_index) [unique]
 
     document_id
+
+    (document_id, deleted_at)
   }
 }
 
@@ -683,12 +709,16 @@ Table message_documents {
 
   position integer [not null, default: 0]
 
+  deleted_at timestamptz
+
   created_at timestamptz [not null, default: `now()`]
 
   indexes {
     (message_id, document_id, relation_type) [pk]
 
     document_id
+
+    (message_id, deleted_at)
   }
 }
 
@@ -712,6 +742,8 @@ Table user_principal_tokens {
   // Optional provenance.
   connector_id bigint
 
+  deleted_at timestamptz
+
   created_at timestamptz [not null, default: `now()`]
 
   indexes {
@@ -720,6 +752,8 @@ Table user_principal_tokens {
     user_id
 
     connector_id
+
+    (user_id, deleted_at)
   }
 }
 
@@ -738,6 +772,8 @@ Table document_blobs {
   document_id uuid [pk, not null]
 
   raw_bytes bytea [not null]
+
+  deleted_at timestamptz
 
   created_at timestamptz [not null, default: `now()`]
 }

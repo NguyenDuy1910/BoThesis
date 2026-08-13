@@ -22,8 +22,8 @@ import { memo, type FormEvent, type MouseEvent, type RefObject, useCallback, use
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
 import {
-  releaseConversationAttachment,
-  uploadConversationAttachment,
+  releaseConversationDocument,
+  uploadConversationDocument,
 } from "@/modules/chat/api";
 import {
   cachedToUIMessage,
@@ -39,7 +39,7 @@ import type {
   ChatConversation,
   ChatMessage,
   ChatMessagePart,
-  ConversationAttachment,
+  ConversationDocument,
 } from "@/modules/chat/types";
 import { AgentActivityPanel, AgentExecutionCard } from "./AgentExecutionCard";
 import { AppSidebar, BothesisMark } from "./AppSidebar";
@@ -72,17 +72,17 @@ const suggestions = [
   },
 ];
 
-interface ComposerAttachment {
+interface ComposerDocument {
   key: string;
   fileName: string;
   sizeBytes: number;
-  progress: "hashing" | "uploading" | "validating" | "ready" | "failed";
-  attachment?: ConversationAttachment;
+  progress: "starting" | "uploading" | "validating" | "ready" | "failed";
+  document?: ConversationDocument;
   error?: string;
 }
 
 function createDraftConversationId() {
-  return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return globalThis.crypto.randomUUID();
 }
 
 export default function ChatShell() {
@@ -135,14 +135,14 @@ export default function ChatShell() {
 
   const deleteConversation = useCallback(async (id: string) => {
     const storedMessages = await conversationAdapter.getConversationMessages(id);
-    const attachmentIds = new Set(
+    const documentIds = new Set(
       storedMessages.flatMap((message) => message.parts.flatMap((part) => (
-        part.type === "data-attachment" ? [part.data.id] : []
+        part.type === "data-document" ? [part.data.id] : []
       ))),
     );
     await Promise.allSettled(
-      [...attachmentIds].map((attachmentId) => (
-        releaseConversationAttachment(attachmentId, id)
+      [...documentIds].map((documentId) => (
+        releaseConversationDocument(documentId)
       )),
     );
     await conversationAdapter.deleteConversation(id);
@@ -234,7 +234,7 @@ function ChatConversation({
   onOpenSidebar: () => void;
 }) {
   const [input, setInput] = useState("");
-  const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  const [composerAttachments, setComposerAttachments] = useState<ComposerDocument[]>([]);
   const [sourceFocus, setSourceFocus] = useState<{
     messageId: string;
     sourceId: string;
@@ -355,16 +355,16 @@ function ChatConversation({
   }, [messages.length]);
 
   const submit = useCallback(async (value: string) => {
-    const readyAttachments = composerAttachments
-      .flatMap((item) => item.attachment ? [item.attachment] : []);
-    const text = value.trim() || (readyAttachments.length
+    const readyDocuments = composerAttachments
+      .flatMap((item) => item.document ? [item.document] : []);
+    const text = value.trim() || (readyDocuments.length
       ? "Please analyze the attached file."
       : "");
     if (!text || isUploading || isStreaming || !isConfigured) return;
     clearError();
     setInput("");
     setComposerAttachments([]);
-    await sendMessage({ text, attachments: readyAttachments });
+    await sendMessage({ text, documents: readyDocuments });
   }, [
     clearError,
     composerAttachments,
@@ -384,20 +384,20 @@ function ChatConversation({
         key,
         fileName: file.name,
         sizeBytes: file.size,
-        progress: "hashing",
+        progress: "starting",
       }]);
-      void uploadConversationAttachment(file, conversationId, {
+      void uploadConversationDocument(file, {
         signal: controller.signal,
         onProgress: (progress) => setComposerAttachments((current) => (
           current.map((item) => item.key === key ? { ...item, progress } : item)
         )),
-      }).then((attachment) => {
+      }).then((document) => {
         setComposerAttachments((current) => current.map((item) => (
-          item.key === key ? { ...item, attachment, progress: "ready" } : item
+          item.key === key ? { ...item, document, progress: "ready" } : item
         )));
       }).catch((cause) => {
         if (controller.signal.aborted) return;
-        const message = cause instanceof Error ? cause.message : "Attachment upload failed.";
+        const message = cause instanceof Error ? cause.message : "Document upload failed.";
         setComposerAttachments((current) => current.map((item) => (
           item.key === key ? { ...item, error: message, progress: "failed" } : item
         )));
@@ -405,17 +405,17 @@ function ChatConversation({
         uploadControllersRef.current.delete(key);
       });
     }
-  }, [composerAttachments.length, conversationId]);
+  }, [composerAttachments.length]);
 
   const removeAttachment = useCallback((key: string) => {
     const item = composerAttachments.find((candidate) => candidate.key === key);
     uploadControllersRef.current.get(key)?.abort();
     uploadControllersRef.current.delete(key);
     setComposerAttachments((current) => current.filter((candidate) => candidate.key !== key));
-    if (item?.attachment) {
-      void releaseConversationAttachment(item.attachment.id, conversationId);
+    if (item?.document) {
+      void releaseConversationDocument(item.document.id);
     }
-  }, [composerAttachments, conversationId]);
+  }, [composerAttachments]);
 
   const focusSource = useCallback((messageId: string, sourceId: string) => {
     setSelectedActivityMessageId(messageId);
@@ -592,18 +592,18 @@ const MessageView = memo(function MessageView({
   const streamError = message.parts.find(
     (part): part is Extract<ChatMessagePart, { type: "data-stream-error" }> => part.type === "data-stream-error",
   );
-  const messageAttachments = message.parts
-    .filter((part): part is Extract<ChatMessagePart, { type: "data-attachment" }> => (
-      part.type === "data-attachment"
+  const messageDocuments = message.parts
+    .filter((part): part is Extract<ChatMessagePart, { type: "data-document" }> => (
+      part.type === "data-document"
     ));
 
   if (message.role === "user") {
     return (
       <div className="message-row user" data-chat-role="user">
         <div className="user-bubble">
-          {messageAttachments.length > 0 && (
+          {messageDocuments.length > 0 && (
             <div className="message-attachments">
-              {messageAttachments.map((part) => (
+              {messageDocuments.map((part) => (
                 <span className="message-attachment" key={part.data.id}>
                   <FileSearch aria-hidden="true" size={13} />
                   <span title={part.data.fileName}>{part.data.fileName}</span>
@@ -700,7 +700,7 @@ function ChatComposer({
   onSubmit,
   textareaRef,
 }: {
-  attachments: ComposerAttachment[];
+  attachments: ComposerDocument[];
   input: string;
   isConfigured: boolean;
   isStreaming: boolean;
@@ -801,8 +801,8 @@ function ChatComposer({
   );
 }
 
-function attachmentProgressLabel(item: ComposerAttachment) {
-  if (item.progress === "hashing") return "Checking";
+function attachmentProgressLabel(item: ComposerDocument) {
+  if (item.progress === "starting") return "Starting";
   if (item.progress === "uploading") return "Uploading";
   if (item.progress === "validating") return "Validating";
   if (item.progress === "failed") return "Failed";

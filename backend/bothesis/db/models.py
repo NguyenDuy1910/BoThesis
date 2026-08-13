@@ -190,6 +190,7 @@ class TenantMembership(TimestampMixin, Base):
         String(16), nullable=False, default="active", server_default="active"
     )
     joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(back_populates="tenant_membership")
     tenant: Mapped[Tenant] = relationship(back_populates="memberships")
@@ -417,7 +418,9 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "lifecycle_status",
         ),
         Index(None, "connector_scope_id", "generation", "indexing_status"),
+        Index(None, "owner_user_id", "upload_status"),
         Index(None, "parent_document_id"),
+        UniqueConstraint("owner_user_id", "upload_idempotency_key"),
         CheckConstraint(
             "(owner_user_id IS NOT NULL AND tenant_id IS NULL) OR "
             "(owner_user_id IS NULL AND tenant_id IS NOT NULL)",
@@ -433,6 +436,14 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "connector_scope_id IS NOT NULL OR generation IS NULL",
             name="local_document_has_no_generation",
+        ),
+        CheckConstraint(
+            "upload_status IN ('not_applicable', 'pending', 'available', 'failed')",
+            name="document_upload_status_is_valid",
+        ),
+        CheckConstraint(
+            "content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'",
+            name="document_content_sha256_is_valid",
         ),
     )
 
@@ -468,6 +479,15 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         server_default=text("'{}'::jsonb"),
     )
     raw_storage_key: Mapped[str | None] = mapped_column(Text)
+    upload_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="not_applicable",
+        server_default="not_applicable",
+    )
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
+    upload_idempotency_key: Mapped[str | None] = mapped_column(String(128))
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     parent_document_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("documents.id"),
@@ -524,6 +544,7 @@ class DocumentChunk(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __table_args__ = (
         UniqueConstraint("document_id", "chunk_index"),
         Index(None, "document_id"),
+        Index(None, "document_id", "deleted_at"),
     )
 
     document_id: Mapped[UUID] = mapped_column(
@@ -544,13 +565,17 @@ class DocumentChunk(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         default=dict,
         server_default=text("'{}'::jsonb"),
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     document: Mapped[Document] = relationship(back_populates="chunks")
 
 
 class MessageDocument(CreatedAtMixin, Base):
     __tablename__ = "message_documents"
-    __table_args__ = (Index(None, "document_id"),)
+    __table_args__ = (
+        Index(None, "document_id"),
+        Index(None, "message_id", "deleted_at"),
+    )
 
     message_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -572,6 +597,7 @@ class MessageDocument(CreatedAtMixin, Base):
         default=0,
         server_default="0",
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     message: Mapped[Message] = relationship(back_populates="document_links")
     document: Mapped[Document] = relationship(back_populates="message_links")
@@ -582,6 +608,7 @@ class UserPrincipalToken(CreatedAtMixin, Base):
     __table_args__ = (
         Index(None, "user_id"),
         Index(None, "connector_id"),
+        Index(None, "user_id", "deleted_at"),
     )
 
     user_id: Mapped[UUID] = mapped_column(
@@ -597,6 +624,7 @@ class UserPrincipalToken(CreatedAtMixin, Base):
         BigInteger,
         ForeignKey("connectors.id"),
     )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(back_populates="principal_tokens")
     connector: Mapped[Connector | None] = relationship(
@@ -613,6 +641,7 @@ class DocumentBlob(CreatedAtMixin, Base):
         primary_key=True,
     )
     raw_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     document: Mapped[Document] = relationship(back_populates="blob")
 

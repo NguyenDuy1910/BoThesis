@@ -86,16 +86,6 @@ function readStoredMessages(id: string): CachedChatMessage[] {
   }
 }
 
-function removeStoredMessages(id: string) {
-  const sessionId = resolveSessionId(id);
-  memoryMessages.delete(sessionId);
-  try {
-    window.localStorage.removeItem(messageKey(sessionId));
-  } catch {
-    // Storage may be unavailable; the memory fallback is already cleared.
-  }
-}
-
 function createLocalId(prefix: string) {
   const randomUUID = globalThis.crypto?.randomUUID?.();
   if (randomUUID) return randomUUID;
@@ -181,9 +171,24 @@ export const conversationAdapter: ConversationAdapter = {
     sessionId = id,
   ) {
     const existing = readConversations().find((conversation) => conversation.id === id);
-    if (existing) return existing;
+    if (existing && existing.deletedAt === undefined) return existing;
 
     const now = Date.now();
+    if (existing) {
+      const restored: ChatConversation = {
+        ...existing,
+        title,
+        sessionId,
+        updatedAt: now,
+        deletedAt: undefined,
+      };
+      writeConversations(
+        readConversations().map((conversation) => (
+          conversation.id === id ? restored : conversation
+        )),
+      );
+      return restored;
+    }
     const conversation: ChatConversation = {
       id,
       sessionId,
@@ -200,9 +205,9 @@ export const conversationAdapter: ConversationAdapter = {
   },
 
   async listConversations() {
-    return readConversations().sort(
-      (a, b) => b.updatedAt - a.updatedAt
-    );
+    return readConversations()
+      .filter((conversation) => conversation.deletedAt === undefined)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
   },
 
   async getConversationMessages(id) {
@@ -226,7 +231,9 @@ export const conversationAdapter: ConversationAdapter = {
   async updateConversation(id, patch) {
     let updated: ChatConversation | null = null;
     const next = readConversations().map((conversation) => {
-      if (conversation.id !== id) return conversation;
+      if (conversation.id !== id || conversation.deletedAt !== undefined) {
+        return conversation;
+      }
       updated = {
         ...conversation,
         ...patch,
@@ -239,13 +246,11 @@ export const conversationAdapter: ConversationAdapter = {
   },
 
   async deleteConversation(id) {
-    const sessionId = resolveSessionId(id);
-    writeConversations(
-      readConversations().filter(
-        (conversation) => conversation.id !== id && conversation.sessionId !== id
-      )
-    );
-    removeStoredMessages(id);
-    removeStoredMessages(sessionId);
+    const deletedAt = Date.now();
+    writeConversations(readConversations().map((conversation) => (
+      conversation.id === id || conversation.sessionId === id
+        ? { ...conversation, deletedAt }
+        : conversation
+    )));
   },
 };

@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from sqlalchemy import and_, delete, not_, or_, select, update
+from sqlalchemy import and_, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload, selectinload
+from sqlalchemy.orm import joinedload, selectinload, with_loader_criteria
 from sqlalchemy.sql import Select
 
 from bothesis.db.models import (
@@ -19,47 +18,25 @@ from bothesis.db.models import (
     ConnectorScope,
     Conversation,
     Document,
-    DocumentBlob,
     DocumentChunk,
     Message,
     MessageDocument,
     SyncRun,
 )
-from bothesis.services.auth import (
+from bothesis.services import (
     ACTIVE_STATUS,
     AuthContext,
     AuthService,
     AuthorizationError,
+    DocumentChunkInput,
+    DocumentNotFoundError,
+    InvalidDocumentStateError,
+    KNOWLEDGE_READ_PERMISSION,
+    LOCAL_DOCUMENT_ORIGINS,
+    MESSAGE_DOCUMENT_RELATIONS,
+    SOURCE_MANAGE_PERMISSION,
+    UPLOAD_STATUSES,
 )
-
-LOCAL_DOCUMENT_ORIGINS = frozenset({"upload", "generated"})
-MESSAGE_DOCUMENT_RELATIONS = frozenset({"attachment", "reference", "output"})
-KNOWLEDGE_READ_PERMISSION = "knowledge.read"
-SOURCE_MANAGE_PERMISSION = "source.manage"
-
-
-class DocumentServiceError(Exception):
-    """Base exception for durable document service failures."""
-
-
-class DocumentNotFoundError(DocumentServiceError):
-    """Raised for missing and inaccessible documents to prevent enumeration."""
-
-
-class InvalidDocumentStateError(DocumentServiceError):
-    """Raised when a lifecycle or lineage transition is invalid."""
-
-
-@dataclass(frozen=True, slots=True)
-class DocumentChunkInput:
-    """Canonical chunk content written to PostgreSQL before vector indexing."""
-
-    content: str
-    token_count: int | None = None
-    start_page_number: int | None = None
-    end_page_number: int | None = None
-    heading_path: tuple[str, ...] | None = None
-    metadata: Mapping[str, Any] | None = None
 
 
 class DocumentService:
@@ -80,10 +57,20 @@ class DocumentService:
         metadata: Mapping[str, Any] | None = None,
         raw_storage_key: str | None = None,
         parent_document_id: UUID | None = None,
+        upload_status: str = "not_applicable",
+        content_sha256: str | None = None,
+        upload_idempotency_key: str | None = None,
+        uploaded_at: datetime | None = None,
     ) -> Document:
         await AuthService(self._session).get_user(owner_user_id)
         normalized_origin = _local_origin(origin)
         _validate_size(size_bytes)
+        normalized_upload_status = _upload_status(upload_status)
+        normalized_sha256 = _content_sha256(content_sha256)
+        normalized_idempotency_key = _optional_text(
+            upload_idempotency_key,
+            max_length=128,
+        )
         if parent_document_id is not None:
             await self._validate_parent(
                 parent_document_id,
@@ -105,12 +92,236 @@ class DocumentService:
             size_bytes=size_bytes,
             metadata_=dict(metadata or {}),
             raw_storage_key=_optional_text(raw_storage_key),
+            upload_status=normalized_upload_status,
+            content_sha256=normalized_sha256,
+            upload_idempotency_key=normalized_idempotency_key,
+            uploaded_at=uploaded_at,
             parent_document_id=parent_document_id,
             created_by_user_id=owner_user_id,
         )
         self._session.add(document)
         await self._session.flush()
         return document
+
+    async def create_or_get_personal_upload(
+        self,
+        owner_user_id: UUID,
+        *,
+        idempotency_key: str,
+        file_name: str,
+        mime_type: str,
+        size_bytes: int,
+        metadata: Mapping[str, Any] | None = None,
+        use_object_storage: bool = True,
+    ) -> tuple[Document, bool]:
+        """Create one pending upload, or return the matching retry target.
+
+        The PostgreSQL conflict target makes simultaneous retries converge on
+        one Document without introducing a separate upload record.
+        """
+
+        await AuthService(self._session).get_user(owner_user_id)
+        normalized_key = _required_text(
+            idempotency_key,
+            "upload idempotency key",
+            max_length=128,
+        )
+        normalized_name = _required_text(file_name, "file name", max_length=240)
+        normalized_mime = _required_text(
+            mime_type,
+            "mime type",
+            max_length=255,
+        ).casefold()
+        _validate_size(size_bytes)
+        if size_bytes is None or size_bytes < 1:
+            raise ValueError("upload size must be greater than zero")
+
+        document_id = uuid4()
+        raw_storage_key = (
+            f"users/{owner_user_id}/documents/{document_id}/raw"
+            if use_object_storage
+            else None
+        )
+        values = {
+            "id": document_id,
+            "owner_user_id": owner_user_id,
+            "tenant_id": None,
+            "connector_scope_id": None,
+            "generation": None,
+            "origin": "upload",
+            "title": normalized_name,
+            "mime_type": normalized_mime,
+            "size_bytes": size_bytes,
+            "metadata_": {
+                **dict(metadata or {}),
+                "file_name": normalized_name,
+            },
+            "raw_storage_key": raw_storage_key,
+            "upload_status": "pending",
+            "upload_idempotency_key": normalized_key,
+            "created_by_user_id": owner_user_id,
+        }
+        inserted_id = await self._session.scalar(
+            insert(Document)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=[
+                    Document.owner_user_id,
+                    Document.upload_idempotency_key,
+                ],
+                index_where=Document.upload_idempotency_key.is_not(None),
+            )
+            .returning(Document.id)
+        )
+        created = inserted_id is not None
+        document = await self._session.scalar(
+            select(Document).where(
+                Document.owner_user_id == owner_user_id,
+                Document.upload_idempotency_key == normalized_key,
+            )
+        )
+        if document is None:
+            raise InvalidDocumentStateError(
+                "upload idempotency conflict was not readable"
+            )
+        if (
+            document.origin != "upload"
+            or document.title != normalized_name
+            or document.mime_type != normalized_mime
+            or document.size_bytes != size_bytes
+            or document.lifecycle_status != ACTIVE_STATUS
+        ):
+            raise InvalidDocumentStateError(
+                "upload idempotency key was reused with different file metadata"
+            )
+        await self._session.flush()
+        return document, created
+
+    async def get_owned_upload(
+        self,
+        document_id: UUID,
+        owner_user_id: UUID,
+        *,
+        include_hidden: bool = False,
+        for_update: bool = False,
+    ) -> Document:
+        """Return one uploader-owned Document without exposing its existence."""
+
+        statement = select(Document).where(
+            Document.id == document_id,
+            Document.owner_user_id == owner_user_id,
+            Document.origin == "upload",
+        )
+        if not include_hidden:
+            statement = statement.where(Document.lifecycle_status == ACTIVE_STATUS)
+        if for_update:
+            statement = statement.with_for_update()
+        document = await self._session.scalar(statement)
+        if document is None:
+            raise DocumentNotFoundError(f"document not found: {document_id}")
+        return document
+
+    async def mark_upload_available(
+        self,
+        document_id: UUID,
+        owner_user_id: UUID,
+        *,
+        raw_storage_key: str | None,
+        content_sha256: str | None = None,
+        storage_metadata: Mapping[str, Any] | None = None,
+        uploaded_at: datetime | None = None,
+    ) -> Document:
+        document = await self._session.scalar(
+            select(Document)
+            .where(
+                Document.id == document_id,
+                Document.owner_user_id == owner_user_id,
+                Document.origin == "upload",
+            )
+            .with_for_update()
+        )
+        if document is None or document.lifecycle_status != ACTIVE_STATUS:
+            raise DocumentNotFoundError(f"document not found: {document_id}")
+        if document.upload_status == "available":
+            return document
+        if document.upload_status not in {"pending", "failed"}:
+            raise InvalidDocumentStateError("document is not awaiting uploaded content")
+
+        document.raw_storage_key = _optional_text(raw_storage_key)
+        document.content_sha256 = _content_sha256(content_sha256)
+        document.upload_status = "available"
+        document.uploaded_at = uploaded_at or datetime.now(UTC)
+        if storage_metadata:
+            metadata = dict(document.metadata_)
+            metadata["storage"] = dict(storage_metadata)
+            document.metadata_ = metadata
+        await self._session.flush()
+        return document
+
+    async def mark_upload_failed(
+        self,
+        document_id: UUID,
+        owner_user_id: UUID,
+        *,
+        error_code: str,
+    ) -> Document:
+        document = await self.get_owned_upload(document_id, owner_user_id)
+        if document.upload_status == "available":
+            return document
+        document.upload_status = "failed"
+        metadata = dict(document.metadata_)
+        metadata["upload_error"] = _required_text(
+            error_code,
+            "upload error code",
+            max_length=128,
+        )
+        document.metadata_ = metadata
+        await self._session.flush()
+        return document
+
+    async def set_content_sha256(
+        self,
+        document_id: UUID,
+        content_sha256: str,
+    ) -> Document:
+        document = await self._get_internal(document_id)
+        normalized = _content_sha256(content_sha256)
+        if normalized is None:
+            raise ValueError("content sha256 is required")
+        if (
+            document.content_sha256 is not None
+            and document.content_sha256 != normalized
+        ):
+            raise InvalidDocumentStateError("document content fingerprint changed")
+        document.content_sha256 = normalized
+        await self._session.flush()
+        return document
+
+    async def merge_metadata(
+        self,
+        document_id: UUID,
+        values: Mapping[str, Any],
+    ) -> Document:
+        document = await self._get_internal(document_id)
+        metadata = dict(document.metadata_)
+        metadata.update(dict(values))
+        document.metadata_ = metadata
+        await self._session.flush()
+        return document
+
+    async def soft_delete_chunks(self, document_id: UUID) -> None:
+        document = await self._get_internal(document_id)
+        await self._session.execute(
+            update(DocumentChunk)
+            .where(
+                DocumentChunk.document_id == document_id,
+                DocumentChunk.deleted_at.is_(None),
+            )
+            .values(deleted_at=datetime.now(UTC))
+        )
+        document.indexing_status = "none"
+        document.last_indexed_at = None
+        await self._session.flush()
 
     async def create_enterprise_document(
         self,
@@ -268,14 +479,36 @@ class DocumentService:
         if not chunks:
             raise ValueError("at least one document chunk is required")
 
-        records = [
-            _chunk_record(document_id, chunk_index, chunk)
-            for chunk_index, chunk in enumerate(chunks)
-        ]
-        await self._session.execute(
-            delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
-        )
-        self._session.add_all(records)
+        existing_records = {
+            record.chunk_index: record
+            for record in await self._session.scalars(
+                select(DocumentChunk)
+                .where(DocumentChunk.document_id == document_id)
+                .with_for_update()
+            )
+        }
+        records: list[DocumentChunk] = []
+        for chunk_index, chunk in enumerate(chunks):
+            replacement = _chunk_record(document_id, chunk_index, chunk)
+            record = existing_records.get(chunk_index)
+            if record is None:
+                self._session.add(replacement)
+                records.append(replacement)
+                continue
+            record.content = replacement.content
+            record.token_count = replacement.token_count
+            record.start_page_number = replacement.start_page_number
+            record.end_page_number = replacement.end_page_number
+            record.heading_path = replacement.heading_path
+            record.metadata_ = replacement.metadata_
+            record.deleted_at = None
+            records.append(record)
+
+        deleted_at = datetime.now(UTC)
+        for chunk_index, record in existing_records.items():
+            if chunk_index >= len(chunks):
+                record.deleted_at = deleted_at
+
         document.indexing_status = "pending"
         document.last_indexed_at = None
         await self._session.flush()
@@ -291,12 +524,24 @@ class DocumentService:
         if document.lifecycle_status == "deleted":
             raise InvalidDocumentStateError("cannot index a deleted document")
         has_chunk = await self._session.scalar(
-            select(DocumentChunk.id).where(DocumentChunk.document_id == document_id)
+            select(DocumentChunk.id).where(
+                DocumentChunk.document_id == document_id,
+                DocumentChunk.deleted_at.is_(None),
+            )
         )
         if has_chunk is None:
             raise InvalidDocumentStateError("cannot index a document without chunks")
         document.indexing_status = "indexed"
         document.last_indexed_at = indexed_at or datetime.now(UTC)
+        await self._session.flush()
+        return document
+
+    async def mark_index_pending(self, document_id: UUID) -> Document:
+        document = await self._get_internal(document_id)
+        if document.lifecycle_status == "deleted":
+            raise InvalidDocumentStateError("cannot index a deleted document")
+        document.indexing_status = "pending"
+        document.last_indexed_at = None
         await self._session.flush()
         return document
 
@@ -388,7 +633,13 @@ class DocumentService:
     ) -> Document:
         statement = self._visible_documents(access).where(Document.id == document_id)
         if include_chunks:
-            statement = statement.options(selectinload(Document.chunks))
+            statement = statement.options(
+                selectinload(Document.chunks),
+                with_loader_criteria(
+                    DocumentChunk,
+                    DocumentChunk.deleted_at.is_(None),
+                ),
+            )
         document = await self._session.scalar(statement)
         if document is None:
             raise DocumentNotFoundError(f"document not found: {document_id}")
@@ -429,7 +680,10 @@ class DocumentService:
         await self.get_document(document_id, access=access)
         result = await self._session.scalars(
             select(DocumentChunk)
-            .where(DocumentChunk.document_id == document_id)
+            .where(
+                DocumentChunk.document_id == document_id,
+                DocumentChunk.deleted_at.is_(None),
+            )
             .order_by(DocumentChunk.chunk_index)
         )
         return list(result)
@@ -442,43 +696,6 @@ class DocumentService:
     ) -> str:
         chunks = await self.get_chunks(document_id, access=access)
         return "\n\n".join(chunk.content for chunk in chunks)
-
-    async def store_blob(self, document_id: UUID, raw_bytes: bytes) -> DocumentBlob:
-        """Store raw bytes from a trusted ingestion worker."""
-
-        await self._get_internal(document_id)
-        if not raw_bytes:
-            raise ValueError("raw document bytes must not be empty")
-        statement = (
-            insert(DocumentBlob)
-            .values(document_id=document_id, raw_bytes=raw_bytes)
-            .on_conflict_do_update(
-                index_elements=[DocumentBlob.document_id],
-                set_={"raw_bytes": raw_bytes},
-            )
-            .returning(DocumentBlob)
-        )
-        blob = await self._session.scalar(statement)
-        if blob is None:
-            raise InvalidDocumentStateError("document blob was not stored")
-        await self._session.flush()
-        return blob
-
-    async def get_blob(
-        self,
-        document_id: UUID,
-        *,
-        access: AuthContext,
-    ) -> bytes:
-        await self.get_document(document_id, access=access)
-        raw_bytes = await self._session.scalar(
-            select(DocumentBlob.raw_bytes).where(
-                DocumentBlob.document_id == document_id
-            )
-        )
-        if raw_bytes is None:
-            raise DocumentNotFoundError(f"document blob not found: {document_id}")
-        return raw_bytes
 
     async def link_message(
         self,
@@ -521,7 +738,7 @@ class DocumentService:
                     MessageDocument.document_id,
                     MessageDocument.relation_type,
                 ],
-                set_={"position": position},
+                set_={"position": position, "deleted_at": None},
             )
             .returning(MessageDocument)
         )
@@ -550,11 +767,14 @@ class DocumentService:
         if message_exists is None:
             raise DocumentNotFoundError(f"message not found: {message_id}")
         await self._session.execute(
-            delete(MessageDocument).where(
+            update(MessageDocument)
+            .where(
                 MessageDocument.message_id == message_id,
                 MessageDocument.document_id == document_id,
                 MessageDocument.relation_type == relation_type.strip().casefold(),
+                MessageDocument.deleted_at.is_(None),
             )
+            .values(deleted_at=datetime.now(UTC))
         )
         await self._session.flush()
 
@@ -583,6 +803,14 @@ class DocumentService:
         document.lifecycle_status = "deleted"
         document.indexing_status = "none"
         document.deleted_at = datetime.now(UTC)
+        await self._session.execute(
+            update(DocumentChunk)
+            .where(
+                DocumentChunk.document_id == document_id,
+                DocumentChunk.deleted_at.is_(None),
+            )
+            .values(deleted_at=document.deleted_at)
+        )
         await self._session.flush()
         return document
 
@@ -727,6 +955,25 @@ def _validate_size(size_bytes: int | None) -> None:
         raise ValueError("document size must not be negative")
 
 
+def _upload_status(value: str) -> str:
+    normalized = value.strip().casefold()
+    if normalized not in UPLOAD_STATUSES:
+        allowed = ", ".join(sorted(UPLOAD_STATUSES))
+        raise ValueError(f"upload status must be one of: {allowed}")
+    return normalized
+
+
+def _content_sha256(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().casefold()
+    if len(normalized) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized
+    ):
+        raise ValueError("content sha256 must be a lowercase hexadecimal digest")
+    return normalized
+
+
 def _required_text(
     value: str,
     field_name: str,
@@ -747,10 +994,4 @@ def _optional_text(value: str | None, *, max_length: int | None = None) -> str |
     return _required_text(value, "value", max_length=max_length)
 
 
-__all__ = [
-    "DocumentChunkInput",
-    "DocumentNotFoundError",
-    "DocumentService",
-    "DocumentServiceError",
-    "InvalidDocumentStateError",
-]
+__all__ = ["DocumentService"]

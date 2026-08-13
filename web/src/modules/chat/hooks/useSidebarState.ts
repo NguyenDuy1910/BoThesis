@@ -4,6 +4,18 @@ import { useCallback, useEffect, useState } from "react";
 
 const STORAGE_KEY = "bothesis-sidebar-collapsed";
 
+function readCollapsedState(): boolean {
+  if (typeof window === "undefined") return false;
+  const stored = window.localStorage.getItem(STORAGE_KEY);
+  if (stored === null) return false;
+  try {
+    const value: unknown = JSON.parse(stored);
+    return typeof value === "boolean" ? value : false;
+  } catch {
+    return false;
+  }
+}
+
 export interface SidebarState {
   collapsed: boolean;
   mobileOpen: boolean;
@@ -13,16 +25,13 @@ export interface SidebarState {
 }
 
 export function useSidebarState(): SidebarState {
-  const [collapsed, setCollapsed] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return window.localStorage.getItem(STORAGE_KEY) === "true";
-  });
+  const [collapsed, setCollapsed] = useState(readCollapsedState);
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const toggleCollapse = useCallback(() => {
     setCollapsed((prev) => {
       const next = !prev;
-      window.localStorage.setItem(STORAGE_KEY, String(next));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
       return next;
     });
   }, []);

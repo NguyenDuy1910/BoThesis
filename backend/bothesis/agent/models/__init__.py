@@ -63,19 +63,18 @@ class ConversationMessage:
 
 
 @dataclass(frozen=True, slots=True)
-class ConversationAttachment:
-    """Server-validated attachment context available to one model run."""
+class ConversationDocument:
+    """Server-validated Document context available to one model run."""
 
     id: str
     title: str
     content_type: str
-    mode: Literal["direct", "indexed", "lazy"]
+    mode: Literal["direct", "indexed"]
     citation_id: str
     content_block: Mapping[str, Any] | None = None
     extracted_text: str | None = None
     evidence: tuple[Evidence, ...] = ()
     provider_annotations: tuple[Mapping[str, Any], ...] = ()
-    background_index: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +90,7 @@ class AgentContext:
     trace_step: int | None = None
     retrieval_round: int = 0
     retrieval_query_count: int = 0
-    attachments: tuple[ConversationAttachment, ...] = ()
+    documents: tuple[ConversationDocument, ...] = ()
     model_extra_body: Mapping[str, Any] | None = None
 
 
@@ -315,12 +314,12 @@ class FinalAnswerDelta(StreamEvent):
 
 
 @dataclass(frozen=True, slots=True)
-class AttachmentProgress(StreamEvent):
-    type: ClassVar[str] = "attachment_progress"
-    attachment_id: str
+class DocumentProgress(StreamEvent):
+    type: ClassVar[str] = "document_progress"
+    document_id: str
     file_name: str
     status: Literal["preparing", "ready", "indexing", "skipped", "failed"]
-    mode: Literal["direct", "indexed", "lazy"]
+    mode: Literal["direct", "indexed"]
     message: str
 
 
@@ -370,7 +369,7 @@ AgentEvent: TypeAlias = (
     | FinalAnswerDelta
     | InterleavedToolStarted
     | InterleavedToolCompleted
-    | AttachmentProgress
+    | DocumentProgress
 )
 
 __all__ = [
@@ -380,13 +379,13 @@ __all__ = [
     "CitationAvailable",
     "CitationEvent",
     "CommentaryDelta",
-    "ConversationAttachment",
+    "ConversationDocument",
     "ConversationMessage",
     "Evidence",
     "EvidenceReference",
     "ExecutionMode",
     "FinalAnswerDelta",
-    "AttachmentProgress",
+    "DocumentProgress",
     "GenerationCompleted",
     "GenerationKind",
     "GenerationStarted",

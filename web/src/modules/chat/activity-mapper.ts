@@ -138,7 +138,7 @@ export class AgentActivityMapper {
     );
     const usedSourceCount = sources.filter((source) => source.status === "Used").length;
     const hasMeaningfulStep = steps.some((step) => (
-      step.type === "attachment_preparation"
+      step.type === "document_preparation"
       || step.type === "knowledge_retrieval"
       || step.type === "tool_execution"
       || step.type === "next_step_generation"
@@ -188,7 +188,7 @@ function statusFromPart(status: "active" | "completed" | "error" | "skipped"): A
 }
 
 function defaultStepLabel(type: AgentActivityType, toolName: string | undefined) {
-  if (type === "attachment_preparation") return "Preparing attachment";
+  if (type === "document_preparation") return "Preparing document";
   if (type === "next_step_generation") return "Determining next step";
   if (type === "final_response_generation") return "Generating final response";
   if (type === "knowledge_retrieval") return "Searching knowledge base";
@@ -200,7 +200,7 @@ function activityTypeFromPart(
   part: Extract<ChatMessagePart, { type: "data-status" }>,
 ): AgentActivityType | undefined {
   if (part.data.activityType) return part.data.activityType;
-  if (part.data.phase === "attachment") return "attachment_preparation";
+  if (part.data.phase === "document") return "document_preparation";
   if (part.data.phase === "retrieval") return "knowledge_retrieval";
   if (part.data.phase === "tool") return "tool_execution";
   if (part.data.phase === "model") return "final_response_generation";

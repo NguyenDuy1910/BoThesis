@@ -9,7 +9,7 @@ import type {
   AgentStreamEvent,
   ChatMessage,
   ChatMessagePart,
-  ConversationAttachment,
+  ConversationDocument,
 } from "../types";
 
 type ChatStatus = "ready" | "submitted" | "streaming";
@@ -91,14 +91,14 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
       data: { text: event.text },
     }];
   }
-  if (event.type === "attachment_progress") {
+  if (event.type === "document_progress") {
     const failed = event.status === "failed";
     const completed = event.status === "ready" || event.status === "skipped";
     return upsertStatus(parts, {
       type: "data-status",
-      id: `attachment-${event.attachment_id}`,
+      id: `document-${event.document_id}`,
       data: {
-        phase: "attachment",
+        phase: "document",
         state: failed ? "error" : completed ? (event.status === "skipped" ? "skipped" : "completed") : "active",
         label: event.status === "indexing"
           ? `Finding relevant content in ${event.file_name}`
@@ -110,8 +110,8 @@ function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMes
                 ? `${event.file_name} could not be prepared`
                 : `Preparing ${event.file_name}`,
         detail: event.message,
-        activityType: "attachment_preparation",
-        stepId: `attachment-${event.attachment_id}`,
+        activityType: "document_preparation",
+        stepId: `document-${event.document_id}`,
       },
     });
   }
@@ -468,7 +468,7 @@ export function useBothesisChat({
     options: {
       historyMessages?: ChatMessage[];
       displayMessages?: ChatMessage[];
-      attachments?: ConversationAttachment[];
+      documents?: ConversationDocument[];
     } = {},
   ) => {
     if (controllerRef.current) return;
@@ -497,10 +497,10 @@ export function useBothesisChat({
             role: "user" as const,
             parts: [
               { type: "text" as const, text, state: "done" as const },
-              ...(options.attachments ?? []).map((attachment) => ({
-                type: "data-attachment" as const,
-                id: attachment.id,
-                data: attachment,
+              ...(options.documents ?? []).map((document) => ({
+                type: "data-document" as const,
+                id: document.id,
+                data: document,
               })),
             ],
           }, assistant]
@@ -513,7 +513,7 @@ export function useBothesisChat({
       await streamAgentResponse(text, {
         conversationId,
         history,
-        attachmentIds: options.attachments?.map((attachment) => attachment.id),
+        documentIds: options.documents?.map((document) => document.id),
         signal: controller.signal,
         onEvent: (event) => {
           if (event.type === "message_delta" || event.type === "final_answer_delta") {
@@ -549,11 +549,11 @@ export function useBothesisChat({
 
   const sendMessage = useCallback(async ({
     text,
-    attachments = [],
+    documents = [],
   }: {
     text: string;
-    attachments?: ConversationAttachment[];
-  }) => run(text, true, { attachments }), [run]);
+    documents?: ConversationDocument[];
+  }) => run(text, true, { documents }), [run]);
   const stop = useCallback(() => {
     const activeAssistantId = activeAssistantIdRef.current;
     controllerRef.current?.abort();
@@ -577,7 +577,7 @@ export function useBothesisChat({
     await run(context.userText, false, {
       historyMessages: context.historyMessages,
       displayMessages: context.displayMessages,
-      attachments: context.attachments,
+      documents: context.documents,
     });
   }, [run]);
 

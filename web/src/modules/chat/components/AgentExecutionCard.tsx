@@ -187,7 +187,7 @@ function ActivitySteps({ messageId, steps }: { messageId: string; steps: Activit
 }
 
 function minimalActivitySteps(steps: ActivityEntry[]): ActivityEntry[] {
-  const attachmentSteps = steps.filter((step) => step.type === "attachment_preparation");
+  const attachmentSteps = steps.filter((step) => step.type === "document_preparation");
   const retrievalSteps = steps.filter((step) => step.type === "knowledge_retrieval");
   const toolSteps = steps.filter((step) => step.type === "tool_execution");
   const generationStep = [...steps]
@@ -371,7 +371,7 @@ function summaryLabel(
 ) {
   if (run.status === "running" || isStreaming) {
     const active = [...run.steps].reverse().find((step) => step.status === "running");
-    if (active?.type === "attachment_preparation") return "Đang chuẩn bị tệp đính kèm…";
+    if (active?.type === "document_preparation") return "Đang chuẩn bị tài liệu…";
     if (active?.type === "knowledge_retrieval") return "Đang tìm trong Knowledge…";
     if (active?.type === "tool_execution") return "Đang sử dụng công cụ…";
     if (hasAnswer || active?.type === "final_response_generation") {

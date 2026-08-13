@@ -1,0 +1,68 @@
+{
+  "schema_version": 2,
+  "title": "BoThesis document upload and processing storage",
+  "status": "implemented",
+  "decisions": {
+    "system_of_record": "PostgreSQL",
+    "raw_binary_primary": "S3-compatible object storage",
+    "raw_binary_fallback": "PostgreSQL document_blobs, bounded to 20 MiB by default",
+    "retrieval_index": "Qdrant derived from PostgreSQL document_chunks",
+    "provider_cache": "documents.metadata keyed by provider and source fingerprint",
+    "deletion_policy": "soft delete only; the application never physically removes retained content"
+  },
+  "entities": {
+    "documents": {
+      "purpose": "Canonical metadata, ownership, lineage, upload, lifecycle, and index readiness",
+      "upload_status": ["not_applicable", "pending", "available", "failed"],
+      "new_fields": [
+        "upload_status",
+        "content_sha256",
+        "upload_idempotency_key",
+        "uploaded_at"
+      ],
+      "constraints": [
+        "exactly one of owner_user_id or tenant_id is set",
+        "upload idempotency is unique per personal owner",
+        "content_sha256 is null or lowercase SHA-256"
+      ]
+    },
+    "document_blobs": {
+      "purpose": "Bounded fallback for raw bytes when object storage cannot be used",
+      "relationship": "one-to-zero-or-one with documents",
+      "lifecycle": "deleted_at tombstone retains raw_bytes"
+    },
+    "document_chunks": {
+      "purpose": "Canonical parsed chunks and source-location lineage",
+      "relationship": "one-to-many from documents",
+      "lifecycle": "deleted_at tombstone; replacement reuses stable document and chunk keys"
+    },
+    "message_documents": {
+      "purpose": "Only durable association between messages and uploaded documents",
+      "relation_types": ["attachment", "reference", "output"],
+      "lifecycle": "deleted_at tombstone"
+    },
+    "authorization_links": {
+      "entities": ["tenant_memberships", "user_principal_tokens"],
+      "lifecycle": "revocation sets inactive/deleted_at and immediately excludes the rows from authorization"
+    }
+  },
+  "access_patterns": [
+    "start or resume one upload by owner and idempotency key",
+    "validate one owner-visible document before direct model input",
+    "load or replace canonical chunks for on-demand indexing",
+    "link ordered documents to a user message and cited documents to an assistant message",
+    "replace deterministic vector points with active tenant, owner ACL, and chunk lineage",
+    "hide then idempotently tombstone PostgreSQL children, provider-cache entries, and vector points while retaining raw content"
+  ],
+  "lifecycle": {
+    "upload": "pending -> available or failed",
+    "index": "none/failed -> pending -> indexed or failed",
+    "delete": "active -> hidden -> deleted, with deleted_at tombstones on dependent records",
+    "retention": "indefinite application retention; no hard-delete or purge operation",
+    "backup_boundary": "PostgreSQL and object-store backup/versioning are deployment responsibilities"
+  },
+  "migrations": [
+    "backend/migrations/0001_document_upload_state.sql",
+    "backend/migrations/0002_soft_delete_only.sql"
+  ]
+}

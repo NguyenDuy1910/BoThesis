@@ -21,8 +21,9 @@ from bothesis.db.models import (
     Message,
     SyncRun,
 )
-from bothesis.services.auth import AuthService, AuthorizationError
-from bothesis.services.document import (
+from bothesis.services import (
+    AuthService,
+    AuthorizationError,
     DocumentChunkInput,
     DocumentNotFoundError,
     DocumentService,
