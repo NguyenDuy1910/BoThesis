@@ -113,6 +113,40 @@ def test_filters_are_deterministic_and_keep_zero_ancestor_ids() -> None:
     assert acl_list_condition.match == qmodels.MatchAny(any=["reader-1", "reader-2"])
 
 
+def test_admin_filter_keeps_tenant_and_tombstone_boundaries() -> None:
+    query_filter = VectorStore.build_retrieval_filter(
+        None,
+        access_context=SimpleNamespace(
+            tenant_id="tenant-1",
+            reader_ids=["email:admin@example.test"],
+            space_keys=[],
+            is_admin=True,
+        ),
+    )
+
+    assert query_filter.must is not None
+    assert [
+        condition.key
+        for condition in query_filter.must
+        if isinstance(condition, qmodels.FieldCondition)
+    ] == ["is_deleted", "tenant_id"]
+    assert not any(
+        isinstance(condition, qmodels.Filter)
+        for condition in query_filter.must
+    )
+
+
+def test_lifecycle_filter_excludes_tombstones_without_access_conditions() -> None:
+    query_filter = VectorStore.build_lifecycle_filter()
+
+    assert query_filter.must == [
+        qmodels.FieldCondition(
+            key="is_deleted",
+            match=qmodels.MatchValue(value=False),
+        )
+    ]
+
+
 @pytest.mark.asyncio
 async def test_acl_sync_removes_reserved_reader_id() -> None:
     client = RecordingClient()

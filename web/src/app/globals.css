@@ -229,7 +229,6 @@ a {
 .composer-tool:focus-visible,
 .composer-send:focus-visible,
 .assistant-action:focus-visible,
-.assistant-activity__summary:focus-visible,
 .assistant-source:focus-visible,
 .activity-panel__tabs button:focus-visible,
 .topbar__menu:focus-visible,
@@ -1805,41 +1804,105 @@ a {
   max-width: 100%;
 }
 
-.assistant-activity {
-  max-width: 40rem;
-  margin: -0.125rem 0 0.5rem;
-  color: var(--text-muted);
-  font-size: 0.78125rem;
-}
-
-.assistant-activity__summary {
-  display: inline-flex;
-  max-width: 100%;
-  align-items: center;
-  gap: 0.4375rem;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  padding: 0.1875rem 0.25rem;
-  color: inherit;
-  text-align: left;
-}
-
-.assistant-activity__summary:hover {
-  background: var(--bg-subtle);
-  color: var(--text-secondary);
-}
-
-.assistant-activity__summary-label {
+.assistant-turn {
+  display: grid;
   min-width: 0;
-  overflow: hidden;
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100%;
+  gap: 0.875rem;
 }
 
-.assistant-activity--running .assistant-activity__status-icon { color: var(--primary); }
-.assistant-activity--failed .assistant-activity__status-icon { color: var(--danger); }
+.assistant-turn__interim {
+  max-width: 42rem;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.assistant-turn__tool {
+  display: flex;
+  max-width: 100%;
+  align-items: flex-start;
+  gap: 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.assistant-turn__tool-icon {
+  flex: 0 0 auto;
+  margin-top: 0.125rem;
+  color: var(--text-soft);
+}
+
+.assistant-turn__tool--active .assistant-turn__tool-icon {
+  animation: assistant-tool-pulse 1.4s ease-in-out infinite;
+  color: var(--brand-accent);
+}
+
+.assistant-turn__tool--error,
+.assistant-turn__tool--error .assistant-turn__tool-icon,
+.assistant-turn__tool--error .assistant-turn__tool-detail {
+  color: var(--danger);
+}
+
+.assistant-turn__tool-body {
+  display: grid;
+  min-width: 0;
+  gap: 0.125rem;
+}
+
+.assistant-turn__tool-label {
+  color: inherit;
+  font-weight: 550;
+}
+
+.assistant-turn__tool-detail {
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.assistant-turn__response {
+  margin-top: 0.125rem;
+}
+
+.assistant-turn__pending {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 1rem;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.assistant-turn__pending span {
+  width: 0.25rem;
+  height: 0.25rem;
+  animation: assistant-pending-dot 1.2s ease-in-out infinite;
+  border-radius: 999px;
+  background: var(--text-soft);
+}
+
+.assistant-turn__pending span:nth-child(2) { animation-delay: 120ms; }
+.assistant-turn__pending span:nth-child(3) { animation-delay: 240ms; }
+
+@keyframes assistant-tool-pulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+@keyframes assistant-pending-dot {
+  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-turn__tool--active .assistant-turn__tool-icon,
+  .assistant-turn__pending span {
+    animation: none;
+  }
+}
 
 .assistant-activity__spin { animation: agent-activity-spin 0.9s linear infinite; }
 
@@ -1900,11 +1963,17 @@ a {
 
 .assistant-activity__error {
   overflow-wrap: anywhere;
-  color: var(--text-muted);
   line-height: 1.45;
 }
 
 .assistant-activity__error { color: var(--danger); }
+
+.assistant-activity__detail {
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
 
 .assistant-sources {
   display: grid;

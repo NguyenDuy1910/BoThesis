@@ -10,6 +10,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from bothesis.agent.models import AgentContext
+from bothesis.agent.protocol import FunctionTool
+from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
 from bothesis.knowledge.document_index import (
     QdrantKeywordRetriever,
@@ -97,6 +99,21 @@ class StubEmbedder:
 class StubSemanticVectorStore:
     def __init__(self) -> None:
         self.calls: list[tuple[list[float], object, int]] = []
+        self.access_contexts: list[object] = []
+        self.lifecycle_filter_calls = 0
+
+    def build_lifecycle_filter(self) -> object:
+        self.lifecycle_filter_calls += 1
+        return "lifecycle-filter"
+
+    def build_retrieval_filter(
+        self,
+        _search_params: object,
+        *,
+        access_context: object,
+    ) -> object:
+        self.access_contexts.append(access_context)
+        return "scoped-filter"
 
     async def semantic_search(
         self,
@@ -151,6 +168,62 @@ async def test_semantic_retriever_embeds_the_query_and_normalizes_qdrant_payload
     assert store.calls == [([0.1, 0.2], None, 3)]
     assert results[0].id == "chunk-1"
     assert results[0].relevance_score == 0.91
+
+
+@pytest.mark.asyncio
+async def test_semantic_retriever_forwards_authenticated_acl_scope() -> None:
+    store = StubSemanticVectorStore()
+    embedder = StubEmbedder()
+    retriever = QdrantSemanticRetriever(
+        store,
+        embedder,
+        allow_unscoped_admin_retrieval=True,
+    )  # type: ignore[arg-type]
+    context = AgentContext(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        roles=["analyst"],
+        reader_ids=("email:person@example.test", "external_group:finance"),
+        is_admin=False,
+    )
+
+    await retriever.search_scoped("annual leave", limit=3, ctx=context)
+
+    access = store.access_contexts[0]
+    assert getattr(access, "tenant_id") == "tenant-1"
+    assert getattr(access, "reader_ids") == (
+        "email:person@example.test",
+        "external_group:analyst",
+        "external_group:finance",
+        "public",
+        "user-1",
+    )
+    assert getattr(access, "is_admin") is False
+    assert store.lifecycle_filter_calls == 0
+    assert store.calls == [([0.1, 0.2], "scoped-filter", 3)]
+
+
+@pytest.mark.asyncio
+async def test_phase1_admin_retrieval_keeps_only_the_lifecycle_filter() -> None:
+    store = StubSemanticVectorStore()
+    embedder = StubEmbedder()
+    retriever = QdrantSemanticRetriever(
+        store,
+        embedder,
+        allow_unscoped_admin_retrieval=True,
+    )  # type: ignore[arg-type]
+    context = AgentContext(
+        user_id="admin-1",
+        tenant_id="tenant-1",
+        roles=["developer"],
+        is_admin=True,
+    )
+
+    await retriever.search_scoped("annual leave", limit=3, ctx=context)
+
+    assert store.access_contexts == []
+    assert store.lifecycle_filter_calls == 1
+    assert store.calls == [([0.1, 0.2], "lifecycle-filter", 3)]
 
 
 @pytest.mark.asyncio
@@ -216,3 +289,27 @@ async def test_knowledge_search_handles_timeouts() -> None:
 
     assert result.error == "Knowledge search timed out. Please try again."
     assert result.metadata["outcome"] == "timeout"
+
+
+def test_knowledge_search_declares_itself_as_a_protocol_function_tool() -> None:
+    declaration = KnowledgeSearchTool(StubRetriever([])).as_function_tool()
+
+    assert isinstance(declaration, FunctionTool)
+    assert declaration.name == "knowledge_search"
+    assert declaration.parameters["required"] == ["query"]
+    assert "access-permitted" in declaration.description
+    assert "evidence IDs for citations" in declaration.description
+    assert "Do not use generic terms" in declaration.parameters["properties"][
+        "query"
+    ]["description"]
+    # A closed argument schema lets a provider enforce strict tool calling.
+    assert declaration.strict is True
+
+
+def test_tool_registry_exposes_declarations_through_the_protocol() -> None:
+    registry = ToolRegistry()
+    registry.register(KnowledgeSearchTool(StubRetriever([])))
+
+    assert [tool.name for tool in registry.function_tools()] == ["knowledge_search"]
+    assert registry.public_label("knowledge_search") == "Search knowledge base"
+    assert registry.public_category("knowledge_search") == "retrieval"

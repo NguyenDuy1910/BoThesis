@@ -49,11 +49,6 @@ export interface ReasoningEntry {
   text: string;
 }
 
-export interface FindingEntry {
-  id: string;
-  text: string;
-}
-
 export interface SourceResult {
   id: string;
   title: string;
@@ -77,7 +72,6 @@ export interface AgentRunView {
   toolDurationMs?: number;
   toolCallCount?: number;
   reasoning: ReasoningEntry[];
-  findings: FindingEntry[];
   steps: ActivityEntry[];
   sources: SourceResult[];
   sourceCount: number;

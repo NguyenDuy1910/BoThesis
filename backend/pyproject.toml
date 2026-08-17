@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.141.1",
     "httpx>=0.27",
     "langfuse==4.14.3",
+    "openai>=2.0,<3",
     "pydantic[email]>=2.13.4",
     "pypdf>=6.0",
     "pytest>=8",

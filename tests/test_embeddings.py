@@ -9,14 +9,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from bothesis.agent.transports.openrouter_embeddings import (
-    EmbeddingError,
-    OpenRouterEmbeddingClient,
-)
+from bothesis.agent.transports.openrouter import OpenRouterTransport
 
 
 @pytest.mark.asyncio
-async def test_openrouter_embedder_posts_the_configured_model_and_normalizes_vector() -> None:
+async def test_openrouter_embeddings_returns_the_native_payload() -> None:
     seen_request: httpx.Request | None = None
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -29,15 +26,15 @@ async def test_openrouter_embedder_posts_the_configured_model_and_normalizes_vec
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    embedder = OpenRouterEmbeddingClient(
+    transport = OpenRouterTransport(
         api_key="test-key",
-        model="openai/text-embedding-3-small",
+        embedding_model="openai/text-embedding-3-small",
         client=client,
     )
 
-    vector = await embedder.embed_query("annual leave")
+    response = await transport.embeddings(input="annual leave")
 
-    assert vector == [0.1, 0.2]
+    assert response == {"data": [{"embedding": [0.1, 0.2]}]}
     assert seen_request is not None
     assert seen_request.url.path == "/api/v1/embeddings"
     assert json.loads(seen_request.content) == {
@@ -48,14 +45,19 @@ async def test_openrouter_embedder_posts_the_configured_model_and_normalizes_vec
 
 
 @pytest.mark.asyncio
-async def test_openrouter_embedder_rejects_malformed_responses() -> None:
+async def test_openrouter_embeddings_does_not_normalize_provider_data() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{}]}, request=request)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    embedder = OpenRouterEmbeddingClient(api_key="test-key", model="test-model", client=client)
+    transport = OpenRouterTransport(
+        api_key="test-key",
+        embedding_model="test-model",
+        client=client,
+    )
 
-    with pytest.raises(EmbeddingError, match="embedding request failed"):
-        await embedder.embed_query("annual leave")
+    response = await transport.embeddings(input=["annual leave"])
+
+    assert response == {"data": [{}]}
 
     await client.aclose()

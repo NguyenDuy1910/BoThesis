@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -74,18 +73,15 @@ def _render_value(variable: str, value: object) -> str:
     )
 
 
-def render_chat_base(*, current_datetime: str | None = None) -> str:
-    """Render the shared system prompt with volatile context at the end."""
+def render_base_instruction() -> str:
+    """Return the primary conversational-agent instruction."""
 
-    runtime_datetime = current_datetime or datetime.now().astimezone().isoformat(
-        timespec="minutes"
-    )
-    return render_prompt("chat_base", current_datetime=runtime_datetime)
+    return render_prompt("base_instruction")
 
 
 __all__ = [
     "PromptRenderError",
     "load_prompt",
-    "render_chat_base",
+    "render_base_instruction",
     "render_prompt",
 ]

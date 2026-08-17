@@ -12,13 +12,43 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from bothesis.agent.models import (
     AgentContext,
     Evidence,
-    ExecutionMode,
-    ModelTurn,
-    ToolCall,
-    ToolResult,
+    ToolOutput,
 )
-from bothesis.agent.transports.base import LLMResponse
+from bothesis.agent.protocol import (
+    FunctionCallItem,
+    IncompleteDetails,
+    InputTokensDetails,
+    MessageItem,
+    OutputText,
+    Response,
+    ResponseUsage,
+)
 from bothesis.observability import LangfuseTracing, _trace_name
+
+
+def assistant_response(
+    text: str = "",
+    *,
+    model: str | None = "openai/gpt-5.4-mini",
+    function_calls: tuple[FunctionCallItem, ...] = (),
+    usage: ResponseUsage | None = None,
+    incomplete_details: IncompleteDetails | None = None,
+) -> Response:
+    """Build one protocol response the way a transport would map it."""
+
+    output: list[Any] = []
+    if text:
+        output.append(
+            MessageItem(role="assistant", content=(OutputText(text=text),))
+        )
+    output.extend(function_calls)
+    return Response(
+        status="completed" if incomplete_details is None else "incomplete",
+        model=model,
+        output=tuple(output),
+        usage=usage,
+        incomplete_details=incomplete_details,
+    )
 
 
 class RecordingObservation:
@@ -69,7 +99,6 @@ def test_agent_trace_captures_content_with_safe_correlations() -> None:
             tool_call_count=1,
             sources_found=5,
             sources_used=2,
-            execution_mode=ExecutionMode.PLANNED,
         )
 
     serialized = json.dumps(
@@ -88,7 +117,7 @@ def test_agent_trace_captures_content_with_safe_correlations() -> None:
     assert client.starts[0]["metadata"]["conversation_id"] == "conversation-1"
     completion_update = client.observations[0].updates[-1]
     assert completion_update["output"] == "Grounded enterprise answer"
-    assert completion_update["metadata"]["execution_mode"] == "planned"
+    assert completion_update["metadata"]["tool_call_count"] == 1
 
 
 def test_trace_name_uses_a_short_valid_request_id() -> None:
@@ -125,17 +154,14 @@ def test_capability_trace_captures_model_usage_cache_and_execution_metadata() ->
         trace.mark_first_token()
         trace.mark_first_token()
         trace.complete(
-            response=LLMResponse(
-                id="response-1",
-                model="openai/gpt-5.4-mini",
-                content='{"query":"leave policy"}',
-                usage={
-                    "prompt_tokens": 20,
-                    "cached_prompt_tokens": 12,
-                    "completion_tokens": 8,
-                    "total_tokens": 28,
-                },
-                finish_reason="tool_calls",
+            response=assistant_response(
+                '{"query":"leave policy"}',
+                usage=ResponseUsage(
+                    input_tokens=20,
+                    input_tokens_details=InputTokensDetails(cached_tokens=12),
+                    output_tokens=8,
+                    total_tokens=28,
+                ),
             ),
             output={"query": "leave policy"},
             duration_ms=125,
@@ -174,7 +200,7 @@ def test_capability_trace_captures_model_usage_cache_and_execution_metadata() ->
         "capability": "query_rewrite",
         "retrieval_round": 0,
         "retrieval_query_count": 0,
-        "finish_reason": "tool_calls",
+        "finish_reason": "stop",
         "llm_latency_ms": 125,
         "prompt_tokens": 20,
         "cached_prompt_tokens": 12,
@@ -198,16 +224,14 @@ def test_capability_trace_records_invalid_response_failure() -> None:
         trace.fail(
             category="invalid_response",
             duration_ms=20,
-            response=LLMResponse(
-                id="response-2",
-                model="openai/gpt-5.4-mini",
-                content="truncated-json",
-                finish_reason="length",
-                usage={
-                    "prompt_tokens": 100,
-                    "completion_tokens": 50,
-                    "total_tokens": 150,
-                },
+            response=assistant_response(
+                "truncated-json",
+                incomplete_details=IncompleteDetails(reason="max_output_tokens"),
+                usage=ResponseUsage(
+                    input_tokens=100,
+                    output_tokens=50,
+                    total_tokens=150,
+                ),
             ),
             output="truncated-json",
         )
@@ -239,18 +263,15 @@ def test_model_turn_trace_is_named_from_the_returned_tool_calls() -> None:
         tool_round=0,
     ) as trace:
         trace.complete(
-            turn=ModelTurn(
-                text="",
-                tool_calls=[
-                    ToolCall(
+            response=assistant_response(
+                function_calls=(
+                    FunctionCallItem(
                         call_id="search-1",
                         name="knowledge_search",
-                        arguments={"query": "annual leave policy"},
-                    )
-                ],
-                finish_reason="tool_calls",
-                model="openai/gpt-5.4-mini",
-                usage={"prompt_tokens": 20, "completion_tokens": 4},
+                        arguments='{"query":"annual leave policy"}',
+                    ),
+                ),
+                usage=ResponseUsage(input_tokens=20, output_tokens=4),
             ),
             duration_ms=80,
         )
@@ -258,9 +279,11 @@ def test_model_turn_trace_is_named_from_the_returned_tool_calls() -> None:
     assert client.starts[0]["name"] == "agent-model-turn"
     update = client.observations[0].updates[-1]
     assert update["name"] == "decide-next-step"
-    assert update["output"]["tool_calls"][0]["arguments"] == {
-        "query": "annual leave policy"
-    }
+    # The protocol keeps provider argument bytes verbatim.
+    assert (
+        update["output"]["tool_calls"][0]["arguments"]
+        == '{"query":"annual leave policy"}'
+    )
     assert update["metadata"]["generation_kind"] == "next_step"
     assert update["metadata"]["selected_tools"] == ["knowledge_search"]
     assert update["metadata"]["tool_call_count"] == 1
@@ -278,12 +301,7 @@ def test_model_turn_trace_names_a_text_response_as_final() -> None:
         tool_round=0,
     ) as trace:
         trace.complete(
-            turn=ModelTurn(
-                text="Hello!",
-                tool_calls=[],
-                finish_reason="stop",
-                model="openai/gpt-5.4-mini",
-            ),
+            response=assistant_response("Hello!"),
             duration_ms=30,
         )
 
@@ -302,8 +320,7 @@ def test_tool_execution_trace_uses_the_tool_name() -> None:
         arguments={"metric": "net_interest_margin"},
     ) as trace:
         trace.complete(
-            result=ToolResult(
-                call_id="call-1",
+            result=ToolOutput(
                 content="3.2%",
                 metadata={"outcome": "success"},
             )

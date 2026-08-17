@@ -75,9 +75,16 @@ class QdrantKeywordRetriever:
 class QdrantSemanticRetriever:
     """Uses a query embedder with the existing Qdrant dense-vector search."""
 
-    def __init__(self, store: VectorStore, embedder: QueryEmbedder) -> None:
+    def __init__(
+        self,
+        store: VectorStore,
+        embedder: QueryEmbedder,
+        *,
+        allow_unscoped_admin_retrieval: bool = False,
+    ) -> None:
         self._store = store
         self._embedder = embedder
+        self._allow_unscoped_admin_retrieval = allow_unscoped_admin_retrieval
 
     async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
         """Compatibility search; callers handling private data use search_scoped."""
@@ -91,11 +98,14 @@ class QdrantSemanticRetriever:
         limit: int,
         ctx: AgentContext,
     ) -> list[RetrievedDocument]:
-        access = _retrieval_access(ctx)
-        query_filter = self._store.build_retrieval_filter(
-            None,
-            access_context=access,
-        )
+        if self._allow_unscoped_admin_retrieval and ctx.is_admin:
+            query_filter = self._store.build_lifecycle_filter()
+        else:
+            access = _retrieval_access(ctx)
+            query_filter = self._store.build_retrieval_filter(
+                None,
+                access_context=access,
+            )
         return await self._search(query, limit=limit, query_filter=query_filter)
 
     async def _search(
@@ -134,6 +144,11 @@ def _retrieval_access(ctx: AgentContext) -> _RetrievalAccess:
     if "@" in user:
         reader_ids.add(f"email:{user}")
     reader_ids.update(
+        reader_id.strip().lower()
+        for reader_id in ctx.reader_ids
+        if reader_id.strip()
+    )
+    reader_ids.update(
         f"external_group:{role.strip().lower()}"
         for role in ctx.roles
         if role.strip()
@@ -141,6 +156,7 @@ def _retrieval_access(ctx: AgentContext) -> _RetrievalAccess:
     return _RetrievalAccess(
         tenant_id=ctx.tenant_id,
         reader_ids=tuple(sorted(reader_ids)),
+        is_admin=ctx.is_admin,
     )
 
 

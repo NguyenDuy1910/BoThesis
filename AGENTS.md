@@ -30,10 +30,13 @@ Primary source types:
 - Never physically delete persisted business data, raw document objects,
   provider references, or vector points. Delete actions must use a lifecycle
   status or `deleted_at` tombstone, and normal reads must exclude tombstones.
-- Each `backend/bothesis/services/<name>.py` module defines only its primary
-  `<Name>Service` class. Put service contexts, DTOs, errors, and shared service
-  constants in `backend/bothesis/services/__init__.py`, and import them through
-  the `bothesis.services` package boundary.
+- Each `backend/bothesis/<package>/<name>.py` module defines only its primary
+  class or object for that module. Put shared contexts, DTOs, errors, and
+  package-level constants in that package's `__init__.py`, and import them
+  through the `bothesis.<package>` package boundary. This applies to all
+  packages: `agent`, `chat`, `connector`, `document_index`, `services`, and
+  their sub-packages. (Example: `services/auth.py` defines only `AuthService`;
+  shared service types live in `services/__init__.py`.)
 - Separate ingestion, indexing, retrieval, agent orchestration, and BI logic.
 - Validate inputs at API boundaries.
 - Enforce permissions before retrieval results or BI data reach the agent.

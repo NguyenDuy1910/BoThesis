@@ -18,7 +18,6 @@ import { memo, useEffect, useMemo, useState } from "react";
 import { AgentActivityMapper } from "@/modules/chat/activity-mapper";
 import type {
   ActivityEntry,
-  AgentRunStatus,
   SourceResult,
   SourceType,
 } from "@/modules/chat/activity";
@@ -28,41 +27,6 @@ interface SourceFocus {
   sourceId: string;
   nonce: number;
 }
-
-interface AgentExecutionCardProps {
-  message: ChatMessage;
-  isStreaming: boolean;
-  onOpen: () => void;
-}
-
-export const AgentExecutionCard = memo(function AgentExecutionCard({
-  message,
-  isStreaming,
-  onOpen,
-}: AgentExecutionCardProps) {
-  const run = useMemo(
-    () => AgentActivityMapper.fromParts(message.parts, isStreaming),
-    [message.parts, isStreaming],
-  );
-  if (!run.hasActivity) return null;
-  const hasAnswer = message.parts.some((part) => part.type === "text" && part.text.length > 0);
-
-  return (
-    <section className={clsx("assistant-activity", `assistant-activity--${run.status}`)}>
-      <button
-        aria-label="Open activity for this response"
-        className="assistant-activity__summary"
-        onClick={onOpen}
-        type="button"
-      >
-        <RunStatusIcon status={run.status} />
-        <span aria-live="polite" className="assistant-activity__summary-label">
-          {summaryLabel(run, isStreaming, hasAnswer)}
-        </span>
-      </button>
-    </section>
-  );
-});
 
 interface AgentActivityPanelProps {
   message?: ChatMessage;
@@ -175,8 +139,13 @@ function ActivitySteps({ messageId, steps }: { messageId: string; steps: Activit
               <span className="assistant-activity__step-heading">
                 <span>{step.label}</span>
               </span>
-              {step.description && step.status === "failed" && (
-                <span className="assistant-activity__error">{step.description}</span>
+              {step.description && (
+                <span className={step.status === "failed"
+                  ? "assistant-activity__error"
+                  : "assistant-activity__detail"}
+                >
+                  {step.description}
+                </span>
               )}
             </span>
           </li>
@@ -187,62 +156,13 @@ function ActivitySteps({ messageId, steps }: { messageId: string; steps: Activit
 }
 
 function minimalActivitySteps(steps: ActivityEntry[]): ActivityEntry[] {
-  const attachmentSteps = steps.filter((step) => step.type === "document_preparation");
-  const retrievalSteps = steps.filter((step) => step.type === "knowledge_retrieval");
-  const toolSteps = steps.filter((step) => step.type === "tool_execution");
-  const generationStep = [...steps]
-    .reverse()
-    .find((step) => step.type === "final_response_generation");
-  const visibleSteps: ActivityEntry[] = [];
-
-  visibleSteps.push(...attachmentSteps.map((step) => ({
-    ...step,
-    durationMs: undefined,
-    resultCount: undefined,
-    description: step.status === "failed" ? step.description : undefined,
-  })));
-
-  if (retrievalSteps.length > 0) {
-    visibleSteps.push({
-      ...retrievalSteps[0],
-      id: "knowledge-retrieval",
-      label: "Search knowledge base",
-      status: aggregateStepStatus(retrievalSteps),
-      description: retrievalSteps.find((step) => step.status === "failed")?.description,
+  return steps
+    .filter((step) => step.type !== "final_response_generation")
+    .map((step) => ({
+      ...step,
       durationMs: undefined,
       resultCount: undefined,
-    });
-  }
-
-  visibleSteps.push(...toolSteps.map((step) => ({
-    ...step,
-    durationMs: undefined,
-    resultCount: undefined,
-    description: step.status === "failed" ? step.description : undefined,
-  })));
-
-  if (generationStep) {
-    visibleSteps.push({
-      ...generationStep,
-      id: "response-generation",
-      label: "Generate response",
-      durationMs: undefined,
-      resultCount: undefined,
-      description: generationStep.status === "failed"
-        ? generationStep.description
-        : undefined,
-    });
-  }
-
-  return visibleSteps;
-}
-
-function aggregateStepStatus(steps: ActivityEntry[]): ActivityEntry["status"] {
-  if (steps.some((step) => step.status === "failed")) return "failed";
-  if (steps.some((step) => step.status === "running")) return "running";
-  if (steps.some((step) => step.status === "pending")) return "pending";
-  if (steps.every((step) => step.status === "skipped")) return "skipped";
-  return "completed";
+    }));
 }
 
 function SourceList({
@@ -344,44 +264,11 @@ function SourceItem({
   );
 }
 
-function RunStatusIcon({ status }: { status: AgentRunStatus }) {
-  if (status === "running") {
-    return <LoaderCircle aria-hidden="true" className="assistant-activity__status-icon assistant-activity__spin" size={14} />;
-  }
-  if (status === "failed") {
-    return <AlertCircle aria-hidden="true" className="assistant-activity__status-icon" size={14} />;
-  }
-  if (status === "cancelled") {
-    return <CircleStop aria-hidden="true" className="assistant-activity__status-icon" size={14} />;
-  }
-  return null;
-}
-
 function StepIcon({ step }: { step: ActivityEntry }) {
   if (step.status === "running") return <LoaderCircle aria-hidden="true" className="assistant-activity__spin" size={13} />;
   if (step.status === "failed") return <AlertCircle aria-hidden="true" size={13} />;
   if (step.status === "skipped") return <CircleStop aria-hidden="true" size={13} />;
   return null;
-}
-
-function summaryLabel(
-  run: ReturnType<typeof AgentActivityMapper.fromParts>,
-  isStreaming: boolean,
-  hasAnswer: boolean,
-) {
-  if (run.status === "running" || isStreaming) {
-    const active = [...run.steps].reverse().find((step) => step.status === "running");
-    if (active?.type === "document_preparation") return "Đang chuẩn bị tài liệu…";
-    if (active?.type === "knowledge_retrieval") return "Đang tìm trong Knowledge…";
-    if (active?.type === "tool_execution") return "Đang sử dụng công cụ…";
-    if (hasAnswer || active?.type === "final_response_generation") {
-      return "Đang tổng hợp câu trả lời…";
-    }
-    return "Đang phân tích…";
-  }
-  if (run.status === "failed") return "Không thể hoàn tất · Details";
-  if (run.status === "cancelled") return "Đã dừng · Details";
-  return "Details";
 }
 
 function statusLabel(status: ActivityEntry["status"]) {

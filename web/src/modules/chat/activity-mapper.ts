@@ -1,10 +1,8 @@
 import type {
   ActivityEntry,
-  ActivityStepStatus,
   AgentActivityType,
   AgentRunStatus,
   AgentRunView,
-  FindingEntry,
   ReasoningEntry,
   SourceResult,
   SourceStatus,
@@ -23,13 +21,14 @@ export class AgentActivityMapper {
     const sources: SourceResult[] = [];
     const sourceById = new Map<string, SourceResult>();
     const reasoning: ReasoningEntry[] = [];
-    const findings: FindingEntry[] = [];
     let activeRetrieval: ActivityEntry | undefined;
 
     for (const part of parts) {
       if (part.type === "data-status") {
         const type = activityTypeFromPart(part);
         if (!type) continue;
+        // final_response_generation is the answer phase — not shown as an activity step.
+        if (type === "final_response_generation") continue;
         const id = part.data.stepId
           ?? `${type}-${part.data.toolCallId ?? legacyToolCallId(part.id) ?? steps.length}`;
         const existing = stepById.get(id);
@@ -37,7 +36,7 @@ export class AgentActivityMapper {
         const nextStep: ActivityEntry = {
           id,
           type,
-          label: part.data.label || defaultStepLabel(type, part.data.toolName),
+          label: activityLabel(part.data.label, type, part.data.toolName),
           status: nextStatus,
           durationMs: part.data.durationMs,
           description: part.data.detail,
@@ -81,47 +80,15 @@ export class AgentActivityMapper {
         });
       }
 
-      if (part.type === "data-finding" && part.data.text.trim()) {
-        findings.push({
-          id: part.id ?? `finding-${findings.length}`,
-          text: part.data.text.trim(),
-        });
-      }
-
       if (part.type === "data-stream-error") {
-        const activeGeneration = [...steps].reverse().find((step) => (
+        const activeStep = [...steps].reverse().find((step) => (
           step.status === "running"
-          && (step.type === "next_step_generation"
-            || step.type === "final_response_generation")
         ));
-        if (activeGeneration) {
-          activeGeneration.status = "failed";
-          activeGeneration.description = part.data.message;
-        } else {
-          steps.push({
-            id: `generation-error-${steps.length}`,
-            type: "final_response_generation",
-            label: "Generating final response",
-            status: "failed",
-            description: part.data.message,
-            sourceIds: [],
-          });
+        if (activeStep) {
+          activeStep.status = "failed";
+          activeStep.description = part.data.message;
         }
       }
-    }
-
-    const hasAnswer = parts.some((part) => part.type === "text" && part.text.trim());
-    const hasFinalGeneration = steps.some((step) => (
-      step.type === "final_response_generation"
-    ));
-    if (hasAnswer && !hasFinalGeneration) {
-      steps.push({
-        id: "generation",
-        type: "final_response_generation",
-        label: status === "completed" ? "Generated final response" : "Generating final response",
-        status: generationStatus(status),
-        sourceIds: [],
-      });
     }
 
     if (status === "cancelled") {
@@ -143,9 +110,7 @@ export class AgentActivityMapper {
       || step.type === "tool_execution"
       || step.type === "next_step_generation"
     ));
-    const isClassifying = status === "running" && steps.some((step) => (
-      step.type === "next_step_generation" && step.status === "running"
-    ));
+    const hasAnswer = parts.some((part) => part.type === "text" && part.text.trim());
     const isWaitingForFirstOutput = status === "running" && isStreaming && !hasAnswer;
     const hasStreamError = parts.some((part) => part.type === "data-stream-error");
 
@@ -157,16 +122,12 @@ export class AgentActivityMapper {
       toolDurationMs: run?.data.toolDurationMs,
       toolCallCount: run?.data.toolCallCount,
       reasoning,
-      findings,
       steps,
       sources,
       sourceCount: reportedSourceCount || sources.length,
       usedSourceCount,
       hasActivity: Boolean(
-        reasoning.length
-        || findings.length
-        || hasMeaningfulStep
-        || isClassifying
+        hasMeaningfulStep
         || isWaitingForFirstOutput
         || sources.length
         || hasStreamError
@@ -175,22 +136,22 @@ export class AgentActivityMapper {
   }
 }
 
-function generationStatus(status: AgentRunStatus): ActivityStepStatus {
-  if (status === "failed") return "failed";
-  if (status === "cancelled") return "skipped";
-  return status === "running" ? "running" : "completed";
-}
-
-function statusFromPart(status: "active" | "completed" | "error" | "skipped"): ActivityStepStatus {
+function statusFromPart(status: "active" | "completed" | "error" | "skipped") {
   if (status === "active") return "running";
   if (status === "error") return "failed";
   return status;
 }
 
-function defaultStepLabel(type: AgentActivityType, toolName: string | undefined) {
+function activityLabel(
+  label: string,
+  type: AgentActivityType,
+  toolName: string | undefined,
+) {
+  const cleanLabel = label.replace(/^(?:Act|Observe)\s*[·:]\s*/i, "").trim();
+  if (cleanLabel && !/^(?:Think|Final response)$/i.test(cleanLabel)) {
+    return cleanLabel;
+  }
   if (type === "document_preparation") return "Preparing document";
-  if (type === "next_step_generation") return "Determining next step";
-  if (type === "final_response_generation") return "Generating final response";
   if (type === "knowledge_retrieval") return "Searching knowledge base";
   if (!toolName) return "Running tool";
   return toolName.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());

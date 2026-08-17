@@ -46,6 +46,8 @@ class HealthSettings:
     qdrant_url: str | None
     qdrant_api_key: str | None
     qdrant_collection: str | None
+    openai_base_url: str
+    openai_api_key: str | None
     openrouter_base_url: str
     openrouter_api_key: str | None
     chat_model: str | None
@@ -53,6 +55,7 @@ class HealthSettings:
     langfuse_base_url: str
     langfuse_public_key: str | None
     langfuse_secret_key: str | None
+
 
 class HealthService:
     """Probe independent dependencies without executing user workloads."""
@@ -76,9 +79,15 @@ class HealthService:
             timeout=self._timeout_seconds,
             transport=self._transport,
         ) as client:
-            qdrant, openrouter, langfuse = await asyncio.gather(
+            qdrant, openai_chat, openrouter_embeddings, langfuse = await asyncio.gather(
                 self._check_qdrant(client),
-                self._check_openrouter(client),
+                self._check_openai_chat(client),
+                self._check_openrouter_model(
+                    client,
+                    "openrouter_embeddings",
+                    self._settings.embedding_model,
+                    "embeddings/models",
+                ),
                 self._check_langfuse(client),
             )
 
@@ -90,7 +99,8 @@ class HealthService:
                 latency_ms=0,
             ),
             qdrant,
-            *openrouter,
+            openai_chat,
+            openrouter_embeddings,
             langfuse,
         ]
         required_failed = any(
@@ -180,25 +190,58 @@ class HealthService:
             )
         return _healthy(name, required, started_at, collection=collection)
 
-    async def _check_openrouter(
+    async def _check_openai_chat(
         self,
         client: httpx.AsyncClient,
-    ) -> tuple[ServiceHealth, ServiceHealth]:
-        chat, embeddings = await asyncio.gather(
-            self._check_openrouter_model(
-                client,
-                "openrouter_chat",
-                self._settings.chat_model,
-                "models",
-            ),
-            self._check_openrouter_model(
-                client,
-                "openrouter_embeddings",
-                self._settings.embedding_model,
-                "embeddings/models",
-            ),
-        )
-        return chat, embeddings
+    ) -> ServiceHealth:
+        name = "openai_chat"
+        model = self._settings.chat_model
+        if not self._settings.openai_api_key or not model:
+            return _not_configured(name, True, model=model)
+
+        started_at = perf_counter()
+        try:
+            async with asyncio.timeout(self._timeout_seconds):
+                response = await client.get(
+                    f"{self._settings.openai_base_url.rstrip('/')}/models/"
+                    f"{quote(model, safe='')}",
+                    headers={
+                        "Authorization": f"Bearer {self._settings.openai_api_key}"
+                    },
+                )
+        except (TimeoutError, httpx.TimeoutException):
+            return _unhealthy(name, True, started_at, "timeout", model=model)
+        except httpx.HTTPError:
+            return _unhealthy(
+                name,
+                True,
+                started_at,
+                "connection_failed",
+                model=model,
+            )
+
+        error_category = _http_error_category(response.status_code)
+        if error_category is not None:
+            return _unhealthy(
+                name,
+                True,
+                started_at,
+                error_category,
+                model=model,
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if not isinstance(payload, dict) or payload.get("id") != model:
+            return _unhealthy(
+                name,
+                True,
+                started_at,
+                "invalid_response",
+                model=model,
+            )
+        return _healthy(name, True, started_at, model=model)
 
     async def _check_openrouter_model(
         self,

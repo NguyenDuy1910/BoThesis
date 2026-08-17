@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,7 +27,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRouter
-from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.engine import get_session
@@ -146,28 +147,6 @@ class ChatRequest(BaseModel):
     roles: list[str] = Field(default_factory=list, deprecated=True)
     conversation_id: str | None = None
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=24)
-    document_ids: list[UUID] = Field(default_factory=list, max_length=12)
-    attachment_ids: list[UUID] = Field(
-        default_factory=list,
-        max_length=12,
-        deprecated=True,
-    )
-
-    @field_validator("document_ids", "attachment_ids")
-    @classmethod
-    def _unique_document_ids(cls, values: list[UUID]) -> list[UUID]:
-        if len(values) != len(set(values)):
-            raise ValueError("document IDs must be unique")
-        return values
-
-    @model_validator(mode="after")
-    def _resolve_deprecated_document_alias(self) -> ChatRequest:
-        legacy_ids = self.__dict__.get("attachment_ids", [])
-        if self.document_ids and legacy_ids:
-            raise ValueError("use document_ids or deprecated attachment_ids, not both")
-        if not self.document_ids and legacy_ids:
-            self.document_ids = list(legacy_ids)
-        return self
 
 
 class DocumentUploadStartRequest(BaseModel):
@@ -488,9 +467,10 @@ async def patch_user_permissions(
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
 attachments_router = APIRouter(prefix="/attachments", tags=["attachments"])
 
-_agent_loop: Any | None = None
+_agent: Any | None = None
 _document_runtime: Any | None = None
 _INSECURE_DEVELOPMENT_IDENTITY_ENV = "BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY"
+_PHASE1_UNSCOPED_RETRIEVAL_ENV = "BOTHESIS_PHASE1_UNSCOPED_RETRIEVAL"
 
 
 def _environment_boolean(name: str, *, default: bool = False) -> bool:
@@ -508,6 +488,18 @@ def _environment_boolean(name: str, *, default: bool = False) -> bool:
     return value
 
 
+def _phase1_unscoped_retrieval_enabled() -> bool:
+    """Allow the explicit single-tenant Phase 1 compatibility mode."""
+
+    enabled = _environment_boolean(_PHASE1_UNSCOPED_RETRIEVAL_ENV)
+    if enabled and not _environment_boolean(_INSECURE_DEVELOPMENT_IDENTITY_ENV):
+        raise RuntimeError(
+            f"{_PHASE1_UNSCOPED_RETRIEVAL_ENV} requires "
+            f"{_INSECURE_DEVELOPMENT_IDENTITY_ENV}=true"
+        )
+    return enabled
+
+
 class _LazyDocumentEmbedder:
     """Defer embedding configuration until Index On Demand is selected."""
 
@@ -518,33 +510,71 @@ class _LazyDocumentEmbedder:
 
     def _get_client(self) -> Any:
         if self._client is None:
-            from bothesis.agent.transports.openrouter_embeddings import (
-                OpenRouterEmbeddingClient,
-            )
+            from bothesis.agent.transports.openrouter import OpenRouterTransport
 
-            self._client = OpenRouterEmbeddingClient(base_url=self._base_url)
-            self.model = self._client.model
+            self._client = OpenRouterTransport(
+                base_url=self._base_url,
+                embedding_model=self.model or None,
+            )
+            self.model = self._client.embedding_model or ""
         return self._client
 
     async def embed_query(self, query: str) -> list[float]:
-        return await self._get_client().embed_query(query)
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError("query must not be empty")
+        return (await self._embed([normalized_query]))[0]
 
     async def embed_documents(self, documents: list[str]) -> list[list[float]]:
-        return await self._get_client().embed_documents(documents)
+        normalized = [document.strip() for document in documents]
+        if not normalized or any(not document for document in normalized):
+            raise ValueError("documents must contain non-empty text")
+        return await self._embed(normalized)
+
+    async def _embed(self, inputs: list[str]) -> list[list[float]]:
+        payload = await self._get_client().embeddings(
+            input=inputs[0] if len(inputs) == 1 else inputs,
+        )
+        data = payload.get("data")
+        if not isinstance(data, list) or len(data) != len(inputs):
+            raise ValueError("embedding response does not contain all vectors")
+        indexed: list[tuple[int, list[float]]] = []
+        for fallback_index, item in enumerate(data):
+            if not isinstance(item, dict):
+                raise ValueError("embedding response vector is invalid")
+            raw_vector = item.get("embedding")
+            if not isinstance(raw_vector, list) or not raw_vector:
+                raise ValueError("embedding response vector is invalid")
+            if any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in raw_vector
+            ):
+                raise ValueError("embedding response vector is invalid")
+            vector = [float(value) for value in raw_vector]
+            if any(not math.isfinite(value) for value in vector):
+                raise ValueError("embedding response vector is invalid")
+            raw_index = item.get("index", fallback_index)
+            if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+                raise ValueError("embedding response index is invalid")
+            indexed.append((raw_index, vector))
+        indexed.sort(key=lambda item: item[0])
+        if [index for index, _ in indexed] != list(range(len(inputs))):
+            raise ValueError("embedding response indexes are invalid")
+        return [vector for _, vector in indexed]
 
     async def aclose(self) -> None:
         if self._client is not None:
             await self._client.aclose()
 
 
-def _get_agent_loop() -> Any:
-    """Build the singleton agent loop without introducing a DI framework."""
-    global _agent_loop
-    if _agent_loop is None:
+def _get_agent() -> Any:
+    """Build the singleton agent without introducing a DI framework."""
+    global _agent
+    if _agent is None:
+        from bothesis.agent import Agent, AgentConfig
         from bothesis.agent.tools import ToolRegistry
         from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
         from bothesis.agent.transports.openrouter import OpenRouterTransport
-        from bothesis.chat.agent_loop import AgentLoop
         from bothesis.document_index.vector_store import VectorStore
         from bothesis.knowledge.document_index import QdrantSemanticRetriever
         from bothesis.observability import create_langfuse_tracing
@@ -554,6 +584,12 @@ def _get_agent_loop() -> Any:
             "OPEN_ROUTER_BASE_URL",
             OpenRouterTransport.DEFAULT_BASE_URL,
         )
+        allow_unscoped_retrieval = _phase1_unscoped_retrieval_enabled()
+        if allow_unscoped_retrieval:
+            logging.getLogger(__name__).warning(
+                "Phase 1 unscoped admin retrieval is enabled; tenant filtering "
+                "is disabled for admin chat requests"
+            )
         retriever = QdrantSemanticRetriever(
             VectorStore(
                 collection_name=os.getenv("QDRANT_COLLECTION"),
@@ -563,37 +599,33 @@ def _get_agent_loop() -> Any:
                 timeout=8,
             ),
             _LazyDocumentEmbedder(base_url=openrouter_base_url),
+            allow_unscoped_admin_retrieval=allow_unscoped_retrieval,
         )
         tracing = create_langfuse_tracing()
         registry.register(KnowledgeSearchTool(retriever, tracing=tracing))
-        _agent_loop = AgentLoop(
-            transport=OpenRouterTransport(base_url=openrouter_base_url),
-            registry=registry,
-            max_model_turns=int(os.getenv("BOTHESIS_MAX_MODEL_TURNS", "3")),
-            max_tool_rounds=int(os.getenv("BOTHESIS_MAX_TOOL_ROUNDS", "2")),
-            max_tool_calls=int(os.getenv("BOTHESIS_MAX_TOOL_CALLS", "6")),
-            max_history_messages=int(
-                os.getenv("BOTHESIS_MAX_HISTORY_MESSAGES", "24")
+        _agent = Agent(
+            model=OpenRouterTransport(base_url=openrouter_base_url),
+            tools=registry,
+            config=AgentConfig(
+                max_model_turns=int(os.getenv("BOTHESIS_MAX_MODEL_TURNS", "3")),
+                max_tool_rounds=int(os.getenv("BOTHESIS_MAX_TOOL_ROUNDS", "2")),
+                max_tool_calls=int(os.getenv("BOTHESIS_MAX_TOOL_CALLS", "6")),
+                max_history_messages=int(
+                    os.getenv("BOTHESIS_MAX_HISTORY_MESSAGES", "24")
+                ),
+                max_history_characters=int(
+                    os.getenv("BOTHESIS_MAX_HISTORY_CHARACTERS", "24000")
+                ),
+                recent_history_messages=int(
+                    os.getenv("BOTHESIS_RECENT_HISTORY_MESSAGES", "6")
+                ),
+                tool_timeout_seconds=float(
+                    os.getenv("BOTHESIS_TOOL_TIMEOUT_SECONDS", "8")
+                ),
             ),
-            max_history_characters=int(
-                os.getenv("BOTHESIS_MAX_HISTORY_CHARACTERS", "24000")
-            ),
-            recent_history_messages=int(
-                os.getenv("BOTHESIS_RECENT_HISTORY_MESSAGES", "6")
-            ),
-            history_compression_threshold=int(
-                os.getenv("BOTHESIS_HISTORY_COMPRESSION_THRESHOLD", "4000")
-            ),
-            max_compressed_history_characters=int(
-                os.getenv("BOTHESIS_MAX_COMPRESSED_HISTORY_CHARACTERS", "2000")
-            ),
-            tool_timeout_seconds=float(
-                os.getenv("BOTHESIS_TOOL_TIMEOUT_SECONDS", "8")
-            ),
-            enable_interleaved=True,
             tracing=tracing,
         )
-    return _agent_loop
+    return _agent
 
 
 @dataclasses.dataclass(slots=True)
@@ -979,7 +1011,6 @@ async def release_attachment(
 async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
     """Return the agent event stream as server-sent events."""
     from bothesis.agent.models import AgentContext, ConversationMessage
-    from bothesis.chat.message_processing import MessageProcessor
     from bothesis.db.engine import get_session_factory
 
     request_id = uuid4().hex
@@ -1003,6 +1034,19 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
         user_id=str(access.user_id),
         tenant_id=str(access.tenant_id),
         roles=[access.role_code] if access.role_code else [],
+        reader_ids=tuple(
+            sorted(
+                {
+                    f"email:{access.email.strip().lower()}",
+                    *(
+                        token.strip().lower()
+                        for token in access.principal_tokens
+                        if token.strip()
+                    ),
+                }
+            )
+        ),
+        is_admin=access.is_admin,
         conversation_id=str(conversation_id),
         request_id=request_id,
         history=tuple(
@@ -1011,40 +1055,20 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
         ),
     )
     try:
-        loop = _get_agent_loop()
+        agent = _get_agent()
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="agent service is not configured",
         ) from exc
 
-    try:
-        runtime = _get_document_runtime()
-        message_processor = MessageProcessor(
-            loop,
-            runtime.pipeline,
-            runtime.conversations,
-        )
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="document service is not configured",
-        ) from exc
-
     async def event_gen():
-        stream = message_processor.run_stream(
-            body.message,
-            body.document_ids,
-            context,
-            access=access,
-        )
+        stream = agent.run(body.message, context)
         try:
             async for event in stream:
                 if await request.is_disconnected():
                     break
-                event_data = _public_agent_event_data(event)
-                payload = {"type": event.type, **event_data}
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                yield f"data: {event.model_dump_json()}\n\n"
         finally:
             await stream.aclose()
 
@@ -1068,33 +1092,6 @@ def _conversation_id(value: str | None) -> UUID:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="conversation_id must be a UUID",
         ) from exc
-
-
-def _public_agent_event_data(event: object) -> dict[str, Any]:
-    """Remove private correlation data and empty optional fields from SSE."""
-
-    event_data = _without_none(dataclasses.asdict(event))
-    event_data.pop("request_id", None)
-    event_data.pop("call_id", None)
-    event_data.pop("arguments", None)
-    event_data.pop("provider_annotations", None)
-    evidence = event_data.get("evidence")
-    if isinstance(evidence, dict):
-        evidence.pop("document_id", None)
-        evidence.pop("relevance_score", None)
-    return event_data
-
-
-def _without_none(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _without_none(item)
-            for key, item in value.items()
-            if item is not None
-        }
-    if isinstance(value, list):
-        return [_without_none(item) for item in value]
-    return value
 
 
 @agent_router.post(
@@ -1551,11 +1548,15 @@ def _get_health_service() -> HealthService:
             qdrant_url=os.getenv("QDRANT_URL") or None,
             qdrant_api_key=os.getenv("QDRANT_API_KEY") or None,
             qdrant_collection=os.getenv("QDRANT_COLLECTION") or None,
+            openai_base_url=(
+                os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+            ),
+            openai_api_key=os.getenv("OPENAI_API_KEY") or None,
             openrouter_base_url=(
                 os.getenv("OPEN_ROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
             ),
             openrouter_api_key=os.getenv("OPENROUTER_API_KEY") or None,
-            chat_model=os.getenv("OPENROUTER_MODEL") or None,
+            chat_model=os.getenv("OPENAI_MODEL") or None,
             embedding_model=os.getenv("EMBEDDING_MODEL") or None,
             langfuse_base_url=(
                 os.getenv("LANGFUSE_BASE_URL")

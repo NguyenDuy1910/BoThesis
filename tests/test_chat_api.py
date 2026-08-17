@@ -4,7 +4,6 @@ import json
 import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -14,45 +13,46 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import main
 import bothesis.db.engine as db_engine
-from bothesis.agent.models import TextDelta, TurnDone
+from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
-from bothesis.agent.transports.base import ChatMessage, LLMResponse, LLMTransport
-from bothesis.chat.agent_loop import AgentLoop
-from bothesis.connector.document_pipeline import PreparedDocuments
 from bothesis.knowledge.document_index import RetrievedDocument
 from bothesis.services import AuthContext
 
 
-class ScriptedTransport(LLMTransport):
+def text_delta(text: str) -> dict[str, Any]:
+    return {"choices": [{"delta": {"content": text}}]}
+
+
+def turn_done(
+    finish_reason: str,
+    *,
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    delta: dict[str, Any] = {}
+    if tool_calls:
+        delta["tool_calls"] = [
+            {"index": index, **call} for index, call in enumerate(tool_calls)
+        ]
+    return {"choices": [{"delta": delta, "finish_reason": finish_reason}]}
+
+
+class ScriptedTransport:
+    provider = "openrouter"
+    model = "openai/gpt-5.4-mini"
+
     def __init__(self) -> None:
-        self.complete_requests: list[list[dict[str, Any]]] = []
         self.stream_requests: list[list[dict[str, Any]]] = []
 
-    async def complete(
+    async def stream_chat(
         self,
-        messages: Sequence[ChatMessage | Mapping[str, Any]],
+        *,
+        messages: Sequence[Mapping[str, Any]],
         **_: Any,
-    ) -> LLMResponse:
-        self.complete_requests.append([dict(message) for message in messages])
-        return LLMResponse(
-            id="compression-1",
-            model="openai/gpt-5.4-mini",
-            content=(
-                '{"summary":"Earlier question and answer about the leave policy."}'
-            ),
-            finish_reason="stop",
-            usage={"prompt_tokens": 10, "completion_tokens": 3},
-        )
-
-    async def stream_turn(
-        self,
-        messages: Sequence[ChatMessage | Mapping[str, Any]],
-        **_: Any,
-    ) -> AsyncIterator[TextDelta | TurnDone]:
+    ) -> AsyncIterator[dict[str, Any]]:
         self.stream_requests.append([dict(message) for message in messages])
         if len(self.stream_requests) == 1:
-            yield TurnDone(
+            yield turn_done(
                 "tool_calls",
                 tool_calls=[
                     {
@@ -60,20 +60,39 @@ class ScriptedTransport(LLMTransport):
                         "type": "function",
                         "function": {
                             "name": "knowledge_search",
-                            "arguments": '{"query":"leave policy"}',
+                            "arguments": '{"queries":["leave policy"]}',
                         },
                     }
                 ],
             )
             return
-        yield TextDelta("Employees receive 20 days of annual leave [[cite:chunk-1]].")
-        yield TurnDone("stop")
+        yield text_delta("Employees receive 20 days of annual leave [[cite:chunk-1]].")
+        yield turn_done("stop")
 
 
 class StubRetriever:
+    def __init__(self) -> None:
+        self.contexts: list[Any] = []
+
     async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
         assert query == "leave policy"
         assert limit == 5
+        return self._documents()
+
+    async def search_scoped(
+        self,
+        query: str,
+        *,
+        limit: int,
+        ctx: Any,
+    ) -> list[RetrievedDocument]:
+        assert query == "leave policy"
+        assert limit == 5
+        self.contexts.append(ctx)
+        return self._documents()
+
+    @staticmethod
+    def _documents() -> list[RetrievedDocument]:
         return [
             RetrievedDocument(
                 id="chunk-1",
@@ -88,43 +107,39 @@ class StubRetriever:
         ]
 
 
-class InterleavedTransport(LLMTransport):
-    async def complete(
-        self,
-        messages: Sequence[ChatMessage | Mapping[str, Any]],
-        **_: Any,
-    ) -> LLMResponse:
-        return LLMResponse(
-            id="plan-1",
-            model="openai/gpt-5.4-mini",
-            content=json.dumps(
-                {
-                    "mode": "planned",
-                    "requires_knowledge_retrieval": True,
-                    "commentary": "I’ll check the relevant source.",
-                    "steps": [
-                        {
-                            "id": "step_1",
-                            "title": "Check leave policy",
-                            "tool_name": "knowledge_search",
-                            "arguments": {"query": "leave policy"},
-                            "success_criteria": "At least one source",
-                            "depends_on": [],
-                        }
-                    ],
-                }
-            ),
-            finish_reason="stop",
-        )
+class InterleavedTransport:
+    provider = "openrouter"
+    model = "openai/gpt-5.4-mini"
 
-    async def stream_turn(
+    def __init__(self) -> None:
+        self.turn = 0
+
+    async def stream_chat(
         self,
-        messages: Sequence[ChatMessage | Mapping[str, Any]],
+        *,
+        messages: Sequence[Mapping[str, Any]],
         **_: Any,
-    ) -> AsyncIterator[TextDelta | TurnDone]:
-        yield TextDelta("Employees receive 20 days ")
-        yield TextDelta("[[cite:chunk-1]].")
-        yield TurnDone("stop")
+    ) -> AsyncIterator[dict[str, Any]]:
+        self.turn += 1
+        if self.turn == 1:
+            yield text_delta("I’ll check the relevant source first.")
+            yield turn_done(
+                "tool_calls",
+                tool_calls=[
+                    {
+                        "id": "search-1",
+                        "type": "function",
+                        "function": {
+                            "name": "knowledge_search",
+                            "arguments": '{"queries":["leave policy"]}',
+                        },
+                    }
+                ],
+            )
+            return
+        yield text_delta("Employees receive 20 days ")
+        yield text_delta("[[cite:chunk-1]].")
+        yield turn_done("stop")
 
 
 class _SessionContext:
@@ -135,23 +150,7 @@ class _SessionContext:
         return None
 
 
-class _DocumentPipeline:
-    async def prepare_for_message(self, *args: Any, **kwargs: Any) -> PreparedDocuments:
-        return PreparedDocuments(contexts=(), source_fingerprints={})
-
-    async def cache_provider_annotations(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-
-class _Conversations:
-    async def start_turn(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    async def finish_turn(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-
-def _install_document_runtime(monkeypatch: Any) -> tuple[UUID, UUID]:
+def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
     user_id = uuid4()
     tenant_id = uuid4()
 
@@ -163,37 +162,32 @@ def _install_document_runtime(monkeypatch: Any) -> tuple[UUID, UUID]:
             tenant_id=tenant_id,
             role_id=uuid4(),
             role_code="analyst",
-            permission_codes=("knowledge.read",),
-            principal_tokens=(),
+            permission_codes=("admin", "knowledge.read"),
+            principal_tokens=("external_group:finance",),
         )
 
     monkeypatch.setattr(main, "_resolve_access", resolve_access)
-    monkeypatch.setattr(
-        main,
-        "_get_document_runtime",
-        lambda: SimpleNamespace(
-            pipeline=_DocumentPipeline(),
-            conversations=_Conversations(),
-        ),
-    )
     monkeypatch.setattr(db_engine, "get_session_factory", lambda: _SessionContext)
     return user_id, tenant_id
 
 
 def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     registry = ToolRegistry()
-    registry.register(KnowledgeSearchTool(StubRetriever()))
+    retriever = StubRetriever()
+    registry.register(KnowledgeSearchTool(retriever))
     transport = ScriptedTransport()
-    loop = AgentLoop(
+    agent = Agent(
         transport,
         registry,
-        recent_history_messages=2,
-        enable_interleaved=False,
+        config=AgentConfig(
+            max_model_turns=3,
+            max_tool_rounds=2,
+            recent_history_messages=2,
+        ),
     )
-    monkeypatch.setattr(main, "_agent_loop", loop)
-    user_id, tenant_id = _install_document_runtime(monkeypatch)
+    monkeypatch.setattr(main, "_agent", agent)
+    user_id, tenant_id = _install_access(monkeypatch)
     conversation_id = uuid4()
-    long_assistant_answer = f"Earlier answer\n{'A' * 5_000}"
 
     with TestClient(main.app) as client:
         response = client.post(
@@ -205,8 +199,6 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
                 "roles": [],
                 "conversation_id": str(conversation_id),
                 "history": [
-                    {"role": "user", "content": "Earlier question"},
-                    {"role": "assistant", "content": long_assistant_answer},
                     {"role": "user", "content": "Recent scope question"},
                     {"role": "assistant", "content": "Recent scope answer"},
                 ],
@@ -220,29 +212,14 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         if line.startswith("data: ")
     ]
     assert [event["type"] for event in events] == [
-        "run_started",
-        "turn_started",
-        "generation_started",
-        "generation_completed",
         "tool_started",
         "citation_available",
         "tool_completed",
-        "turn_completed",
-        "turn_started",
-        "generation_started",
-        "message_delta",
+        "final_answer_delta",
         "citation",
-        "message_delta",
-        "generation_completed",
-        "turn_completed",
+        "final_answer_delta",
         "run_completed",
     ]
-    generation_events = [
-        event for event in events if event["type"] == "generation_completed"
-    ]
-    assert generation_events[0]["generation_kind"] == "next_step"
-    assert generation_events[0]["selected_tools"] == ["knowledge_search"]
-    assert generation_events[1]["generation_kind"] == "final_response"
     citation_event = next(
         event for event in events if event["type"] == "citation_available"
     )
@@ -253,31 +230,35 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     assert "content" not in citation_event["evidence"]
     tool_event = next(event for event in events if event["type"] == "tool_completed")
     assert tool_event["result_count"] == 1
-    assert events[-1]["tool_call_count"] == 1
-    compression_prompt = transport.complete_requests[0][1]["content"]
-    model_request = transport.stream_requests[0]
-    assert "Compress the earlier conversation" in compression_prompt
-    assert "Earlier answer" in compression_prompt
-    assert (
-        "Earlier question and answer about the leave policy"
-        in model_request[1]["content"]
+    started_tool_event = next(
+        event for event in events if event["type"] == "tool_started"
     )
-    assert model_request[2:4] == [
+    assert started_tool_event["activity_id"] == tool_event["activity_id"]
+    assert tool_event["label"] == "Search knowledge base"
+    assert tool_event["category"] == "retrieval"
+    assert tool_event["status"] == "completed"
+    assert events[-1]["tool_call_count"] == 1
+    assert len(retriever.contexts) == 1
+    assert retriever.contexts[0].reader_ids == (
+        "email:person@example.test",
+        "external_group:finance",
+    )
+    assert retriever.contexts[0].is_admin is True
+    model_request = transport.stream_requests[0]
+    assert model_request[0]["role"] == "system"
+    assert model_request[1:] == [
         {"role": "user", "content": "Recent scope question"},
         {"role": "assistant", "content": "Recent scope answer"},
+        {"role": "user", "content": "What is the leave policy?"},
     ]
-    assert model_request[-1] == {
-        "role": "user",
-        "content": "What is the leave policy?",
-    }
 
 
 def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     registry = ToolRegistry()
     registry.register(KnowledgeSearchTool(StubRetriever()))
-    loop = AgentLoop(InterleavedTransport(), registry, enable_interleaved=True)
-    monkeypatch.setattr(main, "_agent_loop", loop)
-    user_id, tenant_id = _install_document_runtime(monkeypatch)
+    agent = Agent(InterleavedTransport(), registry)
+    monkeypatch.setattr(main, "_agent", agent)
+    user_id, tenant_id = _install_access(monkeypatch)
 
     with TestClient(main.app) as client:
         response = client.post(
@@ -298,26 +279,24 @@ def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     ]
     assert response.headers["cache-control"] == "no-cache, no-transform"
     assert response.headers["x-accel-buffering"] == "no"
-    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
-    assert len({event["event_id"] for event in events}) == len(events)
     assert [event["type"] for event in events] == [
-        "run_started",
         "commentary_delta",
         "tool_started",
-        "tool_completed",
         "citation_available",
-        "intermediate_finding_delta",
+        "tool_completed",
         "final_answer_delta",
         "citation",
         "final_answer_delta",
         "run_completed",
     ]
     tool_event = next(event for event in events if event["type"] == "tool_started")
+    assert tool_event["call_id"] == "search-1"
     assert "arguments" not in tool_event
-    assert "call_id" not in tool_event
+    assert tool_event["label"] == "Search knowledge base"
+    assert tool_event["activity_id"]
+    assert tool_event["category"] == "retrieval"
     citation = next(event for event in events if event["type"] == "citation_available")
-    assert "document_id" not in citation["evidence"]
-    assert "relevance_score" not in citation["evidence"]
+    assert citation["evidence"]["document_id"] == "doc-1"
     assert citation["evidence"]["snippet"] == (
         "Employees receive 20 days of annual leave."
     )

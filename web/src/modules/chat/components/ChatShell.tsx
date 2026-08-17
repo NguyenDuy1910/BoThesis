@@ -41,9 +41,9 @@ import type {
   ChatMessagePart,
   ConversationDocument,
 } from "@/modules/chat/types";
-import { AgentActivityPanel, AgentExecutionCard } from "./AgentExecutionCard";
+import { AgentActivityPanel } from "./AgentExecutionCard";
 import { AppSidebar, BothesisMark } from "./AppSidebar";
-import { IncrementalMarkdown } from "./IncrementalMarkdown";
+import { AssistantTurn } from "./AssistantTurn";
 
 const suggestions = [
   {
@@ -487,7 +487,6 @@ function ChatConversation({
                   isStreaming={isStreaming}
                   lastMessageId={lastMessage?.id}
                   messages={messages}
-                  onActivity={openActivity}
                   onCitation={focusSource}
                   onRegenerate={handleRegenerate}
                   stackRef={messageStackRef}
@@ -545,7 +544,6 @@ function MessageList({
   isStreaming,
   lastMessageId,
   messages,
-  onActivity,
   onCitation,
   onRegenerate,
   stackRef,
@@ -553,7 +551,6 @@ function MessageList({
   isStreaming: boolean;
   lastMessageId?: string;
   messages: ChatMessage[];
-  onActivity: (messageId?: string) => void;
   onCitation: (messageId: string, sourceId: string) => void;
   onRegenerate: (messageId: string) => void;
   stackRef: RefObject<HTMLDivElement | null>;
@@ -565,7 +562,6 @@ function MessageList({
           isStreaming={isStreaming && message.id === lastMessageId}
           key={message.id}
           message={message}
-          onActivity={onActivity}
           onCitation={onCitation}
           onRegenerate={onRegenerate}
         />
@@ -577,13 +573,11 @@ function MessageList({
 const MessageView = memo(function MessageView({
   isStreaming,
   message,
-  onActivity,
   onCitation,
   onRegenerate,
 }: {
   isStreaming: boolean;
   message: ChatMessage;
-  onActivity: (messageId?: string) => void;
   onCitation: (messageId: string, sourceId: string) => void;
   onRegenerate: (messageId: string) => void;
 }) {
@@ -621,21 +615,11 @@ const MessageView = memo(function MessageView({
     <div className="message-row assistant">
       <div className="avatar avatar--assistant"><BothesisMark className="bothesis-mark--avatar" label="Assistant" /></div>
       <div className="message-body">
-        <AgentExecutionCard
+        <AssistantTurn
           isStreaming={isStreaming}
-          message={message}
-          onOpen={() => onActivity(message.id)}
+          onCitationClick={(event) => handleCitationClick(event, message.id, onCitation)}
+          parts={message.parts}
         />
-        {text && (
-          <div
-            className="assistant-content"
-            data-latest-assistant-answer={isStreaming ? "true" : undefined}
-            onClick={(event) => handleCitationClick(event, message.id, onCitation)}
-          >
-            <div className="answer-detail"><IncrementalMarkdown isStreaming={isStreaming} text={text} /></div>
-            {isStreaming && <span className="streaming-cursor" />}
-          </div>
-        )}
         {streamError && <div className="error-box">{streamError.data.message}</div>}
         {!isStreaming && (text || streamError) && (
           <div className="answer-footer">

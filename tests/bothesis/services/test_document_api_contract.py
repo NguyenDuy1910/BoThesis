@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from uuid import uuid4
 
 import pytest
-from pydantic import ValidationError
 
-from main import ChatRequest, _environment_boolean
+from main import (
+    _environment_boolean,
+    _phase1_unscoped_retrieval_enabled,
+)
 
 
 def test_backend_source_contains_no_physical_delete_operations() -> None:
@@ -43,33 +44,14 @@ def test_environment_boolean_requires_a_json_boolean(
         _environment_boolean(setting_name)
 
 
-def test_chat_request_uses_canonical_document_ids() -> None:
-    document_id = uuid4()
+def test_phase1_unscoped_retrieval_requires_insecure_development_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BOTHESIS_PHASE1_UNSCOPED_RETRIEVAL", "true")
+    monkeypatch.setenv("BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY", "false")
 
-    request = ChatRequest(message="Analyze this", document_ids=[document_id])
+    with pytest.raises(RuntimeError, match="requires"):
+        _phase1_unscoped_retrieval_enabled()
 
-    assert request.document_ids == [document_id]
-
-
-def test_deprecated_attachment_ids_resolve_to_document_uuids() -> None:
-    document_id = uuid4()
-
-    request = ChatRequest(message="Analyze this", attachment_ids=[document_id])
-
-    assert request.document_ids == [document_id]
-
-
-def test_chat_request_rejects_ambiguous_or_duplicate_document_ids() -> None:
-    document_id = uuid4()
-
-    with pytest.raises(ValidationError):
-        ChatRequest(
-            message="Analyze this",
-            document_ids=[document_id],
-            attachment_ids=[uuid4()],
-        )
-    with pytest.raises(ValidationError):
-        ChatRequest(
-            message="Analyze this",
-            document_ids=[document_id, document_id],
-        )
+    monkeypatch.setenv("BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY", "true")
+    assert _phase1_unscoped_retrieval_enabled() is True

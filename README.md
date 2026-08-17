@@ -65,7 +65,10 @@ uv run python main.py
 Edit `backend/.env` before starting. At minimum, configure:
 
 ```dotenv
-OPENROUTER_API_KEY=...
+OPENAI_API_KEY=...
+OPENAI_MODEL=gpt-5-mini
+OPENROUTER_API_KEY=...  # document embeddings
+EMBEDDING_MODEL=openai/text-embedding-3-small
 DATABASE_URL=postgresql+asyncpg://bothesis:bothesis@127.0.0.1:5432/bothesis
 QDRANT_URL=http://localhost:6333
 QDRANT_COLLECTION=bothesis
@@ -116,6 +119,16 @@ Boolean environment settings use strict JSON boolean values.
 ```dotenv
 BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true
 ```
+
+For the single-tenant Phase 1 dataset only, development admins can query
+legacy Qdrant points that do not carry the current database tenant UUID:
+
+```dotenv
+BOTHESIS_PHASE1_UNSCOPED_RETRIEVAL=true
+```
+
+This setting requires insecure development identity mode, remains disabled by
+default, and must never be enabled in a shared or production environment.
 
 Then set database-backed user and tenant UUIDs in `web/.env.local`:
 

@@ -705,6 +705,22 @@ class VectorStore:
 
         return qmodels.Filter(must=conditions)
 
+    @staticmethod
+    def build_lifecycle_filter(
+        *,
+        is_deleted_field: str = "is_deleted",
+    ) -> qmodels.Filter:
+        """Exclude tombstones when a caller applies no access-scope filter."""
+
+        return qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key=is_deleted_field,
+                    match=qmodels.MatchValue(value=False),
+                )
+            ]
+        )
+
     @classmethod
     def build_access_filter(
         cls,
@@ -712,7 +728,7 @@ class VectorStore:
         tenant_id: str,
         reader_ids: list[str] | set[str] | None = None,
         space_keys: list[str] | set[str] | None = None,
-        is_admin: bool = False,
+        is_admin: bool = True,
         is_deleted_field: str = "is_deleted",
         tenant_id_field: str = "tenant_id",
     ) -> qmodels.Filter:
@@ -753,7 +769,7 @@ class VectorStore:
         tenant_id: str,
         reader_ids: Iterable[str],
         space_keys: Iterable[str] | None = None,
-        is_admin: bool = False,
+        is_admin: bool = True,
         is_deleted_field: str = "is_deleted",
         tenant_id_field: str = "tenant_id",
     ) -> list[Any]:

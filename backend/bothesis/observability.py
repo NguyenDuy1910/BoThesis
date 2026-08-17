@@ -15,11 +15,9 @@ from typing import Any, Protocol
 from bothesis.agent.models import (
     AgentContext,
     Evidence,
-    ExecutionMode,
-    ModelTurn,
-    ToolResult,
+    ToolOutput,
 )
-from bothesis.agent.transports.base import LLMResponse
+from bothesis.agent.protocol import Response, ResponseUsage
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +42,6 @@ class AgentRunTrace:
         tool_call_count: int,
         sources_found: int,
         sources_used: int,
-        execution_mode: ExecutionMode | None = None,
     ) -> None:
         metadata: dict[str, Any] = {
             "status": "completed",
@@ -54,8 +51,6 @@ class AgentRunTrace:
             "sources_found": sources_found,
             "sources_used": sources_used,
         }
-        if execution_mode is not None:
-            metadata["execution_mode"] = execution_mode.value
         _safe_update(
             self._observation,
             output=answer,
@@ -102,23 +97,20 @@ class CapabilityTrace:
     def complete(
         self,
         *,
-        response: LLMResponse | ModelTurn,
+        response: Response,
         output: Any,
         duration_ms: int,
     ) -> None:
-        usage = response.usage
         metadata = {
             **self._metadata,
-            "finish_reason": response.finish_reason,
+            "finish_reason": _finish_reason(response),
             "llm_latency_ms": duration_ms,
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "cached_prompt_tokens": usage.get("cached_prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
+            **_token_metadata(response.usage),
         }
         _safe_update(
             self._observation,
             model=response.model,
-            usage_details=_usage_details(usage),
+            usage_details=_usage_details(response.usage),
             output=output,
             metadata=metadata,
         )
@@ -128,7 +120,7 @@ class CapabilityTrace:
         *,
         category: str,
         duration_ms: int,
-        response: LLMResponse | ModelTurn | None = None,
+        response: Response | None = None,
         output: Any = None,
     ) -> None:
         update: dict[str, Any] = {
@@ -141,17 +133,14 @@ class CapabilityTrace:
             "status_message": category,
         }
         if response is not None:
-            usage = response.usage
             update.update(
                 model=response.model,
-                usage_details=_usage_details(usage),
+                usage_details=_usage_details(response.usage),
                 output=output,
                 metadata={
                     **update["metadata"],
-                    "finish_reason": response.finish_reason,
-                    "prompt_tokens": usage.get("prompt_tokens", 0),
-                    "cached_prompt_tokens": usage.get("cached_prompt_tokens", 0),
-                    "completion_tokens": usage.get("completion_tokens", 0),
+                    "finish_reason": _finish_reason(response),
+                    **_token_metadata(response.usage),
                 },
             )
         _safe_update(self._observation, **update)
@@ -174,42 +163,40 @@ class GenerationTrace:
         )
         self._first_token_recorded = True
 
-    def complete(self, *, turn: ModelTurn, duration_ms: int) -> None:
-        if turn.tool_calls:
+    def complete(self, *, response: Response, duration_ms: int) -> None:
+        function_calls = response.function_calls
+        if function_calls:
             observation_name = "decide-next-step"
             generation_kind = "next_step"
             output: Any = {
-                "text": turn.text,
+                "text": response.output_text,
                 "tool_calls": [
                     {
                         "id": call.call_id,
                         "name": call.name,
                         "arguments": call.arguments,
                     }
-                    for call in turn.tool_calls
+                    for call in function_calls
                 ],
             }
         else:
             observation_name = "generate-final-response"
             generation_kind = "final_response"
-            output = turn.text
-        usage = turn.usage
+            output = response.output_text
         _safe_update(
             self._observation,
             name=observation_name,
-            model=turn.model,
-            usage_details=_usage_details(usage),
+            model=response.model,
+            usage_details=_usage_details(response.usage),
             output=output,
             metadata={
                 **self._metadata,
                 "generation_kind": generation_kind,
-                "finish_reason": turn.finish_reason,
-                "tool_call_count": len(turn.tool_calls),
-                "selected_tools": [call.name for call in turn.tool_calls],
+                "finish_reason": _finish_reason(response),
+                "tool_call_count": len(function_calls),
+                "selected_tools": [call.name for call in function_calls],
                 "llm_latency_ms": duration_ms,
-                "prompt_tokens": usage.get("prompt_tokens", 0),
-                "cached_prompt_tokens": usage.get("cached_prompt_tokens", 0),
-                "completion_tokens": usage.get("completion_tokens", 0),
+                **_token_metadata(response.usage),
             },
         )
 
@@ -232,7 +219,7 @@ class ToolExecutionTrace:
 
     _observation: _Observation
 
-    def complete(self, *, result: ToolResult) -> None:
+    def complete(self, *, result: ToolOutput) -> None:
         update: dict[str, Any] = {
             "output": {
                 "content": result.content,
@@ -516,21 +503,42 @@ def _retrieval_context(
         yield RetrievalTrace(observation, metadata)
 
 
-def _usage_details(usage: Mapping[str, int]) -> dict[str, int] | None:
-    details: dict[str, int] = {}
-    prompt_tokens = usage.get("prompt_tokens")
-    cached_prompt_tokens = usage.get("cached_prompt_tokens", 0)
-    completion_tokens = usage.get("completion_tokens")
-    total_tokens = usage.get("total_tokens")
-    if prompt_tokens is not None:
-        details["input"] = max(0, prompt_tokens - cached_prompt_tokens)
-    if cached_prompt_tokens:
-        details["input_cached_tokens"] = cached_prompt_tokens
-    if completion_tokens is not None:
-        details["output"] = completion_tokens
-    if total_tokens is not None:
-        details["total"] = total_tokens
-    return details or None
+def _finish_reason(response: Response) -> str:
+    """Describe how a response ended using only protocol status semantics."""
+
+    if response.incomplete_details is not None:
+        return response.incomplete_details.reason
+    if response.function_calls:
+        return "tool_calls"
+    return "stop" if response.status == "completed" else response.status
+
+
+def _token_metadata(usage: ResponseUsage | None) -> dict[str, int]:
+    if usage is None:
+        return {
+            "prompt_tokens": 0,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+    return {
+        "prompt_tokens": usage.input_tokens,
+        "cached_prompt_tokens": usage.input_tokens_details.cached_tokens,
+        "completion_tokens": usage.output_tokens,
+    }
+
+
+def _usage_details(usage: ResponseUsage | None) -> dict[str, int] | None:
+    if usage is None:
+        return None
+    cached_tokens = usage.input_tokens_details.cached_tokens
+    details: dict[str, int] = {
+        "input": max(0, usage.input_tokens - cached_tokens),
+    }
+    if cached_tokens:
+        details["input_cached_tokens"] = cached_tokens
+    details["output"] = usage.output_tokens
+    details["total"] = usage.total_tokens
+    return details
 
 
 def _safe_update(observation: _Observation, **kwargs: Any) -> None:

@@ -73,7 +73,6 @@ export type ChatDataParts = {
     text: string;
     state: "streaming" | "done";
   };
-  finding: { text: string };
   "stream-error": { message: string; retryable?: boolean };
 };
 
@@ -84,7 +83,6 @@ export type ChatMessagePart =
   | { type: "data-status"; id?: string; data: ChatDataParts["status"] }
   | { type: "data-source"; id?: string; data: ChatDataParts["source"] }
   | { type: "data-reasoning"; id?: string; data: ChatDataParts["reasoning"] }
-  | { type: "data-finding"; id?: string; data: ChatDataParts["finding"] }
   | { type: "data-stream-error"; id?: string; data: ChatDataParts["stream-error"] };
 
 export interface ChatMessage {
@@ -110,27 +108,12 @@ export interface AgentHistoryMessage {
   content: string;
 }
 
-export type AssistantPhase = "commentary" | "tool_activity" | "intermediate_finding" | "final_answer";
-
 type StreamEventMetadata = { sequence?: number; event_id?: string };
 
 export type AgentStreamEvent = StreamEventMetadata & (
-  | { type: "run_started"; conversation_id?: string | null; request_id?: string | null }
-  | { type: "turn_started"; turn: number }
-  | { type: "generation_started"; turn: number }
-  | {
-      type: "generation_completed";
-      turn: number;
-      generation_kind: "next_step" | "final_response";
-      finish_reason?: string | null;
-      tool_call_count: number;
-      selected_tools: string[];
-      duration_ms: number;
-    }
-  | { type: "message_delta"; text: string }
   | { type: "final_answer_delta"; text: string }
-  | { type: "commentary_delta"; text: string }
-  | { type: "intermediate_finding_delta"; text: string }
+  | { type: "commentary_delta"; text: string; turn: number }
+  | { type: "provider_reasoning_summary_delta"; turn: number; text: string }
   | {
       type: "document_progress";
       document_id: string;
@@ -139,10 +122,6 @@ export type AgentStreamEvent = StreamEventMetadata & (
       mode: "direct" | "indexed";
       message: string;
     }
-  | { type: "public_reasoning_started"; turn: number }
-  | { type: "public_reasoning_delta"; turn: number; text: string }
-  | { type: "public_reasoning_completed"; turn: number }
-  | { type: "provider_reasoning_summary_delta"; turn: number; text: string }
   | {
       type: "tool_started";
       activity_id?: string;
@@ -169,7 +148,6 @@ export type AgentStreamEvent = StreamEventMetadata & (
     }
   | { type: "citation_available"; evidence: AgentEvidence }
   | { type: "citation"; evidence_id: string; title: string; page?: string | null; uri?: string | null }
-  | { type: "turn_completed"; turn: number; outcome: "tool" | "final" }
   | {
       type: "run_completed";
       duration_ms?: number | null;
