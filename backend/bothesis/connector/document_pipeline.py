@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
@@ -13,11 +13,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from bothesis.agent.models import (
-    ConversationDocument,
-    DocumentProgress,
-    Evidence,
-)
+from bothesis.agent.models import ConversationDocument, Evidence
 from bothesis.connector.file.processing import (
     FileProcessingError,
     FileProcessor,
@@ -223,7 +219,6 @@ class DocumentPipeline:
         *,
         access: AuthContext,
         message: str,
-        report: Callable[[DocumentProgress], None],
     ) -> PreparedDocuments:
         if len(document_ids) != len(set(document_ids)):
             raise ValueError("document IDs must be unique")
@@ -233,63 +228,19 @@ class DocumentPipeline:
             document = await self._load_visible_document(document_id, access=access)
             title = _file_name(document)
             mode = self._route(document)
-            report(
-                DocumentProgress(
-                    document_id=str(document.id),
-                    file_name=title,
-                    status="preparing",
-                    mode=mode,
-                    message="Selecting the lowest-cost document processing path.",
-                )
-            )
             try:
                 if mode == "direct":
                     context, fingerprint = await self._prepare_direct(document)
                 else:
-                    report(
-                        DocumentProgress(
-                            document_id=str(document.id),
-                            file_name=title,
-                            status="indexing",
-                            mode="indexed",
-                            message=(
-                                "Reusing the existing document index."
-                                if self._index_content_is_current(document)
-                                else "Building the document index required for this answer."
-                            ),
-                        )
-                    )
                     context, fingerprint = await self._prepare_indexed(
                         document,
                         access=access,
                         message=message,
                     )
             except Exception:
-                report(
-                    DocumentProgress(
-                        document_id=str(document.id),
-                        file_name=title,
-                        status="failed",
-                        mode=mode,
-                        message="The document could not be prepared safely.",
-                    )
-                )
                 raise
             contexts.append(context)
             fingerprints[document.id] = fingerprint
-            report(
-                DocumentProgress(
-                    document_id=str(document.id),
-                    file_name=title,
-                    status="ready",
-                    mode=context.mode,
-                    message=(
-                        "The original document will be sent directly to the model."
-                        if context.mode == "direct"
-                        else "Permission-filtered document evidence is ready."
-                    ),
-                )
-            )
         return PreparedDocuments(tuple(contexts), fingerprints)
 
     async def cache_provider_annotations(

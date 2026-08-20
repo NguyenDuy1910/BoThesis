@@ -3,7 +3,7 @@
 One user request is one Turn Request
 (:class:`~bothesis.agent.turn_request.TurnRequest`), which itself loops
 through as many Sampling Requests as it takes to reach a final answer.
-``ConversationLoop`` holds the dependencies shared across requests (model,
+``ConversationSession`` holds the dependencies shared across requests (model,
 tools, memory, tracing) and constructs one fresh ``TurnRequest`` per call —
 it does not run the loop itself.
 """
@@ -15,8 +15,8 @@ from typing import Any
 
 from bothesis.agent import AgentConfig
 from bothesis.agent.conversation_compression import ConversationMemory
-from bothesis.agent.models import AgentContext, AgentEvent
-from bothesis.agent.protocol import FunctionCallItem
+from bothesis.agent.models import AgentContext
+from bothesis.agent.protocol import FunctionCallItem, RuntimeStreamEvent
 from bothesis.agent.response_stream import _openrouter_function_calls as _parse_openrouter_function_calls
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.transports.openai import OpenAITransport
@@ -25,7 +25,7 @@ from bothesis.agent.turn_request import TurnRequest
 from bothesis.observability import AgentRunTrace, LangfuseTracing
 
 
-class ConversationLoop:
+class ConversationSession:
     """Construct one fresh :class:`TurnRequest` per user message."""
 
     def __init__(
@@ -47,13 +47,13 @@ class ConversationLoop:
         self._config = config
         self._tracing = tracing
 
-    async def stream(
+    async def run_session(
         self,
         user_message: str,
         ctx: AgentContext,
         *,
         run_trace: AgentRunTrace | None,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncIterator[RuntimeStreamEvent]:
         """Execute one user request as a fresh Turn Request."""
 
         turn_request = TurnRequest(
@@ -64,7 +64,7 @@ class ConversationLoop:
             config=self._config,
             tracing=self._tracing,
         )
-        async for event in turn_request.run(user_message, ctx, run_trace=run_trace):
+        async for event in turn_request.run_turn(user_message, ctx, run_trace=run_trace):
             yield event
 
     @staticmethod
@@ -76,4 +76,4 @@ class ConversationLoop:
         return _parse_openrouter_function_calls(raw_calls)
 
 
-__all__ = ["ConversationLoop"]
+__all__ = ["ConversationSession"]

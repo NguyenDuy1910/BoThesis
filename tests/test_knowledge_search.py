@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from bothesis.agent.models import AgentContext
+from bothesis.agent.models import AgentContext, ToolContext
 from bothesis.agent.protocol import FunctionTool
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
@@ -17,9 +17,11 @@ from bothesis.knowledge.document_index import (
     QdrantKeywordRetriever,
     QdrantSemanticRetriever,
     RetrievedDocument,
+    ScopedKnowledgeRetriever,
 )
 
 CONTEXT = AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[])
+TOOL_CONTEXT = ToolContext(agent_context=CONTEXT)
 DOCUMENT = RetrievedDocument(
     id="chunk-1",
     document_id="doc-1",
@@ -32,7 +34,7 @@ DOCUMENT = RetrievedDocument(
 )
 
 
-class StubRetriever:
+class StubRetriever(ScopedKnowledgeRetriever):
     def __init__(self, documents: list[RetrievedDocument]) -> None:
         self.documents = documents
         self.calls: list[tuple[str, int]] = []
@@ -40,6 +42,15 @@ class StubRetriever:
     async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
         self.calls.append((query, limit))
         return self.documents
+
+    async def search_scoped(
+        self,
+        query: str,
+        *,
+        limit: int,
+        ctx: AgentContext,
+    ) -> list[RetrievedDocument]:
+        return await self.search(query, limit=limit)
 
 
 class ScopedStubRetriever(StubRetriever):
@@ -59,15 +70,25 @@ class ScopedStubRetriever(StubRetriever):
         return self.documents
 
 
-class FailingRetriever:
+class FailingRetriever(ScopedKnowledgeRetriever):
     async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
         raise RuntimeError("Qdrant unavailable")
 
+    async def search_scoped(
+        self, query: str, *, limit: int, ctx: AgentContext
+    ) -> list[RetrievedDocument]:
+        return await self.search(query, limit=limit)
 
-class BlockingRetriever:
+
+class BlockingRetriever(ScopedKnowledgeRetriever):
     async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
         await asyncio.Event().wait()
         return []
+
+    async def search_scoped(
+        self, query: str, *, limit: int, ctx: AgentContext
+    ) -> list[RetrievedDocument]:
+        return await self.search(query, limit=limit)
 
 
 class StubVectorStore:
@@ -231,7 +252,7 @@ async def test_knowledge_search_returns_bounded_evidence_and_source_metadata() -
     retriever = StubRetriever([DOCUMENT])
     tool = KnowledgeSearchTool(retriever, result_limit=3)
 
-    result = await tool.execute({"query": "annual leave"}, CONTEXT)
+    result = await tool.execute({"queries": ["annual leave"]}, TOOL_CONTEXT)
 
     assert retriever.calls == [("annual leave", 3)]
     assert result.error is None
@@ -249,8 +270,8 @@ async def test_knowledge_search_prefers_permission_scoped_retrieval() -> None:
     retriever = ScopedStubRetriever([DOCUMENT])
 
     result = await KnowledgeSearchTool(retriever).execute(
-        {"query": "annual leave"},
-        CONTEXT,
+        {"queries": ["annual leave"]},
+        TOOL_CONTEXT,
     )
 
     assert result.error is None
@@ -260,8 +281,8 @@ async def test_knowledge_search_prefers_permission_scoped_retrieval() -> None:
 @pytest.mark.asyncio
 async def test_knowledge_search_handles_empty_results() -> None:
     result = await KnowledgeSearchTool(StubRetriever([])).execute(
-        {"query": "annual leave"},
-        CONTEXT,
+        {"queries": ["annual leave"]},
+        TOOL_CONTEXT,
     )
 
     assert result.error is None
@@ -272,8 +293,8 @@ async def test_knowledge_search_handles_empty_results() -> None:
 @pytest.mark.asyncio
 async def test_knowledge_search_handles_retrieval_failures() -> None:
     result = await KnowledgeSearchTool(FailingRetriever()).execute(
-        {"query": "annual leave"},
-        CONTEXT,
+        {"queries": ["annual leave"]},
+        TOOL_CONTEXT,
     )
 
     assert result.error == "Knowledge search is temporarily unavailable. Please try again."
@@ -285,7 +306,7 @@ async def test_knowledge_search_handles_timeouts() -> None:
     result = await KnowledgeSearchTool(
         BlockingRetriever(),
         timeout_seconds=0.01,
-    ).execute({"query": "annual leave"}, CONTEXT)
+    ).execute({"queries": ["annual leave"]}, TOOL_CONTEXT)
 
     assert result.error == "Knowledge search timed out. Please try again."
     assert result.metadata["outcome"] == "timeout"
@@ -296,11 +317,11 @@ def test_knowledge_search_declares_itself_as_a_protocol_function_tool() -> None:
 
     assert isinstance(declaration, FunctionTool)
     assert declaration.name == "knowledge_search"
-    assert declaration.parameters["required"] == ["query"]
+    assert declaration.parameters["required"] == ["queries"]
     assert "access-permitted" in declaration.description
     assert "evidence IDs for citations" in declaration.description
     assert "Do not use generic terms" in declaration.parameters["properties"][
-        "query"
+        "queries"
     ]["description"]
     # A closed argument schema lets a provider enforce strict tool calling.
     assert declaration.strict is True
@@ -311,5 +332,6 @@ def test_tool_registry_exposes_declarations_through_the_protocol() -> None:
     registry.register(KnowledgeSearchTool(StubRetriever([])))
 
     assert [tool.name for tool in registry.function_tools()] == ["knowledge_search"]
-    assert registry.public_label("knowledge_search") == "Search knowledge base"
-    assert registry.public_category("knowledge_search") == "retrieval"
+    definition = registry.definitions()[0]
+    assert definition.activity_label == "Search knowledge base"
+    assert definition.activity_category == "retrieval"

@@ -32,3 +32,17 @@ TURN LOOP
 │       └── final assistant message
 │
 └── TURN COMPLETED
+
+
+
+1 conversation_session
+    = N Turns
+
+1 Turn
+    = N Samplings
+
+1 Sampling
+    = N Attempts (if retry)
+
+1 Attempt
+    = 1 Response Stream

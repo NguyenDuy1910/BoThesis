@@ -3,7 +3,7 @@
 A retry repeats the exact same model sampling because the transport failed
 transiently (a dropped connection, a rate limit, a 5xx). It is not a turn
 continuation: continuing to a new sampling because tool results now exist is
-the Turn Loop's job (:class:`~bothesis.agent.conversation_loop.ConversationLoop`),
+the Turn Loop's job (:class:`~bothesis.agent.conversation_session.ConversationSession`),
 not this module's.
 """
 
@@ -22,15 +22,16 @@ from openai import (
     RateLimitError,
 )
 
-from bothesis.agent import AgentExecutionError, ModelStreamCompleted
-from bothesis.agent.models import AgentEvent
-from bothesis.agent.protocol import ResponseRequest
+from bothesis.agent import AgentExecutionError, ModelStreamCompleted, TextDelta
+from bothesis.agent.protocol import ReasoningSummaryDelta, ResponseRequest
 from bothesis.agent.response_stream import (
-    ResponseStreamProcessor,
+    StreamResponse,
     openai_canonical_events,
     openrouter_canonical_events,
 )
 from bothesis.agent.step_context import StepContext
+from bothesis.agent.transports.openai import OpenAITransport
+from bothesis.agent.transports.openrouter import OpenRouterTransport
 
 _RETRYABLE_OPENAI_ERRORS: tuple[type[Exception], ...] = (
     APIConnectionError,
@@ -50,7 +51,7 @@ def _build_prompt(step: StepContext) -> ResponseRequest:
 
     return ResponseRequest(
         input=step.history.items,
-        model=step.model,
+        model=step.model_info.name,
         instructions=step.history.instructions,
         tools=step.tools,
         tool_choice="auto" if step.tools else None,
@@ -63,29 +64,38 @@ def _build_prompt(step: StepContext) -> ResponseRequest:
 
 async def run_sampling_request(
     step: StepContext,
+    transport: OpenAITransport | OpenRouterTransport,
     *,
     generation_trace: Any = None,
-) -> AsyncIterator[AgentEvent | ModelStreamCompleted]:
+) -> AsyncIterator[TextDelta | ReasoningSummaryDelta | ModelStreamCompleted]:
     """Attempt one sampling request, retrying transient transport failures."""
 
     prompt = _build_prompt(step)
     attempt = 0
     while True:
+        emitted_text = False
         try:
-            processor = ResponseStreamProcessor(
-                turn_number=step.turn_number,
+            response_stream = StreamResponse(
+                provider=step.model_info.provider,
+                sampling_number=step.turn_number,
                 generation_trace=generation_trace,
             )
             events = (
-                openai_canonical_events(step.transport, prompt)
-                if step.provider == "openai"
-                else openrouter_canonical_events(step.transport, prompt)
+                openai_canonical_events(transport, prompt)
+                if step.model_info.provider == "openai"
+                else openrouter_canonical_events(transport, prompt)
             )
-            async for event in processor.run(events):
+            async for event in response_stream.run_llm(events):
+                if isinstance(event, TextDelta):
+                    emitted_text = True
                 yield event
             return
         except (OpenAIError, httpx.HTTPError, ValueError) as exc:
-            if not _is_retryable(exc) or attempt >= step.config.max_sampling_retries:
+            if (
+                emitted_text
+                or not _is_retryable(exc)
+                or attempt >= step.config.max_sampling_retries
+            ):
                 raise AgentExecutionError("model transport failed") from exc
             attempt += 1
             await asyncio.sleep(step.config.sampling_retry_base_delay_seconds * (2 ** (attempt - 1)))

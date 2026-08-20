@@ -9,15 +9,15 @@ import {
   ListChecks,
   LoaderCircle,
   Menu,
-  PanelRight,
   Plus,
   RefreshCw,
   Send,
+  ShieldCheck,
   Sparkles,
   Square,
   X,
 } from "lucide-react";
-import { memo, type FormEvent, type MouseEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
@@ -41,7 +41,6 @@ import type {
   ChatMessagePart,
   ConversationDocument,
 } from "@/modules/chat/types";
-import { AgentActivityPanel } from "./AgentExecutionCard";
 import { AppSidebar, BothesisMark } from "./AppSidebar";
 import { AssistantTurn } from "./AssistantTurn";
 
@@ -235,13 +234,6 @@ function ChatConversation({
 }) {
   const [input, setInput] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<ComposerDocument[]>([]);
-  const [sourceFocus, setSourceFocus] = useState<{
-    messageId: string;
-    sourceId: string;
-    nonce: number;
-  } | null>(null);
-  const [activityOpen, setActivityOpen] = useState(false);
-  const [selectedActivityMessageId, setSelectedActivityMessageId] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const messageStackRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -276,15 +268,6 @@ function ChatConversation({
   const activeTurnId = latestUserMessageId && activeAssistantMessageId
     ? `${latestUserMessageId}:${activeAssistantMessageId}`
     : null;
-  const latestAssistantMessage = [...messages]
-    .reverse()
-    .find((message) => message.role === "assistant");
-  const selectedActivityMessage = messages.find(
-    (message) => message.id === selectedActivityMessageId && message.role === "assistant",
-  ) ?? latestAssistantMessage;
-  const selectedActivityIsStreaming = Boolean(
-    isStreaming && selectedActivityMessage?.id === activeAssistantMessageId,
-  );
   const hasMessageError = messages.some((message) => (
     message.parts.some((part) => part.type === "data-stream-error")
   ));
@@ -303,15 +286,6 @@ function ChatConversation({
     textarea.style.height = "0px";
     textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
   }, [input]);
-
-  useEffect(() => {
-    if (activeAssistantMessageId) setSelectedActivityMessageId(activeAssistantMessageId);
-  }, [activeAssistantMessageId]);
-
-  useEffect(() => {
-    if (selectedActivityMessageId || !latestAssistantMessage) return;
-    setSelectedActivityMessageId(latestAssistantMessage.id);
-  }, [latestAssistantMessage, selectedActivityMessageId]);
 
   useLayoutEffect(() => {
     if (!activeTurnId || positionedTurnRef.current === activeTurnId) return;
@@ -417,27 +391,6 @@ function ChatConversation({
     }
   }, [composerAttachments]);
 
-  const focusSource = useCallback((messageId: string, sourceId: string) => {
-    setSelectedActivityMessageId(messageId);
-    setActivityOpen(true);
-    setSourceFocus((current) => ({
-      messageId,
-      sourceId,
-      nonce: (current?.nonce ?? 0) + 1,
-    }));
-  }, []);
-
-  const openActivity = useCallback((messageId?: string) => {
-    const targetId = messageId ?? activeAssistantMessageId ?? latestAssistantMessage?.id;
-    if (targetId) setSelectedActivityMessageId(targetId);
-    setSourceFocus(null);
-    setActivityOpen(true);
-  }, [activeAssistantMessageId, latestAssistantMessage?.id]);
-
-  const closeActivity = useCallback(() => {
-    setActivityOpen(false);
-  }, []);
-
   const handleRegenerate = useCallback((messageId: string) => {
     void regenerate({ messageId });
   }, [regenerate]);
@@ -455,25 +408,16 @@ function ChatConversation({
             <Menu size={18} />
           </button>
           <div className="topbar__title-wrap">
-            <h1 title={conversationTitle ?? "Knowledge Agent"}>{conversationTitle ?? "Knowledge Agent"}</h1>
+            <span className="topbar__identity-mark"><BothesisMark decorative /></span>
+            <span className="topbar__title-copy">
+              <span className="topbar__eyebrow">Knowledge assistant</span>
+              <h1 title={conversationTitle ?? "New conversation"}>{conversationTitle ?? "New conversation"}</h1>
+            </span>
           </div>
-        </div>
-        <div className="topbar__actions">
-          <button
-            aria-label="Open activity and sources"
-            aria-pressed={activityOpen}
-            className="topbar__activity"
-            onClick={() => openActivity()}
-            type="button"
-          >
-            <PanelRight aria-hidden="true" size={15} />
-            <span>Activity</span>
-            {isStreaming && <LoaderCircle aria-hidden="true" className="topbar__activity-spin" size={12} />}
-          </button>
         </div>
       </header>
 
-      <div className={clsx("chat-activity-layout", activityOpen && "chat-activity-layout--open")}>
+      <div className="chat-activity-layout">
         <div className="conversation-pane">
           <div
             className="chat-scroll"
@@ -487,7 +431,6 @@ function ChatConversation({
                   isStreaming={isStreaming}
                   lastMessageId={lastMessage?.id}
                   messages={messages}
-                  onCitation={focusSource}
                   onRegenerate={handleRegenerate}
                   stackRef={messageStackRef}
                 />
@@ -515,26 +458,6 @@ function ChatConversation({
             textareaRef={textareaRef}
           />
         </div>
-        {activityOpen && (
-          <>
-            <button
-              aria-label="Close activity"
-              className="activity-panel-overlay"
-              onClick={closeActivity}
-              type="button"
-            />
-            <AgentActivityPanel
-              isStreaming={selectedActivityIsStreaming}
-              message={selectedActivityMessage}
-              onClose={closeActivity}
-              sourceFocus={
-                sourceFocus && sourceFocus.messageId === selectedActivityMessage?.id
-                  ? sourceFocus
-                  : undefined
-              }
-            />
-          </>
-        )}
       </div>
     </section>
   );
@@ -544,14 +467,12 @@ function MessageList({
   isStreaming,
   lastMessageId,
   messages,
-  onCitation,
   onRegenerate,
   stackRef,
 }: {
   isStreaming: boolean;
   lastMessageId?: string;
   messages: ChatMessage[];
-  onCitation: (messageId: string, sourceId: string) => void;
   onRegenerate: (messageId: string) => void;
   stackRef: RefObject<HTMLDivElement | null>;
 }) {
@@ -562,7 +483,6 @@ function MessageList({
           isStreaming={isStreaming && message.id === lastMessageId}
           key={message.id}
           message={message}
-          onCitation={onCitation}
           onRegenerate={onRegenerate}
         />
       ))}
@@ -573,12 +493,10 @@ function MessageList({
 const MessageView = memo(function MessageView({
   isStreaming,
   message,
-  onCitation,
   onRegenerate,
 }: {
   isStreaming: boolean;
   message: ChatMessage;
-  onCitation: (messageId: string, sourceId: string) => void;
   onRegenerate: (messageId: string) => void;
 }) {
   const { copy, copied } = useClipboard();
@@ -615,10 +533,13 @@ const MessageView = memo(function MessageView({
     <div className="message-row assistant">
       <div className="avatar avatar--assistant"><BothesisMark className="bothesis-mark--avatar" label="Assistant" /></div>
       <div className="message-body">
+        <div className="assistant-byline">
+          <strong>BoThesis</strong>
+        </div>
         <AssistantTurn
           isStreaming={isStreaming}
-          onCitationClick={(event) => handleCitationClick(event, message.id, onCitation)}
           parts={message.parts}
+          runtime={message.runtime}
         />
         {streamError && <div className="error-box">{streamError.data.message}</div>}
         {!isStreaming && (text || streamError) && (
@@ -651,24 +572,6 @@ function latestMessageId(messages: ChatMessage[], role: ChatMessage["role"]) {
 function reserveActiveTurnSpace(scroller: HTMLDivElement, stack: HTMLDivElement) {
   const reservedHeight = Math.max(240, scroller.clientHeight - 96);
   stack.style.setProperty("--chat-active-fill", `${reservedHeight}px`);
-}
-
-function handleCitationClick(
-  event: MouseEvent<HTMLDivElement>,
-  messageId: string,
-  onCitation: (messageId: string, sourceId: string) => void,
-) {
-  const target = event.target;
-  if (!(target instanceof Element)) return;
-  const link = target.closest<HTMLAnchorElement>('a[href^="#source-"]');
-  const href = link?.getAttribute("href");
-  if (!href) return;
-  event.preventDefault();
-  try {
-    onCitation(messageId, decodeURIComponent(href.slice("#source-".length)));
-  } catch {
-    // Ignore malformed local citation anchors.
-  }
 }
 
 function ChatComposer({
@@ -742,16 +645,6 @@ function ChatComposer({
           ref={fileInputRef}
           type="file"
         />
-        <button
-          aria-label="Attach files"
-          className="composer-tool"
-          disabled={isStreaming || !isConfigured || attachments.length >= 12}
-          onClick={() => fileInputRef.current?.click()}
-          title="Attach files"
-          type="button"
-        >
-          <Plus size={15} />
-        </button>
         <textarea
           aria-label="Message assistant"
           disabled={isStreaming || !isConfigured}
@@ -762,25 +655,41 @@ function ChatComposer({
               void onSubmit(input);
             }
           }}
-          placeholder="Ask about reports, risks, metrics, or decisions..."
+          placeholder="Ask a question about your company knowledge..."
           ref={textareaRef}
           rows={1}
           value={input}
         />
-        <button
-          aria-label={isStreaming ? "Stop generating" : "Send message"}
-          className={clsx("composer-send", isStreaming && "composer-send--stop")}
-          disabled={!isStreaming && (
-            isUploading
-            || (!input.trim() && !attachments.some((item) => item.progress === "ready"))
-            || !isConfigured
-          )}
-          onClick={isStreaming ? onStop : undefined}
-          type={isStreaming ? "button" : "submit"}
-        >
-          {isStreaming ? <Square className="composer-send__stop-icon" size={11} strokeWidth={0} /> : <Send className="composer-send__send-icon" size={18} />}
-        </button>
+        <div className="composer__footer">
+          <button
+            aria-label="Attach files"
+            className="composer-tool"
+            disabled={isStreaming || !isConfigured || attachments.length >= 12}
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach files"
+            type="button"
+          >
+            <Plus size={16} />
+            <span>Attach</span>
+          </button>
+          <span className="composer__privacy"><ShieldCheck aria-hidden="true" size={13} /> Permission-aware</span>
+          <span className="composer__shortcut">Enter to send · Shift + Enter for new line</span>
+          <button
+            aria-label={isStreaming ? "Stop generating" : "Send message"}
+            className={clsx("composer-send", isStreaming && "composer-send--stop")}
+            disabled={!isStreaming && (
+              isUploading
+              || (!input.trim() && !attachments.some((item) => item.progress === "ready"))
+              || !isConfigured
+            )}
+            onClick={isStreaming ? onStop : undefined}
+            type={isStreaming ? "button" : "submit"}
+          >
+            {isStreaming ? <Square className="composer-send__stop-icon" size={11} strokeWidth={0} /> : <Send className="composer-send__send-icon" size={17} />}
+          </button>
+        </div>
       </form>
+      <p className="composer-disclaimer">BoThesis can make mistakes. Verify important decisions with the cited sources.</p>
     </div>
   );
 }
@@ -803,11 +712,19 @@ function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
   return (
     <div className="welcome">
       <div className="welcome__content">
-        <div className="welcome-heading">
-          <BothesisMark className="bothesis-mark--welcome" decorative />
-          <div><p className="welcome-eyebrow">Enterprise assistant</p><h2>How can I help?</h2></div>
+        <div className="welcome-hero">
+          <span className="welcome-hero__mark"><BothesisMark className="bothesis-mark--welcome" decorative /></span>
+          <div className="welcome-heading">
+            <p className="welcome-eyebrow">Your enterprise knowledge partner</p>
+            <h2>What would you like to understand?</h2>
+          </div>
+          <p className="welcome-copy">Ask BoThesis to find trusted context, compare business signals, or turn what your organization knows into a clear next step.</p>
+          <div className="welcome-trust" aria-label="Assistant capabilities">
+            <span><ShieldCheck aria-hidden="true" size={14} /> Permission-aware</span>
+            <span><FileSearch aria-hidden="true" size={14} /> Source-backed answers</span>
+          </div>
         </div>
-        <p className="welcome-copy">Ask a question, request a summary, or draft a decision memo from knowledge you can access.</p>
+        <p className="suggestions__label">Try a starting point</p>
         <div className="suggestions">
           {suggestions.map((suggestion) => (
             <button className="suggestion" key={suggestion.title} onClick={() => void onSelect(suggestion.prompt)} type="button">

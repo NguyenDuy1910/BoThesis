@@ -3,11 +3,10 @@
 This is the inbound half of the protocol boundary: a provider adapter
 (``openai_canonical_events``/``openrouter_canonical_events``) translates a
 transport's native stream into the canonical
-:class:`~bothesis.agent.protocol.ResponseStreamEvent` union, and
-``ResponseStreamProcessor`` is the one shared engine that turns that canonical
-stream into live :class:`~bothesis.agent.models.AgentEvent` deltas plus a
-final :class:`~bothesis.agent.step_context` sampling result — regardless of
-which provider produced it.
+:class:`~bothesis.agent.protocol.ProviderStreamEvent` union, and
+``StreamResponse`` is the one shared engine that turns that provider stream
+into internal deltas plus a final sampling result —
+regardless of which provider produced it.
 """
 
 from __future__ import annotations
@@ -23,16 +22,17 @@ from openai.types.responses import (
     ResponseReasoningItem,
 )
 
-from bothesis.agent import ModelStreamCompleted
-from bothesis.agent.models import ProviderReasoningSummaryDelta
+from bothesis.agent import ModelStreamCompleted, TextDelta
 from bothesis.agent.protocol import (
     FunctionCallItem,
     FunctionTool,
+    ExtensionItem,
     IncompleteDetails,
     InputTokensDetails,
     Item,
     MessageItem,
     OutputText,
+    ReasoningSummaryDelta,
     ReasoningItem,
     ReasoningSummaryText,
     Response,
@@ -44,40 +44,49 @@ from bothesis.agent.protocol import (
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseRequest,
     ResponseStatus,
-    ResponseStreamEvent,
+    ProviderStreamEvent,
     ResponseUsage,
     Tool,
 )
 from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
-from bothesis.agent.turn_input import ResponseItem, TurnInput, encode_reasoning_details
+from bothesis.agent.turn_input import ResponseItem, TurnInput
 
 
-class ResponseStreamProcessor:
+class StreamResponse:
     """Consume canonical stream events and assemble one sampling result."""
 
-    def __init__(self, *, turn_number: int, generation_trace: Any = None) -> None:
-        self._turn_number = turn_number
+    def __init__(
+        self,
+        *,
+        provider: Literal["openai", "openrouter"],
+        sampling_number: int,
+        generation_trace: Any = None,
+    ) -> None:
+        self._provider = provider
+        self._sampling_number = sampling_number
         self._trace = generation_trace
         self._marked_first_token = False
 
-    async def run(
-        self, events: AsyncIterator[ResponseStreamEvent]
-    ) -> AsyncIterator[ProviderReasoningSummaryDelta | ModelStreamCompleted]:
+    async def run_llm(
+        self, events: AsyncIterator[ProviderStreamEvent]
+    ) -> AsyncIterator[TextDelta | ReasoningSummaryDelta | ModelStreamCompleted]:
         items: list[Item] = []
-        text_deltas: list[str] = []
         final_response: Response | None = None
 
         async for event in events:
             if isinstance(event, ResponseOutputTextDeltaEvent):
                 self._mark_first_token()
                 if event.delta:
-                    text_deltas.append(event.delta)
+                    yield TextDelta(text=event.delta)
             elif isinstance(event, ResponseReasoningSummaryTextDeltaEvent):
                 if event.delta:
                     self._mark_first_token()
-                    yield ProviderReasoningSummaryDelta(
-                        turn=self._turn_number, text=event.delta
+                    yield ReasoningSummaryDelta(
+                        provider=self._provider,
+                        sampling_number=self._sampling_number,
+                        item_id=event.item_id,
+                        delta=event.delta,
                     )
             elif isinstance(event, ResponseOutputItemDoneEvent):
                 items.append(event.item)
@@ -92,13 +101,10 @@ class ResponseStreamProcessor:
             raise ValueError("provider response failed")
 
         response = final_response.model_copy(update={"output": tuple(items)})
-        if not text_deltas and response.output_text:
-            text_deltas.append(response.output_text)
 
         yield ModelStreamCompleted(
             response=response,
             duration_ms=0,  # corrected by the caller once the attempt finishes
-            text_deltas=tuple(text_deltas),
             items=tuple(items),
         )
 
@@ -119,7 +125,7 @@ def _turn_input(prompt: ResponseRequest) -> TurnInput:
 
 async def openai_canonical_events(
     transport: OpenAITransport, prompt: ResponseRequest
-) -> AsyncIterator[ResponseStreamEvent]:
+) -> AsyncIterator[ProviderStreamEvent]:
     """Adapt an OpenAI Responses stream into canonical events."""
 
     params: dict[str, Any] = dict(prompt.provider_options)
@@ -142,19 +148,15 @@ async def openai_canonical_events(
         **params,
     )
 
-    sequence = 0
     async for raw in stream:
-        sequence += 1
         if raw.type == "response.output_text.delta":
             yield ResponseOutputTextDeltaEvent(
-                sequence_number=sequence,
                 item_id=raw.item_id,
                 output_index=raw.output_index,
                 delta=raw.delta or "",
             )
         elif raw.type == "response.reasoning_summary_text.delta":
             yield ResponseReasoningSummaryTextDeltaEvent(
-                sequence_number=sequence,
                 item_id=raw.item_id,
                 output_index=raw.output_index,
                 summary_index=raw.summary_index,
@@ -164,7 +166,6 @@ async def openai_canonical_events(
             item = _openai_protocol_item(raw.item)
             if item is not None:
                 yield ResponseOutputItemDoneEvent(
-                    sequence_number=sequence,
                     output_index=raw.output_index,
                     item=item,
                 )
@@ -180,16 +181,16 @@ async def openai_canonical_events(
                 incomplete_details=_openai_incomplete_details(response),
             )
             if raw.type == "response.completed":
-                yield ResponseCompletedEvent(sequence_number=sequence, response=protocol_response)
+                yield ResponseCompletedEvent(response=protocol_response)
             elif raw.type == "response.incomplete":
-                yield ResponseIncompleteEvent(sequence_number=sequence, response=protocol_response)
+                yield ResponseIncompleteEvent(response=protocol_response)
             else:
-                yield ResponseFailedEvent(sequence_number=sequence, response=protocol_response)
+                yield ResponseFailedEvent(response=protocol_response)
 
 
 async def openrouter_canonical_events(
     transport: OpenRouterTransport, prompt: ResponseRequest
-) -> AsyncIterator[ResponseStreamEvent]:
+) -> AsyncIterator[ProviderStreamEvent]:
     """Adapt an OpenRouter chat-completions stream into canonical events."""
 
     params: dict[str, Any] = dict(prompt.provider_options)
@@ -204,12 +205,12 @@ async def openrouter_canonical_events(
 
     tool_call_deltas: dict[int, dict[str, str]] = {}
     reasoning_details: list[dict[str, Any]] = []
+    legacy_reasoning_parts: list[str] = []
     finish_reason: str | None = None
     model_name: str | None = prompt.model
     usage: ResponseUsage | None = None
     annotations: list[dict[str, Any]] = []
     text_parts: list[str] = []
-    sequence = 0
 
     async for chunk in transport.stream_chat(
         messages=cast(
@@ -240,9 +241,7 @@ async def openrouter_canonical_events(
         content = delta.get("content")
         if isinstance(content, str) and content:
             text_parts.append(content)
-            sequence += 1
             yield ResponseOutputTextDeltaEvent(
-                sequence_number=sequence,
                 item_id="message",
                 output_index=0,
                 delta=content,
@@ -257,13 +256,16 @@ async def openrouter_canonical_events(
                 if detail.get("type") == "reasoning.summary":
                     summary = detail.get("summary")
                     if isinstance(summary, str) and summary:
-                        sequence += 1
                         yield ResponseReasoningSummaryTextDeltaEvent(
-                            sequence_number=sequence,
                             item_id="reasoning",
                             output_index=0,
                             delta=summary,
                         )
+        raw_reasoning = delta.get("reasoning")
+        if isinstance(raw_reasoning, str) and raw_reasoning:
+            # Legacy/plaintext reasoning is provider-native reasoning, not a
+            # summary. Preserve it for replay but never expose it as one.
+            legacy_reasoning_parts.append(raw_reasoning)
 
         annotations.extend(_openrouter_file_annotations(delta.get("annotations")))
         raw_calls = delta.get("tool_calls")
@@ -280,10 +282,20 @@ async def openrouter_canonical_events(
     ]
     function_calls = _openrouter_function_calls(raw_tool_calls)
 
-    if reasoning_details:
-        sequence += 1
+    if reasoning_details or legacy_reasoning_parts:
+        native_reasoning: dict[str, Any] = {
+            "type": "openrouter.reasoning_details",
+        }
+        if reasoning_details:
+            native_reasoning["details"] = reasoning_details
+        if legacy_reasoning_parts:
+            native_reasoning["reasoning"] = "".join(legacy_reasoning_parts)
         yield ResponseOutputItemDoneEvent(
-            sequence_number=sequence,
+            output_index=0,
+            item=ExtensionItem(**native_reasoning),
+        )
+    if reasoning_details:
+        yield ResponseOutputItemDoneEvent(
             output_index=0,
             item=ReasoningItem(
                 summary=tuple(
@@ -292,15 +304,12 @@ async def openrouter_canonical_events(
                     if detail.get("type") == "reasoning.summary"
                     and isinstance(detail.get("summary"), str)
                 ),
-                encrypted_content=encode_reasoning_details(reasoning_details),
             ),
         )
 
     text = "".join(text_parts)
     if text or annotations:
-        sequence += 1
         yield ResponseOutputItemDoneEvent(
-            sequence_number=sequence,
             output_index=0,
             item=MessageItem(
                 role="assistant",
@@ -308,8 +317,7 @@ async def openrouter_canonical_events(
             ),
         )
     for call in function_calls:
-        sequence += 1
-        yield ResponseOutputItemDoneEvent(sequence_number=sequence, output_index=0, item=call)
+        yield ResponseOutputItemDoneEvent(output_index=0, item=call)
 
     status, incomplete_details = _status_from_finish_reason(finish_reason)
     response = Response(
@@ -319,11 +327,10 @@ async def openrouter_canonical_events(
         usage=usage,
         incomplete_details=incomplete_details,
     )
-    sequence += 1
     if status == "completed":
-        yield ResponseCompletedEvent(sequence_number=sequence, response=response)
+        yield ResponseCompletedEvent(response=response)
     else:
-        yield ResponseIncompleteEvent(sequence_number=sequence, response=response)
+        yield ResponseIncompleteEvent(response=response)
 
 
 def _openai_protocol_item(item: Any) -> Item | None:
@@ -549,7 +556,7 @@ def _token_count(value: object) -> int:
 
 
 __all__ = [
-    "ResponseStreamProcessor",
+    "StreamResponse",
     "openai_canonical_events",
     "openrouter_canonical_events",
 ]

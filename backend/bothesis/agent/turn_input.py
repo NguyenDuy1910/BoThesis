@@ -3,7 +3,7 @@
 A turn is fed by two distinct kinds of entry, exactly as in Codex's own
 ``TurnInput``: fresh, not-yet-canonical content a user submitted
 (:class:`UserInput`) and an already-canonical protocol item being replayed
-or injected directly (:class:`ResponseItem` — model commentary, tool calls,
+or injected directly (:class:`ResponseItem` — model messages, tool calls,
 tool results). ``TurnInput`` stores ``instructions`` (the base system prompt,
 equivalent to a Prompt's ``base_instructions``) plus the ordered sequence of
 entries, and renders both into each provider's own wire shape on demand.
@@ -16,13 +16,13 @@ provider's raw stream into canonical items — lives in
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeAlias
 
 from bothesis.agent.protocol import (
     ContentPart,
+    ExtensionItem,
     FunctionCallItem,
     FunctionCallOutputItem,
     InputFile,
@@ -99,8 +99,12 @@ class TurnInput:
                 pending.clear()
 
         for item in self.items:
-            if isinstance(item, _ASSISTANT_GROUP_TYPES) or (
-                isinstance(item, MessageItem) and item.role == "assistant"
+            if (
+                isinstance(item, _ASSISTANT_GROUP_TYPES)
+                or _is_openrouter_reasoning_item(item)
+                or (
+                    isinstance(item, MessageItem) and item.role == "assistant"
+                )
             ):
                 pending.append(item)
                 continue
@@ -216,9 +220,18 @@ def _openrouter_assistant_message(group: Sequence[Item]) -> dict[str, Any]:
     annotations: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []
     reasoning_details: list[dict[str, Any]] | None = None
+    reasoning: str | None = None
     for item in group:
-        if isinstance(item, ReasoningItem):
-            reasoning_details = _decode_reasoning_details(item.encrypted_content)
+        if _is_openrouter_reasoning_item(item):
+            native = item.model_dump()
+            details = native.get("details")
+            if isinstance(details, list):
+                reasoning_details = [
+                    dict(detail) for detail in details if isinstance(detail, dict)
+                ]
+            raw_reasoning = native.get("reasoning")
+            if isinstance(raw_reasoning, str) and raw_reasoning:
+                reasoning = raw_reasoning
         elif isinstance(item, MessageItem):
             text = item.text
             for part in item.content:
@@ -237,27 +250,15 @@ def _openrouter_assistant_message(group: Sequence[Item]) -> dict[str, Any]:
         message["tool_calls"] = tool_calls
     if reasoning_details:
         message["reasoning_details"] = reasoning_details
+    if reasoning:
+        message["reasoning"] = reasoning
     if annotations:
         message["annotations"] = annotations
     return message
 
 
-def encode_reasoning_details(reasoning_details: Sequence[dict[str, Any]]) -> str:
-    """Pack OpenRouter's opaque reasoning continuation blob for canonical storage."""
-
-    return json.dumps(list(reasoning_details), ensure_ascii=False)
-
-
-def _decode_reasoning_details(encrypted_content: str | None) -> list[dict[str, Any]] | None:
-    if not encrypted_content:
-        return None
-    try:
-        decoded = json.loads(encrypted_content)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(decoded, list):
-        return None
-    return [dict(entry) for entry in decoded if isinstance(entry, dict)]
+def _is_openrouter_reasoning_item(item: Item) -> bool:
+    return isinstance(item, ExtensionItem) and item.type == "openrouter.reasoning_details"
 
 
 __all__ = [
@@ -265,5 +266,4 @@ __all__ = [
     "TurnInput",
     "TurnInputEntry",
     "UserInput",
-    "encode_reasoning_details",
 ]

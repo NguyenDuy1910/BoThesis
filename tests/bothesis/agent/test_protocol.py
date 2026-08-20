@@ -31,18 +31,13 @@ from bothesis.agent.protocol import (
     Refusal,
     Response,
     ResponseCompletedEvent,
-    ResponseCreatedEvent,
     ResponseError,
     ResponseFailedEvent,
-    ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent,
-    ResponseInProgressEvent,
-    ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseOutputTextDeltaEvent,
-    ResponseOutputTextDoneEvent,
     ResponseRequest,
-    ResponseStreamEventAdapter,
+    ReasoningSummaryDelta,
+    ProviderStreamEventAdapter,
     ResponseUsage,
     ToolAdapter,
     ToolReference,
@@ -277,6 +272,18 @@ def test_extension_item_preserves_provider_type_and_fields() -> None:
     ]
 
 
+def test_reasoning_summary_delta_is_typed_and_provider_attributed() -> None:
+    event = ReasoningSummaryDelta(
+        provider="openrouter",
+        sampling_number=2,
+        item_id="reasoning-summary-1",
+        delta="Compared the constraints.",
+    )
+
+    assert event.provider == "openrouter"
+    assert event.delta == "Compared the constraints."
+
+
 def test_extension_items_survive_a_response_round_trip() -> None:
     response = Response(
         status="completed",
@@ -300,87 +307,49 @@ def test_extension_types_cannot_shadow_core_items_or_function_tools() -> None:
 
 
 def test_stream_event_union_resolves_every_event_type() -> None:
-    snapshot = Response(status="in_progress")
     events = [
-        ResponseCreatedEvent(sequence_number=0, response=snapshot),
-        ResponseInProgressEvent(sequence_number=1, response=snapshot),
-        ResponseOutputItemAddedEvent(
-            sequence_number=2,
-            output_index=0,
-            item=FunctionCallItem(call_id="c1", name="search"),
-        ),
-        ResponseFunctionCallArgumentsDeltaEvent(
-            sequence_number=3, item_id="fc-1", output_index=0, delta='{"query"'
-        ),
-        ResponseFunctionCallArgumentsDoneEvent(
-            sequence_number=4,
-            item_id="fc-1",
-            output_index=0,
-            arguments='{"query":"leave"}',
-        ),
         ResponseOutputItemDoneEvent(
-            sequence_number=5,
             output_index=0,
             item=FunctionCallItem(
                 call_id="c1", name="search", arguments='{"query":"leave"}'
             ),
         ),
         ResponseOutputTextDeltaEvent(
-            sequence_number=6, item_id="msg-1", output_index=1, delta="20 days"
+            item_id="msg-1", output_index=1, delta="20 days"
         ),
-        ResponseOutputTextDoneEvent(
-            sequence_number=7, item_id="msg-1", output_index=1, text="20 days"
-        ),
-        ResponseCompletedEvent(
-            sequence_number=8, response=Response(status="completed")
-        ),
+        ResponseCompletedEvent(response=Response(status="completed")),
     ]
 
     for event in events:
-        restored = ResponseStreamEventAdapter.validate_json(event.model_dump_json())
+        restored = ProviderStreamEventAdapter.validate_json(event.model_dump_json())
         assert restored == event
         assert type(restored) is type(event)
 
     assert [event.type for event in events] == [
-        "response.created",
-        "response.in_progress",
-        "response.output_item.added",
-        "response.function_call_arguments.delta",
-        "response.function_call_arguments.done",
         "response.output_item.done",
         "response.output_text.delta",
-        "response.output_text.done",
         "response.completed",
     ]
 
 
 def test_failed_event_carries_the_response_error() -> None:
     event = ResponseFailedEvent(
-        sequence_number=1,
         response=Response(
             status="failed",
             error=ResponseError(code="rate_limit", message="slow down"),
         ),
     )
-    restored = ResponseStreamEventAdapter.validate_json(event.model_dump_json())
+    restored = ProviderStreamEventAdapter.validate_json(event.model_dump_json())
     assert restored.response.error == ResponseError(
         code="rate_limit", message="slow down"
     )
 
 
 def test_output_item_events_carry_extension_items() -> None:
-    event = ResponseOutputItemAddedEvent(
-        sequence_number=1,
+    event = ResponseOutputItemDoneEvent(
         output_index=0,
         item=ExtensionItem(type="vendor.custom", note="keep"),
     )
-    restored = ResponseStreamEventAdapter.validate_json(event.model_dump_json())
+    restored = ProviderStreamEventAdapter.validate_json(event.model_dump_json())
     assert isinstance(restored.item, ExtensionItem)
     assert restored.item.model_dump()["note"] == "keep"
-
-
-def test_stream_events_require_a_non_negative_sequence_number() -> None:
-    with pytest.raises(ValidationError):
-        ResponseOutputTextDeltaEvent(
-            sequence_number=-1, item_id="msg-1", output_index=0, delta="x"
-        )

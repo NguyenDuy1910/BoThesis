@@ -8,12 +8,9 @@ from contextlib import nullcontext
 
 from bothesis.agent import AgentConfig, AgentExecutionError
 from bothesis.agent.conversation_compression import ConversationMemory
-from bothesis.agent.conversation_loop import ConversationLoop
-from bothesis.agent.models import (
-    AgentContext,
-    AgentEvent,
-    RunFailed,
-)
+from bothesis.agent.conversation_session import ConversationSession
+from bothesis.agent.models import AgentContext
+from bothesis.agent.protocol import Error, RuntimeStreamEvent
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
@@ -39,7 +36,7 @@ class Agent:
         self.config = config or AgentConfig()
         self.memory = memory or ConversationMemory(config=self.config)
         self._tracing = tracing
-        self._conversation_loop = ConversationLoop(
+        self._conversation_session = ConversationSession(
             model,
             tools,
             memory=self.memory,
@@ -51,18 +48,18 @@ class Agent:
         self,
         user_message: str,
         ctx: AgentContext,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncIterator[RuntimeStreamEvent]:
         """Yield application events for one conversation run."""
 
         normalized_message = user_message.strip()
         if not normalized_message:
-            yield RunFailed(error="message must not be empty")
+            yield Error(message="message must not be empty")
             return
         if len(normalized_message) > self.config.max_user_message_characters:
-            yield RunFailed(error="message exceeds the allowed length")
+            yield Error(message="message exceeds the allowed length")
             return
         if not ctx.tenant_id or not ctx.user_id:
-            yield RunFailed(error="tenant and user context are required")
+            yield Error(message="tenant and user context are required")
             return
 
         trace_context = (
@@ -72,7 +69,7 @@ class Agent:
         )
         with trace_context as run_trace:
             try:
-                async for event in self._conversation_loop.stream(
+                async for event in self._conversation_session.run_session(
                     normalized_message,
                     ctx,
                     run_trace=run_trace,
@@ -86,7 +83,7 @@ class Agent:
                 )
                 if run_trace is not None:
                     run_trace.fail(stage="model")
-                yield RunFailed(error="model response failed")
+                yield Error(message="model response failed")
 
 
 __all__ = ["Agent"]

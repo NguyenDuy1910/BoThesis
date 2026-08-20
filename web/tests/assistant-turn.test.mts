@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { assistantTurnItems } from "../src/modules/chat/assistant-turn.ts";
 import { upsertStatusPart } from "../src/modules/chat/stream-parts.ts";
-import type { ChatMessagePart } from "../src/modules/chat/types.ts";
+import type { AgentItemStore, ChatMessagePart } from "../src/modules/chat/types.ts";
 
 test("renders a direct final response without synthetic progress concepts", () => {
   const items = assistantTurnItems([
@@ -19,7 +19,7 @@ test("renders a direct final response without synthetic progress concepts", () =
       },
     },
     { type: "text", text: "The answer.", state: "streaming" },
-  ]);
+  ], true);
 
   assert.deepEqual(items, [{
     kind: "response",
@@ -29,46 +29,30 @@ test("renders a direct final response without synthetic progress concepts", () =
   }]);
 });
 
-test("preserves arbitrary interim, parallel tool, and final ordering", () => {
-  const parts: ChatMessagePart[] = [
-    {
-      type: "data-reasoning",
-      id: "interim-0",
-      data: {
-        source: "model",
-        turn: 0,
-        text: "I’ll check Core TM first.",
-        state: "done",
+test("renders interleaved commentary, tool activity, and the final answer from item state", () => {
+  const runtime: AgentItemStore = {
+    turnStatus: "in_progress",
+    activeItemIds: [],
+    historyItemIds: ["commentary-1", "tool-1", "response-1"],
+    items: {
+      "commentary-1": {
+        type: "message", id: "commentary-1", role: "assistant", phase: "commentary",
+        status: "completed", content: [{ type: "output_text", text: "Checking the policy." }],
+      },
+      "tool-1": {
+        type: "tool_call", id: "tool-1", call_id: "call-1", name: "knowledge_search",
+        label: "Search knowledge base", category: "retrieval", status: "completed",
+      },
+      "response-1": {
+        type: "message", id: "response-1", role: "assistant", phase: "final_answer",
+        status: "in_progress", content: [{ type: "output_text", text: "Grounded answer." }],
       },
     },
-    toolPart("core", "Search Knowledge", "completed"),
-    toolPart("product", "Search product configuration", "completed"),
-    {
-      type: "data-reasoning",
-      id: "interim-1",
-      data: {
-        source: "model",
-        turn: 1,
-        text: "The result is incomplete, so I’ll narrow the search.",
-        state: "done",
-      },
-    },
-    toolPart("lending", "Search lending configuration", "completed"),
-    { type: "text", text: "Grounded final answer.", state: "done" },
-  ];
+  };
 
   assert.deepEqual(
-    assistantTurnItems(parts).map((item) => (
-      item.kind === "interim" ? item.text : item.kind === "tool" ? item.label : item.text
-    )),
-    [
-      "I’ll check Core TM first.",
-      "Search Knowledge",
-      "Search product configuration",
-      "The result is incomplete, so I’ll narrow the search.",
-      "Search lending configuration",
-      "Grounded final answer.",
-    ],
+    assistantTurnItems([], true, runtime).map((item) => item.kind),
+    ["message", "tool", "response"],
   );
 });
 
@@ -77,7 +61,7 @@ test("tool completion updates the existing ordered row", () => {
   const completed = toolPart("search-1", "Observe · Search Knowledge", "completed");
   const withStart = upsertStatusPart([], started);
   const withCompletion = upsertStatusPart(withStart, completed);
-  const items = assistantTurnItems(withCompletion);
+  const items = assistantTurnItems(withCompletion, true);
 
   assert.equal(withCompletion.length, 1);
   assert.deepEqual(items, [{
@@ -87,6 +71,7 @@ test("tool completion updates the existing ordered row", () => {
     category: "retrieval",
     state: "completed",
     detail: undefined,
+    count: 1,
   }]);
 });
 

@@ -73,15 +73,15 @@ def _render_value(variable: str, value: object) -> str:
     )
 
 
-def render_base_instruction() -> str:
+def render_agent_base() -> str:
     """Return the primary conversational-agent instruction."""
 
-    return render_prompt("base_instruction")
+    return render_prompt("agent_base")
 
 
 __all__ = [
     "PromptRenderError",
     "load_prompt",
-    "render_base_instruction",
+    "render_agent_base",
     "render_prompt",
 ]

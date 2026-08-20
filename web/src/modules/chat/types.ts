@@ -1,5 +1,3 @@
-import type { AgentActivityType } from "./activity";
-
 export interface ChatConversation {
   id: string;
   sessionId: string;
@@ -47,7 +45,7 @@ export type ChatDataParts = {
     toolCallId?: string;
     durationMs?: number;
     resultCount?: number;
-    activityType?: AgentActivityType;
+    activityType?: "document_preparation" | "tool_execution" | "knowledge_retrieval" | "final_response_generation";
     stepId?: string;
     turn?: number;
     selectedTools?: string[];
@@ -67,28 +65,29 @@ export type ChatDataParts = {
     status?: "Used" | "Found" | "Reviewed" | "Restricted";
     restricted?: boolean;
   };
-  reasoning: {
-    source: "model" | "provider";
-    turn: number;
-    text: string;
-    state: "streaming" | "done";
-  };
   "stream-error": { message: string; retryable?: boolean };
 };
 
 export type ChatMessagePart =
-  | { type: "text"; text: string; state: "streaming" | "done" }
+  | {
+      type: "text";
+      id?: string;
+      text: string;
+      state: "streaming" | "done";
+      /** Assistant commentary is conversational text, but not the final answer. */
+      phase?: "commentary" | "final_answer";
+    }
   | { type: "data-document"; id?: string; data: ConversationDocument }
   | { type: "data-run"; id?: string; data: ChatDataParts["run"] }
   | { type: "data-status"; id?: string; data: ChatDataParts["status"] }
   | { type: "data-source"; id?: string; data: ChatDataParts["source"] }
-  | { type: "data-reasoning"; id?: string; data: ChatDataParts["reasoning"] }
   | { type: "data-stream-error"; id?: string; data: ChatDataParts["stream-error"] };
 
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   parts: ChatMessagePart[];
+  runtime?: AgentItemStore;
 }
 
 export interface AgentEvidence {
@@ -110,50 +109,55 @@ export interface AgentHistoryMessage {
 
 type StreamEventMetadata = { sequence?: number; event_id?: string };
 
-export type AgentStreamEvent = StreamEventMetadata & (
-  | { type: "final_answer_delta"; text: string }
-  | { type: "commentary_delta"; text: string; turn: number }
-  | { type: "provider_reasoning_summary_delta"; turn: number; text: string }
+export type AgentItem =
   | {
-      type: "document_progress";
-      document_id: string;
-      file_name: string;
-      status: "preparing" | "ready" | "indexing" | "skipped" | "failed";
-      mode: "direct" | "indexed";
-      message: string;
+      type: "message";
+      id?: string;
+      role: "assistant" | "user" | "system" | "developer";
+      phase?: "commentary" | "final_answer";
+      status?: "in_progress" | "completed" | "incomplete" | "failed" | "skipped";
+      content: Array<{ type: "output_text" | "input_text"; text: string }>;
     }
   | {
-      type: "tool_started";
-      activity_id?: string;
+      type: "tool_call";
+      id?: string;
+      call_id: string;
+      name: string;
       label?: string;
-      category?: "retrieval" | "tool";
-      attempt?: number;
-      call_id?: string;
-      name?: string;
-      arguments?: Record<string, unknown>;
+      category: "retrieval" | "tool";
+      status: "in_progress" | "completed" | "incomplete" | "failed" | "skipped";
     }
   | {
-      type: "tool_completed";
-      activity_id?: string;
-      label?: string;
-      category?: "retrieval" | "tool";
-      status?: "completed" | "failed" | "timeout" | "skipped";
-      attempt?: number;
-      message?: string | null;
-      call_id?: string;
-      name?: string;
+      type: "tool_result";
+      id?: string;
+      call_id: string;
+      name: string;
+      status: "in_progress" | "completed" | "failed" | "timeout" | "skipped";
       error?: string | null;
       duration_ms?: number | null;
       result_count?: number | null;
     }
-  | { type: "citation_available"; evidence: AgentEvidence }
-  | { type: "citation"; evidence_id: string; title: string; page?: string | null; uri?: string | null }
+  | ({ type: "evidence"; id?: string; status: "found" | "used" } & AgentEvidence)
+  | { type: "reasoning"; id?: string; status?: string; summary?: Array<{ text: string }> };
+
+export interface AgentItemStore {
+  items: Record<string, AgentItem>;
+  historyItemIds: string[];
+  activeItemIds: string[];
+  turnStatus: "idle" | "in_progress" | "completed" | "failed" | "cancelled";
+}
+
+export type AgentStreamEvent = StreamEventMetadata & (
+  | { type: "turn.started" }
+  | { type: "item.started"; item: AgentItem }
+  | { type: "item.delta"; item_id: string; delta: string }
+  | { type: "item.completed"; item: AgentItem }
   | {
-      type: "run_completed";
+      type: "turn.completed";
       duration_ms?: number | null;
       model_duration_ms?: number | null;
       tool_duration_ms?: number | null;
       tool_call_count?: number | null;
     }
-  | { type: "run_failed"; error: string }
+  | { type: "error"; message: string }
 );

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -37,31 +38,30 @@ class ToolRegistry:
         """Adapt core definitions to the provider-neutral wire contract."""
 
         return tuple(
-            FunctionTool(
-                name=definition.name,
-                description=definition.description,
-                parameters=definition.input_schema,
-                strict=True,
-            )
-            for definition in self.definitions()
+            tool.as_function_tool() for tool in self._tools.values()
         )
 
     def arguments_are_valid(self, name: str, arguments: Mapping[str, Any]) -> bool:
         tool = self.get(name)
         return tool is not None and _matches_schema(arguments, tool.definition.input_schema)
 
-    def public_category(self, name: str) -> str:
-        """Compatibility metadata owned by the registry, never by a Tool."""
+    def is_tool_arguments_payload(self, text: str) -> bool:
+        """Whether a model text response is a schema-valid tool payload.
 
-        return "retrieval" if name == "knowledge_search" else "tool"
+        A provider can occasionally serialize a function-call payload as plain
+        message text. Such text is an internal command, never a user answer.
+        """
 
-    def public_label(self, name: str) -> str:
-        """Stable activity label used by the application-event projector."""
-
-        if name == "knowledge_search":
-            return "Search knowledge base"
-        return name.replace("_", " ").replace("-", " ").strip().title() or "Run tool"
-
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(payload, Mapping):
+            return False
+        return any(
+            _matches_schema(payload, tool.definition.input_schema)
+            for tool in self._tools.values()
+        )
 
 def _matches_schema(value: object, schema: Mapping[str, Any]) -> bool:
     expected_type = schema.get("type")

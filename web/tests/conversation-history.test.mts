@@ -25,9 +25,11 @@ test("history keeps complete recent turns and excludes activity text", () => {
       role: "assistant",
       parts: [
         {
-          type: "data-reasoning",
-          id: "reasoning",
-          data: { source: "model", turn: 0, text: "Searching internally", state: "done" },
+          type: "text",
+          id: "commentary",
+          text: "Searching internally",
+          state: "done",
+          phase: "commentary",
         },
         { type: "text", text: "The documented fee is 1%.", state: "done" },
       ],

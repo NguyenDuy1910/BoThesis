@@ -127,7 +127,9 @@ function normalizeCachedMessages(messages: CachedChatMessage[]) {
 
 export function getMessageText(message: ChatMessage): string {
   return message.parts
-    .filter((part): part is Extract<ChatMessagePart, { type: "text" }> => part.type === "text")
+    .filter((part): part is Extract<ChatMessagePart, { type: "text" }> => (
+      part.type === "text" && part.phase !== "commentary"
+    ))
     .map((part) => part.text)
     .join("");
 }

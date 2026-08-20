@@ -163,7 +163,13 @@ class GenerationTrace:
         )
         self._first_token_recorded = True
 
-    def complete(self, *, response: Response, duration_ms: int) -> None:
+    def complete(
+        self,
+        *,
+        response: Response,
+        duration_ms: int,
+        reasoning_summary: str | None = None,
+    ) -> None:
         function_calls = response.function_calls
         if function_calls:
             observation_name = "decide-next-step"
@@ -196,6 +202,7 @@ class GenerationTrace:
                 "tool_call_count": len(function_calls),
                 "selected_tools": [call.name for call in function_calls],
                 "llm_latency_ms": duration_ms,
+                **({"reasoning_summary": reasoning_summary} if reasoning_summary else {}),
                 **_token_metadata(response.usage),
             },
         )

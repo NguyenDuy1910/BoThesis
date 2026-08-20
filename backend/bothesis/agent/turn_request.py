@@ -5,48 +5,44 @@ one LLM call — it loops through as many Sampling Requests
 (:func:`~bothesis.agent.sampling_request.run_sampling_request`, which owns the
 provider retry loop and the canonical response-stream processing) as it takes
 to alternate model decisions and tool observations into a final answer.
-:class:`~bothesis.agent.conversation_loop.ConversationLoop` constructs one
+:class:`~bothesis.agent.conversation_session.ConversationSession` constructs one
 fresh ``TurnRequest`` per user message and delegates entirely to it.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import nullcontext
 from dataclasses import replace
 from time import perf_counter
-from typing import Any
-
 from bothesis.agent import (
     AgentConfig,
     AgentExecutionError,
     ModelStreamCompleted,
+    TextDelta,
     duration_ms,
-    evidence_reference,
 )
-from bothesis.agent.citation import CitationRenderer
 from bothesis.agent.conversation_compression import ConversationMemory
+from bothesis.agent.message_emitter import MessageEmitter
 from bothesis.agent.models import (
     AgentContext,
-    AgentEvent,
-    CitationAvailable,
-    CommentaryDelta,
     ConversationDocument,
     ConversationRun,
-    FinalAnswerDelta,
-    RunCompleted,
-    ToolCompleted,
     ToolContext,
-    ToolObservation,
-    ToolOutput,
-    ToolStarted,
 )
-from bothesis.agent.protocol import FunctionCallItem
+from bothesis.agent.protocol import (
+    EvidenceItem,
+    ItemCompleted,
+    ItemStarted,
+    ReasoningSummaryDelta,
+    RuntimeStreamEvent,
+    SamplingRequestOutput,
+    TurnCompleted,
+    TurnStarted,
+)
 from bothesis.agent.sampling_request import run_sampling_request
 from bothesis.agent.step_context import Provider, StepContext, capture_step_context
-from bothesis.agent.tools import ToolRegistry
+from bothesis.agent.tools import ToolExecutionBatch, ToolExecutor, ToolRegistry
 from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.agent.turn_input import ResponseItem
@@ -72,179 +68,200 @@ class TurnRequest:
         self._memory = memory
         self._config = config
         self._tracing = tracing
-        self._citations = CitationRenderer()
+        self._messages = MessageEmitter()
+        self._tool_executor = ToolExecutor(
+            tools,
+            timeout_seconds=config.tool_timeout_seconds,
+            max_output_characters=config.max_tool_context_characters,
+            tracing=tracing,
+        )
 
-    async def run(
+    async def run_turn(
         self,
         user_message: str,
         ctx: AgentContext,
         *,
         run_trace: AgentRunTrace | None,
-    ) -> AsyncIterator[AgentEvent]:
-        """Run Think → Act → Observe dynamically using native tool calls."""
+    ) -> AsyncIterator[RuntimeStreamEvent]:
+        """Execute one user Turn through repeated model samplings."""
 
         started_at = perf_counter()
         state = ConversationRun(user_message=user_message)
-        for event in self._register_document_evidence(ctx.documents, state):
-            yield event
+
+        yield TurnStarted()
+        for item in self._register_document_evidence(ctx.documents, state):
+            yield ItemStarted(item=item)
+            yield ItemCompleted(item=item)
 
         turn_input = await self._memory.prepare(user_message, ctx)
 
-        for turn_number in range(self._config.max_model_turns):
+        while True:
+            # Safety guard only — this does not drive the semantic loop.
+            if state.model_iteration >= self._config.max_model_turns:
+                raise AgentExecutionError(
+                    "sampling request limit reached without a final response"
+                )
+
             state.model_iteration += 1
+            sampling_number = state.model_iteration
+
             allow_tools = (
-                turn_number < self._config.max_model_turns - 1
-                and state.tool_round < self._config.max_tool_rounds
+                state.tool_round < self._config.max_tool_rounds
                 and state.tool_call_count < self._config.max_tool_calls
             )
-            step = capture_step_context(
+
+            # One fresh immutable snapshot per Sampling Request.
+            step_input = capture_step_context(
                 agent_context=ctx,
                 provider=self._provider,
                 transport=self._model,
                 history=turn_input,
                 tools=self._tools.function_tools() if allow_tools else (),
                 config=self._config,
-                turn_number=turn_number,
+                turn_number=sampling_number,
             )
 
             completed: ModelStreamCompleted | None = None
-            async for event in self._sample(step, tool_round=state.tool_round):
+            message_started = False
+            streamed_character_count = 0
+
+            async for event in self._sample(
+                step_input,
+                tool_round=state.tool_round,
+            ):
                 if isinstance(event, ModelStreamCompleted):
                     completed = event
-                else:
-                    yield event
+                elif isinstance(event, TextDelta):
+                    if not message_started:
+                        yield self._messages.start(
+                            item_id=f"turn-message-{sampling_number}"
+                        )
+                        message_started = True
+                    for message_event in self._messages.delta(
+                        event.text,
+                        evidence=state.evidence,
+                        render_citations=bool(state.evidence),
+                    ):
+                        streamed_character_count += len(message_event.delta)
+                        yield message_event
+
             if completed is None:
                 raise AgentExecutionError("model stream did not complete")
+
             state.model_duration_ms += completed.duration_ms
 
             response = completed.response
-            function_calls = response.function_calls
-            answer_text = response.output_text
+            output = SamplingRequestOutput.from_response(response)
 
-            if function_calls:
+            # Model requested actions → Turn continues.
+
+            if output.needs_follow_up:
                 if not allow_tools:
                     raise AgentExecutionError(
                         "model requested a tool after the safety limit"
                     )
-                # Text before tool calls is model commentary — visible to the user
-                # but must NOT be emitted as part of the final answer.
-                if answer_text.strip():
-                    yield CommentaryDelta(text=answer_text.strip(), turn=turn_number)
 
+                function_calls = response.function_calls
+
+                if message_started:
+                    for message_event in self._messages.complete(phase="commentary"):
+                        if message_event.type == "item.delta":
+                            streamed_character_count += len(message_event.delta)
+                        yield message_event
+
+                # Persist semantic model output before executing its requested tools.
                 turn_input = turn_input.extend(
-                    ResponseItem(item=item) for item in completed.items
+                    ResponseItem(item=item)
+                    for item in completed.items
                 )
+
                 state.tool_round += 1
+
                 execution_ctx = replace(
                     ctx,
                     retrieval_round=state.tool_round,
                     retrieval_query_count=len(function_calls),
                 )
-                for call in function_calls:
-                    try:
-                        arguments = call.parsed_arguments()
-                    except ValueError:
-                        arguments = {}
-                    yield ToolStarted(
-                        call_id=call.call_id,
-                        name=call.name,
-                        arguments=arguments,
-                        activity_id=(
-                            f"iteration-{state.model_iteration}-call-{call.call_id}"
-                        ),
-                        label=self._tools.public_label(call.name),
-                        category=self._tools.public_category(call.name),
-                    )
-                observations = await self._execute_tools(
+
+                tool_batch: ToolExecutionBatch | None = None
+                async for tool_event in self._tool_executor.execute(
                     function_calls,
                     context=ToolContext(agent_context=execution_ctx),
-                    remaining_calls=self._config.max_tool_calls - state.tool_call_count,
+                    remaining_calls=(
+                        self._config.max_tool_calls
+                        - state.tool_call_count
+                    ),
                     previous_signatures=state.executed_tool_signatures,
-                )
-                state.tool_call_count += sum(
-                    1
-                    for observation in observations
-                    if observation.output.metadata.get("outcome")
-                    not in {"invalid_arguments", "unknown_tool", "duplicate_call", "tool_call_limit"}
-                )
-                state.tool_duration_ms += sum(
-                    observation.duration_ms for observation in observations
-                )
-                for observation in observations:
-                    for evidence in observation.output.evidence:
-                        existing = state.evidence.get(evidence.id)
-                        if existing is None:
-                            state.evidence[evidence.id] = evidence
-                            yield CitationAvailable(
-                                evidence=evidence_reference(evidence)
-                            )
-                        elif evidence.relevance_score is not None and (
-                            existing.relevance_score is None
-                            or evidence.relevance_score > existing.relevance_score
-                        ):
-                            state.evidence[evidence.id] = evidence
-                    yield ToolCompleted(
-                        call_id=observation.call.call_id,
-                        name=observation.call.name,
-                        activity_id=(
-                            f"iteration-{state.model_iteration}-call-"
-                            f"{observation.call.call_id}"
-                        ),
-                        error=observation.output.error,
-                        duration_ms=observation.duration_ms,
-                        result_count=observation.result_count,
-                        label=self._tools.public_label(observation.call.name),
-                        category=self._tools.public_category(observation.call.name),
-                        status=observation.status,
-                    )
+                    sampling_number=sampling_number,
+                    evidence=state.evidence,
+                ):
+                    if isinstance(tool_event, ToolExecutionBatch):
+                        tool_batch = tool_event
+                    else:
+                        yield tool_event
+                if tool_batch is None:
+                    raise AgentExecutionError("tool execution did not complete")
+                state.tool_call_count += tool_batch.executed_call_count
+                state.tool_duration_ms += tool_batch.duration_ms
+
+                # Tool observations become input for the NEXT sampling.
                 turn_input = turn_input.extend(
-                    ResponseItem(
-                        item=observation.provider_output(self._config.max_tool_context_characters)
-                    )
-                    for observation in observations
+                    ResponseItem(item=item) for item in tool_batch.output_items
                 )
+
                 continue
 
-            if not answer_text.strip():
-                raise AgentExecutionError("model returned an empty response")
+            # No tool call → model should have completed the Turn.
 
-            # Emit final answer text through the citation buffer.
-            async for event in self._final_response_events(completed, state):
-                yield event
+            if (
+                output.last_agent_message is None
+                or self._tools.is_tool_arguments_payload(output.last_agent_message)
+            ):
+                raise AgentExecutionError(
+                    "model returned neither a final answer nor a valid tool call"
+                )
 
+            if not message_started:
+                raise AgentExecutionError("model returned text without streaming deltas")
+            for message_event in self._messages.complete(phase="final_answer"):
+                if message_event.type == "item.delta":
+                    streamed_character_count += len(message_event.delta)
+                yield message_event
+            state.answer_character_count += streamed_character_count
+            state.used_evidence_ids.update(self._messages.used_evidence_ids)
+            for evidence_id in state.used_evidence_ids:
+                yield ItemCompleted(
+                    item=_evidence_item(state.evidence[evidence_id], status="used")
+                )
             if run_trace is not None:
                 run_trace.complete(
-                    answer=answer_text,
+                    answer=output.last_agent_message,
                     answer_characters=state.answer_character_count,
                     turn_count=state.model_iteration,
                     tool_call_count=state.tool_call_count,
                     sources_found=len(state.evidence),
                     sources_used=len(state.used_evidence_ids),
                 )
-            annotations = response.output_annotations
-            yield RunCompleted(
+            yield TurnCompleted(
                 duration_ms=duration_ms(started_at),
                 model_duration_ms=state.model_duration_ms,
                 tool_duration_ms=state.tool_duration_ms,
                 tool_call_count=state.tool_call_count,
-                provider_annotations=list(annotations) or None,
             )
             return
-
-        raise AgentExecutionError("model turn limit reached without a final response")
 
     async def _sample(
         self,
         step: StepContext,
         *,
         tool_round: int,
-    ) -> AsyncIterator[AgentEvent | ModelStreamCompleted]:
-        """Run one Sampling Request and report its timing to tracing."""
+    ) -> AsyncIterator[TextDelta | ModelStreamCompleted]:
+        """Run one Sampling Request, forwarding text while retaining control metadata."""
 
         started_at = perf_counter()
         rendered_history = (
             step.history.to_openai_input()
-            if step.provider == "openai"
+            if step.model_info.provider == "openai"
             else step.history.to_openrouter_messages()
         )
         trace_context = (
@@ -259,12 +276,15 @@ class TurnRequest:
         )
         with trace_context as generation_trace:
             completed: ModelStreamCompleted | None = None
+            reasoning_summary_parts: list[str] = []
             try:
                 async for event in run_sampling_request(
-                    step, generation_trace=generation_trace
+                    step, self._model, generation_trace=generation_trace
                 ):
                     if isinstance(event, ModelStreamCompleted):
                         completed = event
+                    elif isinstance(event, ReasoningSummaryDelta):
+                        reasoning_summary_parts.append(event.delta)
                     else:
                         yield event
             except AgentExecutionError:
@@ -283,175 +303,40 @@ class TurnRequest:
                 generation_trace.complete(
                     response=completed.response,
                     duration_ms=turn_duration_ms,
+                    reasoning_summary=(
+                        "".join(reasoning_summary_parts) or None
+                    ),
                 )
 
         yield replace(completed, duration_ms=turn_duration_ms)
-
-    async def _final_response_events(
-        self,
-        completed: ModelStreamCompleted,
-        state: ConversationRun,
-    ) -> AsyncIterator[AgentEvent]:
-        """Process text_deltas through the citation buffer and yield answer events.
-
-        Each delta yields to the event loop so uvicorn can flush SSE frames
-        incrementally rather than batching all chunks into one TCP write.
-        """
-        async for event in self._citations.render(
-            completed.text_deltas,
-            state.evidence,
-            state.used_evidence_ids,
-        ):
-            if isinstance(event, FinalAnswerDelta):
-                state.answer_character_count += len(event.text)
-            yield event
-            await asyncio.sleep(0)
 
     @staticmethod
     def _register_document_evidence(
         documents: Sequence[ConversationDocument],
         state: ConversationRun,
-    ) -> list[CitationAvailable]:
-        events: list[CitationAvailable] = []
+    ) -> list[EvidenceItem]:
+        items: list[EvidenceItem] = []
         for document in documents:
             for evidence in document.evidence:
                 if evidence.id in state.evidence:
                     continue
                 state.evidence[evidence.id] = evidence
-                events.append(
-                    CitationAvailable(
-                        evidence=evidence_reference(evidence).model_copy(
-                            update={"relevance_score": None}
-                        )
-                    )
-                )
-        return events
-
-    async def _execute_tools(
-        self,
-        calls: Sequence[FunctionCallItem],
-        *,
-        context: ToolContext,
-        remaining_calls: int,
-        previous_signatures: set[str],
-    ) -> tuple[ToolObservation, ...]:
-        """Apply runtime limits and execute independent tool calls concurrently."""
-
-        observations: list[ToolObservation | None] = [None] * len(calls)
-        pending: list[tuple[int, FunctionCallItem, dict[str, Any]]] = []
-        for index, call in enumerate(calls):
-            arguments = _decoded_arguments(call)
-            if arguments is None:
-                observations[index] = _error_observation(
-                    call, "Invalid arguments for tool.", "invalid_arguments"
-                )
-                continue
-            if self._tools.get(call.name) is None:
-                observations[index] = _error_observation(
-                    call, f"Unknown tool: {call.name}", "unknown_tool"
-                )
-                continue
-            if not self._tools.arguments_are_valid(call.name, arguments):
-                observations[index] = _error_observation(
-                    call, f"Invalid arguments for tool: {call.name}", "invalid_arguments"
-                )
-                continue
-            signature = _tool_signature(call.name, arguments)
-            if signature in previous_signatures:
-                observations[index] = _error_observation(
-                    call,
-                    "This exact tool request was already executed in this run.",
-                    "duplicate_call",
-                )
-                continue
-            if len(pending) >= remaining_calls:
-                observations[index] = _error_observation(
-                    call,
-                    "The tool-call limit was reached for this run.",
-                    "tool_call_limit",
-                )
-                continue
-            previous_signatures.add(signature)
-            pending.append((index, call, arguments))
-
-        results = await asyncio.gather(
-            *(
-                self._execute_one_tool(call, arguments, context)
-                for _, call, arguments in pending
-            )
-        )
-        for (index, _, _), observation in zip(pending, results, strict=True):
-            observations[index] = observation
-        return tuple(item for item in observations if item is not None)
-
-    async def _execute_one_tool(
-        self,
-        call: FunctionCallItem,
-        arguments: Mapping[str, Any],
-        context: ToolContext,
-    ) -> ToolObservation:
-        tool = self._tools.get(call.name)
-        if tool is None:
-            return _error_observation(call, f"Unknown tool: {call.name}", "unknown_tool")
-        started_at = perf_counter()
-        trace_context = (
-            self._tracing.tool_execution(name=call.name, arguments=arguments)
-            if self._tracing is not None
-            else nullcontext(None)
-        )
-        try:
-            with trace_context as trace:
-                output = await asyncio.wait_for(
-                    tool.execute(dict(arguments), context),
-                    timeout=self._config.tool_timeout_seconds,
-                )
-                if trace is not None:
-                    trace.complete(result=output)
-        except TimeoutError:
-            output = ToolOutput(
-                content="",
-                error="Tool execution timed out.",
-                metadata={"outcome": "timeout", "result_count": 0},
-            )
-        except Exception:  # noqa: BLE001 - tool failure is an observation
-            output = ToolOutput(
-                content="",
-                error="Tool execution failed.",
-                metadata={"outcome": "failed", "result_count": 0},
-            )
-        return ToolObservation(
-            call=call,
-            output=output,
-            duration_ms=round((perf_counter() - started_at) * 1_000),
-        )
+                items.append(_evidence_item(evidence, relevance_score=None))
+        return items
 
 
-def _error_observation(
-    call: FunctionCallItem,
-    error: str,
-    outcome: str,
-) -> ToolObservation:
-    return ToolObservation(
-        call=call,
-        output=ToolOutput(
-            content="",
-            error=error,
-            metadata={"outcome": outcome, "result_count": 0},
-        ),
-        duration_ms=0,
-    )
+def _evidence_item(
+    evidence: Evidence,
+    *,
+    relevance_score: float | None | object = ...,
+    status: str = "found",
+) -> EvidenceItem:
+    from bothesis.agent import evidence_reference
 
-
-def _decoded_arguments(call: FunctionCallItem) -> dict[str, Any] | None:
-    try:
-        return call.parsed_arguments()
-    except ValueError:
-        return None
-
-
-def _tool_signature(name: str, arguments: Mapping[str, Any]) -> str:
-    encoded = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return f"{name}:{encoded}"
-
+    values = evidence_reference(evidence).model_dump()
+    values["status"] = status
+    if relevance_score is not ...:
+        values["relevance_score"] = relevance_score
+    return EvidenceItem(**values)
 
 __all__ = ["TurnRequest"]

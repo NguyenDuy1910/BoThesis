@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from collections.abc import Mapping
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
-
-from bothesis.agent.protocol import FunctionCallItem, FunctionCallOutputItem
+from bothesis.agent.protocol import FunctionCallItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,22 +21,6 @@ class Evidence:
     section: str | None = None
     uri: str | None = None
     source: str | None = None
-    relevance_score: float | None = None
-
-
-class EvidenceReference(BaseModel):
-    """Source metadata that is safe and useful to send to the chat client."""
-
-    model_config = ConfigDict(frozen=True)
-
-    id: str
-    document_id: str
-    title: str
-    page: str | None = None
-    section: str | None = None
-    uri: str | None = None
-    source: str | None = None
-    snippet: str | None = None
     relevance_score: float | None = None
 
 
@@ -125,17 +107,6 @@ class ToolObservation:
             return "skipped"
         return "failed"
 
-    def provider_output(self, max_characters: int) -> FunctionCallOutputItem:
-        content = self.output.content
-        if self.output.error:
-            content = f"Tool error: {self.output.error}"
-        elif not content:
-            content = "Tool completed without a textual result."
-        if len(content) > max_characters:
-            content = f"{content[: max(1, max_characters - 1)].rstrip()}…"
-        return FunctionCallOutputItem(call_id=self.call.call_id, output=content)
-
-
 @dataclass(slots=True)
 class ConversationRun:
     """Mutable accounting and grounded evidence for one user-initiated run."""
@@ -153,126 +124,13 @@ class ConversationRun:
     executed_tool_signatures: set[str] = field(default_factory=set)
 
 
-# SSE events. Every field on these models is exactly what reaches the wire:
-# main.py serializes them with ``model_dump_json()`` directly, with no
-# separate mapping layer. Fields that must never reach the client (tool call
-# arguments) are marked ``exclude=True`` so they stay constructible for
-# internal use without ever appearing in the JSON payload.
-class StreamEvent(BaseModel):
-    """Base for every wire-serializable application event."""
-
-    model_config = ConfigDict(frozen=True)
-
-
-class ProviderReasoningSummaryDelta(StreamEvent):
-    type: Literal["provider_reasoning_summary_delta"] = "provider_reasoning_summary_delta"
-    turn: int
-    text: str
-
-
-class ToolStarted(StreamEvent):
-    type: Literal["tool_started"] = "tool_started"
-    call_id: str
-    name: str
-    arguments: dict[str, Any] = Field(default_factory=dict, exclude=True)
-    activity_id: str | None = None
-    label: str | None = None
-    category: Literal["retrieval", "tool"] | None = None
-
-
-class ToolCompleted(StreamEvent):
-    type: Literal["tool_completed"] = "tool_completed"
-    call_id: str
-    name: str
-    activity_id: str | None = None
-    error: str | None = None
-    duration_ms: int | None = None
-    result_count: int | None = None
-    label: str | None = None
-    category: Literal["retrieval", "tool"] | None = None
-    status: Literal["completed", "failed", "timeout", "skipped"] | None = None
-
-
-class CitationAvailable(StreamEvent):
-    type: Literal["citation_available"] = "citation_available"
-    evidence: EvidenceReference
-
-
-class CitationEvent(StreamEvent):
-    type: Literal["citation"] = "citation"
-    evidence_id: str
-    title: str
-    page: str | None = None
-    uri: str | None = None
-
-
-class RunCompleted(StreamEvent):
-    type: Literal["run_completed"] = "run_completed"
-    duration_ms: int | None = None
-    model_duration_ms: int | None = None
-    tool_duration_ms: int | None = None
-    tool_call_count: int | None = None
-    provider_annotations: list[dict[str, Any]] | None = None
-
-
-class RunFailed(StreamEvent):
-    type: Literal["run_failed"] = "run_failed"
-    error: str
-
-
-class CommentaryDelta(StreamEvent):
-    type: Literal["commentary_delta"] = "commentary_delta"
-    text: str
-    turn: int = 0
-
-
-class FinalAnswerDelta(StreamEvent):
-    type: Literal["final_answer_delta"] = "final_answer_delta"
-    text: str
-
-
-class DocumentProgress(StreamEvent):
-    type: Literal["document_progress"] = "document_progress"
-    document_id: str
-    file_name: str
-    status: Literal["preparing", "ready", "indexing", "skipped", "failed"]
-    mode: Literal["direct", "indexed"]
-    message: str
-
-
-AgentEvent: TypeAlias = (
-    ProviderReasoningSummaryDelta
-    | ToolStarted
-    | ToolCompleted
-    | CitationAvailable
-    | CitationEvent
-    | RunCompleted
-    | RunFailed
-    | CommentaryDelta
-    | FinalAnswerDelta
-    | DocumentProgress
-)
-
 __all__ = [
     "AgentContext",
-    "AgentEvent",
-    "CitationAvailable",
-    "CitationEvent",
-    "CommentaryDelta",
     "ConversationRun",
     "ConversationDocument",
     "ConversationMessage",
     "Evidence",
-    "EvidenceReference",
-    "FinalAnswerDelta",
-    "DocumentProgress",
-    "ProviderReasoningSummaryDelta",
-    "RunCompleted",
-    "RunFailed",
-    "StreamEvent",
-    "ToolCompleted",
     "ToolContext",
     "ToolObservation",
     "ToolOutput",
-    "ToolStarted",
 ]

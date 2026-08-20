@@ -8,9 +8,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from bothesis.agent import AgentConfig, ConversationLoop, ConversationMemory
+from bothesis.agent import AgentConfig, ConversationMemory, ConversationSession
 from bothesis.agent.citation import CitationRenderer
-from bothesis.agent.models import CitationEvent, ConversationMessage, Evidence, FinalAnswerDelta
+from bothesis.agent.models import (
+    AgentContext,
+    ConversationDocument,
+    ConversationMessage,
+    Evidence,
+)
+from bothesis.agent.protocol import InputText
 
 
 def test_conversation_policy_keeps_newest_content_within_budget() -> None:
@@ -62,6 +68,54 @@ def test_conversation_policy_preserves_recent_turn_and_summarizes_only_older() -
 
 
 @pytest.mark.asyncio
+async def test_conversation_context_uses_distinct_xml_sections() -> None:
+    evidence = Evidence(
+        id="ev-1",
+        document_id="doc-1",
+        title="Leave policy",
+        content="Employees receive 20 days of annual leave.",
+    )
+    context = AgentContext(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        roles=[],
+        documents=(
+            ConversationDocument(
+                id="doc-1",
+                title="Leave policy <draft>",
+                content_type="text/plain",
+                mode="indexed",
+                citation_id="ev-1",
+                extracted_text="Annual leave <must be cited>.",
+                evidence=(evidence,),
+            ),
+        ),
+    )
+
+    turn_input = await ConversationMemory(config=AgentConfig()).prepare(
+        "What is the leave policy?",
+        context,
+    )
+
+    assert turn_input.instructions is not None
+    assert "<agent_instructions>" in turn_input.instructions
+    assert "<conversation_document_policy>" in turn_input.instructions
+    assert "<documents>" in turn_input.instructions
+    assert "Leave policy &lt;draft&gt;" in turn_input.instructions
+    texts = [
+        part.text
+        for item in turn_input.items
+        for part in item.content
+        if isinstance(part, InputText)
+    ]
+    assert texts[0] == "<user_message>What is the leave policy?</user_message>"
+    assert "<attached_document>" in texts[1]
+    assert "Annual leave &lt;must be cited&gt;." in texts[1]
+    assert "<retrieved_document_evidence>" in texts[2]
+    assert "<evidence_id>ev-1</evidence_id>" in texts[2]
+
+
+@pytest.mark.asyncio
 async def test_citation_renderer_carries_split_markers_between_deltas() -> None:
     evidence = {
         "ev-1": Evidence(
@@ -82,16 +136,12 @@ async def test_citation_renderer_carries_split_markers_between_deltas() -> None:
         )
     ]
 
-    assert events == [
-        FinalAnswerDelta(text="Policy "),
-        CitationEvent(evidence_id="ev-1", title="Leave policy"),
-        FinalAnswerDelta(text=" applies"),
-    ]
+    assert events == [("Policy ", None), ("", "ev-1"), (" applies", None)]
     assert used_evidence_ids == {"ev-1"}
 
 
 def test_openrouter_function_calls_parses_native_tool_call_shape() -> None:
-    calls = ConversationLoop._openrouter_function_calls(
+    calls = ConversationSession._openrouter_function_calls(
         [
             {
                 "id": "tool-1",

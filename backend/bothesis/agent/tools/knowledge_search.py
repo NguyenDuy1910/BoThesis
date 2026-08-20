@@ -81,6 +81,8 @@ class KnowledgeSearch(Tool):
                 "required": ["queries"],
                 "additionalProperties": False,
             },
+            activity_label="Search knowledge base",
+            activity_category="retrieval",
         )
 
     async def execute(

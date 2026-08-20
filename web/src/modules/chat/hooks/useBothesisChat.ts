@@ -4,12 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
 import { streamAgentResponse } from "../api";
 import { historyFromMessages, regenerationContext } from "../conversation-history";
-import { upsertStatusPart } from "../stream-parts";
+import { applyAgentStreamEvent, updateRun } from "../message-stream";
 import type {
-  AgentEvidence,
   AgentStreamEvent,
   ChatMessage,
-  ChatMessagePart,
   ConversationDocument,
 } from "../types";
 
@@ -17,240 +15,6 @@ type ChatStatus = "ready" | "submitted" | "streaming";
 
 function messageId(prefix: string) {
   return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function appendEvent(parts: ChatMessagePart[], event: AgentStreamEvent): ChatMessagePart[] {
-  if (event.type === "provider_reasoning_summary_delta") {
-    return appendReasoningDelta(parts, "provider", event.turn, event.text);
-  }
-  if (event.type === "commentary_delta") {
-    return appendReasoningDelta(parts, "model", event.turn, event.text);
-  }
-  if (event.type === "document_progress") {
-    const failed = event.status === "failed";
-    const completed = event.status === "ready" || event.status === "skipped";
-    return upsertStatusPart(parts, {
-      type: "data-status",
-      id: `document-${event.document_id}`,
-      data: {
-        phase: "document",
-        state: failed ? "error" : completed ? (event.status === "skipped" ? "skipped" : "completed") : "active",
-        label: event.status === "indexing"
-          ? `Finding relevant content in ${event.file_name}`
-          : event.status === "ready"
-            ? `${event.file_name} is ready`
-            : event.status === "skipped"
-              ? `${event.file_name} stored for later`
-              : failed
-                ? `${event.file_name} could not be prepared`
-                : `Preparing ${event.file_name}`,
-        detail: event.message,
-        activityType: "document_preparation",
-        stepId: `document-${event.document_id}`,
-      },
-    });
-  }
-  if (event.type === "final_answer_delta") {
-    const nextParts = parts;
-    const last = nextParts.at(-1);
-    if (last?.type === "text") {
-      return [
-        ...nextParts.slice(0, -1),
-        { ...last, text: last.text + event.text, state: "streaming" },
-      ];
-    }
-    return [...nextParts, { type: "text", text: event.text, state: "streaming" }];
-  }
-  if (event.type === "tool_started") {
-    const activityId = event.activity_id ?? event.call_id ?? `activity-${event.sequence ?? 0}`;
-    const isRetrieval = event.category === "retrieval";
-    const label = event.label ?? (event.name ? displayToolName(event.name) : "Tool");
-    return upsertStatusPart(parts, {
-      type: "data-status",
-      id: `tool-${activityId}`,
-      data: {
-        phase: isRetrieval ? "retrieval" : "tool",
-        state: "active",
-        label,
-        toolName: event.name,
-        toolCallId: activityId,
-        activityType: isRetrieval ? "knowledge_retrieval" : "tool_execution",
-        stepId: `tool-${activityId}`,
-      },
-    });
-  }
-  if (event.type === "tool_completed") {
-    const activityId = event.activity_id ?? event.call_id ?? `activity-${event.sequence ?? 0}`;
-    const isRetrieval = event.category === "retrieval";
-    const failed = event.status === "failed" || event.status === "timeout" || Boolean(event.error);
-    const label = event.label ?? (event.name ? displayToolName(event.name) : "Tool");
-    const detail = event.message ?? event.error ?? undefined;
-    return upsertStatusPart(parts, {
-      type: "data-status",
-      id: `tool-${activityId}`,
-      data: {
-        phase: isRetrieval ? "retrieval" : "tool",
-        state: failed ? "error" : event.status === "skipped" ? "skipped" : "completed",
-        label,
-        detail,
-        toolName: event.name,
-        toolCallId: activityId,
-        durationMs: event.duration_ms ?? undefined,
-        resultCount: event.result_count ?? undefined,
-        activityType: isRetrieval ? "knowledge_retrieval" : "tool_execution",
-        stepId: `tool-${activityId}`,
-      },
-    });
-  }
-  if (event.type === "citation_available") {
-    return [...parts, sourcePart(event.evidence)];
-  }
-  if (event.type === "citation") {
-    return appendCitation(parts, event.evidence_id, event.title);
-  }
-  if (event.type === "run_failed") {
-    return updateRun([...parts, {
-      type: "data-stream-error",
-      id: "stream-error",
-      data: { message: event.error, retryable: true },
-    }], { status: "failed" });
-  }
-  if (event.type === "run_completed") {
-    return updateRun(
-      parts.map((part) => {
-        if (part.type === "text") return { ...part, state: "done" };
-        if (part.type === "data-reasoning") {
-          return { ...part, data: { ...part.data, state: "done" } };
-        }
-        return part;
-      }),
-      {
-        status: "completed",
-        durationMs: event.duration_ms ?? undefined,
-        modelDurationMs: event.model_duration_ms ?? undefined,
-        toolDurationMs: event.tool_duration_ms ?? undefined,
-        toolCallCount: event.tool_call_count ?? undefined,
-      },
-    );
-  }
-  return parts;
-}
-
-type ReasoningPart = Extract<ChatMessagePart, { type: "data-reasoning" }>;
-
-function startReasoning(
-  parts: ChatMessagePart[],
-  source: ReasoningPart["data"]["source"],
-  turn: number,
-): ChatMessagePart[] {
-  const id = `reasoning-${source}-${turn}`;
-  if (parts.some((part) => part.type === "data-reasoning" && part.id === id)) {
-    return parts;
-  }
-  const reasoning: ReasoningPart = {
-    type: "data-reasoning",
-    id,
-    data: { source, turn, text: "", state: "streaming" },
-  };
-  return [...parts, reasoning];
-}
-
-function appendReasoningDelta(
-  parts: ChatMessagePart[],
-  source: ReasoningPart["data"]["source"],
-  turn: number,
-  text: string,
-): ChatMessagePart[] {
-  if (!text) return parts;
-  const nextParts = startReasoning(parts, source, turn);
-  const id = `reasoning-${source}-${turn}`;
-  return nextParts.map((part) => (
-    part.type === "data-reasoning" && part.id === id
-      ? { ...part, data: { ...part.data, text: part.data.text + text } }
-      : part
-  ));
-}
-
-function completeReasoningForTurn(
-  parts: ChatMessagePart[],
-  turn: number,
-  source?: ReasoningPart["data"]["source"],
-): ChatMessagePart[] {
-  return parts.map((part) => (
-    part.type === "data-reasoning"
-    && part.data.turn === turn
-    && (source === undefined || part.data.source === source)
-      ? { ...part, data: { ...part.data, state: "done" as const } }
-      : part
-  ));
-}
-
-function displayToolName(toolName: string) {
-  return toolName
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-type RunPart = Extract<ChatMessagePart, { type: "data-run" }>;
-
-function updateRun(
-  parts: ChatMessagePart[],
-  patch: Partial<RunPart["data"]>,
-): ChatMessagePart[] {
-  const index = parts.findIndex((part) => part.type === "data-run");
-  if (index === -1) {
-    const run: RunPart = {
-      type: "data-run",
-      id: "run",
-      data: { status: "running", startedAt: Date.now(), ...patch },
-    };
-    return [...parts, run];
-  }
-  const currentRun = parts[index] as RunPart;
-  const run: RunPart = { ...currentRun, data: { ...currentRun.data, ...patch } };
-  return [
-    ...parts.slice(0, index),
-    run,
-    ...parts.slice(index + 1),
-  ];
-}
-
-function appendCitation(parts: ChatMessagePart[], evidenceId: string, title: string) {
-  const nextParts = parts.map((part) => (
-    part.type === "data-source" && part.data.id === evidenceId
-      ? { ...part, data: { ...part.data, status: "Used" as const } }
-      : part
-  ));
-  const textIndex = [...nextParts].map((part) => part.type).lastIndexOf("text");
-  if (textIndex === -1) return nextParts;
-
-  const text = nextParts[textIndex] as Extract<ChatMessagePart, { type: "text" }>;
-  const safeTitle = title.replace(/[\\[\\]]/g, "\\$&").trim() || "Source";
-  const citation = ` [${safeTitle}](#source-${encodeURIComponent(evidenceId)})`;
-  return [
-    ...nextParts.slice(0, textIndex),
-    { ...text, text: `${text.text}${citation}` },
-    ...nextParts.slice(textIndex + 1),
-  ];
-}
-
-function sourcePart(evidence: AgentEvidence): Extract<ChatMessagePart, { type: "data-source" }> {
-  return {
-    type: "data-source",
-    id: evidence.id,
-    data: {
-      id: evidence.id,
-      title: evidence.title,
-      url: evidence.uri ?? undefined,
-      description: evidence.section ?? evidence.page ?? undefined,
-      page: evidence.page ?? undefined,
-      section: evidence.section ?? undefined,
-      snippet: evidence.snippet ?? undefined,
-      status: "Found",
-      source: evidence.source ?? undefined,
-      relevanceScore: evidence.relevance_score ?? undefined,
-    },
-  };
 }
 
 export function useBothesisChat({
@@ -275,6 +39,7 @@ export function useBothesisChat({
 
   useEffect(() => {
     controllerRef.current?.abort();
+    messagesRef.current = initialMessages;
     setMessages(initialMessages);
     setStatus("ready");
     setError(null);
@@ -282,13 +47,13 @@ export function useBothesisChat({
   }, [conversationId, initialMessages]);
 
   const updateAssistant = useCallback((assistantId: string, event: AgentStreamEvent) => {
-    setMessages((current) => {
-      const next = current.map((message) => message.id === assistantId
-        ? { ...message, parts: appendEvent(message.parts, event) }
-        : message);
-      messagesRef.current = next;
-      return next;
-    });
+    // The stream can deliver its first event before React commits the render
+    // that inserted the assistant placeholder. Reduce against the synchronous
+    // ref first so no SSE event (especially ``turn.completed``) is dropped or
+    // later overwritten by a stale queued state update.
+    const next = applyAgentStreamEvent(messagesRef.current, assistantId, event);
+    messagesRef.current = next;
+    setMessages(next);
   }, []);
 
   const run = useCallback(async (
@@ -318,25 +83,23 @@ export function useBothesisChat({
       }],
     };
     activeAssistantIdRef.current = assistantId;
-    setMessages((current) => {
-      const baseMessages = options.displayMessages ?? current;
-      const next = includeUserMessage
-        ? [...baseMessages, {
-            id: messageId("user"),
-            role: "user" as const,
-            parts: [
-              { type: "text" as const, text, state: "done" as const },
-              ...(options.documents ?? []).map((document) => ({
-                type: "data-document" as const,
-                id: document.id,
-                data: document,
-              })),
-            ],
-          }, assistant]
-        : [...baseMessages, assistant];
-      messagesRef.current = next;
-      return next;
-    });
+    const baseMessages = options.displayMessages ?? messagesRef.current;
+    const nextMessages = includeUserMessage
+      ? [...baseMessages, {
+          id: messageId("user"),
+          role: "user" as const,
+          parts: [
+            { type: "text" as const, text, state: "done" as const },
+            ...(options.documents ?? []).map((document) => ({
+              type: "data-document" as const,
+              id: document.id,
+              data: document,
+            })),
+          ],
+        }, assistant]
+      : [...baseMessages, assistant];
+    messagesRef.current = nextMessages;
+    setMessages(nextMessages);
 
     try {
       await streamAgentResponse(text, {
@@ -345,11 +108,11 @@ export function useBothesisChat({
         documentIds: options.documents?.map((document) => document.id),
         signal: controller.signal,
         onEvent: (event) => {
-          if (event.type === "final_answer_delta") {
+          if (event.type === "item.delta") {
             setStatus("streaming");
           }
           updateAssistant(assistantId, event);
-          if (event.type === "run_failed") setError(new Error(event.error));
+          if (event.type === "error") setError(new Error(event.message));
         },
       });
       if (!controller.signal.aborted) {
@@ -365,7 +128,7 @@ export function useBothesisChat({
       if (!controller.signal.aborted) {
         const nextError = cause instanceof Error ? cause : new Error("Chat request failed.");
         setError(nextError);
-        updateAssistant(assistantId, { type: "run_failed", error: nextError.message });
+        updateAssistant(assistantId, { type: "error", message: nextError.message });
       }
     } finally {
       if (controllerRef.current === controller) {
