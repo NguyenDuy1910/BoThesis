@@ -578,10 +578,10 @@ function RecentChatList({
           if (!deleteTarget || !deletingIds.has(deleteTarget.id)) setDeleteTarget(null);
         }}
         open={Boolean(deleteTarget)}
-        title="Delete conversation?"
+        title="Hide conversation?"
       >
         <p className="conversation-action-dialog__copy">
-          This will permanently remove “{deleteTarget?.title}” and its locally stored messages.
+          This will hide “{deleteTarget?.title}”. Its locally stored messages are retained.
         </p>
         {actionError && <p className="conversation-action-dialog__error" role="alert">{actionError}</p>}
         <div className="conversation-action-dialog__actions">
@@ -603,7 +603,7 @@ function RecentChatList({
                 await onDelete(target.id);
                 setDeleteTarget(null);
               } catch {
-                setActionError("Could not delete this conversation.");
+                setActionError("Could not hide this conversation.");
               } finally {
                 setDeletingIds((current) => {
                   const next = new Set(current);
@@ -614,7 +614,7 @@ function RecentChatList({
             }}
             variant="danger"
           >
-            Delete
+            Hide
           </Button>
         </div>
       </Dialog>
@@ -630,8 +630,13 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
         className="sidebar-account-row"
         title={collapsed ? "Knowledge workspace" : undefined}
       >
-        <UserCircle aria-hidden="true" size={18} />
-        {!collapsed && <span>Knowledge workspace</span>}
+        <span className="sidebar-account-row__avatar"><UserCircle aria-hidden="true" size={18} /></span>
+        {!collapsed && (
+          <span className="sidebar-account-row__copy">
+            <strong>Knowledge workspace</strong>
+            <small>Private to your access</small>
+          </span>
+        )}
       </div>
     </div>
   );

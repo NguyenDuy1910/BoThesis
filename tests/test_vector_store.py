@@ -33,20 +33,24 @@ class RecordingClient:
         return SimpleNamespace(points=["point-1"])
 
 
-def test_store_can_be_configured_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_store_can_be_configured_through_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured_kwargs: dict[str, Any] = {}
 
     def make_client(**kwargs: Any) -> RecordingClient:
         captured_kwargs.update(kwargs)
         return RecordingClient()
 
-    monkeypatch.setenv("QDRANT_URL", "http://qdrant.internal:6333")
-    monkeypatch.setenv("QDRANT_API_KEY", "test-key")
-    monkeypatch.setenv("QDRANT_COLLECTION", "tenant_chunks")
-    monkeypatch.setenv("QDRANT_PREFER_GRPC", "true")
     monkeypatch.setattr(vector_store_module, "AsyncQdrantClient", make_client)
 
-    store = VectorStore.from_environment(timeout=15)
+    store = VectorStore(
+        collection_name="tenant_chunks",
+        url="http://qdrant.internal:6333",
+        api_key="test-key",
+        prefer_grpc=True,
+        timeout=15,
+    )
 
     assert store.collection_name == "tenant_chunks"
     assert isinstance(store.client, RecordingClient)
@@ -107,6 +111,40 @@ def test_filters_are_deterministic_and_keep_zero_ancestor_ids() -> None:
     acl_list_condition = acl_filter.should[0]
     assert isinstance(acl_list_condition, qmodels.FieldCondition)
     assert acl_list_condition.match == qmodels.MatchAny(any=["reader-1", "reader-2"])
+
+
+def test_admin_filter_keeps_tenant_and_tombstone_boundaries() -> None:
+    query_filter = VectorStore.build_retrieval_filter(
+        None,
+        access_context=SimpleNamespace(
+            tenant_id="tenant-1",
+            reader_ids=["email:admin@example.test"],
+            space_keys=[],
+            is_admin=True,
+        ),
+    )
+
+    assert query_filter.must is not None
+    assert [
+        condition.key
+        for condition in query_filter.must
+        if isinstance(condition, qmodels.FieldCondition)
+    ] == ["is_deleted", "tenant_id"]
+    assert not any(
+        isinstance(condition, qmodels.Filter)
+        for condition in query_filter.must
+    )
+
+
+def test_lifecycle_filter_excludes_tombstones_without_access_conditions() -> None:
+    query_filter = VectorStore.build_lifecycle_filter()
+
+    assert query_filter.must == [
+        qmodels.FieldCondition(
+            key="is_deleted",
+            match=qmodels.MatchValue(value=False),
+        )
+    ]
 
 
 @pytest.mark.asyncio

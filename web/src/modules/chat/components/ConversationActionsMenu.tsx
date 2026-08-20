@@ -7,7 +7,7 @@ import {
   Pencil,
   Pin,
   Share2,
-  Trash2,
+  EyeOff,
 } from "lucide-react";
 
 import { Dropdown, DropdownItem } from "@/components/ui/Dropdown";
@@ -73,14 +73,14 @@ export function ConversationActionsMenu({
         onClick={onArchive}
       />
       <DropdownItem
-        aria-label="Delete conversation"
+        aria-label="Hide conversation"
         className="sidebar-popover__item sidebar-popover__item--delete"
         destructive
         disabled={deleting}
         onClick={onDelete}
       >
-        <Trash2 aria-hidden="true" size={16} />
-        <span>Delete</span>
+        <EyeOff aria-hidden="true" size={16} />
+        <span>Hide conversation</span>
       </DropdownItem>
     </Dropdown>
   );

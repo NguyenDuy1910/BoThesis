@@ -35,7 +35,7 @@ class QdrantPayloadSink(Protocol):
     async def write(self, records: Sequence[QdrantChunkRecord]) -> int:
         """Embed and upsert every supplied record, returning the written count."""
 
-    async def delete_document(
+    async def soft_delete_document(
         self,
         *,
         tenant_id: str,
@@ -135,7 +135,7 @@ class ConnectorPipeline:
             if change.change_type != SourceChangeType.DELETE:
                 continue
             try:
-                await self._sink.delete_document(
+                await self._sink.soft_delete_document(
                     tenant_id=self._context.tenant_id,
                     connector_id=self._context.connector_id,
                     document_id=change.external_id,
@@ -165,7 +165,7 @@ class ConnectorPipeline:
                     )
                     # Replace semantics remove stale trailing chunks when a
                     # newer document version produces fewer chunks.
-                    await self._sink.delete_document(
+                    await self._sink.soft_delete_document(
                         tenant_id=self._context.tenant_id,
                         connector_id=self._context.connector_id,
                         document_id=outcome.external_id,

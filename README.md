@@ -65,10 +65,34 @@ uv run python main.py
 Edit `backend/.env` before starting. At minimum, configure:
 
 ```dotenv
-OPENROUTER_API_KEY=...
+OPENAI_API_KEY=...
+OPENAI_MODEL=gpt-5-mini
+OPENROUTER_API_KEY=...  # document embeddings
+EMBEDDING_MODEL=openai/text-embedding-3-small
+DATABASE_URL=postgresql+asyncpg://bothesis:bothesis@127.0.0.1:5432/bothesis
 QDRANT_URL=http://localhost:6333
 QDRANT_COLLECTION=bothesis
 QDRANT_API_KEY=  # set a key only when authentication is enabled
+```
+
+Chat document uploads can use AWS S3.
+The browser uploads bytes directly to its presigned URL; configure the bucket's
+CORS policy to allow `PUT` from the WebUI origin with the `Content-Type` header.
+Without object storage, the API permits a PostgreSQL blob fallback up to 20 MiB.
+AWS credentials are resolved through boto3's standard credential chain. For
+local development, use `aws configure`, `AWS_PROFILE`, or the normal
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` environment variables. In AWS,
+prefer a container or instance role.
+
+```dotenv
+BOTHESIS_S3_BUCKET=bothesis-documents
+BOTHESIS_S3_REGION=us-east-1
+# Optional for local S3-compatible development endpoints only:
+BOTHESIS_S3_ENDPOINT_URL=
+BOTHESIS_S3_ADDRESSING_STYLE=auto
+BOTHESIS_DOCUMENT_MAX_UPLOAD_BYTES=104857600
+BOTHESIS_DOCUMENT_MAX_DATABASE_BLOB_BYTES=20971520
+BOTHESIS_DOCUMENT_DIRECT_MAX_BYTES=20971520
 ```
 
 The API starts at `http://127.0.0.1:8000`.
@@ -88,13 +112,30 @@ npm ci
 npm run dev
 ```
 
-Set the temporary development request context in `web/.env.local`:
+For local development only, enable UUID identity resolution in `backend/.env`:
+
+Boolean environment settings use strict JSON boolean values.
+
+```dotenv
+BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true
+```
+
+For the single-tenant Phase 1 dataset only, development admins can query
+legacy Qdrant points that do not carry the current database tenant UUID:
+
+```dotenv
+BOTHESIS_PHASE1_UNSCOPED_RETRIEVAL=true
+```
+
+This setting requires insecure development identity mode, remains disabled by
+default, and must never be enabled in a shared or production environment.
+
+Then set database-backed user and tenant UUIDs in `web/.env.local`:
 
 ```dotenv
 NEXT_PUBLIC_BOTHESIS_API_URL=http://127.0.0.1:8000
-NEXT_PUBLIC_BOTHESIS_TENANT_ID=local-tenant
-NEXT_PUBLIC_BOTHESIS_USER_ID=local-user
-NEXT_PUBLIC_BOTHESIS_ROLES=employee
+NEXT_PUBLIC_BOTHESIS_TENANT_ID=00000000-0000-0000-0000-000000000001
+NEXT_PUBLIC_BOTHESIS_USER_ID=00000000-0000-0000-0000-000000000002
 ```
 
 Open `http://localhost:3000`.

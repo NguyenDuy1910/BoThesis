@@ -5,7 +5,9 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -14,8 +16,10 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
+    Header,
     HTTPException,
     Query,
+    Request,
     Response,
     UploadFile,
     status,
@@ -24,8 +28,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRouter
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.health import HealthReport, HealthService
+from bothesis.db.engine import get_session
+
+from bothesis.health import HealthReport, HealthService, HealthSettings
 
 # ---------------------------------------------------------------------------
 # Schemas
@@ -135,11 +142,55 @@ class ChatRequest(BaseModel):
     """A bounded chat turn submitted by the current WebUI."""
 
     message: str = Field(min_length=1, max_length=4_000)
-    tenant_id: str = Field(min_length=1, max_length=256)
-    user_id: str = Field(min_length=1, max_length=256)
-    roles: list[str]
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=256)
+    user_id: str | None = Field(default=None, min_length=1, max_length=256)
+    roles: list[str] = Field(default_factory=list, deprecated=True)
     conversation_id: str | None = None
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=24)
+
+
+class DocumentUploadStartRequest(BaseModel):
+    file_name: str = Field(min_length=1, max_length=240)
+    content_type: str = Field(min_length=1, max_length=160)
+    size_bytes: int = Field(ge=1)
+
+
+class LegacyAttachmentUploadStart(DocumentUploadStartRequest):
+    sha256: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{64}$")
+    tenant_id: UUID
+    user_id: UUID
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class LegacyAttachmentScope(BaseModel):
+    tenant_id: UUID
+    user_id: UUID
+    conversation_id: str = Field(min_length=1, max_length=256)
+
+
+class DocumentUploadTarget(BaseModel):
+    mode: Literal["presigned", "api"]
+    url: str
+    method: str
+    headers: dict[str, str]
+    expires_at: str
+
+
+class DocumentMetadata(BaseModel):
+    id: str
+    file_name: str
+    content_type: str
+    size_bytes: int
+    upload_status: Literal["not_applicable", "pending", "available", "failed"]
+    indexing_status: str
+    created_at: str
+    uploaded_at: str | None = None
+
+
+class DocumentUploadStartResponse(BaseModel):
+    upload_required: bool
+    target: DocumentUploadTarget | None = None
+    document: DocumentMetadata
 
 
 # --- Connectors ---
@@ -414,21 +465,116 @@ async def patch_user_permissions(
 # ---------------------------------------------------------------------------
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
+attachments_router = APIRouter(prefix="/attachments", tags=["attachments"])
 
-_agent_loop: Any | None = None
+_agent: Any | None = None
+_document_runtime: Any | None = None
+_INSECURE_DEVELOPMENT_IDENTITY_ENV = "BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY"
+_PHASE1_UNSCOPED_RETRIEVAL_ENV = "BOTHESIS_PHASE1_UNSCOPED_RETRIEVAL"
 
 
-def _get_agent_loop() -> Any:
-    """Build the singleton agent loop without introducing a DI framework."""
-    global _agent_loop
-    if _agent_loop is None:
+def _environment_boolean(name: str, *, default: bool = False) -> bool:
+    """Read one strict JSON boolean at the application composition boundary."""
+
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{name} must be a JSON boolean") from exc
+    if not isinstance(value, bool):
+        raise RuntimeError(f"{name} must be a JSON boolean")
+    return value
+
+
+def _phase1_unscoped_retrieval_enabled() -> bool:
+    """Allow the explicit single-tenant Phase 1 compatibility mode."""
+
+    enabled = _environment_boolean(_PHASE1_UNSCOPED_RETRIEVAL_ENV)
+    if enabled and not _environment_boolean(_INSECURE_DEVELOPMENT_IDENTITY_ENV):
+        raise RuntimeError(
+            f"{_PHASE1_UNSCOPED_RETRIEVAL_ENV} requires "
+            f"{_INSECURE_DEVELOPMENT_IDENTITY_ENV}=true"
+        )
+    return enabled
+
+
+class _LazyDocumentEmbedder:
+    """Defer embedding configuration until Index On Demand is selected."""
+
+    def __init__(self, *, base_url: str) -> None:
+        self.model = os.getenv("EMBEDDING_MODEL", "").strip()
+        self._base_url = base_url
+        self._client: Any | None = None
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            from bothesis.agent.transports.openrouter import OpenRouterTransport
+
+            self._client = OpenRouterTransport(
+                base_url=self._base_url,
+                embedding_model=self.model or None,
+            )
+            self.model = self._client.embedding_model or ""
+        return self._client
+
+    async def embed_query(self, query: str) -> list[float]:
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError("query must not be empty")
+        return (await self._embed([normalized_query]))[0]
+
+    async def embed_documents(self, documents: list[str]) -> list[list[float]]:
+        normalized = [document.strip() for document in documents]
+        if not normalized or any(not document for document in normalized):
+            raise ValueError("documents must contain non-empty text")
+        return await self._embed(normalized)
+
+    async def _embed(self, inputs: list[str]) -> list[list[float]]:
+        payload = await self._get_client().embeddings(
+            input=inputs[0] if len(inputs) == 1 else inputs,
+        )
+        data = payload.get("data")
+        if not isinstance(data, list) or len(data) != len(inputs):
+            raise ValueError("embedding response does not contain all vectors")
+        indexed: list[tuple[int, list[float]]] = []
+        for fallback_index, item in enumerate(data):
+            if not isinstance(item, dict):
+                raise ValueError("embedding response vector is invalid")
+            raw_vector = item.get("embedding")
+            if not isinstance(raw_vector, list) or not raw_vector:
+                raise ValueError("embedding response vector is invalid")
+            if any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in raw_vector
+            ):
+                raise ValueError("embedding response vector is invalid")
+            vector = [float(value) for value in raw_vector]
+            if any(not math.isfinite(value) for value in vector):
+                raise ValueError("embedding response vector is invalid")
+            raw_index = item.get("index", fallback_index)
+            if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+                raise ValueError("embedding response index is invalid")
+            indexed.append((raw_index, vector))
+        indexed.sort(key=lambda item: item[0])
+        if [index for index, _ in indexed] != list(range(len(inputs))):
+            raise ValueError("embedding response indexes are invalid")
+        return [vector for _, vector in indexed]
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+
+
+def _get_agent() -> Any:
+    """Build the singleton agent without introducing a DI framework."""
+    global _agent
+    if _agent is None:
+        from bothesis.agent import Agent, AgentConfig
         from bothesis.agent.tools import ToolRegistry
         from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
         from bothesis.agent.transports.openrouter import OpenRouterTransport
-        from bothesis.agent.transports.openrouter_embeddings import (
-            OpenRouterEmbeddingClient,
-        )
-        from bothesis.chat.agent_loop import AgentLoop
         from bothesis.document_index.vector_store import VectorStore
         from bothesis.knowledge.document_index import QdrantSemanticRetriever
         from bothesis.observability import create_langfuse_tracing
@@ -438,53 +584,470 @@ def _get_agent_loop() -> Any:
             "OPEN_ROUTER_BASE_URL",
             OpenRouterTransport.DEFAULT_BASE_URL,
         )
+        allow_unscoped_retrieval = _phase1_unscoped_retrieval_enabled()
+        if allow_unscoped_retrieval:
+            logging.getLogger(__name__).warning(
+                "Phase 1 unscoped admin retrieval is enabled; tenant filtering "
+                "is disabled for admin chat requests"
+            )
         retriever = QdrantSemanticRetriever(
-            VectorStore.from_environment(timeout=8),
-            OpenRouterEmbeddingClient(base_url=openrouter_base_url),
+            VectorStore(
+                collection_name=os.getenv("QDRANT_COLLECTION"),
+                url=os.getenv("QDRANT_URL"),
+                api_key=os.getenv("QDRANT_API_KEY") or None,
+                prefer_grpc=_environment_boolean("QDRANT_PREFER_GRPC"),
+                timeout=8,
+            ),
+            _LazyDocumentEmbedder(base_url=openrouter_base_url),
+            allow_unscoped_admin_retrieval=allow_unscoped_retrieval,
         )
         tracing = create_langfuse_tracing()
         registry.register(KnowledgeSearchTool(retriever, tracing=tracing))
-        _agent_loop = AgentLoop(
-            transport=OpenRouterTransport(base_url=openrouter_base_url),
-            registry=registry,
-            max_model_turns=int(os.getenv("BOTHESIS_MAX_MODEL_TURNS", "3")),
-            max_tool_rounds=int(os.getenv("BOTHESIS_MAX_TOOL_ROUNDS", "2")),
-            max_tool_calls=int(os.getenv("BOTHESIS_MAX_TOOL_CALLS", "6")),
-            max_history_messages=int(
-                os.getenv("BOTHESIS_MAX_HISTORY_MESSAGES", "24")
+        _agent = Agent(
+            model=OpenRouterTransport(base_url=openrouter_base_url),
+            tools=registry,
+            config=AgentConfig(
+                max_model_turns=int(os.getenv("BOTHESIS_MAX_MODEL_TURNS", "3")),
+                max_tool_rounds=int(os.getenv("BOTHESIS_MAX_TOOL_ROUNDS", "2")),
+                max_tool_calls=int(os.getenv("BOTHESIS_MAX_TOOL_CALLS", "6")),
+                max_history_messages=int(
+                    os.getenv("BOTHESIS_MAX_HISTORY_MESSAGES", "24")
+                ),
+                max_history_characters=int(
+                    os.getenv("BOTHESIS_MAX_HISTORY_CHARACTERS", "24000")
+                ),
+                recent_history_messages=int(
+                    os.getenv("BOTHESIS_RECENT_HISTORY_MESSAGES", "6")
+                ),
+                tool_timeout_seconds=float(
+                    os.getenv("BOTHESIS_TOOL_TIMEOUT_SECONDS", "8")
+                ),
             ),
-            max_history_characters=int(
-                os.getenv("BOTHESIS_MAX_HISTORY_CHARACTERS", "24000")
-            ),
-            recent_history_messages=int(
-                os.getenv("BOTHESIS_RECENT_HISTORY_MESSAGES", "6")
-            ),
-            history_compression_threshold=int(
-                os.getenv("BOTHESIS_HISTORY_COMPRESSION_THRESHOLD", "4000")
-            ),
-            max_compressed_history_characters=int(
-                os.getenv("BOTHESIS_MAX_COMPRESSED_HISTORY_CHARACTERS", "2000")
-            ),
-            tool_timeout_seconds=float(
-                os.getenv("BOTHESIS_TOOL_TIMEOUT_SECONDS", "8")
-            ),
-            enable_interleaved=True,
             tracing=tracing,
         )
-    return _agent_loop
+    return _agent
+
+
+@dataclasses.dataclass(slots=True)
+class _DocumentRuntime:
+    uploads: Any
+    conversations: Any
+    session_factory: Any
+    storage: Any
+    _pipeline: Any | None = None
+
+    @property
+    def pipeline(self) -> Any:
+        if self._pipeline is None:
+            from bothesis.agent.transports.openrouter import OpenRouterTransport
+            from bothesis.connector.document_pipeline import (
+                DEFAULT_DIRECT_MAX_BYTES,
+                DEFAULT_PROCESSING_MAX_BYTES,
+                DocumentChunker,
+                DocumentPipeline,
+                FileParser,
+            )
+            from bothesis.connector.file.processing import FileProcessor
+            from bothesis.connector.provider_cache import PostgresProviderFileCache
+            from bothesis.document_index.vector_store import (
+                QdrantDocumentIndex,
+                VectorStore,
+            )
+
+            base_url = os.getenv(
+                "OPEN_ROUTER_BASE_URL",
+                OpenRouterTransport.DEFAULT_BASE_URL,
+            )
+            embedder = _LazyDocumentEmbedder(base_url=base_url)
+            processing_max_bytes = int(
+                os.getenv(
+                    "BOTHESIS_DOCUMENT_MAX_PROCESSING_BYTES",
+                    str(DEFAULT_PROCESSING_MAX_BYTES),
+                )
+            )
+            self._pipeline = DocumentPipeline(
+                self.session_factory,
+                object_storage=self.storage,
+                parser=FileParser(
+                    FileProcessor(max_file_bytes=processing_max_bytes)
+                ),
+                chunker=DocumentChunker(
+                    max_characters=int(
+                        os.getenv("BOTHESIS_DOCUMENT_CHUNK_CHARACTERS", "4000")
+                    ),
+                    overlap_characters=int(
+                        os.getenv("BOTHESIS_DOCUMENT_CHUNK_OVERLAP", "400")
+                    ),
+                ),
+                embedder=embedder,
+                vector_index=QdrantDocumentIndex(
+                    VectorStore(
+                        collection_name=os.getenv("QDRANT_COLLECTION"),
+                        url=os.getenv("QDRANT_URL"),
+                        api_key=os.getenv("QDRANT_API_KEY") or None,
+                        prefer_grpc=_environment_boolean("QDRANT_PREFER_GRPC"),
+                        timeout=20,
+                    )
+                ),
+                provider_cache=PostgresProviderFileCache(self.session_factory),
+                direct_max_bytes=int(
+                    os.getenv(
+                        "BOTHESIS_DOCUMENT_DIRECT_MAX_BYTES",
+                        str(DEFAULT_DIRECT_MAX_BYTES),
+                    )
+                ),
+                processing_max_bytes=processing_max_bytes,
+                retrieval_limit=int(
+                    os.getenv("BOTHESIS_DOCUMENT_RETRIEVAL_LIMIT", "6")
+                ),
+                embedding_batch_size=int(
+                    os.getenv("BOTHESIS_DOCUMENT_EMBEDDING_BATCH_SIZE", "32")
+                ),
+                download_url_seconds=int(
+                    os.getenv("BOTHESIS_DOCUMENT_DOWNLOAD_URL_SECONDS", "300")
+                ),
+            )
+        return self._pipeline
+
+    async def aclose(self) -> None:
+        if self._pipeline is not None:
+            await self._pipeline.aclose()
+        if self.storage is not None:
+            await self.storage.aclose()
+
+
+def _get_document_runtime() -> _DocumentRuntime:
+    """Compose replaceable document services without a DI framework."""
+
+    global _document_runtime
+    if _document_runtime is None:
+        from bothesis.db.engine import get_session_factory
+        from bothesis.document_index.raw_storage import S3DocumentStorage
+        from bothesis.services import (
+            DEFAULT_MAX_DATABASE_BLOB_BYTES,
+            DEFAULT_MAX_UPLOAD_BYTES,
+            DEFAULT_UPLOAD_URL_SECONDS,
+            ConversationService,
+            UploadService,
+        )
+
+        session_factory = get_session_factory()
+        bucket = (
+            os.getenv("BOTHESIS_S3_BUCKET")
+            or os.getenv("BOTHESIS_OBJECT_STORAGE_BUCKET")
+            or ""
+        ).strip()
+        endpoint_url = (
+            os.getenv("BOTHESIS_S3_ENDPOINT_URL")
+            or os.getenv("BOTHESIS_OBJECT_STORAGE_ENDPOINT")
+            or ""
+        ).strip()
+        if endpoint_url and not bucket:
+            raise RuntimeError("BOTHESIS_S3_BUCKET is required when S3 is configured")
+        storage = (
+            S3DocumentStorage(
+                bucket=bucket,
+                region=(
+                    os.getenv("BOTHESIS_S3_REGION")
+                    or os.getenv("AWS_REGION")
+                    or os.getenv("AWS_DEFAULT_REGION")
+                    or None
+                ),
+                endpoint_url=endpoint_url or None,
+                addressing_style=(
+                    os.getenv("BOTHESIS_S3_ADDRESSING_STYLE") or "auto"
+                ).strip(),
+                timeout_seconds=float(
+                    os.getenv("BOTHESIS_S3_TIMEOUT_SECONDS", "20")
+                ),
+                max_pool_connections=int(
+                    os.getenv("BOTHESIS_S3_MAX_POOL_CONNECTIONS", "20")
+                ),
+            )
+            if bucket
+            else None
+        )
+        _document_runtime = _DocumentRuntime(
+            uploads=UploadService(
+                session_factory,
+                object_storage=storage,
+                max_upload_bytes=int(
+                    os.getenv(
+                        "BOTHESIS_DOCUMENT_MAX_UPLOAD_BYTES",
+                        str(DEFAULT_MAX_UPLOAD_BYTES),
+                    )
+                ),
+                max_database_blob_bytes=int(
+                    os.getenv(
+                        "BOTHESIS_DOCUMENT_MAX_DATABASE_BLOB_BYTES",
+                        str(DEFAULT_MAX_DATABASE_BLOB_BYTES),
+                    )
+                ),
+                upload_url_seconds=int(
+                    os.getenv(
+                        "BOTHESIS_DOCUMENT_UPLOAD_URL_SECONDS",
+                        str(DEFAULT_UPLOAD_URL_SECONDS),
+                    )
+                ),
+            ),
+            conversations=ConversationService(session_factory),
+            session_factory=session_factory,
+            storage=storage,
+        )
+    return _document_runtime
+
+
+def _document_metadata(document: Any) -> DocumentMetadata:
+    return DocumentMetadata(
+        id=str(document.id),
+        file_name=str(document.metadata_.get("file_name") or document.title or "document"),
+        content_type=document.mime_type or "application/octet-stream",
+        size_bytes=document.size_bytes or 0,
+        upload_status=document.upload_status,
+        indexing_status=document.indexing_status,
+        created_at=document.created_at.isoformat(),
+        uploaded_at=(document.uploaded_at.isoformat() if document.uploaded_at else None),
+    )
+
+
+def _target_payload(target: Any | None) -> dict[str, Any] | None:
+    if target is None:
+        return None
+    request = target.request
+    return {
+        "mode": target.mode,
+        "url": request.url,
+        "method": request.method,
+        "headers": dict(request.headers),
+        "expires_at": request.expires_at.isoformat(),
+    }
+
+
+def _legacy_document_metadata(document: DocumentMetadata) -> dict[str, Any]:
+    direct = document.content_type in {
+        "image/png",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+        "application/pdf",
+    }
+    return {
+        "id": document.id,
+        "file_name": document.file_name,
+        "content_type": document.content_type,
+        "size_bytes": document.size_bytes,
+        "mode": "direct" if direct else "indexed",
+        "status": document.upload_status,
+        "created_at": document.created_at,
+    }
+
+
+def _document_http_error(exc: Exception) -> HTTPException:
+    from bothesis.services import (
+        AuthServiceError,
+        AuthorizationError,
+        DocumentNotFoundError,
+    )
+    from bothesis.document_index.raw_storage import ObjectStorageError
+    from bothesis.services import (
+        UploadConflictError,
+        UploadTooLargeError,
+        UploadValidationError,
+    )
+
+    if isinstance(exc, DocumentNotFoundError):
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    if isinstance(exc, UploadTooLargeError):
+        return HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc))
+    if isinstance(exc, UploadConflictError):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    if isinstance(exc, UploadValidationError):
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        )
+    if isinstance(exc, AuthorizationError):
+        return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+    if isinstance(exc, AuthServiceError):
+        return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+    if isinstance(exc, ObjectStorageError):
+        return HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="document storage is temporarily unavailable",
+        )
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="document service is not configured",
+    )
+
+
+async def _resolve_access(
+    request: Request,
+    session: AsyncSession,
+    *,
+    user_id: str | UUID | None = None,
+    tenant_id: str | UUID | None = None,
+) -> Any:
+    from bothesis.services.request_identity import resolve_auth_context
+
+    try:
+        return await resolve_auth_context(
+            request,
+            session,
+            claimed_user_id=user_id,
+            claimed_tenant_id=tenant_id,
+            allow_insecure_development_identity=_environment_boolean(
+                _INSECURE_DEVELOPMENT_IDENTITY_ENV
+            ),
+        )
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
+
+
+@attachments_router.post(
+    "/uploads",
+    status_code=status.HTTP_201_CREATED,
+    deprecated=True,
+)
+async def start_attachment_upload(
+    body: LegacyAttachmentUploadStart,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Deprecated compatibility alias for the Document upload API."""
+    try:
+        access = await _resolve_access(
+            request,
+            session,
+            user_id=body.user_id,
+            tenant_id=body.tenant_id,
+        )
+        result = await _get_document_runtime().uploads.start_upload(
+            access,
+            idempotency_key=idempotency_key or body.sha256 or uuid4().hex,
+            file_name=body.file_name,
+            content_type=body.content_type,
+            size_bytes=body.size_bytes,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
+    target = _target_payload(result.target)
+    if target and target["mode"] == "api" and str(target["url"]).startswith("/"):
+        target["url"] = (
+            f"{str(request.base_url).rstrip('/')}{target['url']}"
+            f"?tenant_id={body.tenant_id}&user_id={body.user_id}"
+        )
+    metadata = _document_metadata(result.document)
+    return {
+        "upload_id": str(result.document.id),
+        "upload_required": result.upload_required,
+        "upload": target,
+        "attachment": _legacy_document_metadata(metadata),
+    }
+
+
+@attachments_router.post(
+    "/uploads/{upload_id}/complete",
+    deprecated=True,
+)
+async def complete_attachment_upload(
+    upload_id: UUID,
+    body: LegacyAttachmentScope,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    try:
+        access = await _resolve_access(
+            request,
+            session,
+            user_id=body.user_id,
+            tenant_id=body.tenant_id,
+        )
+        document = await _get_document_runtime().uploads.complete_upload(
+            access,
+            upload_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
+    return _legacy_document_metadata(_document_metadata(document))
+
+
+@attachments_router.delete(
+    "/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    deprecated=True,
+)
+async def release_attachment(
+    attachment_id: UUID,
+    request: Request,
+    tenant_id: str = Query(min_length=1, max_length=256),
+    user_id: str = Query(min_length=1, max_length=256),
+    conversation_id: str | None = Query(default=None, min_length=1, max_length=256),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    try:
+        access = await _resolve_access(
+            request,
+            session,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+        await _get_document_runtime().pipeline.soft_delete_document(
+            attachment_id,
+            access=access,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
 
 
 @agent_router.post("/chat")
-async def chat_stream(body: ChatRequest) -> StreamingResponse:
+async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
     """Return the agent event stream as server-sent events."""
     from bothesis.agent.models import AgentContext, ConversationMessage
+    from bothesis.db.engine import get_session_factory
 
     request_id = uuid4().hex
+    conversation_id = _conversation_id(body.conversation_id)
+    try:
+        async with get_session_factory()() as auth_session:
+            access = await _resolve_access(
+                request,
+                auth_session,
+                user_id=body.user_id,
+                tenant_id=body.tenant_id,
+            )
+    except HTTPException:
+        raise
+    if access.tenant_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="an active tenant membership is required for chat",
+        )
     context = AgentContext(
-        user_id=body.user_id,
-        tenant_id=body.tenant_id,
-        roles=body.roles,
-        conversation_id=body.conversation_id,
+        user_id=str(access.user_id),
+        tenant_id=str(access.tenant_id),
+        roles=[access.role_code] if access.role_code else [],
+        reader_ids=tuple(
+            sorted(
+                {
+                    f"email:{access.email.strip().lower()}",
+                    *(
+                        token.strip().lower()
+                        for token in access.principal_tokens
+                        if token.strip()
+                    ),
+                }
+            )
+        ),
+        is_admin=access.is_admin,
+        conversation_id=str(conversation_id),
         request_id=request_id,
         history=tuple(
             ConversationMessage(role=message.role, content=message.content)
@@ -492,7 +1055,7 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
         ),
     )
     try:
-        loop = _get_agent_loop()
+        agent = _get_agent()
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -500,10 +1063,14 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
         ) from exc
 
     async def event_gen():
-        async for event in loop.run_stream(body.message, context):
-            event_data = _public_agent_event_data(event)
-            payload = {"type": event.type, **event_data}
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        stream = agent.run(body.message, context)
+        try:
+            async for event in stream:
+                if await request.is_disconnected():
+                    break
+                yield f"data: {event.model_dump_json()}\n\n"
+        finally:
+            await stream.aclose()
 
     return StreamingResponse(
         event_gen(),
@@ -515,30 +1082,16 @@ async def chat_stream(body: ChatRequest) -> StreamingResponse:
     )
 
 
-def _public_agent_event_data(event: object) -> dict[str, Any]:
-    """Remove private correlation data and empty optional fields from SSE."""
-
-    event_data = _without_none(dataclasses.asdict(event))
-    event_data.pop("request_id", None)
-    event_data.pop("call_id", None)
-    event_data.pop("arguments", None)
-    evidence = event_data.get("evidence")
-    if isinstance(evidence, dict):
-        evidence.pop("document_id", None)
-        evidence.pop("relevance_score", None)
-    return event_data
-
-
-def _without_none(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: _without_none(item)
-            for key, item in value.items()
-            if item is not None
-        }
-    if isinstance(value, list):
-        return [_without_none(item) for item in value]
-    return value
+def _conversation_id(value: str | None) -> UUID:
+    if value is None:
+        return uuid4()
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="conversation_id must be a UUID",
+        ) from exc
 
 
 @agent_router.post(
@@ -681,6 +1234,117 @@ async def get_sync_status(
 documents_router = APIRouter(prefix="/documents", tags=["documents"])
 
 
+@documents_router.post(
+    "/uploads",
+    response_model=DocumentUploadStartResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def start_document_upload(
+    body: DocumentUploadStartRequest,
+    request: Request,
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=128,
+        alias="Idempotency-Key",
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> DocumentUploadStartResponse:
+    """Commit uploader-private metadata before returning any binary target."""
+
+    try:
+        access = await _resolve_access(request, session)
+        result = await _get_document_runtime().uploads.start_upload(
+            access,
+            idempotency_key=idempotency_key,
+            file_name=body.file_name,
+            content_type=body.content_type,
+            size_bytes=body.size_bytes,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
+    return DocumentUploadStartResponse(
+        upload_required=result.upload_required,
+        target=(
+            DocumentUploadTarget.model_validate(_target_payload(result.target))
+            if result.target is not None
+            else None
+        ),
+        document=_document_metadata(result.document),
+    )
+
+
+@documents_router.put(
+    "/{document_id}/content",
+    response_model=DocumentMetadata,
+)
+async def store_document_content(
+    document_id: UUID,
+    request: Request,
+    tenant_id: str | None = Query(default=None, min_length=1, max_length=256),
+    user_id: str | None = Query(default=None, min_length=1, max_length=256),
+    session: AsyncSession = Depends(get_session),
+) -> DocumentMetadata:
+    """Bounded PostgreSQL fallback; normal large uploads use presigned PUT."""
+
+    try:
+        access = await _resolve_access(
+            request,
+            session,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+        uploads = _get_document_runtime().uploads
+        document = await uploads.get_document(access, document_id)
+        request_type = request.headers.get("content-type", "").split(";", 1)[0].casefold()
+        if request_type and request_type != (document.mime_type or "").casefold():
+            from bothesis.services import UploadValidationError
+
+            raise UploadValidationError("uploaded content type does not match document metadata")
+        content = bytearray()
+        async for chunk in request.stream():
+            if len(content) + len(chunk) > uploads.max_database_blob_bytes:
+                from bothesis.services import UploadTooLargeError
+
+                raise UploadTooLargeError(
+                    "API upload exceeds the PostgreSQL fallback limit"
+                )
+            content.extend(chunk)
+        stored = await uploads.store_fallback_content(
+            access,
+            document_id,
+            bytes(content),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
+    return _document_metadata(stored)
+
+
+@documents_router.post(
+    "/{document_id}/complete",
+    response_model=DocumentMetadata,
+)
+async def complete_document_upload(
+    document_id: UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> DocumentMetadata:
+    try:
+        access = await _resolve_access(request, session)
+        document = await _get_document_runtime().uploads.complete_upload(
+            access,
+            document_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
+    return _document_metadata(document)
+
+
 @documents_router.post("/search", response_model=SearchResponse)
 async def search_documents(
     body: SearchRequest, current_user: UserProfile = Depends(get_current_user)
@@ -701,20 +1365,38 @@ async def ingest_document(
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
-@documents_router.get("/{doc_id}", response_model=DocumentDetail)
+@documents_router.get("/{doc_id}", response_model=DocumentMetadata)
 async def get_document(
-    doc_id: UUID, current_user: UserProfile = Depends(get_current_user)
-) -> DocumentDetail:
-    # return await document_index_service.get(current_user, doc_id)
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
+    doc_id: UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> DocumentMetadata:
+    try:
+        access = await _resolve_access(request, session)
+        document = await _get_document_runtime().uploads.get_document(access, doc_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
+    return _document_metadata(document)
 
 
 @documents_router.delete("/{doc_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(
-    doc_id: UUID, current_user: UserProfile = Depends(get_current_user)
+    doc_id: UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
 ) -> None:
-    # await document_index_service.delete(current_user, doc_id)
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
+    try:
+        access = await _resolve_access(request, session)
+        await _get_document_runtime().pipeline.soft_delete_document(
+            doc_id,
+            access=access,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -824,10 +1506,21 @@ async def compute_metric(
 # App assembly
 # ---------------------------------------------------------------------------
 
+
+@asynccontextmanager
+async def _app_lifespan(_: FastAPI):
+    try:
+        yield
+    finally:
+        if _document_runtime is not None:
+            await _document_runtime.aclose()
+
+
 app = FastAPI(
     title="BoThesis API",
     version="0.1.0",
     description="Enterprise knowledge and BI assistant.",
+    lifespan=_app_lifespan,
 )
 
 app.add_middleware(
@@ -842,6 +1535,7 @@ _PREFIX = "/api/v1"
 app.include_router(auth_router, prefix=_PREFIX)
 app.include_router(access_router, prefix=_PREFIX)
 app.include_router(agent_router, prefix=_PREFIX)
+app.include_router(attachments_router, prefix=_PREFIX)
 app.include_router(connectors_router, prefix=_PREFIX)
 app.include_router(documents_router, prefix=_PREFIX)
 app.include_router(crons_router, prefix=_PREFIX)
@@ -849,7 +1543,30 @@ app.include_router(bi_router, prefix=_PREFIX)
 
 
 def _get_health_service() -> HealthService:
-    return HealthService.from_environment()
+    return HealthService(
+        HealthSettings(
+            qdrant_url=os.getenv("QDRANT_URL") or None,
+            qdrant_api_key=os.getenv("QDRANT_API_KEY") or None,
+            qdrant_collection=os.getenv("QDRANT_COLLECTION") or None,
+            openai_base_url=(
+                os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1"
+            ),
+            openai_api_key=os.getenv("OPENAI_API_KEY") or None,
+            openrouter_base_url=(
+                os.getenv("OPEN_ROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
+            ),
+            openrouter_api_key=os.getenv("OPENROUTER_API_KEY") or None,
+            chat_model=os.getenv("OPENAI_MODEL") or None,
+            embedding_model=os.getenv("EMBEDDING_MODEL") or None,
+            langfuse_base_url=(
+                os.getenv("LANGFUSE_BASE_URL")
+                or os.getenv("LANGFUSE_HOST")
+                or "https://cloud.langfuse.com"
+            ),
+            langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY") or None,
+            langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY") or None,
+        )
+    )
 
 
 @app.get(

@@ -9,17 +9,22 @@ import {
   ListChecks,
   LoaderCircle,
   Menu,
-  PanelRight,
   Plus,
   RefreshCw,
   Send,
+  ShieldCheck,
   Sparkles,
   Square,
+  X,
 } from "lucide-react";
-import { memo, type FormEvent, type MouseEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
+import {
+  releaseConversationDocument,
+  uploadConversationDocument,
+} from "@/modules/chat/api";
 import {
   cachedToUIMessage,
   conversationAdapter,
@@ -30,10 +35,14 @@ import {
 } from "@/modules/chat/conversations";
 import { useBothesisChat } from "@/modules/chat/hooks/useBothesisChat";
 import { useSidebarState } from "@/modules/chat/hooks/useSidebarState";
-import type { ChatConversation, ChatMessage, ChatMessagePart } from "@/modules/chat/types";
-import { AgentActivityPanel, AgentExecutionCard } from "./AgentExecutionCard";
+import type {
+  ChatConversation,
+  ChatMessage,
+  ChatMessagePart,
+  ConversationDocument,
+} from "@/modules/chat/types";
 import { AppSidebar, BothesisMark } from "./AppSidebar";
-import { IncrementalMarkdown } from "./IncrementalMarkdown";
+import { AssistantTurn } from "./AssistantTurn";
 
 const suggestions = [
   {
@@ -62,8 +71,17 @@ const suggestions = [
   },
 ];
 
+interface ComposerDocument {
+  key: string;
+  fileName: string;
+  sizeBytes: number;
+  progress: "starting" | "uploading" | "validating" | "ready" | "failed";
+  document?: ConversationDocument;
+  error?: string;
+}
+
 function createDraftConversationId() {
-  return `draft-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return globalThis.crypto.randomUUID();
 }
 
 export default function ChatShell() {
@@ -115,6 +133,17 @@ export default function ChatShell() {
   }, [refresh, sidebar]);
 
   const deleteConversation = useCallback(async (id: string) => {
+    const storedMessages = await conversationAdapter.getConversationMessages(id);
+    const documentIds = new Set(
+      storedMessages.flatMap((message) => message.parts.flatMap((part) => (
+        part.type === "data-document" ? [part.data.id] : []
+      ))),
+    );
+    await Promise.allSettled(
+      [...documentIds].map((documentId) => (
+        releaseConversationDocument(documentId)
+      )),
+    );
     await conversationAdapter.deleteConversation(id);
     await refresh(id === activeId ? undefined : activeId);
   }, [activeId, refresh]);
@@ -204,16 +233,11 @@ function ChatConversation({
   onOpenSidebar: () => void;
 }) {
   const [input, setInput] = useState("");
-  const [sourceFocus, setSourceFocus] = useState<{
-    messageId: string;
-    sourceId: string;
-    nonce: number;
-  } | null>(null);
-  const [activityOpen, setActivityOpen] = useState(false);
-  const [selectedActivityMessageId, setSelectedActivityMessageId] = useState<string | null>(null);
+  const [composerAttachments, setComposerAttachments] = useState<ComposerDocument[]>([]);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const messageStackRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const uploadControllersRef = useRef(new Map<string, AbortController>());
   const positionedTurnRef = useRef<string | null>(null);
   const didInitialScrollRef = useRef(false);
   const {
@@ -244,18 +268,17 @@ function ChatConversation({
   const activeTurnId = latestUserMessageId && activeAssistantMessageId
     ? `${latestUserMessageId}:${activeAssistantMessageId}`
     : null;
-  const latestAssistantMessage = [...messages]
-    .reverse()
-    .find((message) => message.role === "assistant");
-  const selectedActivityMessage = messages.find(
-    (message) => message.id === selectedActivityMessageId && message.role === "assistant",
-  ) ?? latestAssistantMessage;
-  const selectedActivityIsStreaming = Boolean(
-    isStreaming && selectedActivityMessage?.id === activeAssistantMessageId,
-  );
   const hasMessageError = messages.some((message) => (
     message.parts.some((part) => part.type === "data-stream-error")
   ));
+  const isUploading = composerAttachments.some((item) => (
+    item.progress !== "ready" && item.progress !== "failed"
+  ));
+
+  useEffect(() => () => {
+    for (const controller of uploadControllersRef.current.values()) controller.abort();
+    uploadControllersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -263,15 +286,6 @@ function ChatConversation({
     textarea.style.height = "0px";
     textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px`;
   }, [input]);
-
-  useEffect(() => {
-    if (activeAssistantMessageId) setSelectedActivityMessageId(activeAssistantMessageId);
-  }, [activeAssistantMessageId]);
-
-  useEffect(() => {
-    if (selectedActivityMessageId || !latestAssistantMessage) return;
-    setSelectedActivityMessageId(latestAssistantMessage.id);
-  }, [latestAssistantMessage, selectedActivityMessageId]);
 
   useLayoutEffect(() => {
     if (!activeTurnId || positionedTurnRef.current === activeTurnId) return;
@@ -315,33 +329,67 @@ function ChatConversation({
   }, [messages.length]);
 
   const submit = useCallback(async (value: string) => {
-    const text = value.trim();
-    if (!text || isStreaming || !isConfigured) return;
+    const readyDocuments = composerAttachments
+      .flatMap((item) => item.document ? [item.document] : []);
+    const text = value.trim() || (readyDocuments.length
+      ? "Please analyze the attached file."
+      : "");
+    if (!text || isUploading || isStreaming || !isConfigured) return;
     clearError();
     setInput("");
-    await sendMessage({ text });
-  }, [clearError, isConfigured, isStreaming, sendMessage]);
+    setComposerAttachments([]);
+    await sendMessage({ text, documents: readyDocuments });
+  }, [
+    clearError,
+    composerAttachments,
+    isConfigured,
+    isStreaming,
+    isUploading,
+    sendMessage,
+  ]);
 
-  const focusSource = useCallback((messageId: string, sourceId: string) => {
-    setSelectedActivityMessageId(messageId);
-    setActivityOpen(true);
-    setSourceFocus((current) => ({
-      messageId,
-      sourceId,
-      nonce: (current?.nonce ?? 0) + 1,
-    }));
-  }, []);
+  const selectAttachments = useCallback((files: FileList) => {
+    const availableSlots = Math.max(0, 12 - composerAttachments.length);
+    for (const file of Array.from(files).slice(0, availableSlots)) {
+      const key = `${file.name}:${file.size}:${file.lastModified}:${Math.random().toString(36).slice(2)}`;
+      const controller = new AbortController();
+      uploadControllersRef.current.set(key, controller);
+      setComposerAttachments((current) => [...current, {
+        key,
+        fileName: file.name,
+        sizeBytes: file.size,
+        progress: "starting",
+      }]);
+      void uploadConversationDocument(file, {
+        signal: controller.signal,
+        onProgress: (progress) => setComposerAttachments((current) => (
+          current.map((item) => item.key === key ? { ...item, progress } : item)
+        )),
+      }).then((document) => {
+        setComposerAttachments((current) => current.map((item) => (
+          item.key === key ? { ...item, document, progress: "ready" } : item
+        )));
+      }).catch((cause) => {
+        if (controller.signal.aborted) return;
+        const message = cause instanceof Error ? cause.message : "Document upload failed.";
+        setComposerAttachments((current) => current.map((item) => (
+          item.key === key ? { ...item, error: message, progress: "failed" } : item
+        )));
+      }).finally(() => {
+        uploadControllersRef.current.delete(key);
+      });
+    }
+  }, [composerAttachments.length]);
 
-  const openActivity = useCallback((messageId?: string) => {
-    const targetId = messageId ?? activeAssistantMessageId ?? latestAssistantMessage?.id;
-    if (targetId) setSelectedActivityMessageId(targetId);
-    setSourceFocus(null);
-    setActivityOpen(true);
-  }, [activeAssistantMessageId, latestAssistantMessage?.id]);
-
-  const closeActivity = useCallback(() => {
-    setActivityOpen(false);
-  }, []);
+  const removeAttachment = useCallback((key: string) => {
+    const item = composerAttachments.find((candidate) => candidate.key === key);
+    uploadControllersRef.current.get(key)?.abort();
+    uploadControllersRef.current.delete(key);
+    setComposerAttachments((current) => current.filter((candidate) => candidate.key !== key));
+    if (item?.document) {
+      void releaseConversationDocument(item.document.id);
+    }
+  }, [composerAttachments]);
 
   const handleRegenerate = useCallback((messageId: string) => {
     void regenerate({ messageId });
@@ -360,25 +408,16 @@ function ChatConversation({
             <Menu size={18} />
           </button>
           <div className="topbar__title-wrap">
-            <h1 title={conversationTitle ?? "Knowledge Agent"}>{conversationTitle ?? "Knowledge Agent"}</h1>
+            <span className="topbar__identity-mark"><BothesisMark decorative /></span>
+            <span className="topbar__title-copy">
+              <span className="topbar__eyebrow">Knowledge assistant</span>
+              <h1 title={conversationTitle ?? "New conversation"}>{conversationTitle ?? "New conversation"}</h1>
+            </span>
           </div>
-        </div>
-        <div className="topbar__actions">
-          <button
-            aria-label="Open activity and sources"
-            aria-pressed={activityOpen}
-            className="topbar__activity"
-            onClick={() => openActivity()}
-            type="button"
-          >
-            <PanelRight aria-hidden="true" size={15} />
-            <span>Activity</span>
-            {isStreaming && <LoaderCircle aria-hidden="true" className="topbar__activity-spin" size={12} />}
-          </button>
         </div>
       </header>
 
-      <div className={clsx("chat-activity-layout", activityOpen && "chat-activity-layout--open")}>
+      <div className="chat-activity-layout">
         <div className="conversation-pane">
           <div
             className="chat-scroll"
@@ -392,8 +431,6 @@ function ChatConversation({
                   isStreaming={isStreaming}
                   lastMessageId={lastMessage?.id}
                   messages={messages}
-                  onActivity={openActivity}
-                  onCitation={focusSource}
                   onRegenerate={handleRegenerate}
                   stackRef={messageStackRef}
                 />
@@ -408,35 +445,19 @@ function ChatConversation({
             </div>
           )}
           <ChatComposer
+            attachments={composerAttachments}
             input={input}
             isConfigured={isConfigured}
             isStreaming={isStreaming}
+            isUploading={isUploading}
             onChange={setInput}
+            onFiles={selectAttachments}
+            onRemoveAttachment={removeAttachment}
             onStop={stop}
             onSubmit={submit}
             textareaRef={textareaRef}
           />
         </div>
-        {activityOpen && (
-          <>
-            <button
-              aria-label="Close activity"
-              className="activity-panel-overlay"
-              onClick={closeActivity}
-              type="button"
-            />
-            <AgentActivityPanel
-              isStreaming={selectedActivityIsStreaming}
-              message={selectedActivityMessage}
-              onClose={closeActivity}
-              sourceFocus={
-                sourceFocus && sourceFocus.messageId === selectedActivityMessage?.id
-                  ? sourceFocus
-                  : undefined
-              }
-            />
-          </>
-        )}
       </div>
     </section>
   );
@@ -446,16 +467,12 @@ function MessageList({
   isStreaming,
   lastMessageId,
   messages,
-  onActivity,
-  onCitation,
   onRegenerate,
   stackRef,
 }: {
   isStreaming: boolean;
   lastMessageId?: string;
   messages: ChatMessage[];
-  onActivity: (messageId?: string) => void;
-  onCitation: (messageId: string, sourceId: string) => void;
   onRegenerate: (messageId: string) => void;
   stackRef: RefObject<HTMLDivElement | null>;
 }) {
@@ -466,8 +483,6 @@ function MessageList({
           isStreaming={isStreaming && message.id === lastMessageId}
           key={message.id}
           message={message}
-          onActivity={onActivity}
-          onCitation={onCitation}
           onRegenerate={onRegenerate}
         />
       ))}
@@ -478,14 +493,10 @@ function MessageList({
 const MessageView = memo(function MessageView({
   isStreaming,
   message,
-  onActivity,
-  onCitation,
   onRegenerate,
 }: {
   isStreaming: boolean;
   message: ChatMessage;
-  onActivity: (messageId?: string) => void;
-  onCitation: (messageId: string, sourceId: string) => void;
   onRegenerate: (messageId: string) => void;
 }) {
   const { copy, copied } = useClipboard();
@@ -493,30 +504,43 @@ const MessageView = memo(function MessageView({
   const streamError = message.parts.find(
     (part): part is Extract<ChatMessagePart, { type: "data-stream-error" }> => part.type === "data-stream-error",
   );
+  const messageDocuments = message.parts
+    .filter((part): part is Extract<ChatMessagePart, { type: "data-document" }> => (
+      part.type === "data-document"
+    ));
 
   if (message.role === "user") {
-    return <div className="message-row user" data-chat-role="user"><div className="user-bubble">{text}</div></div>;
+    return (
+      <div className="message-row user" data-chat-role="user">
+        <div className="user-bubble">
+          {messageDocuments.length > 0 && (
+            <div className="message-attachments">
+              {messageDocuments.map((part) => (
+                <span className="message-attachment" key={part.data.id}>
+                  <FileSearch aria-hidden="true" size={13} />
+                  <span title={part.data.fileName}>{part.data.fileName}</span>
+                </span>
+              ))}
+            </div>
+          )}
+          {text && <span>{text}</span>}
+        </div>
+      </div>
+    );
   }
 
   return (
     <div className="message-row assistant">
       <div className="avatar avatar--assistant"><BothesisMark className="bothesis-mark--avatar" label="Assistant" /></div>
       <div className="message-body">
-        <AgentExecutionCard
+        <div className="assistant-byline">
+          <strong>BoThesis</strong>
+        </div>
+        <AssistantTurn
           isStreaming={isStreaming}
-          message={message}
-          onOpen={() => onActivity(message.id)}
+          parts={message.parts}
+          runtime={message.runtime}
         />
-        {text && (
-          <div
-            className="assistant-content"
-            data-latest-assistant-answer={isStreaming ? "true" : undefined}
-            onClick={(event) => handleCitationClick(event, message.id, onCitation)}
-          >
-            <div className="answer-detail"><IncrementalMarkdown isStreaming={isStreaming} text={text} /></div>
-            {isStreaming && <span className="streaming-cursor" />}
-          </div>
-        )}
         {streamError && <div className="error-box">{streamError.data.message}</div>}
         {!isStreaming && (text || streamError) && (
           <div className="answer-footer">
@@ -550,41 +574,32 @@ function reserveActiveTurnSpace(scroller: HTMLDivElement, stack: HTMLDivElement)
   stack.style.setProperty("--chat-active-fill", `${reservedHeight}px`);
 }
 
-function handleCitationClick(
-  event: MouseEvent<HTMLDivElement>,
-  messageId: string,
-  onCitation: (messageId: string, sourceId: string) => void,
-) {
-  const target = event.target;
-  if (!(target instanceof Element)) return;
-  const link = target.closest<HTMLAnchorElement>('a[href^="#source-"]');
-  const href = link?.getAttribute("href");
-  if (!href) return;
-  event.preventDefault();
-  try {
-    onCitation(messageId, decodeURIComponent(href.slice("#source-".length)));
-  } catch {
-    // Ignore malformed local citation anchors.
-  }
-}
-
 function ChatComposer({
+  attachments,
   input,
   isConfigured,
   isStreaming,
+  isUploading,
   onChange,
+  onFiles,
+  onRemoveAttachment,
   onStop,
   onSubmit,
   textareaRef,
 }: {
+  attachments: ComposerDocument[];
   input: string;
   isConfigured: boolean;
   isStreaming: boolean;
+  isUploading: boolean;
   onChange: (value: string) => void;
+  onFiles: (files: FileList) => void;
+  onRemoveAttachment: (key: string) => void;
   onStop: () => void;
   onSubmit: (text: string) => Promise<void>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
 }) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     await onSubmit(input);
@@ -592,9 +607,44 @@ function ChatComposer({
   return (
     <div className="composer-wrap">
       <form className="composer" onSubmit={submit}>
-        <button aria-label="Attachments are not available" className="composer-tool" disabled title="Attachments are not available yet" type="button">
-          <Plus size={15} />
-        </button>
+        {attachments.length > 0 && (
+          <div className="composer-attachments">
+            {attachments.map((item) => (
+              <span
+                className={clsx(
+                  "composer-attachment",
+                  item.progress === "failed" && "composer-attachment--failed",
+                )}
+                key={item.key}
+                title={item.error ?? item.fileName}
+              >
+                {item.progress !== "ready" && item.progress !== "failed"
+                  ? <LoaderCircle aria-hidden="true" className="composer-attachment__spin" size={13} />
+                  : <FileSearch aria-hidden="true" size={13} />}
+                <span>{item.fileName}</span>
+                <small>{attachmentProgressLabel(item)}</small>
+                <button
+                  aria-label={`Remove ${item.fileName}`}
+                  onClick={() => onRemoveAttachment(item.key)}
+                  type="button"
+                >
+                  <X aria-hidden="true" size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <input
+          accept=".avif,.bmp,.csv,.docx,.gif,.htm,.html,.jpeg,.jpg,.json,.jsonl,.log,.markdown,.md,.pdf,.png,.pptx,.rst,.sql,.tif,.tiff,.tsv,.txt,.webp,.xlsx,.xml,.yaml,.yml"
+          hidden
+          multiple
+          onChange={(event) => {
+            if (event.target.files?.length) onFiles(event.target.files);
+            event.target.value = "";
+          }}
+          ref={fileInputRef}
+          type="file"
+        />
         <textarea
           aria-label="Message assistant"
           disabled={isStreaming || !isConfigured}
@@ -605,34 +655,76 @@ function ChatComposer({
               void onSubmit(input);
             }
           }}
-          placeholder="Ask about reports, risks, metrics, or decisions..."
+          placeholder="Ask a question about your company knowledge..."
           ref={textareaRef}
           rows={1}
           value={input}
         />
-        <button
-          aria-label={isStreaming ? "Stop generating" : "Send message"}
-          className={clsx("composer-send", isStreaming && "composer-send--stop")}
-          disabled={!isStreaming && (!input.trim() || !isConfigured)}
-          onClick={isStreaming ? onStop : undefined}
-          type={isStreaming ? "button" : "submit"}
-        >
-          {isStreaming ? <Square className="composer-send__stop-icon" size={11} strokeWidth={0} /> : <Send className="composer-send__send-icon" size={18} />}
-        </button>
+        <div className="composer__footer">
+          <button
+            aria-label="Attach files"
+            className="composer-tool"
+            disabled={isStreaming || !isConfigured || attachments.length >= 12}
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach files"
+            type="button"
+          >
+            <Plus size={16} />
+            <span>Attach</span>
+          </button>
+          <span className="composer__privacy"><ShieldCheck aria-hidden="true" size={13} /> Permission-aware</span>
+          <span className="composer__shortcut">Enter to send · Shift + Enter for new line</span>
+          <button
+            aria-label={isStreaming ? "Stop generating" : "Send message"}
+            className={clsx("composer-send", isStreaming && "composer-send--stop")}
+            disabled={!isStreaming && (
+              isUploading
+              || (!input.trim() && !attachments.some((item) => item.progress === "ready"))
+              || !isConfigured
+            )}
+            onClick={isStreaming ? onStop : undefined}
+            type={isStreaming ? "button" : "submit"}
+          >
+            {isStreaming ? <Square className="composer-send__stop-icon" size={11} strokeWidth={0} /> : <Send className="composer-send__send-icon" size={17} />}
+          </button>
+        </div>
       </form>
+      <p className="composer-disclaimer">BoThesis can make mistakes. Verify important decisions with the cited sources.</p>
     </div>
   );
+}
+
+function attachmentProgressLabel(item: ComposerDocument) {
+  if (item.progress === "starting") return "Starting";
+  if (item.progress === "uploading") return "Uploading";
+  if (item.progress === "validating") return "Validating";
+  if (item.progress === "failed") return "Failed";
+  return formatFileSize(item.sizeBytes);
+}
+
+function formatFileSize(sizeBytes: number) {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${Math.ceil(sizeBytes / 1024)} KB`;
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
   return (
     <div className="welcome">
       <div className="welcome__content">
-        <div className="welcome-heading">
-          <BothesisMark className="bothesis-mark--welcome" decorative />
-          <div><p className="welcome-eyebrow">Enterprise assistant</p><h2>How can I help?</h2></div>
+        <div className="welcome-hero">
+          <span className="welcome-hero__mark"><BothesisMark className="bothesis-mark--welcome" decorative /></span>
+          <div className="welcome-heading">
+            <p className="welcome-eyebrow">Your enterprise knowledge partner</p>
+            <h2>What would you like to understand?</h2>
+          </div>
+          <p className="welcome-copy">Ask BoThesis to find trusted context, compare business signals, or turn what your organization knows into a clear next step.</p>
+          <div className="welcome-trust" aria-label="Assistant capabilities">
+            <span><ShieldCheck aria-hidden="true" size={14} /> Permission-aware</span>
+            <span><FileSearch aria-hidden="true" size={14} /> Source-backed answers</span>
+          </div>
         </div>
-        <p className="welcome-copy">Ask a question, request a summary, or draft a decision memo from knowledge you can access.</p>
+        <p className="suggestions__label">Try a starting point</p>
         <div className="suggestions">
           {suggestions.map((suggestion) => (
             <button className="suggestion" key={suggestion.title} onClick={() => void onSelect(suggestion.prompt)} type="button">

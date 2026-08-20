@@ -11,12 +11,17 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import os
-from collections.abc import Iterable, Mapping
-from typing import Any, Protocol
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client import models as qmodels
+
+from bothesis.agent.models import Evidence
+from bothesis.connector.qdrant import ChunkKind, QdrantChunkPayload
+from bothesis.db.models import Document, DocumentChunk
+from bothesis.services import AuthContext
 
 log = logging.getLogger(__name__)
 
@@ -24,22 +29,6 @@ ACL_FIELD = "access_control_list"
 NO_READER_IDS = "__no_reader_ids__"
 _NO_TENANT_ID = "__no_tenant_id__"
 _SEARCH_RETRY_DELAYS = (0.5, 1.0)
-
-
-class QdrantSettings(Protocol):
-    """The small configuration contract required by :class:`VectorStore`."""
-
-    qdrant_url: str
-    qdrant_collection: str
-    qdrant_api_key: str | None
-    qdrant_prefer_grpc: bool
-
-
-def _required_environment_value(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"{name} is not configured")
-    return value
 
 
 def _qdrant_json_path_segment(value: str) -> str:
@@ -136,44 +125,6 @@ class VectorStore:
         self._timeout = timeout
         self._check_compatibility = check_compatibility
 
-    @classmethod
-    def from_settings(
-        cls,
-        config: QdrantSettings,
-        *,
-        timeout: int | float | None = 60,
-    ) -> VectorStore:
-        """Create a store from an application-owned configuration object.
-
-        Configuration stays at the composition boundary. This module does not
-        read environment variables or depend on a project-wide settings
-        singleton.
-        """
-
-        return cls(
-            collection_name=config.qdrant_collection,
-            url=config.qdrant_url,
-            api_key=config.qdrant_api_key,
-            prefer_grpc=config.qdrant_prefer_grpc,
-            timeout=timeout,
-        )
-
-    @classmethod
-    def from_environment(
-        cls,
-        *,
-        timeout: int | float | None = 60,
-    ) -> VectorStore:
-        """Create a store from the backend's Qdrant environment variables."""
-
-        return cls(
-            collection_name=_required_environment_value("QDRANT_COLLECTION"),
-            url=_required_environment_value("QDRANT_URL"),
-            api_key=os.getenv("QDRANT_API_KEY") or None,
-            prefer_grpc=os.getenv("QDRANT_PREFER_GRPC") == "true",
-            timeout=timeout,
-        )
-
     @property
     def client(self) -> Any:
         if self._client is None:
@@ -199,6 +150,16 @@ class VectorStore:
         if self._collection_name:
             return self._collection_name
         raise RuntimeError("Qdrant collection is not configured")
+
+    async def aclose(self) -> None:
+        if self._client is None:
+            return
+        close = getattr(self._client, "close", None)
+        if close is None:
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
     async def upsert_points(
         self,
@@ -744,6 +705,22 @@ class VectorStore:
 
         return qmodels.Filter(must=conditions)
 
+    @staticmethod
+    def build_lifecycle_filter(
+        *,
+        is_deleted_field: str = "is_deleted",
+    ) -> qmodels.Filter:
+        """Exclude tombstones when a caller applies no access-scope filter."""
+
+        return qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key=is_deleted_field,
+                    match=qmodels.MatchValue(value=False),
+                )
+            ]
+        )
+
     @classmethod
     def build_access_filter(
         cls,
@@ -751,7 +728,7 @@ class VectorStore:
         tenant_id: str,
         reader_ids: list[str] | set[str] | None = None,
         space_keys: list[str] | set[str] | None = None,
-        is_admin: bool = False,
+        is_admin: bool = True,
         is_deleted_field: str = "is_deleted",
         tenant_id_field: str = "tenant_id",
     ) -> qmodels.Filter:
@@ -792,7 +769,7 @@ class VectorStore:
         tenant_id: str,
         reader_ids: Iterable[str],
         space_keys: Iterable[str] | None = None,
-        is_admin: bool = False,
+        is_admin: bool = True,
         is_deleted_field: str = "is_deleted",
         tenant_id_field: str = "tenant_id",
     ) -> list[Any]:
@@ -974,3 +951,183 @@ class VectorStore:
         if inspect.isawaitable(value):
             return await value
         return value
+
+
+class QdrantDocumentIndex:
+    """Store canonical PostgreSQL chunks in the derived Qdrant index."""
+
+    def __init__(self, store: VectorStore) -> None:
+        self._store = store
+
+    async def replace_document(
+        self,
+        document: Document,
+        chunks: Sequence[DocumentChunk],
+        vectors: Sequence[Sequence[float]],
+        *,
+        access: AuthContext,
+        embedding_model: str,
+        source_fingerprint: str,
+    ) -> None:
+        if access.tenant_id is None:
+            raise ValueError("indexed chat documents require an active tenant")
+        if len(chunks) != len(vectors) or not chunks:
+            raise ValueError("every canonical chunk requires one embedding")
+
+        await self._store.soft_delete_document_points(str(document.id))
+        points = [
+            qmodels.PointStruct(
+                id=_document_point_id(document.id, chunk.chunk_index),
+                vector={"content": list(vector)},
+                payload=_document_payload(
+                    document,
+                    chunk,
+                    access=access,
+                    embedding_model=embedding_model,
+                    source_fingerprint=source_fingerprint,
+                ),
+            )
+            for chunk, vector in zip(chunks, vectors, strict=True)
+        ]
+        await self._store.upsert_points(points)
+
+    async def search_document(
+        self,
+        document: Document,
+        query_vector: list[float],
+        *,
+        access: AuthContext,
+        limit: int,
+    ) -> tuple[Evidence, ...]:
+        if access.tenant_id is None:
+            return ()
+        base_filter = self._store.build_access_filter(
+            tenant_id=str(access.tenant_id),
+            reader_ids={str(access.user_id)},
+        )
+        query_filter = qmodels.Filter(
+            must=[
+                *(base_filter.must or []),
+                qmodels.FieldCondition(
+                    key="document_id",
+                    match=qmodels.MatchValue(value=str(document.id)),
+                ),
+            ]
+        )
+        points = await self._store.semantic_search(
+            query_vector,
+            query_filter=query_filter,
+            limit=limit,
+            title_vector_name=None,
+            log_label="uploaded-document-search",
+        )
+        evidence: list[Evidence] = []
+        for point in points:
+            payload = getattr(point, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+            content = payload.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            raw_score = getattr(point, "score", None)
+            score = float(raw_score) if isinstance(raw_score, (int, float)) else None
+            evidence.append(
+                Evidence(
+                    id=str(getattr(point, "id", ""))
+                    or _document_point_id(
+                        document.id,
+                        int(payload.get("chunk_index") or 0),
+                    ),
+                    document_id=str(document.id),
+                    title=str(payload.get("title") or document.title or document.id),
+                    content=content,
+                    page=(
+                        str(payload["page_number"])
+                        if payload.get("page_number") is not None
+                        else None
+                    ),
+                    section=_document_section(payload),
+                    uri=None,
+                    source="upload",
+                    relevance_score=score,
+                )
+            )
+        return tuple(evidence)
+
+    async def update_document_access(
+        self,
+        document_id: UUID,
+        *,
+        access: AuthContext,
+    ) -> None:
+        if access.tenant_id is None:
+            raise ValueError("indexed chat documents require an active tenant")
+        await self._store.set_document_payload(
+            str(document_id),
+            {
+                "tenant_id": str(access.tenant_id),
+                "owner_user_id": str(access.user_id),
+                "access_control_list": [str(access.user_id)],
+            },
+        )
+
+    async def soft_delete_document(self, document_id: UUID) -> None:
+        await self._store.soft_delete_document_points(str(document_id))
+
+    async def aclose(self) -> None:
+        await self._store.aclose()
+
+
+def _document_point_id(document_id: UUID, chunk_index: int) -> str:
+    return str(uuid5(NAMESPACE_URL, f"bothesis:document:{document_id}:{chunk_index}"))
+
+
+def _document_payload(
+    document: Document,
+    chunk: DocumentChunk,
+    *,
+    access: AuthContext,
+    embedding_model: str,
+    source_fingerprint: str,
+) -> dict[str, Any]:
+    metadata = dict(chunk.metadata_)
+    page_number = chunk.start_page_number or chunk.end_page_number
+    sheet_name = metadata.get("sheet_name")
+    return QdrantChunkPayload(
+        tenant_id=str(access.tenant_id),
+        owner_user_id=str(access.user_id),
+        connector_id="upload",
+        document_id=str(document.id),
+        external_id=str(document.id),
+        chunk_id=chunk.chunk_index,
+        chunk_index=chunk.chunk_index,
+        section_id=f"{document.id}::{chunk.chunk_index}",
+        section_index=chunk.chunk_index,
+        title=document.title or str(document.id),
+        section_title=(chunk.heading_path[-1] if chunk.heading_path else None),
+        semantic_identifier=document.title or str(document.id),
+        content=chunk.content,
+        source="upload",
+        source_type="upload",
+        source_system="upload",
+        chunk_kind=ChunkKind.FILE,
+        content_type=document.mime_type or "application/octet-stream",
+        access_control_list=[str(access.user_id)],
+        metadata={
+            str(key): value
+            for key, value in metadata.items()
+            if isinstance(value, (str, list))
+        },
+        sheet_name=(sheet_name if isinstance(sheet_name, str) and sheet_name else None),
+        page_number=page_number,
+        heading_path=list(chunk.heading_path or ()),
+        file_name=str(document.metadata_.get("file_name") or document.title or ""),
+        size_bytes=document.size_bytes or 0,
+        embedding_model=embedding_model,
+        source_fingerprint=source_fingerprint,
+    ).for_qdrant()
+
+
+def _document_section(payload: dict[str, Any]) -> str | None:
+    value = payload.get("section_title") or payload.get("sheet_name")
+    return str(value) if value is not None else None

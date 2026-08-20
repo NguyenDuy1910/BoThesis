@@ -18,7 +18,6 @@ from ..models import (
     ConnectorScope,
     Document,
     DocumentSource,
-    ExternalAccess,
     HierarchyNode,
     HierarchyNodeType,
     SourceACL,

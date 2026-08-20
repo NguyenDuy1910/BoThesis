@@ -34,7 +34,9 @@ class ChunkingConfig:
         if self.max_characters < 100:
             raise ValueError("max_characters must be at least 100")
         if not 0 <= self.overlap_characters < self.max_characters:
-            raise ValueError("overlap_characters must be non-negative and smaller than max_characters")
+            raise ValueError(
+                "overlap_characters must be non-negative and smaller than max_characters"
+            )
 
 
 class DocumentChunk(BaseModel):
@@ -104,6 +106,7 @@ class QdrantChunkPayload(BaseModel):
     language: str | None = None
 
     access_control_list: list[str] = Field(default_factory=list)
+    owner_user_id: str | None = None
     is_public: bool = False
     is_deleted: bool = False
 
@@ -118,6 +121,8 @@ class QdrantChunkPayload(BaseModel):
     attachment_id: str | None = None
     comment_id: str | None = None
     sheet_name: str | None = None
+    page_number: int | None = Field(default=None, ge=1)
+    heading_path: list[str] = Field(default_factory=list)
 
     parent_hierarchy_raw_node_id: str | None = None
     hierarchy_node_id: int | None = None
@@ -134,6 +139,7 @@ class QdrantChunkPayload(BaseModel):
     file_name: str | None = None
     size_bytes: int | None = Field(default=None, ge=0)
     embedding_model: str | None = None
+    source_fingerprint: str | None = None
 
     @field_validator("access_control_list")
     @classmethod
@@ -239,8 +245,7 @@ def chunk_document(
     for section_index, section in enumerate(document.sections):
         if not section.text or not section.text.strip():
             continue
-        content = _normalise_document_text(section.text)
-        for fragment in _split_text(content, resolved):
+        for fragment in split_text(section.text, resolved):
             chunks.append(
                 DocumentChunk(
                     position=len(chunks),
@@ -273,17 +278,26 @@ def _normalise_document_text(value: str) -> str:
     return re.sub(r"[ \t]+", " ", value).strip()
 
 
-def _split_text(value: str, config: ChunkingConfig) -> list[str]:
-    if len(value) <= config.max_characters:
+def split_text(
+    value: str,
+    config: ChunkingConfig | None = None,
+) -> list[str]:
+    """Split normalized text with the connector-wide deterministic policy."""
+
+    resolved = config or ChunkingConfig()
+    value = _normalise_document_text(value)
+    if not value:
+        return []
+    if len(value) <= resolved.max_characters:
         return [value]
     chunks: list[str] = []
     start = 0
     length = len(value)
     while start < length:
-        proposed_end = min(start + config.max_characters, length)
+        proposed_end = min(start + resolved.max_characters, length)
         end = proposed_end
         if proposed_end < length:
-            minimum_break = start + config.max_characters // 2
+            minimum_break = start + resolved.max_characters // 2
             candidates = (
                 value.rfind("\n\n", minimum_break, proposed_end),
                 value.rfind("\n", minimum_break, proposed_end),
@@ -297,7 +311,7 @@ def _split_text(value: str, config: ChunkingConfig) -> list[str]:
             chunks.append(fragment)
         if end >= length:
             break
-        next_start = max(end - config.overlap_characters, start + 1)
+        next_start = max(end - resolved.overlap_characters, start + 1)
         while next_start < end and not value[next_start - 1].isspace():
             next_start += 1
         start = next_start if next_start < end else end
@@ -347,4 +361,5 @@ __all__ = [
     "QdrantPayloadContext",
     "build_qdrant_records",
     "chunk_document",
+    "split_text",
 ]

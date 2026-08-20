@@ -1,4 +1,9 @@
-import type { AgentHistoryMessage, ChatMessage, ChatMessagePart } from "./types";
+import type {
+  AgentHistoryMessage,
+  ChatMessage,
+  ChatMessagePart,
+  ConversationDocument,
+} from "./types";
 
 export const MAX_HISTORY_MESSAGES = 24;
 export const MAX_HISTORY_CHARACTERS = 24_000;
@@ -7,7 +12,9 @@ const CLIP_MARKER = "\n…\n";
 
 export function conversationMessageText(message: ChatMessage) {
   return message.parts
-    .filter((part): part is Extract<ChatMessagePart, { type: "text" }> => part.type === "text")
+    .filter((part): part is Extract<ChatMessagePart, { type: "text" }> => (
+      part.type === "text" && part.phase !== "commentary"
+    ))
     .map((part) => part.text)
     .join("")
     .trim();
@@ -49,6 +56,7 @@ export function regenerationContext(
   userText: string;
   historyMessages: ChatMessage[];
   displayMessages: ChatMessage[];
+  documents: ConversationDocument[];
 } | null {
   const targetIndex = targetId
     ? messages.findIndex((message) => message.id === targetId)
@@ -65,5 +73,10 @@ export function regenerationContext(
     userText,
     historyMessages: messages.slice(0, userIndex),
     displayMessages: messages.slice(0, userIndex + 1),
+    documents: user.parts
+      .filter((part): part is Extract<ChatMessagePart, { type: "data-document" }> => (
+        part.type === "data-document"
+      ))
+      .map((part) => part.data),
   };
 }

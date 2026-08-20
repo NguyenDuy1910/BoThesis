@@ -1,4 +1,4 @@
-"""OpenRouter implementation of the agent transport contracts."""
+"""Thin async boundary over OpenRouter's native HTTP API."""
 
 from __future__ import annotations
 
@@ -9,26 +9,19 @@ from typing import Any
 
 import httpx
 
-from bothesis.agent.models import (
-    ProviderReasoningDelta,
-    TextDelta,
-    ToolCallDelta,
-    TurnDone,
-)
 
-from .base import ChatMessage, LLMResponse, LLMTransport, LLMTransportError
-
-
-class OpenRouterTransport(LLMTransport):
-    """Async transport for OpenRouter's OpenAI-compatible APIs."""
+class OpenRouterTransport:
+    """Expose OpenRouter chat and embeddings without response wrappers."""
 
     DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+    provider = "openrouter"
 
     def __init__(
         self,
         *,
         api_key: str | None = None,
         model: str | None = None,
+        embedding_model: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
         site_url: str | None = None,
         app_name: str | None = None,
@@ -37,6 +30,7 @@ class OpenRouterTransport(LLMTransport):
     ) -> None:
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
         self.model = model or os.getenv("OPENROUTER_MODEL")
+        self.embedding_model = embedding_model or os.getenv("EMBEDDING_MODEL")
         if not self.api_key:
             raise ValueError("OpenRouter API key is required")
         if timeout <= 0:
@@ -53,220 +47,75 @@ class OpenRouterTransport(LLMTransport):
         if app_name:
             self._headers["X-Title"] = app_name
 
-    async def complete(
+    async def chat(
         self,
-        messages: Sequence[ChatMessage | Mapping[str, Any]],
         *,
+        messages: Sequence[Mapping[str, Any]],
         model: str | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        response_format: Mapping[str, Any] | None = None,
-        tools: Sequence[Mapping[str, Any]] | None = None,
-        tool_choice: str | Mapping[str, Any] | None = None,
-        extra_body: Mapping[str, Any] | None = None,
-    ) -> LLMResponse:
-        selected_model = model or self.model
-        if not messages:
-            raise ValueError("messages must not be empty")
-        if not selected_model:
-            raise ValueError("model is required")
-        body: dict[str, Any] = {
-            "model": selected_model,
-            "messages": [
-                message.as_dict() if isinstance(message, ChatMessage) else dict(message)
-                for message in messages
-            ],
-        }
-        optional = {
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "response_format": response_format,
-            "tools": list(tools) if tools is not None else None,
-            "tool_choice": tool_choice,
-        }
-        body.update(
-            {key: value for key, value in optional.items() if value is not None}
-        )
-        if extra_body:
-            body.update(extra_body)
-        payload = await self.chat_completions(body)
-        try:
-            choice = payload["choices"][0]
-            message = choice["message"]
-            usage = payload.get("usage") or {}
-            return LLMResponse(
-                id=payload["id"],
-                model=payload.get("model", selected_model),
-                content=message.get("content"),
-                finish_reason=choice.get("finish_reason"),
-                tool_calls=tuple(message.get("tool_calls") or ()),
-                usage=_token_usage(usage) if isinstance(usage, Mapping) else {},
-            )
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise LLMTransportError(
-                "OpenRouter returned an unexpected completion shape"
-            ) from exc
+        **params: Any,
+    ) -> dict[str, Any]:
+        """Return one native OpenRouter chat-completion payload."""
 
-    async def chat_completions(self, body: dict[str, Any]) -> dict[str, Any]:
-        """Make one non-streaming OpenRouter chat-completions request."""
-        try:
-            response = await self._client.post(
-                f"{self._base_url}/chat/completions",
-                headers=self._headers,
-                json=body,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise LLMTransportError(
-                "OpenRouter chat completion request failed"
-            ) from exc
-        if not isinstance(payload, dict):
-            raise LLMTransportError("OpenRouter returned a non-object completion")
-        return payload
+        body = self._chat_body(messages=messages, model=model, params=params)
+        if "stream" in body:
+            raise ValueError("use stream_chat for streaming chat requests")
+        return await self._post_json("/chat/completions", body)
 
-    async def stream_turn(
+    async def stream_chat(
         self,
-        messages: Sequence[ChatMessage | Mapping[str, Any]],
         *,
+        messages: Sequence[Mapping[str, Any]],
         model: str | None = None,
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        tools: Sequence[Mapping[str, Any]] | None = None,
-        tool_choice: str | Mapping[str, Any] | None = None,
-        extra_body: Mapping[str, Any] | None = None,
-    ) -> AsyncIterator[
-        ProviderReasoningDelta | TextDelta | ToolCallDelta | TurnDone
-    ]:
-        """Normalize OpenRouter SSE into a single model-turn event stream."""
-        selected_model = model or self.model
-        if not messages:
-            raise ValueError("messages must not be empty")
-        if not selected_model:
-            raise ValueError("model is required")
-        body: dict[str, Any] = {
-            "model": selected_model,
-            "messages": [
-                message.as_dict() if isinstance(message, ChatMessage) else dict(message)
-                for message in messages
-            ],
-        }
-        optional = {
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "tools": list(tools) if tools is not None else None,
-            "tool_choice": tool_choice,
-        }
-        body.update(
-            {key: value for key, value in optional.items() if value is not None}
-        )
-        if extra_body:
-            body.update(extra_body)
+        **params: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield OpenRouter's JSON stream chunks without reconstructing them."""
+
+        body = self._chat_body(messages=messages, model=model, params=params)
+        if "stream" in body:
+            raise ValueError("stream_chat controls the stream parameter")
         body["stream"] = True
-        body.setdefault("usage", {"include": True})
 
-        tool_calls: dict[int, dict[str, str]] = {}
-        finish_reason: str | None = None
-        response_model: str | None = selected_model
-        usage: dict[str, int] = {}
-        try:
-            async with self._client.stream(
-                "POST",
-                f"{self._base_url}/chat/completions",
-                headers=self._headers,
-                json=body,
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    raw_data = line[5:].lstrip()
-                    if raw_data == "[DONE]":
-                        yield TurnDone(
-                            finish_reason=finish_reason or "stop",
-                            tool_calls=_assembled_tool_calls(tool_calls),
-                            model=response_model,
-                            usage=usage,
-                        )
-                        return
-                    try:
-                        payload = json.loads(raw_data)
-                    except json.JSONDecodeError as exc:
-                        raise LLMTransportError(
-                            "OpenRouter returned invalid stream data"
-                        ) from exc
-                    if not isinstance(payload, Mapping):
-                        raise LLMTransportError(
-                            "OpenRouter returned invalid stream data"
-                        )
-                    raw_model = payload.get("model")
-                    if isinstance(raw_model, str) and raw_model:
-                        response_model = raw_model
-                    raw_usage = payload.get("usage")
-                    if isinstance(raw_usage, Mapping):
-                        usage = _token_usage(raw_usage)
-                    choices = payload.get("choices")
-                    if not isinstance(choices, list) or not choices:
-                        continue
-                    choice = choices[0]
-                    if not isinstance(choice, Mapping):
-                        continue
-                    delta = choice.get("delta")
-                    if isinstance(delta, Mapping):
-                        for summary_delta in _reasoning_summary_deltas(
-                            delta.get("reasoning_details")
-                        ):
-                            yield ProviderReasoningDelta(summary_delta)
-                        content = delta.get("content")
-                        if isinstance(content, str) and content:
-                            yield TextDelta(content)
-                        raw_calls = delta.get("tool_calls")
-                        if isinstance(raw_calls, list):
-                            for position, raw_call in enumerate(raw_calls):
-                                if not isinstance(raw_call, Mapping):
-                                    continue
-                                index = _tool_call_index(
-                                    raw_call.get("index"), position
-                                )
-                                pending = tool_calls.setdefault(
-                                    index,
-                                    {
-                                        "id": "",
-                                        "name": "",
-                                        "arguments": "",
-                                    },
-                                )
-                                raw_call_id = raw_call.get("id")
-                                if isinstance(raw_call_id, str) and raw_call_id:
-                                    pending["id"] = raw_call_id
-                                function = raw_call.get("function")
-                                if not isinstance(function, Mapping):
-                                    function = {}
-                                name = function.get("name")
-                                arguments = function.get("arguments")
-                                name_delta = name if isinstance(name, str) else ""
-                                argument_delta = (
-                                    arguments if isinstance(arguments, str) else ""
-                                )
-                                pending["name"] += name_delta
-                                pending["arguments"] += argument_delta
-                                if pending["id"] and (name_delta or argument_delta):
-                                    yield ToolCallDelta(
-                                        call_id=pending["id"],
-                                        name=name_delta,
-                                        arguments=argument_delta,
-                                    )
-                    raw_finish_reason = choice.get("finish_reason")
-                    if raw_finish_reason is not None:
-                        finish_reason = str(raw_finish_reason)
-        except httpx.HTTPError as exc:
-            raise LLMTransportError("OpenRouter stream request failed") from exc
+        async with self._client.stream(
+            "POST",
+            f"{self._base_url}/chat/completions",
+            headers=self._headers,
+            json=body,
+        ) as response:
+            response.raise_for_status()
+            data_lines: list[str] = []
+            async for line in response.aiter_lines():
+                if not line:
+                    if data_lines:
+                        payload = self._stream_payload(data_lines)
+                        data_lines.clear()
+                        if payload is None:
+                            return
+                        yield payload
+                    continue
+                if line.startswith(":"):
+                    continue
+                if line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip())
+            if data_lines:
+                payload = self._stream_payload(data_lines)
+                if payload is not None:
+                    yield payload
 
-        yield TurnDone(
-            finish_reason=finish_reason or "stop",
-            tool_calls=_assembled_tool_calls(tool_calls),
-            model=response_model,
-            usage=usage,
+    async def embeddings(
+        self,
+        *,
+        input: object,
+        model: str | None = None,
+        **params: Any,
+    ) -> dict[str, Any]:
+        """Return one native OpenRouter embedding payload."""
+
+        selected_model = model or self.embedding_model
+        if not selected_model:
+            raise ValueError("OpenRouter embedding model is required")
+        return await self._post_json(
+            "/embeddings",
+            {"model": selected_model, "input": input, **params},
         )
 
     async def aclose(self) -> None:
@@ -274,58 +123,49 @@ class OpenRouterTransport(LLMTransport):
         if self._owns_client:
             await self._client.aclose()
 
-
-def _tool_call_index(raw_index: Any, fallback: int) -> int:
-    try:
-        return int(raw_index)
-    except (TypeError, ValueError):
-        return fallback
-
-
-def _assembled_tool_calls(
-    tool_calls: Mapping[int, Mapping[str, str]],
-) -> list[dict[str, Any]]:
-    return [
-        {
-            "id": tool_call["id"] or f"call_{index}",
-            "type": "function",
-            "function": {
-                "name": tool_call["name"],
-                "arguments": tool_call["arguments"],
-            },
+    def _chat_body(
+        self,
+        *,
+        messages: Sequence[Mapping[str, Any]],
+        model: str | None,
+        params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not messages:
+            raise ValueError("messages must not be empty")
+        selected_model = model or self.model
+        if not selected_model:
+            raise ValueError("OpenRouter model is required")
+        return {
+            "model": selected_model,
+            "messages": [dict(message) for message in messages],
+            **params,
         }
-        for index, tool_call in sorted(tool_calls.items())
-    ]
+
+    async def _post_json(
+        self,
+        path: str,
+        body: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        response = await self._client.post(
+            f"{self._base_url}{path}",
+            headers=self._headers,
+            json=body,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("OpenRouter returned a non-object response")
+        return payload
+
+    @staticmethod
+    def _stream_payload(data_lines: Sequence[str]) -> dict[str, Any] | None:
+        raw_data = "\n".join(data_lines)
+        if raw_data == "[DONE]":
+            return None
+        payload = json.loads(raw_data)
+        if not isinstance(payload, dict):
+            raise ValueError("OpenRouter returned a non-object stream chunk")
+        return payload
 
 
-def _token_usage(raw_usage: Mapping[str, Any]) -> dict[str, int]:
-    usage = {
-        key: value
-        for key, value in raw_usage.items()
-        if key in {"prompt_tokens", "completion_tokens", "total_tokens"}
-        and isinstance(value, int)
-        and not isinstance(value, bool)
-    }
-    prompt_details = raw_usage.get("prompt_tokens_details")
-    if isinstance(prompt_details, Mapping):
-        cached_tokens = prompt_details.get("cached_tokens")
-        if isinstance(cached_tokens, int) and not isinstance(cached_tokens, bool):
-            usage["cached_prompt_tokens"] = cached_tokens
-    return usage
-
-
-def _reasoning_summary_deltas(raw_details: Any) -> list[str]:
-    """Return official summary blocks while ignoring raw/encrypted reasoning."""
-
-    if not isinstance(raw_details, list):
-        return []
-    summaries: list[str] = []
-    for detail in raw_details:
-        if not isinstance(detail, Mapping):
-            continue
-        if detail.get("type") != "reasoning.summary":
-            continue
-        summary = detail.get("summary")
-        if isinstance(summary, str) and summary:
-            summaries.append(summary)
-    return summaries
+__all__ = ["OpenRouterTransport"]
