@@ -1,0 +1,9 @@
+# Ignore Python virtual environments and common artifacts
+backend/.venv/
+backend/.env
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+deployment/.env
+/deliverables/

@@ -1,0 +1,23 @@
+name: bothesis
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bothesis}
+      POSTGRES_USER: ${POSTGRES_USER:-bothesis}
+      # Local development default. Override it in deployment/.env.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bothesis}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
