@@ -271,9 +271,7 @@ function ChatConversation({
   const activeTurnId = latestUserMessageId && activeAssistantMessageId
     ? `${latestUserMessageId}:${activeAssistantMessageId}`
     : null;
-  const hasMessageError = messages.some((message) => (
-    message.parts.some((part) => part.type === "data-stream-error")
-  ));
+  const hasMessageError = messages.some((message) => message.turn?.status === "failed");
   const isUploading = composerAttachments.some((item) => (
     item.progress !== "ready" && item.progress !== "failed"
   ));
@@ -520,9 +518,7 @@ const MessageView = memo(function MessageView({
   const [isRevealing, setIsRevealing] = useState(false);
   const hasSettled = !isStreaming && !isRevealing;
   const text = getMessageText(message);
-  const streamError = message.parts.find(
-    (part): part is Extract<ChatMessagePart, { type: "data-stream-error" }> => part.type === "data-stream-error",
-  );
+  const streamError = message.turn?.error;
   const messageDocuments = message.parts
     .filter((part): part is Extract<ChatMessagePart, { type: "data-document" }> => (
       part.type === "data-document"
@@ -554,11 +550,10 @@ const MessageView = memo(function MessageView({
         <AssistantTurn
           isStreaming={isStreaming}
           onRevealingChange={setIsRevealing}
-          parts={message.parts}
-          runtime={message.runtime}
+          turn={message.turn}
         />
-        {streamError && <div className="error-box">{streamError.data.message}</div>}
-        {hasSettled && <AnswerSources parts={message.parts} />}
+        {streamError && <div className="error-box">{streamError}</div>}
+        {hasSettled && <AnswerSources turn={message.turn} />}
         {hasSettled && (text || streamError) && (
           <div className="answer-footer">
             <div className="assistant-actions" aria-label="Assistant message actions">

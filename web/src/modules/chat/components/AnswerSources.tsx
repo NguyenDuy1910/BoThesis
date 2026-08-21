@@ -4,21 +4,21 @@ import { ChevronRight, ExternalLink, Lock } from "lucide-react";
 import { memo } from "react";
 
 import { answerSources, sourcesLabel } from "../sources";
-import type { ChatMessagePart } from "../types";
+import type { TurnState } from "../types";
 
 /**
- * The evidence behind a finished answer, collapsed by default.
+ * Citations attached to a finished answer, collapsed by default.
  *
  * Grounding is only grounding if the reader can inspect it, so this always
- * renders when the turn produced evidence — but it stays one quiet line until
+ * renders when the turn produced citations — but it stays one quiet line until
  * asked, so it never competes with the answer above it.
  */
 export const AnswerSources = memo(function AnswerSources({
-  parts,
+  turn,
 }: {
-  parts: ChatMessagePart[];
+  turn?: TurnState;
 }) {
-  const sources = answerSources(parts);
+  const sources = answerSources(turn);
   if (!sources.length) return null;
 
   return (

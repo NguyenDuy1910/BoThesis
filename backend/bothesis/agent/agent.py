@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
+from uuid import uuid4
 
 from bothesis.agent import AgentConfig, AgentExecutionError
 from bothesis.agent.conversation_compression import ConversationMemory
 from bothesis.agent.conversation_session import ConversationSession
 from bothesis.agent.models import AgentContext
-from bothesis.agent.protocol import Error, RuntimeStreamEvent
+from bothesis.agent.protocol import Response, ResponseError, ResponseFailedEvent, ResponseStreamEvent
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
@@ -48,18 +49,30 @@ class Agent:
         self,
         user_message: str,
         ctx: AgentContext,
-    ) -> AsyncIterator[RuntimeStreamEvent]:
-        """Yield application events for one conversation run."""
+    ) -> AsyncIterator[ResponseStreamEvent]:
+        """Yield ordered response state mutations for one conversation Turn."""
+
+        sequence_number = 0
+
+        def failure(message: str) -> ResponseFailedEvent:
+            return ResponseFailedEvent(
+                sequence_number=sequence_number + 1,
+                response=Response(
+                    id=f"resp_{uuid4().hex}",
+                    status="failed",
+                    error=ResponseError(code="invalid_request", message=message),
+                ),
+            )
 
         normalized_message = user_message.strip()
         if not normalized_message:
-            yield Error(message="message must not be empty")
+            yield failure("message must not be empty")
             return
         if len(normalized_message) > self.config.max_user_message_characters:
-            yield Error(message="message exceeds the allowed length")
+            yield failure("message exceeds the allowed length")
             return
         if not ctx.tenant_id or not ctx.user_id:
-            yield Error(message="tenant and user context are required")
+            yield failure("tenant and user context are required")
             return
 
         trace_context = (
@@ -74,7 +87,8 @@ class Agent:
                     ctx,
                     run_trace=run_trace,
                 ):
-                    yield event
+                    sequence_number += 1
+                    yield event.model_copy(update={"sequence_number": sequence_number})
             except AgentExecutionError as exc:
                 _log.error(
                     "agent execution failed: %s",
@@ -83,7 +97,17 @@ class Agent:
                 )
                 if run_trace is not None:
                     run_trace.fail(stage="model")
-                yield Error(message="model response failed")
+                sequence_number += 1
+                yield ResponseFailedEvent(
+                    sequence_number=sequence_number,
+                    response=Response(
+                        id=f"resp_{uuid4().hex}",
+                        status="failed",
+                        error=ResponseError(
+                            code="agent_execution_failed", message="model response failed"
+                        ),
+                    ),
+                )
 
 
 __all__ = ["Agent"]

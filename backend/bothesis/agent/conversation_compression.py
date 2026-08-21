@@ -12,6 +12,7 @@ from bothesis.agent.models import (
     AgentContext,
     ConversationDocument,
     ConversationMessage,
+    Evidence,
 )
 from bothesis.agent.prompts.template_render import render_agent_base
 from bothesis.agent.protocol import (

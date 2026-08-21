@@ -9,7 +9,6 @@ import math
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from time import time_ns
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
@@ -1067,23 +1066,10 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
 
     async def event_gen():
         stream = agent.run(body.message, context)
-        item_delta_sequence = 0
         try:
             async for event in stream:
                 if await request.is_disconnected():
                     break
-                if event.type == "item.delta":
-                    item_delta_sequence += 1
-                    _log.debug(
-                        "stream_timing boundary=sse_event_yielded "
-                        "at_unix_ms=%d request_id=%s item_delta_sequence=%d "
-                        "item_id=%s text_characters=%d",
-                        time_ns() // 1_000_000,
-                        request_id,
-                        item_delta_sequence,
-                        event.item_id,
-                        len(event.delta),
-                    )
                 yield f"data: {event.model_dump_json()}\n\n"
         finally:
             await stream.aclose()

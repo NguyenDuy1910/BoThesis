@@ -10,14 +10,12 @@ it does not run the loop itself.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from collections.abc import AsyncIterator
 
 from bothesis.agent import AgentConfig
 from bothesis.agent.conversation_compression import ConversationMemory
 from bothesis.agent.models import AgentContext
-from bothesis.agent.protocol import FunctionCallItem, RuntimeStreamEvent
-from bothesis.agent.response_stream import _openrouter_function_calls as _parse_openrouter_function_calls
+from bothesis.agent.protocol import ResponseStreamEvent
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
@@ -53,7 +51,7 @@ class ConversationSession:
         ctx: AgentContext,
         *,
         run_trace: AgentRunTrace | None,
-    ) -> AsyncIterator[RuntimeStreamEvent]:
+    ) -> AsyncIterator[ResponseStreamEvent]:
         """Execute one user request as a fresh Turn Request."""
 
         turn_request = TurnRequest(
@@ -66,14 +64,5 @@ class ConversationSession:
         )
         async for event in turn_request.run_turn(user_message, ctx, run_trace=run_trace):
             yield event
-
-    @staticmethod
-    def _openrouter_function_calls(
-        raw_calls: Sequence[Any],
-    ) -> list[FunctionCallItem]:
-        """Project accumulated chat-completions tool calls onto protocol items."""
-
-        return _parse_openrouter_function_calls(raw_calls)
-
 
 __all__ = ["ConversationSession"]

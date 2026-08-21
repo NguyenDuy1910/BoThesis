@@ -51,10 +51,6 @@ class BothesisTui(App[None]):
         color: $text;
     }
 
-    .commentary {
-        color: $text-muted;
-    }
-
     .activity {
         margin: 1 0;
         color: $text-muted;

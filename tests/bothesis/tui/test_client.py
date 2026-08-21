@@ -22,10 +22,9 @@ from bothesis.tui.state import ChatState, HistoryMessage
 async def test_client_posts_current_chat_contract_and_preserves_sse_order() -> None:
     captured: dict[str, Any] = {}
     lines = [
-        'data: {"type":"turn.started"}',
+        'data: {"type":"response.created","sequence_number":1,"response_id":"resp-1","response":{"id":"resp-1","status":"in_progress"}}',
         ': ignored SSE comment',
-        'data: {"type":"item.delta","item_id":"message-1","delta":"Hi"}',
-        'data: {"type":"turn.completed"}',
+        'data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp-1","status":"completed"}}',
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -66,14 +65,12 @@ async def test_client_posts_current_chat_contract_and_preserves_sse_order() -> N
         "history": [{"role": "user", "content": "Earlier question"}],
     }
     assert [event.event["type"] for event in received] == [
-        "turn.started",
-        "item.delta",
-        "turn.completed",
+        "response.created",
+        "response.completed",
     ]
     assert [event.raw_sse_line for event in received] == [
         lines[0],
         lines[2],
-        lines[3],
     ]
 
 
@@ -95,99 +92,28 @@ async def test_client_surfaces_http_rejection_detail() -> None:
             pass
 
 
-def test_state_projects_commentary_text_deltas_and_tool_lifecycle() -> None:
+def test_state_materializes_response_items_and_deduplicates_sequences() -> None:
     state = ChatState(conversation_id="f8383f55-174a-4d7e-a28a-68d767dcaeb5")
     state.begin_turn("Explain the documents.")
-
-    state.apply_event(
-        {
-            "type": "item.started",
-            "item": {"type": "message", "id": "commentary-1", "content": []},
-        },
-        raw_sse_line='data: {"type":"item.started"}',
-    )
-    state.apply_event(
-        {"type": "item.delta", "item_id": "commentary-1", "delta": "Searching knowledge..."},
-        raw_sse_line='data: {"type":"item.delta"}',
-    )
-    state.apply_event(
-        {
-            "type": "item.completed",
-            "item": {
-                "type": "message",
-                "id": "commentary-1",
-                "phase": "commentary",
-                "status": "completed",
-                "content": [],
-            },
-        },
-        raw_sse_line='data: {"type":"item.completed"}',
-    )
-    state.apply_event(
-        {
-            "type": "item.started",
-            "item": {
-                "type": "tool_call",
-                "id": "tool-1",
-                "call_id": "call-1",
-                "name": "knowledge_search",
-                "label": "Search knowledge base",
-                "category": "retrieval",
-                "status": "in_progress",
-            },
-        },
-        raw_sse_line='data: {"type":"item.started"}',
-    )
-    state.apply_event(
-        {
-            "type": "item.completed",
-            "item": {
-                "type": "tool_result",
-                "id": "result-1",
-                "call_id": "call-1",
-                "name": "knowledge_search",
-                "status": "completed",
-                "duration_ms": 12,
-                "result_count": 2,
-            },
-        },
-        raw_sse_line='data: {"type":"item.completed"}',
-    )
-    state.apply_event(
-        {
-            "type": "item.started",
-            "item": {"type": "message", "id": "answer-1", "content": []},
-        },
-        raw_sse_line='data: {"type":"item.started"}',
-    )
-    state.apply_event(
-        {"type": "item.delta", "item_id": "answer-1", "delta": "Grounded answer."},
-        raw_sse_line='data: {"type":"item.delta"}',
-    )
-    state.apply_event(
-        {
-            "type": "item.completed",
-            "item": {
-                "type": "message",
-                "id": "answer-1",
-                "phase": "final_answer",
-                "status": "completed",
-                "content": [],
-            },
-        },
-        raw_sse_line='data: {"type":"item.completed"}',
-    )
-    state.apply_event(
-        {"type": "turn.completed"},
-        raw_sse_line='data: {"type":"turn.completed"}',
-    )
+    events = [
+        {"type": "response.created", "sequence_number": 1, "response_id": "resp-1", "response": {"id": "resp-1", "status": "in_progress"}},
+        {"type": "response.output_item.added", "sequence_number": 2, "response_id": "resp-1", "output_index": 0, "item": {"type": "message", "id": "message-1", "role": "assistant", "content": []}},
+        {"type": "response.content_part.added", "sequence_number": 3, "response_id": "resp-1", "item_id": "message-1", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": ""}},
+        {"type": "response.output_text.delta", "sequence_number": 4, "response_id": "resp-1", "item_id": "message-1", "output_index": 0, "content_index": 0, "delta": "Grounded "},
+        {"type": "response.output_text.annotation.added", "sequence_number": 5, "response_id": "resp-1", "item_id": "message-1", "output_index": 0, "content_index": 0, "annotation": {"type": "citation", "citation": {"id": "ev-1"}}},
+        {"type": "response.output_text.done", "sequence_number": 6, "response_id": "resp-1", "item_id": "message-1", "output_index": 0, "content_index": 0, "text": "Grounded answer."},
+        {"type": "response.output_item.done", "sequence_number": 7, "response_id": "resp-1", "output_index": 0, "item": {"type": "message", "id": "message-1", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "Grounded answer.", "annotations": [{"type": "citation", "citation": {"id": "ev-1"}}]}]}},
+        {"type": "response.completed", "sequence_number": 8, "response": {"id": "resp-1", "status": "completed"}},
+        {"type": "response.output_text.delta", "sequence_number": 8, "response_id": "resp-1", "item_id": "message-1", "output_index": 0, "content_index": 0, "delta": "ignored"},
+    ]
+    for event in events:
+        state.apply_event(event, raw_sse_line=json.dumps(event))
     state.complete_turn()
 
     assert state.turn is not None
-    assert state.turn.commentary_text == "Searching knowledge..."
     assert state.turn.final_text == "Grounded answer."
-    assert state.turn.activities["tool-1"].status == "completed"
-    assert state.turn.activities["tool-1"].result_count == 2
+    assert state.turn.responses["resp-1"].items["message-1"].content[0]["annotations"][0]["citation"]["id"] == "ev-1"
+    assert state.turn.last_sequence_number == 8
     assert state.history == [
         type(state.history[0])("user", "Explain the documents."),
         type(state.history[0])("assistant", "Grounded answer."),

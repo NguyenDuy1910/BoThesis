@@ -15,10 +15,6 @@ from bothesis.agent.protocol.content import ContentPart, InputText, OutputText
 
 ItemStatus: TypeAlias = Literal["in_progress", "completed", "incomplete", "failed", "skipped"]
 MessageRole: TypeAlias = Literal["system", "developer", "user", "assistant"]
-MessagePhase: TypeAlias = Literal["commentary", "final_answer"]
-ToolExecutionStatus: TypeAlias = Literal[
-    "in_progress", "completed", "failed", "timeout", "skipped"
-]
 
 CORE_ITEM_TYPES = frozenset(
     {
@@ -26,9 +22,6 @@ CORE_ITEM_TYPES = frozenset(
         "reasoning",
         "function_call",
         "function_call_output",
-        "tool_call",
-        "tool_result",
-        "evidence",
     }
 )
 
@@ -40,7 +33,6 @@ class MessageItem(ProtocolModel):
     content: tuple[ContentPart, ...]
     id: str | None = None
     status: ItemStatus | None = None
-    phase: MessagePhase | None = None
 
     @property
     def text(self) -> str:
@@ -126,46 +118,6 @@ class FunctionCallOutputItem(ProtocolModel):
     status: ItemStatus | None = None
 
 
-class ToolCallItem(ProtocolModel):
-    """A user-visible lifecycle item for one requested tool execution."""
-
-    type: Literal["tool_call"] = "tool_call"
-    id: str = Field(min_length=1)
-    call_id: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    label: str | None = None
-    category: Literal["retrieval", "tool"] = "tool"
-    status: ItemStatus = "in_progress"
-
-
-class ToolResultItem(ProtocolModel):
-    """The visible outcome of a tool call, distinct from model tool input."""
-
-    type: Literal["tool_result"] = "tool_result"
-    id: str = Field(min_length=1)
-    call_id: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    status: ToolExecutionStatus
-    error: str | None = None
-    duration_ms: int | None = Field(default=None, ge=0)
-    result_count: int | None = Field(default=None, ge=0)
-
-
-class EvidenceItem(ProtocolModel):
-    """Grounded source metadata exposed to the chat client."""
-
-    type: Literal["evidence"] = "evidence"
-    id: str = Field(min_length=1)
-    document_id: str
-    title: str
-    page: str | None = None
-    section: str | None = None
-    uri: str | None = None
-    source: str | None = None
-    snippet: str | None = None
-    relevance_score: float | None = None
-    status: Literal["found", "used"] = "found"
-
 class ExtensionItem(ExtensibleProtocolModel):
     """A provider-specific item preserved verbatim.
 
@@ -205,9 +157,6 @@ Item: TypeAlias = Annotated[
         Annotated[ReasoningItem, Tag("reasoning")],
         Annotated[FunctionCallItem, Tag("function_call")],
         Annotated[FunctionCallOutputItem, Tag("function_call_output")],
-        Annotated[ToolCallItem, Tag("tool_call")],
-        Annotated[ToolResultItem, Tag("tool_result")],
-        Annotated[EvidenceItem, Tag("evidence")],
         Annotated[ExtensionItem, Tag(EXTENSION_TAG)],
     ],
     Discriminator(_item_tag),
@@ -237,7 +186,6 @@ def pair_function_calls(
 
 __all__ = [
     "CORE_ITEM_TYPES",
-    "EvidenceItem",
     "ExtensionItem",
     "FunctionCallItem",
     "FunctionCallOutputItem",
@@ -245,12 +193,8 @@ __all__ = [
     "ItemAdapter",
     "ItemStatus",
     "MessageItem",
-    "MessagePhase",
     "MessageRole",
     "ReasoningItem",
     "ReasoningSummaryText",
-    "ToolCallItem",
-    "ToolExecutionStatus",
-    "ToolResultItem",
     "pair_function_calls",
 ]

@@ -22,8 +22,9 @@ from openai import (
     RateLimitError,
 )
 
-from bothesis.agent import AgentExecutionError, ModelStreamCompleted, TextDelta
-from bothesis.agent.protocol import ReasoningSummaryDelta, ResponseRequest
+from bothesis.agent import AgentExecutionError, ModelStreamCompleted
+from bothesis.agent.models import Evidence
+from bothesis.agent.protocol import ResponseRequest, ResponseStreamEvent
 from bothesis.agent.response_stream import (
     StreamResponse,
     openai_canonical_events,
@@ -67,18 +68,18 @@ async def run_sampling_request(
     transport: OpenAITransport | OpenRouterTransport,
     *,
     generation_trace: Any = None,
-) -> AsyncIterator[TextDelta | ReasoningSummaryDelta | ModelStreamCompleted]:
+    evidence: dict[str, Evidence],
+) -> AsyncIterator[ResponseStreamEvent | ModelStreamCompleted]:
     """Attempt one sampling request, retrying transient transport failures."""
 
     prompt = _build_prompt(step)
     attempt = 0
     while True:
-        emitted_text = False
+        emitted_event = False
         try:
             response_stream = StreamResponse(
-                provider=step.model_info.provider,
-                sampling_number=step.turn_number,
                 generation_trace=generation_trace,
+                evidence=evidence,
             )
             events = (
                 openai_canonical_events(transport, prompt)
@@ -86,13 +87,13 @@ async def run_sampling_request(
                 else openrouter_canonical_events(transport, prompt)
             )
             async for event in response_stream.run_llm(events):
-                if isinstance(event, TextDelta):
-                    emitted_text = True
+                if not isinstance(event, ModelStreamCompleted):
+                    emitted_event = True
                 yield event
             return
         except (OpenAIError, httpx.HTTPError, ValueError) as exc:
             if (
-                emitted_text
+                emitted_event
                 or not _is_retryable(exc)
                 or attempt >= step.config.max_sampling_retries
             ):

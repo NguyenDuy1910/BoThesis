@@ -1,4 +1,4 @@
-"""Small UI-facing projection of the public chat stream."""
+"""Reducer-backed materialized state for the semantic agent stream."""
 
 from __future__ import annotations
 
@@ -20,63 +20,88 @@ class HistoryMessage:
 
 
 @dataclass(slots=True)
-class MessageState:
+class OutputItemState:
     id: str
-    text: str = ""
-    phase: str | None = None
+    type: str
+    output_index: int
     status: str | None = None
+    role: str | None = None
+    content: list[dict[str, Any]] = field(default_factory=list)
+    call_id: str | None = None
+    name: str | None = None
+    arguments: str = ""
+
+    @property
+    def text(self) -> str:
+        return "".join(
+            _string(part.get("text"))
+            for part in self.content
+            if part.get("type") == "output_text"
+        )
 
 
 @dataclass(slots=True)
-class ActivityState:
+class ResponseState:
     id: str
-    call_id: str
-    name: str
-    label: str
-    category: str
     status: str = "in_progress"
-    error: str | None = None
-    duration_ms: int | None = None
-    result_count: int | None = None
+    items: dict[str, OutputItemState] = field(default_factory=dict)
+    item_order: list[str] = field(default_factory=list)
+
+    @property
+    def has_function_call(self) -> bool:
+        return any(item.type == "function_call" for item in self.items.values())
+
+    @property
+    def assistant_text(self) -> str:
+        return "\n\n".join(
+            item.text
+            for item_id in self.item_order
+            if (item := self.items[item_id]).type == "message"
+            and item.role == "assistant"
+            and item.text
+        )
 
 
 @dataclass(slots=True)
 class TurnState:
-    messages: dict[str, MessageState] = field(default_factory=dict)
-    message_order: list[str] = field(default_factory=list)
-    activities: dict[str, ActivityState] = field(default_factory=dict)
-    activity_order: list[str] = field(default_factory=list)
+    responses: dict[str, ResponseState] = field(default_factory=dict)
+    response_order: list[str] = field(default_factory=list)
     status: str = "in_progress"
     error: str | None = None
+    last_sequence_number: int = -1
 
-    def message_text(self, *, phase: str | None) -> str:
+    @property
+    def stream_text(self) -> str:
         return "\n\n".join(
-            message.text
-            for item_id in self.message_order
-            if (message := self.messages[item_id]).phase == phase and message.text
+            response.assistant_text
+            for response_id in self.response_order
+            if (response := self.responses[response_id]).assistant_text
         )
 
     @property
-    def pending_text(self) -> str:
-        return self.message_text(phase=None)
-
-    @property
-    def commentary_text(self) -> str:
-        return self.message_text(phase="commentary")
-
-    @property
     def final_text(self) -> str:
-        final = self.message_text(phase="final_answer")
-        if final:
-            return final
-        if self.status == "completed":
-            return self.pending_text
+        """The final no-tool assistant message suitable for next-turn history."""
+
+        for response_id in reversed(self.response_order):
+            response = self.responses[response_id]
+            if response.status == "completed" and not response.has_function_call:
+                if response.assistant_text:
+                    return response.assistant_text
         return ""
+
+    @property
+    def function_calls(self) -> tuple[OutputItemState, ...]:
+        return tuple(
+            item
+            for response_id in self.response_order
+            for item_id in self.responses[response_id].item_order
+            if (item := self.responses[response_id].items[item_id]).type == "function_call"
+        )
 
 
 @dataclass(slots=True)
 class ChatState:
-    """Conversation and current-turn state consumed by the Textual widgets."""
+    """A deterministic reducer for public response lifecycle events."""
 
     conversation_id: str = field(default_factory=lambda: str(uuid4()))
     history: list[HistoryMessage] = field(default_factory=list)
@@ -95,18 +120,13 @@ class ChatState:
         return self.turn
 
     def request_history(self) -> list[HistoryMessage]:
-        """Return a request-safe window matching the chat endpoint limits."""
-
         remaining_characters = MAX_HISTORY_CHARACTERS
         selected: list[HistoryMessage] = []
         for entry in reversed(self.history):
             content = _clip_history(entry.content)
             if not content:
                 continue
-            if (
-                len(selected) == MAX_HISTORY_MESSAGES
-                or len(content) > remaining_characters
-            ):
+            if len(selected) == MAX_HISTORY_MESSAGES or len(content) > remaining_characters:
                 break
             selected.append(HistoryMessage(role=entry.role, content=content))
             remaining_characters -= len(content)
@@ -116,33 +136,83 @@ class ChatState:
         return selected
 
     def apply_event(self, event: Mapping[str, Any], *, raw_sse_line: str) -> TurnState:
-        """Apply one public runtime event without interpreting agent internals."""
-
         if self.turn is None:
             self.turn = TurnState()
+        sequence_number = _integer(event.get("sequence_number"))
+        if sequence_number is None or sequence_number <= self.turn.last_sequence_number:
+            return self.turn
+        self.turn.last_sequence_number = sequence_number
         self.raw_sse_lines.append(raw_sse_line)
-        event_type = event.get("type")
-        if event_type == "turn.started":
-            self.turn.status = "in_progress"
-        elif event_type == "turn.completed":
-            self.turn.status = "completed"
-        elif event_type == "error":
-            self.turn.status = "failed"
-            self.turn.error = _string(event.get("message")) or "The backend reported an error."
-        elif event_type == "item.delta":
-            item_id = _string(event.get("item_id"))
-            if item_id:
-                message = self._message(item_id)
-                message.text += _string(event.get("delta"))
-        elif event_type in {"item.started", "item.completed"}:
+
+        event_type = _string(event.get("type"))
+        if event_type == "response.created":
+            response = event.get("response")
+            if isinstance(response, Mapping):
+                response_id = _string(event.get("response_id")) or _string(response.get("id"))
+                if response_id:
+                    self._response(response_id).status = _string(response.get("status")) or "in_progress"
+        elif event_type == "response.output_item.added":
+            response = self._response_from_event(event)
             item = event.get("item")
-            if isinstance(item, Mapping):
-                self._apply_item(item, completed=event_type == "item.completed")
+            if response is not None and isinstance(item, Mapping):
+                self._upsert_item(response, item, _integer(event.get("output_index")) or 0)
+        elif event_type == "response.content_part.added":
+            item = self._item_from_event(event)
+            part = event.get("part")
+            if item is not None and isinstance(part, Mapping):
+                self._set_part(item, _integer(event.get("content_index")) or 0, part)
+        elif event_type == "response.output_text.delta":
+            item = self._item_from_event(event)
+            if item is not None:
+                part = self._part(item, _integer(event.get("content_index")) or 0)
+                part["type"] = "output_text"
+                part["text"] = _string(part.get("text")) + _string(event.get("delta"))
+        elif event_type == "response.output_text.done":
+            item = self._item_from_event(event)
+            if item is not None:
+                part = self._part(item, _integer(event.get("content_index")) or 0)
+                part["type"] = "output_text"
+                part["text"] = _string(event.get("text"))
+        elif event_type == "response.output_text.annotation.added":
+            item = self._item_from_event(event)
+            annotation = event.get("annotation")
+            if item is not None and isinstance(annotation, Mapping):
+                part = self._part(item, _integer(event.get("content_index")) or 0)
+                annotations = part.setdefault("annotations", [])
+                if isinstance(annotations, list):
+                    annotations.append(dict(annotation))
+        elif event_type == "response.function_call_arguments.delta":
+            item = self._item_from_event(event)
+            if item is not None:
+                item.arguments += _string(event.get("delta"))
+        elif event_type == "response.function_call_arguments.done":
+            item = self._item_from_event(event)
+            if item is not None:
+                item.arguments = _string(event.get("arguments"))
+        elif event_type == "response.output_item.done":
+            response = self._response_from_event(event)
+            item = event.get("item")
+            if response is not None and isinstance(item, Mapping):
+                projected = self._upsert_item(response, item, _integer(event.get("output_index")) or 0)
+                projected.status = _string(item.get("status")) or "completed"
+        elif event_type in {"response.completed", "response.incomplete", "response.failed"}:
+            response = event.get("response")
+            if isinstance(response, Mapping):
+                response_id = _string(response.get("id"))
+                if response_id:
+                    materialized = self._response(response_id)
+                    materialized.status = _string(response.get("status")) or event_type.removeprefix("response.")
+                    if event_type == "response.failed":
+                        self.turn.status = "failed"
+                        error = response.get("error")
+                        self.turn.error = _string(error.get("message")) if isinstance(error, Mapping) else "Model response failed."
+                    elif event_type == "response.incomplete":
+                        self.turn.status = "incomplete"
+                    elif materialized.assistant_text and not materialized.has_function_call:
+                        self.turn.status = "completed"
         return self.turn
 
     def complete_turn(self) -> None:
-        """Add the answer, excluding commentary, to next-turn API history."""
-
         if self.turn is None or self.turn.status != "completed":
             return
         answer = self.turn.final_text.strip()
@@ -155,86 +225,62 @@ class ChatState:
         self.turn = None
         self.raw_sse_lines.clear()
 
-    def _apply_item(self, item: Mapping[str, Any], *, completed: bool) -> None:
-        item_type = item.get("type")
-        if item_type == "message":
-            item_id = _string(item.get("id"))
-            if not item_id:
-                return
-            message = self._message(item_id)
-            completed_text = _content_text(item.get("content"))
-            if completed_text:
-                message.text = completed_text
-            message.phase = _string(item.get("phase")) or message.phase
-            message.status = _string(item.get("status")) or (
-                "completed" if completed else message.status
-            )
-        elif item_type == "tool_call":
-            item_id = _string(item.get("id"))
-            call_id = _string(item.get("call_id"))
-            name = _string(item.get("name"))
-            if not item_id or not call_id or not name:
-                return
-            activity = self._activity(item_id, call_id, name, item)
-            activity.status = _string(item.get("status")) or (
-                "completed" if completed else activity.status
-            )
-        elif item_type == "tool_result":
-            call_id = _string(item.get("call_id"))
-            if not call_id:
-                return
-            activity = next(
-                (candidate for candidate in self.turn.activities.values() if candidate.call_id == call_id),
-                None,
-            )
-            if activity is None:
-                return
-            activity.status = _string(item.get("status")) or activity.status
-            activity.error = _string(item.get("error")) or None
-            activity.duration_ms = _integer(item.get("duration_ms"))
-            activity.result_count = _integer(item.get("result_count"))
+    def _response(self, response_id: str) -> ResponseState:
+        response = self.turn.responses.get(response_id)
+        if response is None:
+            response = ResponseState(id=response_id)
+            self.turn.responses[response_id] = response
+            self.turn.response_order.append(response_id)
+        return response
 
-    def _message(self, item_id: str) -> MessageState:
-        message = self.turn.messages.get(item_id)
-        if message is None:
-            message = MessageState(id=item_id)
-            self.turn.messages[item_id] = message
-            self.turn.message_order.append(item_id)
-        return message
+    def _response_from_event(self, event: Mapping[str, Any]) -> ResponseState | None:
+        response_id = _string(event.get("response_id"))
+        return self._response(response_id) if response_id else None
 
-    def _activity(
-        self,
-        item_id: str,
-        call_id: str,
-        name: str,
-        item: Mapping[str, Any],
-    ) -> ActivityState:
-        activity = self.turn.activities.get(item_id)
-        if activity is None:
-            activity = ActivityState(
-                id=item_id,
-                call_id=call_id,
-                name=name,
-                label=_string(item.get("label")) or _display_tool_name(name),
-                category=_string(item.get("category")) or "tool",
-            )
-            self.turn.activities[item_id] = activity
-            self.turn.activity_order.append(item_id)
-        return activity
+    def _item_from_event(self, event: Mapping[str, Any]) -> OutputItemState | None:
+        response = self._response_from_event(event)
+        item_id = _string(event.get("item_id"))
+        if response is None or not item_id:
+            return None
+        item = response.items.get(item_id)
+        if item is None:
+            item = OutputItemState(id=item_id, type="message", output_index=_integer(event.get("output_index")) or 0)
+            response.items[item_id] = item
+            response.item_order.append(item_id)
+        return item
 
+    def _upsert_item(
+        self, response: ResponseState, payload: Mapping[str, Any], output_index: int
+    ) -> OutputItemState:
+        item_id = _string(payload.get("id")) or f"{response.id}:output:{output_index}"
+        item = response.items.get(item_id)
+        if item is None:
+            item = OutputItemState(id=item_id, type=_string(payload.get("type")), output_index=output_index)
+            response.items[item_id] = item
+            response.item_order.append(item_id)
+        item.type = _string(payload.get("type")) or item.type
+        item.status = _string(payload.get("status")) or item.status
+        item.role = _string(payload.get("role")) or item.role
+        item.call_id = _string(payload.get("call_id")) or item.call_id
+        item.name = _string(payload.get("name")) or item.name
+        if "arguments" in payload:
+            item.arguments = _string(payload.get("arguments"))
+        content = payload.get("content")
+        if isinstance(content, list):
+            item.content = [dict(part) for part in content if isinstance(part, Mapping)]
+        return item
 
-def _content_text(value: object) -> str:
-    if not isinstance(value, list):
-        return ""
-    return "".join(
-        _string(part.get("text"))
-        for part in value
-        if isinstance(part, Mapping) and part.get("type") in {"input_text", "output_text"}
-    )
+    @staticmethod
+    def _set_part(item: OutputItemState, index: int, part: Mapping[str, Any]) -> None:
+        while len(item.content) <= index:
+            item.content.append({})
+        item.content[index] = dict(part)
 
-
-def _display_tool_name(name: str) -> str:
-    return name.replace("_", " ").replace("-", " ").title()
+    @staticmethod
+    def _part(item: OutputItemState, index: int) -> dict[str, Any]:
+        while len(item.content) <= index:
+            item.content.append({})
+        return item.content[index]
 
 
 def _clip_history(content: str) -> str:
@@ -247,7 +293,7 @@ def _clip_history(content: str) -> str:
 
 
 def _integer(value: object) -> int | None:
-    return value if isinstance(value, int) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _string(value: object) -> str:
@@ -255,12 +301,9 @@ def _string(value: object) -> str:
 
 
 __all__ = [
-    "ActivityState",
     "ChatState",
     "HistoryMessage",
-    "MAX_HISTORY_CHARACTERS",
-    "MAX_HISTORY_MESSAGE_CHARACTERS",
-    "MAX_HISTORY_MESSAGES",
-    "MessageState",
+    "OutputItemState",
+    "ResponseState",
     "TurnState",
 ]

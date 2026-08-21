@@ -1752,37 +1752,16 @@ a {
   word-break: break-word;
 }
 
-.answer-detail {
-  min-width: 0;
-  max-width: 100%;
-}
-
 /* ── Assistant turn ──────────────────────────────────────────────────────────
    ONE authoritative definition. This family was previously declared six times
    across the @layer block, this section, and the trailing override block; the
-   duplicates are gone, so change tool/commentary styling here and nowhere else.
-   Shape follows ChatGPT/Codex: activity is a quiet line between messages, never
-   a card, and the final answer is the only thing at full weight. */
+   duplicates are gone, so semantic activity styling lives here. Shape follows
+   ChatGPT/Codex: activity is a quiet line between messages, never a card. */
 .assistant-turn {
   display: grid;
   min-width: 0;
   max-width: 100%;
   gap: 0.75rem;
-}
-
-/* Commentary is the model narrating its own work. It must never compete with
-   the answer, so it sits a size down and a shade back. */
-.assistant-turn__message {
-  min-width: 0;
-  max-width: 100%;
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 0.9375rem;
-  line-height: 1.6;
-}
-
-.assistant-turn__response {
-  margin: 0;
 }
 
 /* No border and no fill in ANY state — an active step is carried by the
@@ -1805,6 +1784,10 @@ a {
   color: var(--text-secondary);
 }
 
+.assistant-turn__tool--completed {
+  color: var(--text-muted);
+}
+
 .assistant-turn__tool-icon {
   flex: 0 0 auto;
   color: currentColor;
@@ -1817,17 +1800,8 @@ a {
 }
 
 .assistant-turn__tool--error,
-.assistant-turn__tool--error .assistant-turn__tool-icon,
-.assistant-turn__tool--error .assistant-turn__tool-detail {
+.assistant-turn__tool--error .assistant-turn__tool-icon {
   color: var(--danger);
-}
-
-.assistant-turn__tool-body {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.375rem;
 }
 
 .assistant-turn__tool-label {
@@ -1835,15 +1809,50 @@ a {
   font-weight: 500;
 }
 
-.assistant-turn__tool-count,
-.assistant-turn__tool-detail {
+.assistant-turn__tool-complete {
   color: var(--text-soft);
-  font-size: 0.75rem;
-  font-variant-numeric: tabular-nums;
+  font-size: 1rem;
+  line-height: 0.8;
 }
 
-.assistant-turn__tool-detail {
-  overflow-wrap: anywhere;
+.assistant-turn__reasoning {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--text-soft);
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+details.assistant-turn__reasoning {
+  display: block;
+}
+
+.assistant-turn__reasoning > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.assistant-turn__reasoning > summary::-webkit-details-marker { display: none; }
+
+.assistant-turn__reasoning-caret {
+  transition: transform 140ms ease;
+}
+
+.assistant-turn__reasoning[open] .assistant-turn__reasoning-caret {
+  transform: rotate(90deg);
+}
+
+.assistant-turn__reasoning-summary {
+  max-width: 44rem;
+  margin: 0.375rem 0 0 1rem;
+  color: var(--text-muted);
+  white-space: pre-wrap;
 }
 
 .assistant-turn__pending {
@@ -1867,8 +1876,10 @@ a {
 
 @media (prefers-reduced-motion: reduce) {
   .assistant-turn__tool--active .assistant-turn__tool-icon,
-  .assistant-turn__pending span {
+  .assistant-turn__pending span,
+  .assistant-turn__reasoning-caret {
     animation: none;
+    transition: none;
   }
 }
 

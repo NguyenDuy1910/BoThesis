@@ -1,33 +1,27 @@
 "use client";
 
 import clsx from "clsx";
-import { AlertCircle, Check, FileSearch, LoaderCircle, Search, Wrench } from "lucide-react";
+import { ChevronRight, Database, LoaderCircle, Search, Wrench } from "lucide-react";
 import { memo } from "react";
 
 import { assistantTurnItems, type AssistantTurnItem } from "../assistant-turn";
-import type { AgentItemStore, ChatMessagePart } from "../types";
+import type { TurnState } from "../types";
 import { IncrementalMarkdown } from "./IncrementalMarkdown";
 
 export const AssistantTurn = memo(function AssistantTurn({
   isStreaming,
   onRevealingChange,
-  parts,
-  runtime,
+  turn,
 }: {
   isStreaming: boolean;
   /** Report while the turn's newest text is still easing onto screen. */
   onRevealingChange?: (isRevealing: boolean) => void;
-  parts: ChatMessagePart[];
-  runtime?: AgentItemStore;
+  turn?: TurnState;
 }) {
-  const items = assistantTurnItems(parts, isStreaming, runtime);
+  const items = assistantTurnItems(turn);
   const lastItem = items.at(-1);
-  // One busy signal at a time: the dots stand in for text that has not started
-  // yet. Once any text is streaming, the text itself is the progress indicator.
-  const showPending = isStreaming && (!lastItem || lastItem.kind === "tool");
-  // Only the newest text block can still be revealing once the stream ends;
-  // earlier blocks drained while the turn was still running.
-  const revealingItemId = items.filter((item) => item.kind !== "tool").at(-1)?.id;
+  const showPending = isStreaming && !lastItem;
+  const revealingItemId = items.filter((item) => item.kind === "message").at(-1)?.id;
 
   if (!items.length && !showPending) return null;
 
@@ -36,7 +30,7 @@ export const AssistantTurn = memo(function AssistantTurn({
       {items.map((item) => {
         if (item.kind === "message") {
           return (
-            <div className="assistant-content assistant-turn__message" key={item.id}>
+            <div className="assistant-content" key={item.id}>
               <IncrementalMarkdown
                 isStreaming={isStreaming && item.state === "streaming"}
                 onRevealingChange={item.id === revealingItemId ? onRevealingChange : undefined}
@@ -45,20 +39,8 @@ export const AssistantTurn = memo(function AssistantTurn({
             </div>
           );
         }
-        if (item.kind === "tool") {
-          return <InlineToolActivity item={item} key={item.id} />;
-        }
-        return (
-          <div className="assistant-content assistant-turn__response" key={item.id}>
-            <div className="answer-detail">
-              <IncrementalMarkdown
-                isStreaming={isStreaming && item.state === "streaming"}
-                onRevealingChange={item.id === revealingItemId ? onRevealingChange : undefined}
-                text={item.text}
-              />
-            </div>
-          </div>
-        );
+        if (item.kind === "tool") return <ToolActivity item={item} key={item.id} />;
+        return <ReasoningActivity item={item} key={item.id} />;
       })}
       {showPending && (
         <span aria-label="Assistant is working" className="assistant-turn__pending" role="status">
@@ -71,66 +53,68 @@ export const AssistantTurn = memo(function AssistantTurn({
   );
 });
 
-function InlineToolActivity({ item }: { item: Extract<AssistantTurnItem, { kind: "tool" }> }) {
-  const Icon = item.state === "active"
-    ? LoaderCircle
-    : item.state === "completed"
-      ? Check
-      : item.state === "error"
-        ? AlertCircle
-        : item.category === "retrieval"
-          ? Search
-          : item.category === "document"
-            ? FileSearch
-            : Wrench;
-  const measure = toolMeasure(item);
+function ToolActivity({ item }: { item: Extract<AssistantTurnItem, { kind: "tool" }> }) {
+  const presentation = toolPresentation(item.name, item.state);
+  const Icon = item.state === "active" ? LoaderCircle : presentation.icon;
 
   return (
     <div
-      aria-label={`${item.label}: ${item.state}`}
-      className={clsx(
-        "assistant-turn__tool",
-        `assistant-turn__tool--${item.state}`,
-      )}
-      role="status"
+      aria-label={presentation.label}
+      className={clsx("assistant-turn__tool", `assistant-turn__tool--${item.state}`)}
+      role={item.state === "active" ? "status" : undefined}
     >
-      <Icon aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
-      <span className="assistant-turn__tool-body">
-        <span className="assistant-turn__tool-label">{toolLabel(item)}</span>
-        {measure && <span className="assistant-turn__tool-count">{measure}</span>}
-        {item.detail && (
-          <span className="assistant-turn__tool-detail">{item.detail}</span>
-        )}
-      </span>
+      {item.state === "completed" ? (
+        <span aria-hidden="true" className="assistant-turn__tool-complete">›</span>
+      ) : (
+        <Icon aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
+      )}
+      <span className="assistant-turn__tool-label">{presentation.label}</span>
     </div>
   );
 }
 
-/** Compact evidence that work happened: results found, and time only when slow. */
-function toolMeasure(item: Extract<AssistantTurnItem, { kind: "tool" }>) {
-  if (item.state === "active") return undefined;
-  const parts: string[] = [];
-  if (typeof item.resultCount === "number" && item.resultCount >= 0) {
-    parts.push(`${item.resultCount} ${item.resultCount === 1 ? "result" : "results"}`);
+function ReasoningActivity({ item }: { item: Extract<AssistantTurnItem, { kind: "reasoning" }> }) {
+  if (item.state === "active") {
+    return (
+      <div className="assistant-turn__reasoning" role="status">
+        <LoaderCircle aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
+        <span>Thinking…</span>
+      </div>
+    );
   }
-  if (typeof item.durationMs === "number" && item.durationMs >= 1000) {
-    parts.push(`${(item.durationMs / 1000).toFixed(1)}s`);
-  }
-  return parts.length ? parts.join(" · ") : undefined;
+  if (!item.text) return null;
+  return (
+    <details className="assistant-turn__reasoning">
+      <summary>
+        <ChevronRight aria-hidden="true" className="assistant-turn__reasoning-caret" size={13} />
+        <span>Thought process</span>
+      </summary>
+      <div className="assistant-turn__reasoning-summary">{item.text}</div>
+    </details>
+  );
 }
 
-function toolLabel(item: Extract<AssistantTurnItem, { kind: "tool" }>) {
-  if (item.category === "retrieval") {
-    if (item.state === "active") return "Searching knowledge…";
-    if (item.state === "completed") return "Searched knowledge";
-    if (item.state === "error") return "Couldn't search knowledge";
-    return "Knowledge search skipped";
+function toolPresentation(
+  name: string,
+  state: Extract<AssistantTurnItem, { kind: "tool" }> ["state"],
+) {
+  const completed = state === "completed";
+  if (name === "knowledge_search") {
+    return {
+      label: state === "error"
+        ? "Knowledge search could not complete"
+        : completed ? "Searched knowledge" : "Searching knowledge…",
+      icon: Search,
+    };
   }
-  if (item.category === "document") {
-    if (item.state === "active") return "Reading document…";
-    if (item.state === "completed") return "Read document";
-    return item.label;
+  if (name === "sql_query") {
+    return {
+      label: state === "error"
+        ? "Data query could not complete"
+        : completed ? "Queried data" : "Querying data…",
+      icon: Database,
+    };
   }
-  if (item.state === "active") return "Running tool…";
-  return item.state === "completed" ? `Ran ${item.label}` : item.label;
+  if (state === "error") return { label: "Tool could not complete", icon: Wrench };
+  return { label: completed ? "Completed tool activity" : "Running tool…", icon: Wrench };
 }

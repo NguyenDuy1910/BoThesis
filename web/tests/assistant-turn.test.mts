@@ -2,106 +2,111 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { assistantTurnItems } from "../src/modules/chat/assistant-turn.ts";
-import { upsertStatusPart } from "../src/modules/chat/stream-parts.ts";
-import type { AgentItemStore, ChatMessagePart } from "../src/modules/chat/types.ts";
+import type { TurnState } from "../src/modules/chat/types.ts";
 
-test("renders a direct final response without synthetic progress concepts", () => {
-  const items = assistantTurnItems([
-    { type: "data-run", data: { status: "running", startedAt: 1 } },
-    {
-      type: "data-status",
-      id: "generation-0",
-      data: {
-        phase: "model",
-        state: "completed",
-        label: "Final response",
-        activityType: "final_response_generation",
-      },
-    },
-    { type: "text", text: "The answer.", state: "streaming" },
-  ], true);
+test("renders message items directly from semantic item state", () => {
+  const items = assistantTurnItems(turnWithFinalMessage());
 
   assert.deepEqual(items, [{
-    kind: "response",
-    id: "response-2",
+    kind: "message",
+    id: "message-1",
     text: "The answer.",
-    state: "streaming",
+    state: "done",
   }]);
 });
 
-test("renders interleaved commentary, tool activity, and the final answer from item state", () => {
-  const runtime: AgentItemStore = {
-    turnStatus: "in_progress",
-    activeItemIds: [],
-    historyItemIds: ["commentary-1", "tool-1", "response-1"],
-    items: {
-      "commentary-1": {
-        type: "message", id: "commentary-1", role: "assistant", phase: "commentary",
-        status: "completed", content: [{ type: "output_text", text: "Checking the policy." }],
-      },
-      "tool-1": {
-        type: "tool_call", id: "tool-1", call_id: "call-1", name: "knowledge_search",
-        label: "Search knowledge base", category: "retrieval", status: "completed",
-      },
+test("keeps interleaved response item ordering and completes tools when a later response starts", () => {
+  const turn: TurnState = {
+    id: "turn-1",
+    status: "streaming",
+    responseOrder: ["response-1", "response-2"],
+    responses: {
       "response-1": {
-        type: "message", id: "response-1", role: "assistant", phase: "final_answer",
-        status: "in_progress", content: [{ type: "output_text", text: "Grounded answer." }],
+        id: "response-1", status: "completed", itemOrder: ["message-1", "tool-1"],
+        items: {
+          "message-1": {
+            type: "message", id: "message-1", role: "assistant", status: "completed",
+            content: [{ type: "output_text", text: "I’ll check the policy.", annotations: [] }],
+          },
+          "tool-1": {
+            type: "function_call", id: "tool-1", call_id: "call-1", name: "knowledge_search",
+            arguments: "{}", status: "completed",
+          },
+        },
+      },
+      "response-2": {
+        id: "response-2", status: "in_progress", itemOrder: ["message-2"],
+        items: {
+          "message-2": {
+            type: "message", id: "message-2", role: "assistant", status: "in_progress",
+            content: [{ type: "output_text", text: "Grounded answer.", annotations: [] }],
+          },
+        },
       },
     },
   };
 
   assert.deepEqual(
-    assistantTurnItems([], true, runtime).map((item) => item.kind),
-    ["message", "tool", "response"],
+    assistantTurnItems(turn).map((item) => [item.kind, item.kind === "tool" ? item.state : item.id]),
+    [["message", "message-1"], ["tool", "completed"], ["message", "message-2"]],
   );
 });
 
-test("tool completion updates the existing ordered row", () => {
-  const started = toolPart("search-1", "Act · Search Knowledge", "active");
-  const completed = toolPart("search-1", "Observe · Search Knowledge", "completed");
-  const withStart = upsertStatusPart([], started);
-  const withCompletion = upsertStatusPart(withStart, completed);
-  const items = assistantTurnItems(withCompletion, true);
+test("keeps the newest function call active while its enclosing Turn continues", () => {
+  const turn: TurnState = {
+    id: "turn-1",
+    status: "streaming",
+    responseOrder: ["response-1"],
+    responses: {
+      "response-1": {
+        id: "response-1", status: "completed", itemOrder: ["tool-1"],
+        items: {
+          "tool-1": {
+            type: "function_call", id: "tool-1", call_id: "call-1", name: "sql_query",
+            arguments: "{}", status: "completed",
+          },
+        },
+      },
+    },
+  };
 
-  assert.equal(withCompletion.length, 1);
-  assert.deepEqual(items, [{
-    kind: "tool",
-    id: "tool-search-1",
-    label: "Search Knowledge",
-    category: "retrieval",
-    state: "completed",
-    detail: undefined,
-    resultCount: undefined,
-    durationMs: undefined,
+  assert.deepEqual(assistantTurnItems(turn), [{
+    kind: "tool", id: "tool-1", name: "sql_query", state: "active",
   }]);
 });
 
-test("tool rows carry the result count and duration the stream reported", () => {
-  const completed = toolPart("search-2", "Observe · Search Knowledge", "completed");
-  completed.data.resultCount = 12;
-  completed.data.durationMs = 1420;
-  const [item] = assistantTurnItems([completed], false);
+test("renders provider reasoning summaries as a collapsed semantic activity", () => {
+  const turn = turnWithFinalMessage();
+  turn.responses["response-1"]!.itemOrder.unshift("reasoning-1");
+  turn.responses["response-1"]!.items["reasoning-1"] = {
+    type: "reasoning", id: "reasoning-1", status: "completed",
+    summary: [{ type: "summary_text", text: "I should verify the policy source." }],
+  };
 
-  assert.equal(item?.kind, "tool");
-  assert.equal(item?.kind === "tool" && item.resultCount, 12);
-  assert.equal(item?.kind === "tool" && item.durationMs, 1420);
+  const [reasoning] = assistantTurnItems(turn);
+  assert.deepEqual(reasoning, {
+    kind: "reasoning",
+    id: "reasoning-1",
+    text: "I should verify the policy source.",
+    state: "completed",
+  });
 });
 
-function toolPart(
-  id: string,
-  label: string,
-  state: "active" | "completed" | "error" | "skipped",
-): Extract<ChatMessagePart, { type: "data-status" }> {
+function turnWithFinalMessage(): TurnState {
   return {
-    type: "data-status",
-    id: `tool-${id}`,
-    data: {
-      phase: "retrieval",
-      state,
-      label,
-      activityType: "knowledge_retrieval",
-      stepId: `tool-${id}`,
-      toolCallId: id,
+    id: "turn-1",
+    status: "completed",
+    responseOrder: ["response-1"],
+    responses: {
+      "response-1": {
+        id: "response-1", status: "completed", itemOrder: ["message-1"],
+        items: {
+          "message-1": {
+            type: "message", id: "message-1", role: "assistant", status: "completed",
+            content: [{ type: "output_text", text: "The answer.", annotations: [] }],
+          },
+        },
+      },
     },
   };
 }

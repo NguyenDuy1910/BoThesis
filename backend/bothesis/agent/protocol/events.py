@@ -1,69 +1,123 @@
-"""Small public item-lifecycle stream and private provider stream contracts."""
+"""The provider-neutral semantic stream consumed by BoThesis clients.
+
+The public stream deliberately follows the OpenAI Responses lifecycle. A
+``response.completed`` event settles one sampling request, not the enclosing
+agent Turn; a Turn may create another response after function execution.
+Clients materialize response and item state from these events rather than
+interpreting runtime phases or UI commands.
+"""
 
 from __future__ import annotations
 
 from typing import Annotated, Literal, TypeAlias, Union
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, model_validator
 
 from bothesis.agent.protocol import ProtocolModel
+from bothesis.agent.protocol.content import ContentPart
 from bothesis.agent.protocol.items import Item
 from bothesis.agent.protocol.responses import Response
 
 
 class StreamEventBase(ProtocolModel):
-    """Base for an immutable streaming event."""
+    """Base for one replayable public stream mutation."""
+
+    sequence_number: int = Field(default=0, ge=0)
 
 
-class TurnStarted(StreamEventBase):
-    type: Literal["turn.started"] = "turn.started"
+class ResponseCreatedEvent(StreamEventBase):
+    type: Literal["response.created"] = "response.created"
+    response_id: str = Field(min_length=1)
+    response: Response
+
+    @model_validator(mode="after")
+    def _match_response_id(self) -> "ResponseCreatedEvent":
+        if self.response.id != self.response_id:
+            raise ValueError("response_id must match response.id")
+        return self
 
 
-class ItemStarted(StreamEventBase):
-    type: Literal["item.started"] = "item.started"
+class ResponseOutputItemAddedEvent(StreamEventBase):
+    type: Literal["response.output_item.added"] = "response.output_item.added"
+    response_id: str = Field(min_length=1)
+    output_index: int = Field(ge=0)
     item: Item
 
 
-class ItemDelta(StreamEventBase):
-    type: Literal["item.delta"] = "item.delta"
-    item_id: str
+class ResponseContentPartAddedEvent(StreamEventBase):
+    type: Literal["response.content_part.added"] = "response.content_part.added"
+    response_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    output_index: int = Field(ge=0)
+    content_index: int = Field(ge=0)
+    part: ContentPart
+
+
+class ResponseOutputTextDeltaEvent(StreamEventBase):
+    type: Literal["response.output_text.delta"] = "response.output_text.delta"
+    response_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    output_index: int = Field(ge=0)
+    content_index: int = Field(ge=0)
     delta: str
 
 
-class ItemCompleted(StreamEventBase):
-    type: Literal["item.completed"] = "item.completed"
+class ResponseContentPartDoneEvent(StreamEventBase):
+    type: Literal["response.content_part.done"] = "response.content_part.done"
+    response_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    output_index: int = Field(ge=0)
+    content_index: int = Field(ge=0)
+    part: ContentPart
+
+
+class ResponseOutputTextDoneEvent(StreamEventBase):
+    type: Literal["response.output_text.done"] = "response.output_text.done"
+    response_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    output_index: int = Field(ge=0)
+    content_index: int = Field(ge=0)
+    text: str
+
+
+class ResponseFunctionCallArgumentsDeltaEvent(StreamEventBase):
+    type: Literal["response.function_call_arguments.delta"] = (
+        "response.function_call_arguments.delta"
+    )
+    response_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    output_index: int = Field(ge=0)
+    delta: str
+
+
+class ResponseFunctionCallArgumentsDoneEvent(StreamEventBase):
+    type: Literal["response.function_call_arguments.done"] = (
+        "response.function_call_arguments.done"
+    )
+    response_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    output_index: int = Field(ge=0)
+    arguments: str
+
+
+class ResponseOutputTextAnnotationAddedEvent(StreamEventBase):
+    type: Literal["response.output_text.annotation.added"] = (
+        "response.output_text.annotation.added"
+    )
+    response_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    output_index: int = Field(ge=0)
+    content_index: int = Field(ge=0)
+    annotation: dict[str, object]
+
+
+class ResponseOutputItemDoneEvent(StreamEventBase):
+    type: Literal["response.output_item.done"] = "response.output_item.done"
+    response_id: str = Field(min_length=1)
+    output_index: int = Field(ge=0)
     item: Item
 
 
-class TurnCompleted(StreamEventBase):
-    type: Literal["turn.completed"] = "turn.completed"
-    duration_ms: int | None = Field(default=None, ge=0)
-    model_duration_ms: int | None = Field(default=None, ge=0)
-    tool_duration_ms: int | None = Field(default=None, ge=0)
-    tool_call_count: int | None = Field(default=None, ge=0)
-
-
-class Error(StreamEventBase):
-    type: Literal["error"] = "error"
-    message: str
-
-
-RuntimeStreamEvent: TypeAlias = Annotated[
-    Union[
-        TurnStarted,
-        ItemStarted,
-        ItemDelta,
-        ItemCompleted,
-        TurnCompleted,
-        Error,
-    ],
-    Field(discriminator="type"),
-]
-RuntimeStreamEventAdapter: TypeAdapter[RuntimeStreamEvent] = TypeAdapter(RuntimeStreamEvent)
-
-
-# Provider-native streams are normalized at the transport boundary only. They
-# are intentionally distinct from the runtime stream consumed by the UI.
 class ResponseCompletedEvent(StreamEventBase):
     type: Literal["response.completed"] = "response.completed"
     response: Response
@@ -79,82 +133,42 @@ class ResponseFailedEvent(StreamEventBase):
     response: Response
 
 
-class ResponseOutputItemDoneEvent(StreamEventBase):
-    type: Literal["response.output_item.done"] = "response.output_item.done"
-    output_index: int = Field(ge=0)
-    item: Item
-
-
-class ResponseOutputTextDeltaEvent(StreamEventBase):
-    type: Literal["response.output_text.delta"] = "response.output_text.delta"
-    item_id: str
-    output_index: int = Field(ge=0)
-    delta: str
-
-
-class ResponseReasoningSummaryTextDeltaEvent(StreamEventBase):
-    type: Literal["response.reasoning_summary_text.delta"] = "response.reasoning_summary_text.delta"
-    item_id: str
-    output_index: int = Field(ge=0)
-    delta: str
-
-
-ProviderStreamEvent: TypeAlias = Annotated[
+ResponseStreamEvent: TypeAlias = Annotated[
     Union[
+        ResponseCreatedEvent,
+        ResponseOutputItemAddedEvent,
+        ResponseContentPartAddedEvent,
+        ResponseOutputTextDeltaEvent,
+        ResponseContentPartDoneEvent,
+        ResponseOutputTextDoneEvent,
+        ResponseFunctionCallArgumentsDeltaEvent,
+        ResponseFunctionCallArgumentsDoneEvent,
+        ResponseOutputTextAnnotationAddedEvent,
+        ResponseOutputItemDoneEvent,
         ResponseCompletedEvent,
         ResponseIncompleteEvent,
         ResponseFailedEvent,
-        ResponseOutputItemDoneEvent,
-        ResponseOutputTextDeltaEvent,
-        ResponseReasoningSummaryTextDeltaEvent,
     ],
     Field(discriminator="type"),
 ]
-ProviderStreamEventAdapter: TypeAdapter[ProviderStreamEvent] = TypeAdapter(ProviderStreamEvent)
-
-
-class ReasoningSummaryDelta:
-    """One provider-authored public reasoning-summary fragment.
-
-    This is an internal sampling event, not a UI runtime event. Raw reasoning
-    text and encrypted reasoning must never be mapped to this type.
-    """
-
-    __slots__ = ("provider", "sampling_number", "item_id", "delta")
-
-    def __init__(
-        self,
-        *,
-        provider: Literal["openai", "openrouter"],
-        sampling_number: int,
-        item_id: str,
-        delta: str,
-    ) -> None:
-        if sampling_number < 1:
-            raise ValueError("sampling_number must be at least one")
-        self.provider = provider
-        self.sampling_number = sampling_number
-        self.item_id = item_id
-        self.delta = delta
+ResponseStreamEventAdapter: TypeAdapter[ResponseStreamEvent] = TypeAdapter(ResponseStreamEvent)
 
 
 __all__ = [
-    "Error",
-    "ItemCompleted",
-    "ItemDelta",
-    "ItemStarted",
-    "ProviderStreamEvent",
-    "ProviderStreamEventAdapter",
-    "ReasoningSummaryDelta",
     "ResponseCompletedEvent",
+    "ResponseContentPartAddedEvent",
+    "ResponseContentPartDoneEvent",
+    "ResponseCreatedEvent",
     "ResponseFailedEvent",
+    "ResponseFunctionCallArgumentsDeltaEvent",
+    "ResponseFunctionCallArgumentsDoneEvent",
     "ResponseIncompleteEvent",
+    "ResponseOutputItemAddedEvent",
     "ResponseOutputItemDoneEvent",
+    "ResponseOutputTextAnnotationAddedEvent",
     "ResponseOutputTextDeltaEvent",
-    "ResponseReasoningSummaryTextDeltaEvent",
-    "RuntimeStreamEvent",
-    "RuntimeStreamEventAdapter",
+    "ResponseOutputTextDoneEvent",
+    "ResponseStreamEvent",
+    "ResponseStreamEventAdapter",
     "StreamEventBase",
-    "TurnCompleted",
-    "TurnStarted",
 ]

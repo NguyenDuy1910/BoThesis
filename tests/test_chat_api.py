@@ -318,29 +318,29 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         if line.startswith("data: ")
     ]
     event_types = [event["type"] for event in events]
-    assert event_types[0] == "turn.started"
-    assert event_types[-1] == "turn.completed"
-    assert set(event_types[1:-1]) <= {"item.started", "item.delta", "item.completed"}
-    evidence_event = next(
-        event for event in events if event.get("item", {}).get("type") == "evidence"
+    assert event_types[0] == "response.created"
+    assert event_types[-1] == "response.completed"
+    assert [event["sequence_number"] for event in events] == list(
+        range(1, len(events) + 1)
     )
-    assert evidence_event["item"]["source"] == "confluence"
-    assert evidence_event["item"]["snippet"] == (
-        "Employees receive 20 days of annual leave."
-    )
-    assert "content" not in evidence_event["item"]
-    tool_result = next(
+    assert event_types.count("response.created") == 2
+    assert event_types.count("response.completed") == 2
+    function_call = next(
         event["item"]
         for event in events
-        if event["type"] == "item.completed"
-        and event.get("item", {}).get("type") == "tool_result"
+        if event["type"] == "response.output_item.done"
+        and event.get("item", {}).get("type") == "function_call"
     )
-    assert tool_result["result_count"] == 1
-    tool_call = next(event["item"] for event in events if event.get("item", {}).get("type") == "tool_call")
-    assert tool_call["label"] == "Search knowledge base"
-    assert tool_call["category"] == "retrieval"
-    assert tool_result["status"] == "completed"
-    assert events[-1]["tool_call_count"] == 1
+    assert function_call["call_id"] == "search-1"
+    assert function_call["name"] == "knowledge_search"
+    annotation = next(
+        event["annotation"]
+        for event in events
+        if event["type"] == "response.output_text.annotation.added"
+    )
+    assert annotation["type"] == "citation"
+    assert annotation["citation"]["document_id"] == "doc-1"
+    assert annotation["citation"]["source"] == "confluence"
     assert len(retriever.contexts) == 1
     assert retriever.contexts[0].reader_ids == (
         "email:person@example.test",
@@ -385,37 +385,25 @@ def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     ]
     assert response.headers["cache-control"] == "no-cache, no-transform"
     assert response.headers["x-accel-buffering"] == "no"
-    # The tool-decision message is a commentary item; all stream mutations
-    # remain generic lifecycle transitions.
     event_types = [event["type"] for event in events]
-    assert event_types[0] == "turn.started"
-    assert event_types[-1] == "turn.completed"
-    assert set(event_types[1:-1]) <= {"item.started", "item.delta", "item.completed"}
-    commentary_started = next(
+    assert event_types[0] == "response.created"
+    assert event_types[-1] == "response.completed"
+    assert event_types.count("response.completed") == 2
+    call = next(
         event["item"]
         for event in events
-        if event["type"] == "item.started"
+        if event["type"] == "response.output_item.done"
+        and event.get("item", {}).get("type") == "function_call"
+    )
+    assert call["call_id"] == "search-1"
+    message = next(
+        event["item"]
+        for event in events
+        if event["type"] == "response.output_item.done"
         and event.get("item", {}).get("type") == "message"
+        and event["item"]["content"][0]["text"] == "I’ll check the relevant source first."
     )
-    assert commentary_started.get("phase") is None
-    commentary = next(
-        event["item"]
-        for event in events
-        if event["type"] == "item.completed"
-        and event.get("item", {}).get("id") == commentary_started["id"]
-    )
-    assert commentary["phase"] == "commentary"
-    assert commentary["id"] == "turn-message-1"
-    tool_event = next(event["item"] for event in events if event.get("item", {}).get("type") == "tool_call")
-    assert tool_event["call_id"] == "search-1"
-    assert tool_event["label"] == "Search knowledge base"
-    assert tool_event["id"]
-    assert tool_event["category"] == "retrieval"
-    citation = next(event["item"] for event in events if event.get("item", {}).get("type") == "evidence")
-    assert citation["document_id"] == "doc-1"
-    assert citation["snippet"] == (
-        "Employees receive 20 days of annual leave."
-    )
+    assert message["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -431,7 +419,7 @@ async def test_openrouter_replays_native_reasoning_and_traces_only_summary() -> 
         )
     ]
 
-    assert events[-1].type == "turn.completed"
+    assert events[-1].type == "response.completed"
     replay = transport.stream_requests[1]
     assistant = next(
         message for message in replay if message.get("role") == "assistant"
@@ -464,24 +452,27 @@ async def test_agent_emits_text_before_sampling_completion() -> None:
         AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[]),
     )
 
-    assert (await anext(stream)).type == "turn.started"
+    assert (await anext(stream)).type == "response.created"
     started = await asyncio.wait_for(anext(stream), timeout=0.1)
+    part_added = await asyncio.wait_for(anext(stream), timeout=0.1)
     first_delta = await asyncio.wait_for(anext(stream), timeout=0.1)
 
-    assert started.type == "item.started"
+    assert started.type == "response.output_item.added"
     assert started.item.type == "message"
-    assert started.item.phase is None
-    assert first_delta.type == "item.delta"
+    assert part_added.type == "response.content_part.added"
+    assert first_delta.type == "response.output_text.delta"
     assert first_delta.delta == "first "
 
     transport.release.set()
     remaining = [event async for event in stream]
     assert [event.type for event in remaining] == [
-        "item.delta",
-        "item.completed",
-        "turn.completed",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.completed",
     ]
-    assert remaining[1].item.phase == "final_answer"
+    assert remaining[-1].response.output_text == "first second"
 
 
 @pytest.mark.asyncio
@@ -511,27 +502,31 @@ async def test_agent_keeps_only_citation_boundary_buffered() -> None:
         ),
     )
 
-    assert (await anext(stream)).type == "turn.started"
-    assert (await anext(stream)).type == "item.started"
-    assert (await anext(stream)).type == "item.completed"
-    assert (await anext(stream)).type == "item.started"
+    assert (await anext(stream)).type == "response.created"
+    assert (await anext(stream)).type == "response.output_item.added"
+    assert (await anext(stream)).type == "response.content_part.added"
     first_delta = await asyncio.wait_for(anext(stream), timeout=0.1)
-    assert first_delta.type == "item.delta"
+    assert first_delta.type == "response.output_text.delta"
     assert first_delta.delta == "Policy "
 
     transport.release.set()
     remaining = [event async for event in stream]
-    assert [event.delta for event in remaining if event.type == "item.delta"] == [
+    assert [event.delta for event in remaining if event.type == "response.output_text.delta"] == [
         " applies"
     ]
-    used = [
-        event.item
+    citation = next(
+        event.annotation
         for event in remaining
-        if event.type == "item.completed"
-        and event.item.type == "evidence"
-        and event.item.status == "used"
-    ]
-    assert [item.id for item in used] == ["ev-1"]
+        if event.type == "response.output_text.annotation.added"
+    )
+    assert citation["citation"]["id"] == "ev-1"
+    completed_part = next(
+        event.part
+        for event in remaining
+        if event.type == "response.content_part.done"
+    )
+    assert completed_part.text == "Policy  applies"
+    assert completed_part.annotations[0]["citation"]["id"] == "ev-1"
 
 
 @pytest.mark.asyncio
@@ -542,7 +537,7 @@ async def test_agent_does_not_delay_literal_brackets_without_evidence() -> None:
     )
     events = [event async for event in stream]
 
-    assert [event.delta for event in events if event.type == "item.delta"] == [
+    assert [event.delta for event in events if event.type == "response.output_text.delta"] == [
         "Array[",
         "0]",
     ]

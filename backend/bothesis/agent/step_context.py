@@ -48,7 +48,7 @@ class StepContext:
     history: "TurnInput"
     tools: tuple[FunctionTool, ...]
     config: AgentConfig
-    turn_number: int
+    sampling_number: int
 
 
 def capture_step_context(
@@ -59,7 +59,7 @@ def capture_step_context(
     history: "TurnInput",
     tools: tuple[FunctionTool, ...],
     config: AgentConfig,
-    turn_number: int,
+    sampling_number: int,
 ) -> StepContext:
     """Snapshot the state one sampling request will observe.
 
@@ -76,7 +76,7 @@ def capture_step_context(
         history=history,
         tools=tools,
         config=config,
-        turn_number=turn_number,
+        sampling_number=sampling_number,
     )
 
 

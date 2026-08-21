@@ -13,14 +13,11 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, TypeAlias
 
-from bothesis.agent.models import ConversationMessage, Evidence
-from bothesis.agent.protocol import EvidenceItem, Item, Response
+from bothesis.agent.models import ConversationMessage
+from bothesis.agent.protocol import Item, Response
 
 ModelMessage: TypeAlias = dict[str, Any]
 """One rendered provider wire message, as produced by ``TurnInput`` rendering."""
-
-MAX_EVIDENCE_SNIPPET_CHARACTERS = 220
-
 
 class AgentExecutionError(RuntimeError):
     """The agent could not safely complete a request."""
@@ -110,49 +107,11 @@ class ModelStreamCompleted:
     response: Response
     duration_ms: int
     items: tuple[Item, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class TextDelta:
-    """One raw assistant text fragment, not yet citation-processed.
-
-    Yielded live as the provider streams tokens so the Turn Loop can push it
-    straight through the citation renderer instead of waiting for the whole
-    sampling response to finish. Internal signalling only — never a public
-    :class:`~bothesis.agent.protocol.RuntimeStreamEvent`.
-    """
-
-    text: str
+    used_evidence_ids: frozenset[str] = frozenset()
 
 
 def duration_ms(started_at: float) -> int:
     return round((perf_counter() - started_at) * 1_000)
-
-
-def evidence_reference(evidence: Evidence) -> EvidenceItem:
-    return EvidenceItem(
-        id=evidence.id,
-        document_id=evidence.document_id,
-        title=evidence.title,
-        page=evidence.page,
-        section=evidence.section,
-        uri=evidence.uri,
-        source=evidence.source,
-        snippet=_evidence_snippet(evidence.content),
-        relevance_score=evidence.relevance_score,
-    )
-
-
-def _evidence_snippet(
-    content: str,
-    max_characters: int = MAX_EVIDENCE_SNIPPET_CHARACTERS,
-) -> str | None:
-    normalized = " ".join(content.split())
-    if not normalized:
-        return None
-    if len(normalized) <= max_characters:
-        return normalized
-    return f"{normalized[: max_characters - 1].rstrip()}…"
 
 
 def _compact_json(value: object) -> str:
@@ -169,7 +128,6 @@ def _message_payload(
 from bothesis.agent.agent import Agent  # noqa: E402
 from bothesis.agent.conversation_compression import ConversationMemory  # noqa: E402
 from bothesis.agent.conversation_session import ConversationSession  # noqa: E402
-from bothesis.agent.message_emitter import MessageEmitter  # noqa: E402
 
 __all__ = [
     "Agent",
@@ -178,11 +136,7 @@ __all__ = [
     "ConversationMemory",
     "ConversationSession",
     "ConversationWindow",
-    "MAX_EVIDENCE_SNIPPET_CHARACTERS",
-    "MessageEmitter",
     "ModelMessage",
     "ModelStreamCompleted",
-    "TextDelta",
     "duration_ms",
-    "evidence_reference",
 ]

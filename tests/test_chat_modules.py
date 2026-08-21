@@ -2,21 +2,26 @@ from __future__ import annotations
 
 import json
 import sys
+import asyncio
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from bothesis.agent import AgentConfig, ConversationMemory, ConversationSession
+from bothesis.agent import AgentConfig, ConversationMemory
 from bothesis.agent.citation import CitationRenderer
 from bothesis.agent.models import (
     AgentContext,
     ConversationDocument,
     ConversationMessage,
     Evidence,
+    ToolContext,
+    ToolOutput,
 )
-from bothesis.agent.protocol import InputText
+from bothesis.agent.protocol import FunctionCallItem, InputText
+from bothesis.agent.response_stream import _openrouter_tool_call_events
+from bothesis.agent.tools import Tool, ToolDefinition, ToolExecutor, ToolRegistry
 
 
 def test_conversation_policy_keeps_newest_content_within_budget() -> None:
@@ -140,8 +145,10 @@ async def test_citation_renderer_carries_split_markers_between_deltas() -> None:
     assert used_evidence_ids == {"ev-1"}
 
 
-def test_openrouter_function_calls_parses_native_tool_call_shape() -> None:
-    calls = ConversationSession._openrouter_function_calls(
+def test_openrouter_function_call_deltas_preserve_the_call_identity() -> None:
+    events = _openrouter_tool_call_events(
+        "resp-1",
+        {},
         [
             {
                 "id": "tool-1",
@@ -154,5 +161,56 @@ def test_openrouter_function_calls_parses_native_tool_call_shape() -> None:
         ]
     )
 
-    assert calls[0].name == "knowledge_search"
-    assert calls[0].parsed_arguments() == {"query": "leave policy"}
+    assert events[0].item.name == "knowledge_search"
+    assert events[0].item.call_id == "tool-1"
+    assert events[1].delta == '{"query":"leave policy"}'
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_runs_independent_calls_concurrently_and_matches_call_ids() -> None:
+    class ParallelEchoTool(Tool):
+        def __init__(self) -> None:
+            self.active = 0
+            self.overlapped = False
+
+        @property
+        def definition(self) -> ToolDefinition:
+            return ToolDefinition(
+                name="echo",
+                description="Echo a value.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            )
+
+        async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolOutput:
+            self.active += 1
+            self.overlapped = self.overlapped or self.active > 1
+            await asyncio.sleep(0.01)
+            self.active -= 1
+            return ToolOutput(content=str(arguments["value"]))
+
+    registry = ToolRegistry()
+    tool = ParallelEchoTool()
+    registry.register(tool)
+    batch = await ToolExecutor(
+        registry, timeout_seconds=1, max_output_characters=100
+    ).execute(
+        (
+            FunctionCallItem(call_id="first", name="echo", arguments='{"value":"one"}'),
+            FunctionCallItem(call_id="second", name="echo", arguments='{"value":"two"}'),
+        ),
+        context=ToolContext(agent_context=AgentContext(user_id="u", tenant_id="t", roles=[])),
+        remaining_calls=2,
+        previous_signatures=set(),
+        evidence={},
+    )
+
+    assert tool.overlapped is True
+    assert [(item.call_id, item.output) for item in batch.output_items] == [
+        ("first", "one"),
+        ("second", "two"),
+    ]

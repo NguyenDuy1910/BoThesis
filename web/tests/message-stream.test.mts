@@ -1,84 +1,116 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyAgentStreamEvent } from "../src/modules/chat/message-stream.ts";
-import type { ChatMessage } from "../src/modules/chat/types.ts";
+import {
+  applyResponseStreamEvent,
+  emptyTurnState,
+} from "../src/modules/chat/message-stream.ts";
+import type { ChatMessage, OutputItem } from "../src/modules/chat/types.ts";
 
-test("materializes the final response from generic message item lifecycle events", () => {
+test("materializes text deltas and annotations into one stable message item", () => {
   const assistantId = "assistant-1";
   let messages: ChatMessage[] = [assistantPlaceholder(assistantId)];
-  const item = {
-    type: "message" as const, id: "msg-1", role: "assistant" as const,
-    phase: "final_answer" as const, status: "in_progress" as const,
-    content: [{ type: "output_text" as const, text: "" }],
+  const response = { id: "response-1", status: "in_progress" as const, output: [] };
+  const message: OutputItem = {
+    type: "message",
+    id: "message-1",
+    role: "assistant",
+    status: "in_progress",
+    content: [{ type: "output_text", text: "", annotations: [] }],
   };
 
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "turn.started" });
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.started", item });
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.delta", item_id: "msg-1", delta: "Grounded " });
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.delta", item_id: "msg-1", delta: "answer." });
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.completed", item: { ...item, status: "completed" } });
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "turn.completed" });
-
-  assert.deepEqual(messages[0].parts, [
-    { type: "data-run", id: "run", data: { status: "completed", startedAt: 1 } },
-    {
-      type: "text",
-      id: "msg-1",
-      text: "Grounded answer.",
-      state: "done",
-      phase: "final_answer",
-    },
-  ]);
-  assert.equal(messages[0].runtime?.items["msg-1"]?.type, "message");
-  assert.deepEqual(messages[0].runtime?.activeItemIds, []);
-  assert.deepEqual(messages[0].runtime?.historyItemIds, ["msg-1"]);
-});
-
-test("keeps a commentary item active until completion and preserves ordered history", () => {
-  const assistantId = "assistant-1";
-  let messages: ChatMessage[] = [assistantPlaceholder(assistantId)];
-  const commentary = {
-    type: "message" as const, id: "commentary-1", role: "assistant" as const,
-    phase: "commentary" as const, status: "in_progress" as const,
-    content: [{ type: "output_text" as const, text: "" }],
-  };
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.started", item: commentary });
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.delta", item_id: "commentary-1", delta: "Checking the policy." });
-  assert.deepEqual(messages[0].runtime?.activeItemIds, ["commentary-1"]);
-  assert.deepEqual(messages[0].parts.at(-1), {
-    type: "text",
-    id: "commentary-1",
-    text: "Checking the policy.",
-    state: "streaming",
-    phase: "commentary",
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.created", response_id: response.id, response,
   });
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.completed", item: { ...commentary, status: "completed" } });
-  assert.deepEqual(messages[0].runtime?.activeItemIds, []);
-  assert.deepEqual(messages[0].runtime?.historyItemIds, ["commentary-1"]);
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.output_item.added", response_id: response.id, output_index: 0, item: message,
+  });
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.content_part.added", response_id: response.id, item_id: "message-1",
+    output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] },
+  });
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.output_text.delta", response_id: response.id, item_id: "message-1",
+    output_index: 0, content_index: 0, delta: "Grounded ",
+  });
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.output_text.annotation.added", response_id: response.id, item_id: "message-1",
+    output_index: 0, content_index: 0,
+    annotation: {
+      type: "citation",
+      start_index: 9,
+      end_index: 9,
+      citation: { id: "source-1", title: "Access Policy", uri: "https://kb/source-1" },
+    },
+  });
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.output_text.delta", response_id: response.id, item_id: "message-1",
+    output_index: 0, content_index: 0, delta: "answer.",
+  });
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.output_item.done", response_id: response.id, output_index: 0,
+    item: { ...message, status: "completed", content: [{ type: "output_text", text: "", annotations: [] }] },
+  });
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.completed",
+    response: {
+      ...response,
+      status: "completed",
+      output: [{ ...message, status: "completed", content: [{ type: "output_text", text: "", annotations: [] }] }],
+    },
+  });
+
+  const turn = messages[0]?.turn;
+  const item = turn?.responses[response.id]?.items["message-1"];
+  assert.equal(turn?.status, "completed");
+  assert.equal(item?.type, "message");
+  assert.equal(item?.type === "message" && item.content[0]?.type === "output_text" && item.content[0].text, "Grounded answer.");
+  assert.equal(item?.type === "message" && item.content[0]?.type === "output_text" && item.content[0].annotations.length, 1);
+  assert.deepEqual(messages[0]?.parts, []);
 });
 
-test("updates a tool activity from tool-call and tool-result item state", () => {
+test("response completion leaves a Turn streaming when it contains function calls", () => {
   const assistantId = "assistant-1";
   let messages: ChatMessage[] = [assistantPlaceholder(assistantId)];
-  const call = {
-    type: "tool_call" as const, id: "tool-1", call_id: "call-1", name: "knowledge_search",
-    label: "Search knowledge base", category: "retrieval" as const, status: "in_progress" as const,
+  const response = { id: "response-1", status: "in_progress" as const, output: [] };
+  const functionCall: OutputItem = {
+    type: "function_call",
+    id: "call-item-1",
+    call_id: "call-1",
+    name: "knowledge_search",
+    arguments: "",
+    status: "in_progress",
   };
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.started", item: call });
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.started", item: {
-    type: "tool_result", id: "tool-1:result", call_id: "call-1", name: "knowledge_search", status: "in_progress",
-  } });
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.completed", item: {
-    type: "tool_result", id: "tool-1:result", call_id: "call-1", name: "knowledge_search", status: "completed", result_count: 2,
-  } });
-  messages = applyAgentStreamEvent(messages, assistantId, { type: "item.completed", item: { ...call, status: "completed" } });
 
-  const status = messages[0].parts.find((part) => part.type === "data-status");
-  assert.equal(status?.type === "data-status" ? status.data.state : undefined, "completed");
-  assert.equal(status?.type === "data-status" ? status.data.resultCount : undefined, 2);
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.created", response_id: response.id, response,
+  });
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.output_item.added", response_id: response.id, output_index: 0, item: functionCall,
+  });
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.function_call_arguments.delta", response_id: response.id, item_id: "call-item-1",
+    output_index: 0, delta: "{\"query\":\"policy",
+  });
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.function_call_arguments.done", response_id: response.id, item_id: "call-item-1",
+    output_index: 0, arguments: "{\"query\":\"policy\"}",
+  });
+  messages = applyResponseStreamEvent(messages, assistantId, {
+    type: "response.completed",
+    response: { ...response, status: "completed", output: [{ ...functionCall, arguments: "{\"query\":\"policy\"}", status: "completed" }] },
+  });
+
+  const turn = messages[0]?.turn;
+  assert.equal(turn?.responses[response.id]?.status, "completed");
+  assert.equal(turn?.status, "streaming");
+  assert.equal(
+    turn?.responses[response.id]?.items["call-item-1"]?.type === "function_call"
+      && turn.responses[response.id]?.items["call-item-1"]?.arguments,
+    "{\"query\":\"policy\"}",
+  );
 });
 
 function assistantPlaceholder(id: string): ChatMessage {
-  return { id, role: "assistant", parts: [{ type: "data-run", id: "run", data: { status: "running", startedAt: 1 } }] };
+  return { id, role: "assistant", parts: [], turn: emptyTurnState(id) };
 }
