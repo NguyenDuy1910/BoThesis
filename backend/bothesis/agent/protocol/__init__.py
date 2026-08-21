@@ -1,33 +1,38 @@
-"""Provider-neutral response protocol modelled on the OpenResponses shape.
+"""OpenResponses data contracts — and nothing else.
 
-The protocol is the contract between the agent runtime and any provider
-transport. It deliberately mirrors OpenResponses naming and semantics so a
-native OpenAI or OpenRouter transport needs field mapping only, never
-structural translation.
+This package is the canonical language of the agent. It mirrors the
+OpenResponses specification (https://www.openresponses.org, version
+2026-04-24): a :class:`~bothesis.agent.protocol.responses.Response` owns an
+ordered ``output`` of Items, an Item owns ContentParts, and the streaming
+events describe mutations of exactly that state.
 
-``Item`` is the primitive: a request carries a collection of input items and a
-response carries a collection of output items. Provider-specific concepts stay
-out of the common contract and travel through the two escape hatches:
-``ExtensionItem``/``ExtensionTool`` for unknown item and tool types, and
-``ResponseRequest.provider_options`` for opaque request options.
+The package holds no behaviour. Response reconstruction lives in
+:mod:`bothesis.agent.reducer`, provider communication and normalization in
+:mod:`bothesis.agent.transports`, and orchestration in
+:mod:`bothesis.agent.conversation_loop`. This package must never import a
+provider SDK.
 
-This package must never import a provider SDK.
+Two escape hatches keep implementer concepts out of the common contract:
+:class:`~bothesis.agent.protocol.items.ExtensionItem` /
+:class:`~bothesis.agent.protocol.tools.ExtensionTool` for slug-prefixed
+implementer types, and ``ResponseRequest.provider_options`` for opaque request
+options.
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-# Tag used by the callable discriminators for any unrecognized item or tool
-# type. It is never a wire value; the original ``type`` string is preserved.
+# Tag used by the callable discriminators for any item or tool type outside the
+# specification. It is never a wire value; the original ``type`` is preserved.
 EXTENSION_TAG = "__extension__"
 
 
 class ProtocolModel(BaseModel):
     """Immutable, strictly validated base for every protocol model.
 
-    Extra fields are rejected so transport mapping bugs surface at the
-    boundary instead of silently dropping provider data.
+    Extra fields are rejected so adapter mapping bugs surface at the provider
+    boundary instead of silently dropping data.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -42,38 +47,24 @@ class ExtensibleProtocolModel(ProtocolModel):
 # Submodules import the shared base from this package while they are being
 # imported, so the primary contracts are re-exported only after it exists.
 from bothesis.agent.protocol.content import (  # noqa: E402
+    DOCUMENT_CITATION_TYPE,
+    TEXT_PART_TYPES,
+    Annotation,
     ContentPart,
     InputContent,
     InputFile,
     InputImage,
     InputText,
-    OutputContent,
+    MessageOutputContent,
     OutputText,
+    ReasoningContent,
+    ReasoningText,
     Refusal,
-)
-from bothesis.agent.protocol.events import (  # noqa: E402
-    Error,
-    ItemCompleted,
-    ItemDelta,
-    ItemStarted,
-    ProviderStreamEvent,
-    ProviderStreamEventAdapter,
-    ReasoningSummaryDelta,
-    ResponseCompletedEvent,
-    ResponseFailedEvent,
-    ResponseIncompleteEvent,
-    ResponseOutputItemDoneEvent,
-    ResponseOutputTextDeltaEvent,
-    ResponseReasoningSummaryTextDeltaEvent,
-    RuntimeStreamEvent,
-    RuntimeStreamEventAdapter,
-    StreamEventBase,
-    TurnCompleted,
-    TurnStarted,
+    SummaryText,
 )
 from bothesis.agent.protocol.items import (  # noqa: E402
     CORE_ITEM_TYPES,
-    EvidenceItem,
+    CompactionItem,
     ExtensionItem,
     FunctionCallItem,
     FunctionCallOutputItem,
@@ -84,23 +75,7 @@ from bothesis.agent.protocol.items import (  # noqa: E402
     MessagePhase,
     MessageRole,
     ReasoningItem,
-    ReasoningSummaryText,
-    ToolCallItem,
-    ToolExecutionStatus,
-    ToolResultItem,
-    pair_function_calls,
 )
-from bothesis.agent.protocol.responses import (  # noqa: E402
-    IncompleteDetails,
-    InputTokensDetails,
-    OutputTokensDetails,
-    Response,
-    ResponseError,
-    ResponseRequest,
-    ResponseStatus,
-    ResponseUsage,
-)
-from bothesis.agent.protocol.models import SamplingRequestOutput  # noqa: E402
 from bothesis.agent.protocol.tools import (  # noqa: E402
     AllowedTools,
     ExtensionTool,
@@ -112,14 +87,63 @@ from bothesis.agent.protocol.tools import (  # noqa: E402
     ToolChoiceMode,
     ToolReference,
 )
+from bothesis.agent.protocol.responses import (  # noqa: E402
+    TERMINAL_RESPONSE_STATUSES,
+    IncompleteDetails,
+    InputTokensDetails,
+    OutputTokensDetails,
+    Response,
+    ResponseError,
+    ResponseRequest,
+    ResponseStatus,
+    ResponseUsage,
+)
+from bothesis.agent.protocol.events import (  # noqa: E402
+    TERMINAL_EVENT_TYPES,
+    ErrorEvent,
+    ErrorPayload,
+    ResponseCompletedEvent,
+    ResponseContentPartAddedEvent,
+    ResponseContentPartDoneEvent,
+    ResponseCreatedEvent,
+    ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
+    ResponseInProgressEvent,
+    ResponseIncompleteEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+    ResponseOutputTextAnnotationAddedEvent,
+    ResponseOutputTextDeltaEvent,
+    ResponseOutputTextDoneEvent,
+    ResponseQueuedEvent,
+    ResponseReasoningDeltaEvent,
+    ResponseReasoningDoneEvent,
+    ResponseReasoningSummaryPartAddedEvent,
+    ResponseReasoningSummaryPartDoneEvent,
+    ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningSummaryTextDoneEvent,
+    ResponseRefusalDeltaEvent,
+    ResponseRefusalDoneEvent,
+    ResponseSnapshotEventBase,
+    ResponseStreamEvent,
+    ResponseStreamEventAdapter,
+    StreamEventBase,
+)
 
 __all__ = [
     "CORE_ITEM_TYPES",
+    "DOCUMENT_CITATION_TYPE",
     "EXTENSION_TAG",
+    "TERMINAL_EVENT_TYPES",
+    "TERMINAL_RESPONSE_STATUSES",
+    "TEXT_PART_TYPES",
     "AllowedTools",
+    "Annotation",
+    "CompactionItem",
     "ContentPart",
-    "Error",
-    "EvidenceItem",
+    "ErrorEvent",
+    "ErrorPayload",
     "ExtensibleProtocolModel",
     "ExtensionItem",
     "ExtensionTool",
@@ -135,47 +159,54 @@ __all__ = [
     "InputTokensDetails",
     "Item",
     "ItemAdapter",
-    "ItemCompleted",
-    "ItemDelta",
-    "ItemStarted",
     "ItemStatus",
     "MessageItem",
+    "MessageOutputContent",
     "MessagePhase",
     "MessageRole",
-    "OutputContent",
     "OutputText",
     "OutputTokensDetails",
     "ProtocolModel",
-    "ProviderStreamEvent",
-    "ProviderStreamEventAdapter",
-    "ReasoningSummaryDelta",
+    "ReasoningContent",
     "ReasoningItem",
-    "ReasoningSummaryText",
+    "ReasoningText",
     "Refusal",
     "Response",
     "ResponseCompletedEvent",
+    "ResponseContentPartAddedEvent",
+    "ResponseContentPartDoneEvent",
+    "ResponseCreatedEvent",
     "ResponseError",
     "ResponseFailedEvent",
+    "ResponseFunctionCallArgumentsDeltaEvent",
+    "ResponseFunctionCallArgumentsDoneEvent",
+    "ResponseInProgressEvent",
     "ResponseIncompleteEvent",
+    "ResponseOutputItemAddedEvent",
     "ResponseOutputItemDoneEvent",
+    "ResponseOutputTextAnnotationAddedEvent",
     "ResponseOutputTextDeltaEvent",
+    "ResponseOutputTextDoneEvent",
+    "ResponseQueuedEvent",
+    "ResponseReasoningDeltaEvent",
+    "ResponseReasoningDoneEvent",
+    "ResponseReasoningSummaryPartAddedEvent",
+    "ResponseReasoningSummaryPartDoneEvent",
     "ResponseReasoningSummaryTextDeltaEvent",
+    "ResponseReasoningSummaryTextDoneEvent",
+    "ResponseRefusalDeltaEvent",
+    "ResponseRefusalDoneEvent",
     "ResponseRequest",
+    "ResponseSnapshotEventBase",
     "ResponseStatus",
-    "RuntimeStreamEvent",
-    "RuntimeStreamEventAdapter",
+    "ResponseStreamEvent",
+    "ResponseStreamEventAdapter",
     "ResponseUsage",
-    "SamplingRequestOutput",
     "StreamEventBase",
+    "SummaryText",
     "Tool",
     "ToolAdapter",
     "ToolChoice",
     "ToolChoiceMode",
-    "ToolCallItem",
-    "ToolExecutionStatus",
     "ToolReference",
-    "ToolResultItem",
-    "TurnCompleted",
-    "TurnStarted",
-    "pair_function_calls",
 ]

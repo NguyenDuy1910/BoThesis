@@ -5,8 +5,8 @@ import {
 import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type {
   AgentHistoryMessage,
-  AgentStreamEvent,
   ConversationDocument,
+  ResponseStreamEvent,
 } from "./types";
 
 const uploadIdempotencyKeys = new WeakMap<File, string>();
@@ -26,7 +26,7 @@ export async function streamAgentResponse(
     history: AgentHistoryMessage[];
     documentIds?: string[];
     signal: AbortSignal;
-    onEvent: (event: AgentStreamEvent) => void;
+    onEvent: (event: ResponseStreamEvent) => void;
   }
 ): Promise<void> {
   const configuration = getBothesisChatConfiguration();
@@ -68,7 +68,7 @@ export async function streamAgentResponse(
       const payload = line.slice(5).trim();
       if (!payload) continue;
       try {
-        const event = JSON.parse(payload) as AgentStreamEvent;
+        const event = JSON.parse(payload) as ResponseStreamEvent;
         if (!deduplicator.shouldAccept(event)) continue;
         options.onEvent(event);
       } catch {

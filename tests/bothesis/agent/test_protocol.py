@@ -1,4 +1,10 @@
-"""Contract tests for the provider-neutral OpenResponses protocol."""
+"""Contract tests for the OpenResponses protocol models.
+
+The protocol is a mirror of the specification (https://www.openresponses.org,
+version 2026-04-24), so these tests assert specification parity: the item union,
+the content families, the item and response state machines, the assistant
+``phase`` field, and the complete streaming event union.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +17,9 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "backend"))
 
 from bothesis.agent.protocol import (
+    DOCUMENT_CITATION_TYPE,
     AllowedTools,
+    CompactionItem,
     ExtensionItem,
     ExtensionTool,
     FunctionCallItem,
@@ -27,45 +35,77 @@ from bothesis.agent.protocol import (
     MessageItem,
     OutputText,
     ReasoningItem,
-    ReasoningSummaryText,
+    ReasoningText,
     Refusal,
     Response,
-    ResponseCompletedEvent,
     ResponseError,
-    ResponseFailedEvent,
-    ResponseOutputItemDoneEvent,
-    ResponseOutputTextDeltaEvent,
     ResponseRequest,
-    ReasoningSummaryDelta,
-    ProviderStreamEventAdapter,
+    ResponseStreamEventAdapter,
     ResponseUsage,
+    SummaryText,
     ToolAdapter,
-    ToolReference,
-    pair_function_calls,
 )
+from bothesis.agent.protocol.content import ContentPart
+from bothesis.agent.protocol.items import ItemStatus
+from bothesis.agent.protocol.responses import ResponseStatus
+from pydantic import TypeAdapter
 
-# ---------------------------------------------------------------------------
-# Discriminated unions
-# ---------------------------------------------------------------------------
+_CONTENT_ADAPTER: TypeAdapter[ContentPart] = TypeAdapter(ContentPart)
+
+# Every event the specification lists for ``text/event-stream`` responses.
+SPECIFIED_EVENT_TYPES = frozenset(
+    {
+        "response.created",
+        "response.queued",
+        "response.in_progress",
+        "response.completed",
+        "response.failed",
+        "response.incomplete",
+        "response.output_item.added",
+        "response.output_item.done",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
+        "response.content_part.added",
+        "response.content_part.done",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.output_text.annotation.added",
+        "response.refusal.delta",
+        "response.refusal.done",
+        "response.reasoning.delta",
+        "response.reasoning.done",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_summary_text.done",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "error",
+    }
+)
 
 
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
-        ({"type": "message", "role": "user", "content": []}, MessageItem),
-        ({"type": "reasoning"}, ReasoningItem),
         (
-            {"type": "function_call", "call_id": "c1", "name": "search"},
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            MessageItem,
+        ),
+        ({"type": "reasoning", "summary": []}, ReasoningItem),
+        (
+            {"type": "function_call", "call_id": "call-1", "name": "search", "arguments": "{}"},
             FunctionCallItem,
         ),
         (
-            {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+            {"type": "function_call_output", "call_id": "call-1", "output": "done"},
             FunctionCallOutputItem,
         ),
-        ({"type": "openrouter.reasoning_details"}, ExtensionItem),
+        ({"type": "compaction", "encrypted_content": "opaque"}, CompactionItem),
+        ({"type": "web_search_call", "status": "searching"}, ExtensionItem),
     ],
 )
-def test_item_union_resolves_each_type(payload: dict, expected: type) -> None:
+def test_item_union_covers_every_specified_item_type(
+    payload: dict, expected: type
+) -> None:
     assert isinstance(ItemAdapter.validate_python(payload), expected)
 
 
@@ -73,29 +113,140 @@ def test_item_union_resolves_each_type(payload: dict, expected: type) -> None:
     ("payload", "expected"),
     [
         ({"type": "input_text", "text": "hi"}, InputText),
-        ({"type": "input_image", "file_id": "file-1"}, InputImage),
+        ({"type": "input_image", "image_url": "https://x/y.png"}, InputImage),
         ({"type": "input_file", "file_id": "file-1"}, InputFile),
-        ({"type": "output_text", "text": "hi"}, OutputText),
+        ({"type": "output_text", "text": "answer"}, OutputText),
         ({"type": "refusal", "refusal": "no"}, Refusal),
+        ({"type": "reasoning_text", "text": "thinking"}, ReasoningText),
+        ({"type": "summary_text", "text": "plan"}, SummaryText),
     ],
 )
-def test_content_union_resolves_each_part(payload: dict, expected: type) -> None:
-    message = MessageItem.model_validate(
-        {"type": "message", "role": "user", "content": [payload]}
+def test_content_union_covers_every_specified_part(
+    payload: dict, expected: type
+) -> None:
+    assert isinstance(_CONTENT_ADAPTER.validate_python(payload), expected)
+
+
+def test_item_status_is_the_specified_state_machine() -> None:
+    assert set(ItemStatus.__args__) == {"in_progress", "completed", "incomplete"}
+
+
+def test_response_status_covers_the_specified_lifecycle() -> None:
+    assert {"queued", "in_progress", "completed", "incomplete", "failed"} <= set(
+        ResponseStatus.__args__
     )
-    assert isinstance(message.content[0], expected)
+
+
+def test_stream_event_union_is_exactly_the_specified_event_set() -> None:
+    schema = ResponseStreamEventAdapter.core_schema
+    while "choices" not in schema:
+        schema = schema["schema"]
+
+    assert set(schema["choices"]) == SPECIFIED_EVENT_TYPES
+
+
+def test_assistant_message_carries_the_phase_field() -> None:
+    commentary = MessageItem(
+        role="assistant",
+        phase="commentary",
+        content=(OutputText(text="Let me look that up."),),
+    )
+    answer = MessageItem(
+        role="assistant",
+        phase="final_answer",
+        content=(OutputText(text="42"),),
+    )
+    response = Response(status="completed", output=(commentary, answer))
+
+    assert response.commentary_text == "Let me look that up."
+    assert response.final_answer_text == "42"
+    assert response.output_text == "Let me look that up.42"
+
+
+def test_phase_is_rejected_when_it_is_not_a_specified_value() -> None:
+    with pytest.raises(ValidationError):
+        MessageItem(role="assistant", phase="draft", content=())
+
+
+def test_final_answer_falls_back_when_no_message_declares_a_phase() -> None:
+    """A provider that predates ``phase`` still yields a usable answer."""
+
+    response = Response(
+        status="completed",
+        output=(MessageItem(role="assistant", content=(OutputText(text="42"),)),),
+    )
+
+    assert response.final_answer_text == "42"
+
+
+def test_final_answer_is_empty_while_the_response_is_only_commentary() -> None:
+    response = Response(
+        status="completed",
+        output=(
+            MessageItem(
+                role="assistant",
+                phase="commentary",
+                content=(OutputText(text="Searching."),),
+            ),
+            FunctionCallItem(call_id="call-1", name="search", arguments="{}"),
+        ),
+    )
+
+    assert response.final_answer_text == ""
+    assert response.function_calls[0].name == "search"
+
+
+def test_reasoning_item_exposes_content_and_summary_separately() -> None:
+    item = ReasoningItem(
+        content=(ReasoningText(text="raw thought"),),
+        summary=(SummaryText(text="plan"),),
+        encrypted_content="opaque",
+    )
+
+    assert item.reasoning_text == "raw thought"
+    assert item.summary_text == "plan"
+    # ``encrypted_content`` is the specified continuation blob, so no
+    # BoThesis-specific field is needed to replay a reasoning item.
+    assert item.encrypted_content == "opaque"
+
+
+def test_function_call_output_defaults_to_the_completed_status() -> None:
+    assert FunctionCallOutputItem(call_id="call-1", output="done").status == "completed"
+
+
+def test_function_call_arguments_decode_to_a_json_object() -> None:
+    call = FunctionCallItem(
+        call_id="call-1", name="search", arguments='{"queries": ["policy"]}'
+    )
+
+    assert call.parsed_arguments() == {"queries": ["policy"]}
+    assert FunctionCallItem(call_id="c", name="n", arguments=" ").parsed_arguments() == {}
+
+
+@pytest.mark.parametrize("arguments", ["[1, 2]", "not json", '"text"'])
+def test_function_call_arguments_reject_non_objects(arguments: str) -> None:
+    call = FunctionCallItem(call_id="call-1", name="search", arguments=arguments)
+
+    with pytest.raises(ValueError):
+        call.parsed_arguments()
+
+
+def test_function_call_identity_is_required() -> None:
+    with pytest.raises(ValidationError):
+        FunctionCallItem(call_id="", name="search")
+    with pytest.raises(ValidationError):
+        FunctionCallItem(call_id="call-1", name="")
 
 
 def test_tool_union_separates_function_and_provider_tools() -> None:
     function_tool = ToolAdapter.validate_python(
         {"type": "function", "name": "search", "parameters": {"type": "object"}}
     )
-    provider_tool = ToolAdapter.validate_python(
-        {"type": "web_search", "search_context_size": "medium"}
-    )
+    hosted = ToolAdapter.validate_python({"type": "web_search_preview", "region": "eu"})
+
     assert isinstance(function_tool, FunctionTool)
-    assert isinstance(provider_tool, ExtensionTool)
-    assert provider_tool.model_dump()["search_context_size"] == "medium"
+    assert isinstance(hosted, ExtensionTool)
+    assert hosted.model_dump()["region"] == "eu"
 
 
 @pytest.mark.parametrize("mode", ["none", "auto", "required"])
@@ -104,16 +255,17 @@ def test_tool_choice_accepts_the_plain_modes(mode: str) -> None:
 
 
 def test_tool_choice_accepts_a_named_function_and_allowed_tools() -> None:
-    named = ResponseRequest(input=(), tool_choice=FunctionToolChoice(name="search"))
+    named = ResponseRequest(
+        input=(), tool_choice=FunctionToolChoice(name="search")
+    ).tool_choice
     allowed = ResponseRequest(
         input=(),
-        tool_choice=AllowedTools(
-            mode="required", tools=(ToolReference(name="search"),)
-        ),
-    )
-    assert isinstance(named.tool_choice, FunctionToolChoice)
-    assert isinstance(allowed.tool_choice, AllowedTools)
-    assert allowed.tool_choice.tools[0].name == "search"
+        tool_choice=AllowedTools(mode="required", tools=({"name": "search"},)),
+    ).tool_choice
+
+    assert isinstance(named, FunctionToolChoice)
+    assert isinstance(allowed, AllowedTools)
+    assert allowed.tools[0].name == "search"
 
 
 def test_allowed_tools_requires_at_least_one_tool() -> None:
@@ -121,235 +273,129 @@ def test_allowed_tools_requires_at_least_one_tool() -> None:
         AllowedTools(tools=())
 
 
-# ---------------------------------------------------------------------------
-# Serialization and deserialization
-# ---------------------------------------------------------------------------
-
-
 def test_request_round_trips_through_json() -> None:
     request = ResponseRequest(
-        model="gpt-5.4-mini",
-        instructions="Answer with citations.",
         input=(
-            MessageItem(
-                role="user",
-                content=(
-                    InputText(text="Summarize this"),
-                    InputImage(image_url="https://example.test/chart.png"),
-                    InputFile(file_id="file-1", filename="policy.pdf"),
-                ),
-            ),
+            MessageItem(role="user", content=(InputText(text="hello"),)),
+            ReasoningItem(summary=(SummaryText(text="plan"),), encrypted_content="x"),
+            FunctionCallItem(call_id="call-1", name="search", arguments='{"q":"a"}'),
+            FunctionCallOutputItem(call_id="call-1", output="found"),
         ),
+        model="test-model",
+        instructions="be brief",
         tools=(FunctionTool(name="search", parameters={"type": "object"}),),
         tool_choice="auto",
-        max_output_tokens=512,
-        temperature=0.2,
-        metadata={"request_id": "r-1"},
+        previous_response_id="resp_1",
         provider_options={"reasoning": {"effort": "low"}},
     )
 
     restored = ResponseRequest.model_validate_json(request.model_dump_json())
 
     assert restored == request
-    assert restored.provider_options == {"reasoning": {"effort": "low"}}
 
 
 def test_response_round_trips_through_json() -> None:
     response = Response(
-        id="resp-1",
-        created_at=1_770_000_000,
-        status="incomplete",
-        model="gpt-5.4-mini",
+        id="resp_1",
+        status="completed",
+        created_at=1,
+        completed_at=2,
+        model="gpt-test",
+        previous_response_id="resp_0",
         output=(
             ReasoningItem(
-                id="rs-1", summary=(ReasoningSummaryText(text="Checking policy"),)
+                id="rs_1",
+                status="completed",
+                content=(ReasoningText(text="thought"),),
+                summary=(SummaryText(text="plan"),),
             ),
             MessageItem(
+                id="msg_1",
                 role="assistant",
+                status="completed",
+                phase="final_answer",
                 content=(
                     OutputText(
-                        text="Employees receive 20 days",
-                        annotations=({"type": "file", "file": {"hash": "h1"}},),
+                        text="grounded",
+                        annotations=(
+                            {
+                                "type": DOCUMENT_CITATION_TYPE,
+                                "start_index": 0,
+                                "end_index": 8,
+                                "citation": {"id": "ev-1"},
+                            },
+                        ),
                     ),
                 ),
             ),
         ),
         usage=ResponseUsage(
-            input_tokens=30,
-            input_tokens_details=InputTokensDetails(cached_tokens=5),
-            output_tokens=9,
-            total_tokens=39,
+            input_tokens=5,
+            input_tokens_details=InputTokensDetails(cached_tokens=2),
+            output_tokens=3,
+            total_tokens=8,
         ),
-        incomplete_details=IncompleteDetails(reason="max_output_tokens"),
+        incomplete_details=None,
     )
 
     restored = Response.model_validate_json(response.model_dump_json())
 
     assert restored == response
-    assert restored.output_text == "Employees receive 20 days"
-    assert restored.output_annotations == ({"type": "file", "file": {"hash": "h1"}},)
-    assert restored.output[0].summary_text == "Checking policy"
+    assert restored.output_annotations[0]["citation"]["id"] == "ev-1"
+
+
+def test_document_citation_uses_the_required_implementer_slug() -> None:
+    """The specification requires implementer types to be slug-prefixed."""
+
+    assert DOCUMENT_CITATION_TYPE.startswith("bothesis:")
 
 
 def test_core_models_reject_unknown_fields() -> None:
     with pytest.raises(ValidationError):
-        Response(status="completed", finish_reason="stop")
+        MessageItem(role="user", content=(), unexpected=1)
 
 
 def test_protocol_models_are_immutable() -> None:
-    item = FunctionCallItem(call_id="c1", name="search")
+    item = MessageItem(role="user", content=(InputText(text="hi"),))
+
     with pytest.raises(ValidationError):
-        item.name = "other"
-
-
-# ---------------------------------------------------------------------------
-# Function calls and their correlation
-# ---------------------------------------------------------------------------
-
-
-def test_function_call_arguments_decode_to_a_json_object() -> None:
-    call = FunctionCallItem(
-        call_id="c1", name="search", arguments='{"query":"leave policy"}'
-    )
-    assert call.parsed_arguments() == {"query": "leave policy"}
-    assert FunctionCallItem(call_id="c1", name="search").parsed_arguments() == {}
-
-
-@pytest.mark.parametrize("arguments", ["{not json}", '"a string"', "[1, 2]"])
-def test_function_call_arguments_reject_non_objects(arguments: str) -> None:
-    call = FunctionCallItem(call_id="c1", name="search", arguments=arguments)
-    with pytest.raises(ValueError):
-        call.parsed_arguments()
-
-
-def test_function_calls_correlate_with_their_outputs_by_call_id() -> None:
-    first = FunctionCallItem(call_id="c1", name="search")
-    second = FunctionCallItem(call_id="c2", name="search")
-    output = FunctionCallOutputItem(call_id="c1", output="20 days")
-
-    pairs = pair_function_calls((first, output, second))
-
-    assert pairs == ((first, output), (second, None))
-
-
-def test_response_exposes_function_calls_in_output_order() -> None:
-    response = Response(
-        status="completed",
-        output=(
-            FunctionCallItem(call_id="c1", name="search"),
-            MessageItem(role="assistant", content=(OutputText(text="checking"),)),
-            FunctionCallItem(call_id="c2", name="fetch"),
-        ),
-    )
-    assert [call.call_id for call in response.function_calls] == ["c1", "c2"]
-    assert response.output_text == "checking"
-
-
-def test_function_call_identity_is_required() -> None:
-    with pytest.raises(ValidationError):
-        FunctionCallItem(call_id="", name="search")
-    with pytest.raises(ValidationError):
-        FunctionCallOutputItem(call_id="c1", output="ok", type="message")
-
-
-# ---------------------------------------------------------------------------
-# Extension items
-# ---------------------------------------------------------------------------
+        item.role = "assistant"
 
 
 def test_extension_item_preserves_provider_type_and_fields() -> None:
     item = ItemAdapter.validate_python(
-        {
-            "type": "openrouter.reasoning_details",
-            "id": "rd-1",
-            "details": [{"type": "reasoning.summary", "summary": "checking"}],
-        }
+        {"type": "web_search_call", "id": "ws_1", "action": {"query": "policy"}}
     )
+
     assert isinstance(item, ExtensionItem)
-    assert item.type == "openrouter.reasoning_details"
-    assert item.model_dump()["details"] == [
-        {"type": "reasoning.summary", "summary": "checking"}
-    ]
+    assert item.type == "web_search_call"
+    assert item.model_dump()["action"] == {"query": "policy"}
 
 
-def test_reasoning_summary_delta_is_typed_and_provider_attributed() -> None:
-    event = ReasoningSummaryDelta(
-        provider="openrouter",
-        sampling_number=2,
-        item_id="reasoning-summary-1",
-        delta="Compared the constraints.",
-    )
-
-    assert event.provider == "openrouter"
-    assert event.delta == "Compared the constraints."
-
-
-def test_extension_items_survive_a_response_round_trip() -> None:
-    response = Response(
-        status="completed",
-        output=(ExtensionItem(type="vendor.trace", payload={"span": "s-1"}),),
-    )
-    restored = Response.model_validate_json(response.model_dump_json())
-    assert restored == response
-    assert restored.output[0].model_dump()["payload"] == {"span": "s-1"}
-
-
-def test_extension_types_cannot_shadow_core_items_or_function_tools() -> None:
+def test_extension_types_cannot_shadow_specified_items_or_function_tools() -> None:
     with pytest.raises(ValidationError):
-        ExtensionItem(type="function_call")
+        ExtensionItem(type="message")
     with pytest.raises(ValidationError):
         ExtensionTool(type="function")
 
 
-# ---------------------------------------------------------------------------
-# Streaming events
-# ---------------------------------------------------------------------------
-
-
-def test_stream_event_union_resolves_every_event_type() -> None:
-    events = [
-        ResponseOutputItemDoneEvent(
-            output_index=0,
-            item=FunctionCallItem(
-                call_id="c1", name="search", arguments='{"query":"leave"}'
-            ),
-        ),
-        ResponseOutputTextDeltaEvent(
-            item_id="msg-1", output_index=1, delta="20 days"
-        ),
-        ResponseCompletedEvent(response=Response(status="completed")),
-    ]
-
-    for event in events:
-        restored = ProviderStreamEventAdapter.validate_json(event.model_dump_json())
-        assert restored == event
-        assert type(restored) is type(event)
-
-    assert [event.type for event in events] == [
-        "response.output_item.done",
-        "response.output_text.delta",
-        "response.completed",
-    ]
-
-
-def test_failed_event_carries_the_response_error() -> None:
-    event = ResponseFailedEvent(
-        response=Response(
-            status="failed",
-            error=ResponseError(code="rate_limit", message="slow down"),
-        ),
-    )
-    restored = ProviderStreamEventAdapter.validate_json(event.model_dump_json())
-    assert restored.response.error == ResponseError(
-        code="rate_limit", message="slow down"
+def test_failed_response_carries_a_typed_error() -> None:
+    response = Response(
+        id="resp_1",
+        status="failed",
+        error=ResponseError(code="rate_limited", message="slow down"),
     )
 
+    assert response.error is not None
+    assert response.error.code == "rate_limited"
 
-def test_output_item_events_carry_extension_items() -> None:
-    event = ResponseOutputItemDoneEvent(
-        output_index=0,
-        item=ExtensionItem(type="vendor.custom", note="keep"),
+
+def test_incomplete_response_carries_its_reason() -> None:
+    response = Response(
+        id="resp_1",
+        status="incomplete",
+        incomplete_details=IncompleteDetails(reason="max_output_tokens"),
     )
-    restored = ProviderStreamEventAdapter.validate_json(event.model_dump_json())
-    assert isinstance(restored.item, ExtensionItem)
-    assert restored.item.model_dump()["note"] == "keep"
+
+    assert response.incomplete_details is not None
+    assert response.incomplete_details.reason == "max_output_tokens"

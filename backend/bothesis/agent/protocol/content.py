@@ -1,8 +1,16 @@
-"""Content parts carried inside protocol message items.
+"""Content parts, exactly as OpenResponses defines them.
 
-Input and output parts are separate families, exactly as in OpenResponses:
-a request supplies ``input_*`` parts and a model returns ``output_text`` or a
-``refusal``.
+Three families share one ``type``-discriminated union:
+
+* input parts (``input_text``, ``input_image``, ``input_file``) are supplied by
+  a client inside a ``message`` item;
+* message output parts (``output_text``, ``refusal``) are produced by a model
+  inside a ``message`` item;
+* reasoning parts (``reasoning_text``, ``summary_text``) live inside a
+  ``reasoning`` item.
+
+``input_video`` is specified but never authored by BoThesis, so it is not
+modelled. Nothing here knows about a provider.
 """
 
 from __future__ import annotations
@@ -12,6 +20,24 @@ from typing import Annotated, Any, Literal, TypeAlias
 from pydantic import Field, model_validator
 
 from bothesis.agent.protocol import ProtocolModel
+
+Annotation: TypeAlias = dict[str, Any]
+"""One annotation attached to an ``output_text`` part.
+
+Kept opaque because members are provider and tool specific: OpenAI emits
+``url_citation``, ``file_citation``, ``file_path`` and container references,
+OpenRouter emits file-cache descriptors, and BoThesis adds
+:data:`DOCUMENT_CITATION_TYPE`. Typing the union would pull every provider's
+vocabulary into the common contract for no gain.
+"""
+
+DOCUMENT_CITATION_TYPE = "bothesis:document_citation"
+"""The one BoThesis annotation type.
+
+OpenResponses only specifies ``url_citation``, which cannot carry enterprise
+document lineage (document id, page, section, access source). The spec requires
+implementer-specific types to be slug-prefixed, hence ``bothesis:``.
+"""
 
 
 class InputText(ProtocolModel):
@@ -53,16 +79,11 @@ class InputFile(ProtocolModel):
 
 
 class OutputText(ProtocolModel):
-    """Text produced by the model.
-
-    ``annotations`` stays an opaque payload because its members are provider
-    and tool specific (citations, file paths, container references). Keeping it
-    untyped avoids pulling provider vocabulary into the common contract.
-    """
+    """Text produced by the model, with its span annotations."""
 
     type: Literal["output_text"] = "output_text"
     text: str
-    annotations: tuple[dict[str, Any], ...] = ()
+    annotations: tuple[Annotation, ...] = ()
 
 
 class Refusal(ProtocolModel):
@@ -72,28 +93,62 @@ class Refusal(ProtocolModel):
     refusal: str
 
 
+class ReasoningText(ProtocolModel):
+    """Raw reasoning text inside a ``reasoning`` item."""
+
+    type: Literal["reasoning_text"] = "reasoning_text"
+    text: str
+
+
+class SummaryText(ProtocolModel):
+    """One provider-authored reasoning summary fragment."""
+
+    type: Literal["summary_text"] = "summary_text"
+    text: str
+
+
 InputContent: TypeAlias = Annotated[
     InputText | InputImage | InputFile,
     Field(discriminator="type"),
 ]
 
-OutputContent: TypeAlias = Annotated[
+MessageOutputContent: TypeAlias = Annotated[
     OutputText | Refusal,
     Field(discriminator="type"),
 ]
 
-ContentPart: TypeAlias = Annotated[
-    InputText | InputImage | InputFile | OutputText | Refusal,
+ReasoningContent: TypeAlias = Annotated[
+    ReasoningText | SummaryText,
     Field(discriminator="type"),
 ]
 
+ContentPart: TypeAlias = Annotated[
+    InputText
+    | InputImage
+    | InputFile
+    | OutputText
+    | Refusal
+    | ReasoningText
+    | SummaryText,
+    Field(discriminator="type"),
+]
+
+TEXT_PART_TYPES = (InputText, OutputText, ReasoningText, SummaryText)
+"""Every part exposing a plain ``text`` attribute."""
+
 __all__ = [
+    "DOCUMENT_CITATION_TYPE",
+    "TEXT_PART_TYPES",
+    "Annotation",
     "ContentPart",
     "InputContent",
     "InputFile",
     "InputImage",
     "InputText",
-    "OutputContent",
+    "MessageOutputContent",
     "OutputText",
+    "ReasoningContent",
+    "ReasoningText",
     "Refusal",
+    "SummaryText",
 ]

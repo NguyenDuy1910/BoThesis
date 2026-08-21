@@ -1,4 +1,10 @@
-"""Bound and optionally compress conversation context for the agent."""
+"""Bound and optionally compress conversation context for the agent.
+
+The output is a plain tuple of canonical OpenResponses Items plus the base
+instructions, which is exactly what a
+:class:`~bothesis.agent.protocol.ResponseRequest` carries. No provider wire
+format is produced here; that belongs to the transport adapters.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +13,12 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from xml.sax.saxutils import escape
 
-from bothesis.agent import AgentConfig, ConversationWindow
+from bothesis.agent import AgentConfig, ConversationWindow, PreparedConversation
 from bothesis.agent.models import (
     AgentContext,
     ConversationDocument,
     ConversationMessage,
+    Evidence,
 )
 from bothesis.agent.prompts.template_render import render_agent_base
 from bothesis.agent.protocol import (
@@ -19,10 +26,10 @@ from bothesis.agent.protocol import (
     InputFile,
     InputImage,
     InputText,
+    Item,
     MessageItem,
     OutputText,
 )
-from bothesis.agent.turn_input import ResponseItem, TurnInput, TurnInputEntry, UserInput
 
 
 class ConversationMemory:
@@ -75,30 +82,30 @@ class ConversationMemory:
         self,
         user_message: str,
         ctx: AgentContext,
-    ) -> TurnInput:
+    ) -> PreparedConversation:
+        """Build the canonical items and instructions for one user turn."""
+
         window = self.window(ctx.history)
         instructions = render_agent_base()
         if ctx.documents:
             instructions = f"{instructions}\n\n{self._document_system_context(ctx.documents)}"
 
-        entries: list[TurnInputEntry] = []
-        entries.extend(
-            ResponseItem(
-                item=MessageItem(role=message.role, content=(InputText(text=message.content),))
+        items: list[Item] = [
+            MessageItem(
+                role=message.role, content=(InputText(text=message.content),)
             )
-            for message in window.older_messages
-        )
-        entries.extend(
-            ResponseItem(
-                item=MessageItem(role=message.role, content=(InputText(text=message.content),))
-            )
-            for message in window.recent_messages
-        )
+            for message in window.messages
+        ]
         cached_message = self._cached_provider_message(ctx.documents)
         if cached_message is not None:
-            entries.append(ResponseItem(item=cached_message))
-        entries.append(UserInput(content=self._document_user_content(user_message, ctx.documents)))
-        return TurnInput(entries=tuple(entries), instructions=instructions)
+            items.append(cached_message)
+        items.append(
+            MessageItem(
+                role="user",
+                content=self._document_user_content(user_message, ctx.documents),
+            )
+        )
+        return PreparedConversation(items=tuple(items), instructions=instructions)
 
     @staticmethod
     def _document_system_context(

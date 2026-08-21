@@ -1,25 +1,16 @@
-"""Execute model-requested tools and project their runtime outcomes."""
+"""Execute one response's function calls and return canonical observations."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from time import perf_counter
 from typing import Any
 
 from bothesis.agent.models import Evidence, ToolContext, ToolObservation, ToolOutput
-from bothesis.agent.protocol import (
-    EvidenceItem,
-    FunctionCallItem,
-    FunctionCallOutputItem,
-    ItemCompleted,
-    ItemStarted,
-    RuntimeStreamEvent,
-    ToolCallItem,
-    ToolResultItem,
-)
+from bothesis.agent.protocol import FunctionCallItem, FunctionCallOutputItem
 from bothesis.agent.tools import ToolExecutionBatch
 from bothesis.agent.tools.registry import ToolRegistry
 from bothesis.observability import LangfuseTracing
@@ -31,7 +22,12 @@ _UNEXECUTED_OUTCOMES = frozenset(
 
 
 class ToolExecutor:
-    """Own validation, execution, result projection, and item lifecycles."""
+    """Validate and run independent calls concurrently.
+
+    Tool timing and outcomes remain runtime telemetry. The client observes the
+    model's ``function_call`` output item; its corresponding
+    ``function_call_output`` is accumulated only as immutable next-step input.
+    """
 
     def __init__(
         self,
@@ -53,10 +49,9 @@ class ToolExecutor:
         context: ToolContext,
         remaining_calls: int,
         previous_signatures: set[str],
-        sampling_number: int,
         evidence: dict[str, Evidence],
-    ) -> AsyncIterator[RuntimeStreamEvent | ToolExecutionBatch]:
-        """Run calls concurrently and emit their lifecycles at actual boundaries."""
+    ) -> ToolExecutionBatch:
+        """Execute all safe independent calls and preserve model call order."""
 
         observations: list[ToolObservation | None] = [None] * len(calls)
         pending: list[tuple[int, FunctionCallItem, dict[str, Any]]] = []
@@ -96,17 +91,6 @@ class ToolExecutor:
             previous_signatures.add(signature)
             pending.append((index, call, arguments))
 
-        for call in calls:
-            yield ItemStarted(item=self._call_item(call, sampling_number))
-            yield ItemStarted(item=self._pending_result_item(call, sampling_number))
-
-        for observation in observations:
-            if observation is not None:
-                for event in self._completion_events(
-                    observation, sampling_number, evidence
-                ):
-                    yield event
-
         tasks = [
             asyncio.create_task(self._execute_indexed(index, call, arguments, context))
             for index, call, arguments in pending
@@ -115,28 +99,32 @@ class ToolExecutor:
             for future in asyncio.as_completed(tasks):
                 index, observation = await future
                 observations[index] = observation
-                for event in self._completion_events(
-                    observation, sampling_number, evidence
-                ):
-                    yield event
         finally:
             for task in tasks:
                 if not task.done():
                     task.cancel()
 
-        completed_observations = tuple(
-            observation for observation in observations if observation is not None
-        )
-        yield ToolExecutionBatch(
+        completed = tuple(observation for observation in observations if observation is not None)
+        for observation in completed:
+            for source in observation.output.evidence:
+                existing = evidence.get(source.id)
+                if existing is None or (
+                    source.relevance_score is not None
+                    and (
+                        existing.relevance_score is None
+                        or source.relevance_score > existing.relevance_score
+                    )
+                ):
+                    evidence[source.id] = source
+        return ToolExecutionBatch(
             output_items=tuple(
                 _output_item(observation, self._max_output_characters)
-                for observation in completed_observations
+                for observation in completed
             ),
-            duration_ms=sum(observation.duration_ms for observation in completed_observations),
+            duration_ms=sum(observation.duration_ms for observation in completed),
             executed_call_count=sum(
-                1
-                for observation in completed_observations
-                if observation.output.metadata.get("outcome") not in _UNEXECUTED_OUTCOMES
+                observation.output.metadata.get("outcome") not in _UNEXECUTED_OUTCOMES
+                for observation in completed
             ),
         )
 
@@ -167,21 +155,18 @@ class ToolExecutor:
         try:
             with trace_context as trace:
                 output = await asyncio.wait_for(
-                    tool.execute(dict(arguments), context),
-                    timeout=self._timeout_seconds,
+                    tool.execute(dict(arguments), context), timeout=self._timeout_seconds
                 )
                 if trace is not None:
                     trace.complete(result=output)
         except TimeoutError:
             output = ToolOutput(
-                content="",
-                error="Tool execution timed out.",
+                content="", error="Tool execution timed out.",
                 metadata={"outcome": "timeout", "result_count": 0},
             )
-        except Exception:  # noqa: BLE001 - failures are model observations
+        except Exception:  # noqa: BLE001 - failure is an agent observation
             output = ToolOutput(
-                content="",
-                error="Tool execution failed.",
+                content="", error="Tool execution failed.",
                 metadata={"outcome": "failed", "result_count": 0},
             )
         return ToolObservation(
@@ -189,88 +174,6 @@ class ToolExecutor:
             output=output,
             duration_ms=round((perf_counter() - started_at) * 1_000),
         )
-
-    def _call_item(self, call: FunctionCallItem, sampling_number: int) -> ToolCallItem:
-        label, category = self._activity_metadata(call.name)
-        return ToolCallItem(
-            id=_activity_id(sampling_number, call),
-            call_id=call.call_id,
-            name=call.name,
-            label=label,
-            category=category,
-        )
-
-    def _result_item(
-        self, observation: ToolObservation, sampling_number: int
-    ) -> ToolResultItem:
-        return ToolResultItem(
-            id=f"{_activity_id(sampling_number, observation.call)}:result",
-            call_id=observation.call.call_id,
-            name=observation.call.name,
-            error=observation.output.error,
-            duration_ms=observation.duration_ms,
-            result_count=observation.result_count,
-            status=observation.status,
-        )
-
-    @staticmethod
-    def _pending_result_item(
-        call: FunctionCallItem, sampling_number: int
-    ) -> ToolResultItem:
-        return ToolResultItem(
-            id=f"{_activity_id(sampling_number, call)}:result",
-            call_id=call.call_id,
-            name=call.name,
-            status="in_progress",
-        )
-
-    def _completion_events(
-        self,
-        observation: ToolObservation,
-        sampling_number: int,
-        evidence: dict[str, Evidence],
-    ) -> tuple[RuntimeStreamEvent, ...]:
-        events = self._evidence_events(observation.output.evidence, evidence)
-        call_item = self._call_item(observation.call, sampling_number)
-        call_status = (
-            "completed"
-            if observation.status == "completed"
-            else "skipped"
-            if observation.status == "skipped"
-            else "failed"
-        )
-        events.extend(
-            (
-                ItemCompleted(item=self._result_item(observation, sampling_number)),
-                ItemCompleted(item=call_item.model_copy(update={"status": call_status})),
-            )
-        )
-        return tuple(events)
-
-    @staticmethod
-    def _evidence_events(
-        discovered: Sequence[Evidence], evidence: dict[str, Evidence]
-    ) -> list[RuntimeStreamEvent]:
-        events: list[RuntimeStreamEvent] = []
-        for item in discovered:
-            existing = evidence.get(item.id)
-            if existing is None:
-                evidence[item.id] = item
-                reference = _evidence_item(item)
-                events.extend((ItemStarted(item=reference), ItemCompleted(item=reference)))
-            elif (
-                item.relevance_score is not None
-                and (existing.relevance_score is None or item.relevance_score > existing.relevance_score)
-            ):
-                evidence[item.id] = item
-        return events
-
-    def _activity_metadata(self, name: str) -> tuple[str, str]:
-        tool = self._registry.get(name)
-        if tool is None:
-            return name.replace("_", " ").replace("-", " ").strip().title() or "Run tool", "tool"
-        definition = tool.definition
-        return definition.activity_label or definition.name.replace("_", " ").title(), definition.activity_category
 
 
 def _error_observation(call: FunctionCallItem, error: str, outcome: str) -> ToolObservation:
@@ -292,10 +195,6 @@ def _tool_signature(name: str, arguments: Mapping[str, Any]) -> str:
     return f"{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
 
 
-def _activity_id(sampling_number: int, call: FunctionCallItem) -> str:
-    return f"sampling-{sampling_number}-call-{call.call_id}"
-
-
 def _output_item(observation: ToolObservation, max_characters: int) -> FunctionCallOutputItem:
     content = observation.output.content
     if observation.output.error:
@@ -304,13 +203,15 @@ def _output_item(observation: ToolObservation, max_characters: int) -> FunctionC
         content = "Tool completed without a textual result."
     if len(content) > max_characters:
         content = f"{content[: max(1, max_characters - 1)].rstrip()}…"
-    return FunctionCallOutputItem(call_id=observation.call.call_id, output=content)
-
-
-def _evidence_item(evidence: Evidence) -> EvidenceItem:
-    from bothesis.agent import evidence_reference
-
-    return evidence_reference(evidence)
+    # A developer-supplied output is always ``completed``: the specification
+    # defines no failure status for an item, so a tool failure is reported in
+    # ``output`` and the runtime outcome stays in telemetry.
+    return FunctionCallOutputItem(
+        id=f"tool-output:{observation.call.call_id}",
+        call_id=observation.call.call_id,
+        output=content,
+        status="completed",
+    )
 
 
 __all__ = ["ToolExecutionBatch", "ToolExecutor"]

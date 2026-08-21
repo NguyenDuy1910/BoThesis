@@ -15,7 +15,7 @@ function message(id: string, role: "user" | "assistant", text: string): ChatMess
   };
 }
 
-test("history keeps complete recent turns and excludes activity text", () => {
+test("history keeps the final response from a semantic multi-response Turn", () => {
   const messages: ChatMessage[] = [
     message("old-user", "user", "O".repeat(20_000)),
     message("old-assistant", "assistant", "A".repeat(5_000)),
@@ -23,16 +23,32 @@ test("history keeps complete recent turns and excludes activity text", () => {
     {
       id: "recent-assistant",
       role: "assistant",
-      parts: [
-        {
-          type: "text",
-          id: "commentary",
-          text: "Searching internally",
-          state: "done",
-          phase: "commentary",
+      parts: [],
+      turn: {
+        id: "turn-1",
+        status: "completed",
+        responseOrder: ["response-1", "response-2"],
+        responses: {
+          "response-1": {
+            id: "response-1", status: "completed", itemOrder: ["tool-1"],
+            items: {
+              "tool-1": {
+                type: "function_call", id: "tool-1", call_id: "call-1", name: "knowledge_search",
+                arguments: "{}", status: "completed",
+              },
+            },
+          },
+          "response-2": {
+            id: "response-2", status: "completed", itemOrder: ["message-1"],
+            items: {
+              "message-1": {
+                type: "message", id: "message-1", role: "assistant", status: "completed",
+                content: [{ type: "output_text", text: "The documented fee is 1%.", annotations: [] }],
+              },
+            },
+          },
         },
-        { type: "text", text: "The documented fee is 1%.", state: "done" },
-      ],
+      },
     },
   ];
 
@@ -42,7 +58,6 @@ test("history keeps complete recent turns and excludes activity text", () => {
     { role: "user", content: "What are the loan fees?" },
     { role: "assistant", content: "The documented fee is 1%." },
   ]);
-  assert.equal(history.some((entry) => entry.content.includes("Searching internally")), false);
   assert.equal(history[0]?.role, "user");
 });
 

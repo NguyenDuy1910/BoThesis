@@ -4,11 +4,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
 import { streamAgentResponse } from "../api";
 import { historyFromMessages, regenerationContext } from "../conversation-history";
-import { applyAgentStreamEvent, updateRun } from "../message-stream";
+import {
+  applyResponseStreamEvent,
+  emptyTurnState,
+  failTurn,
+} from "../message-stream";
 import type {
-  AgentStreamEvent,
   ChatMessage,
   ConversationDocument,
+  ResponseStreamEvent,
 } from "../types";
 
 type ChatStatus = "ready" | "submitted" | "streaming";
@@ -37,8 +41,18 @@ export function useBothesisChat({
   onFinishRef.current = onFinish;
   const isConfigured = Boolean(getBothesisChatConfiguration());
 
+  // Reset on a real conversation switch only. ``initialMessages`` gets a fresh
+  // array identity from every ChatShell refresh — including the ones behind
+  // rename, delete, and the save that follows each completed turn — and keying
+  // the reset on it aborted the in-flight stream and dropped materialized Turn
+  // state. The rehydrated copy is what we just persisted, so there is nothing
+  // to adopt for a conversation already on screen.
+  const loadedConversationRef = useRef(conversationId);
   useEffect(() => {
+    if (loadedConversationRef.current === conversationId) return;
+    loadedConversationRef.current = conversationId;
     controllerRef.current?.abort();
+    controllerRef.current = null;
     messagesRef.current = initialMessages;
     setMessages(initialMessages);
     setStatus("ready");
@@ -46,12 +60,15 @@ export function useBothesisChat({
     activeAssistantIdRef.current = null;
   }, [conversationId, initialMessages]);
 
-  const updateAssistant = useCallback((assistantId: string, event: AgentStreamEvent) => {
+  // Leaving the conversation must not leave the request running.
+  useEffect(() => () => controllerRef.current?.abort(), []);
+
+  const updateAssistant = useCallback((assistantId: string, event: ResponseStreamEvent) => {
     // The stream can deliver its first event before React commits the render
     // that inserted the assistant placeholder. Reduce against the synchronous
-    // ref first so no SSE event (especially ``turn.completed``) is dropped or
+    // ref first so no semantic stream mutation is dropped or
     // later overwritten by a stale queued state update.
-    const next = applyAgentStreamEvent(messagesRef.current, assistantId, event);
+    const next = applyResponseStreamEvent(messagesRef.current, assistantId, event);
     messagesRef.current = next;
     setMessages(next);
   }, []);
@@ -76,11 +93,8 @@ export function useBothesisChat({
     const assistant: ChatMessage = {
       id: assistantId,
       role: "assistant",
-      parts: [{
-        type: "data-run",
-        id: "run",
-        data: { status: "running", startedAt: Date.now() },
-      }],
+      parts: [],
+      turn: emptyTurnState(assistantId),
     };
     activeAssistantIdRef.current = assistantId;
     const baseMessages = options.displayMessages ?? messagesRef.current;
@@ -108,27 +122,34 @@ export function useBothesisChat({
         documentIds: options.documents?.map((document) => document.id),
         signal: controller.signal,
         onEvent: (event) => {
-          if (event.type === "item.delta") {
-            setStatus("streaming");
-          }
+          setStatus("streaming");
           updateAssistant(assistantId, event);
-          if (event.type === "error") setError(new Error(event.message));
+          if (event.type === "response.failed" || event.type === "response.incomplete") {
+            setError(new Error(
+              event.response.error?.message
+              ?? event.response.incomplete_details?.reason
+              ?? "The response could not be completed.",
+            ));
+          }
         },
       });
       if (!controller.signal.aborted) {
-        const completed = messagesRef.current.map((message) => ({
-          ...message,
-          parts: message.parts.map((part) => part.type === "text" ? { ...part, state: "done" as const } : part),
-        }));
-        messagesRef.current = completed;
-        setMessages(completed);
-        onFinishRef.current?.(completed);
+        onFinishRef.current?.(messagesRef.current);
       }
     } catch (cause) {
       if (!controller.signal.aborted) {
         const nextError = cause instanceof Error ? cause : new Error("Chat request failed.");
         setError(nextError);
-        updateAssistant(assistantId, { type: "error", message: nextError.message });
+        setMessages((current) => {
+          const next = current.map((message) => message.id === assistantId
+            ? {
+                ...message,
+                turn: failTurn(message.turn ?? emptyTurnState(message.id), nextError.message),
+              }
+            : message);
+          messagesRef.current = next;
+          return next;
+        });
       }
     } finally {
       if (controllerRef.current === controller) {
@@ -154,7 +175,10 @@ export function useBothesisChat({
     if (activeAssistantId) {
       setMessages((current) => {
         const next = current.map((message) => message.id === activeAssistantId
-          ? { ...message, parts: updateRun(message.parts, { status: "cancelled" }) }
+          ? {
+              ...message,
+              turn: failTurn(message.turn ?? emptyTurnState(message.id), "Response stopped."),
+            }
           : message);
         messagesRef.current = next;
         return next;

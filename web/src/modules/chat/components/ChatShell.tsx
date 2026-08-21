@@ -6,6 +6,7 @@ import {
   Check,
   Copy,
   FileSearch,
+  ArrowDown,
   ListChecks,
   LoaderCircle,
   Menu,
@@ -34,6 +35,7 @@ import {
   uiToCachedMessage,
 } from "@/modules/chat/conversations";
 import { useBothesisChat } from "@/modules/chat/hooks/useBothesisChat";
+import { useJumpToLatest } from "@/modules/chat/hooks/useJumpToLatest";
 import { useSidebarState } from "@/modules/chat/hooks/useSidebarState";
 import type {
   ChatConversation,
@@ -42,6 +44,7 @@ import type {
   ConversationDocument,
 } from "@/modules/chat/types";
 import { AppSidebar, BothesisMark } from "./AppSidebar";
+import { AnswerSources } from "./AnswerSources";
 import { AssistantTurn } from "./AssistantTurn";
 
 const suggestions = [
@@ -268,9 +271,7 @@ function ChatConversation({
   const activeTurnId = latestUserMessageId && activeAssistantMessageId
     ? `${latestUserMessageId}:${activeAssistantMessageId}`
     : null;
-  const hasMessageError = messages.some((message) => (
-    message.parts.some((part) => part.type === "data-stream-error")
-  ));
+  const hasMessageError = messages.some((message) => message.turn?.status === "failed");
   const isUploading = composerAttachments.some((item) => (
     item.progress !== "ready" && item.progress !== "failed"
   ));
@@ -395,6 +396,8 @@ function ChatConversation({
     void regenerate({ messageId });
   }, [regenerate]);
 
+  const { hasMoreBelow, jumpToLatest } = useJumpToLatest(chatScrollRef, messageStackRef);
+
   return (
     <section className="main-pane">
       <header className="topbar">
@@ -417,8 +420,7 @@ function ChatConversation({
         </div>
       </header>
 
-      <div className="chat-activity-layout">
-        <div className="conversation-pane">
+      <div className="conversation-pane">
           <div
             className="chat-scroll"
             ref={chatScrollRef}
@@ -437,6 +439,18 @@ function ChatConversation({
               )}
             </div>
           </div>
+
+          {hasMoreBelow && messages.length > 0 && (
+            <button
+              aria-label="Jump to latest"
+              className="chat-jump"
+              onClick={jumpToLatest}
+              title="Jump to latest"
+              type="button"
+            >
+              <ArrowDown aria-hidden="true" size={15} />
+            </button>
+          )}
 
           {error && !hasMessageError && <div className="chat-inner"><div className="error-box">{error.message}</div></div>}
           {!isConfigured && (
@@ -457,7 +471,6 @@ function ChatConversation({
             onSubmit={submit}
             textareaRef={textareaRef}
           />
-        </div>
       </div>
     </section>
   );
@@ -500,10 +513,12 @@ const MessageView = memo(function MessageView({
   onRegenerate: (messageId: string) => void;
 }) {
   const { copy, copied } = useClipboard();
+  // The answer keeps easing onto screen for a moment after the stream ends, so
+  // the sources and the action row wait for the text rather than for the socket.
+  const [isRevealing, setIsRevealing] = useState(false);
+  const hasSettled = !isStreaming && !isRevealing;
   const text = getMessageText(message);
-  const streamError = message.parts.find(
-    (part): part is Extract<ChatMessagePart, { type: "data-stream-error" }> => part.type === "data-stream-error",
-  );
+  const streamError = message.turn?.error;
   const messageDocuments = message.parts
     .filter((part): part is Extract<ChatMessagePart, { type: "data-document" }> => (
       part.type === "data-document"
@@ -531,18 +546,15 @@ const MessageView = memo(function MessageView({
 
   return (
     <div className="message-row assistant">
-      <div className="avatar avatar--assistant"><BothesisMark className="bothesis-mark--avatar" label="Assistant" /></div>
       <div className="message-body">
-        <div className="assistant-byline">
-          <strong>BoThesis</strong>
-        </div>
         <AssistantTurn
           isStreaming={isStreaming}
-          parts={message.parts}
-          runtime={message.runtime}
+          onRevealingChange={setIsRevealing}
+          turn={message.turn}
         />
-        {streamError && <div className="error-box">{streamError.data.message}</div>}
-        {!isStreaming && (text || streamError) && (
+        {streamError && <div className="error-box">{streamError}</div>}
+        {hasSettled && <AnswerSources turn={message.turn} />}
+        {hasSettled && (text || streamError) && (
           <div className="answer-footer">
             <div className="assistant-actions" aria-label="Assistant message actions">
               {text && (
@@ -647,7 +659,7 @@ function ChatComposer({
         />
         <textarea
           aria-label="Message assistant"
-          disabled={isStreaming || !isConfigured}
+          disabled={!isConfigured}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -664,7 +676,7 @@ function ChatComposer({
           <button
             aria-label="Attach files"
             className="composer-tool"
-            disabled={isStreaming || !isConfigured || attachments.length >= 12}
+            disabled={!isConfigured || attachments.length >= 12}
             onClick={() => fileInputRef.current?.click()}
             title="Attach files"
             type="button"

@@ -1,9 +1,22 @@
 """Public contracts and runtime entry points for the BoThesis agent.
 
-The package has one execution path: :class:`Agent` delegates to
-:class:`ConversationSession`, which constructs one Turn Request per user
-message to alternate dynamically between native tool calls and final
-response generation.
+The package has one execution path. :class:`Agent` validates a request and
+delegates to :class:`~bothesis.agent.conversation_loop.ConversationLoop`, which
+runs one user turn as a chain of OpenResponses responses, alternating between
+function calls and final answer generation.
+
+Layering, top to bottom:
+
+``protocol``
+    the OpenResponses data contracts, and nothing else;
+``transports``
+    provider communication plus normalization onto those contracts;
+``reducer``
+    reconstruction of a response from its event stream;
+``conversation_loop``
+    orchestration of one turn;
+``tools``
+    tool execution.
 """
 
 from __future__ import annotations
@@ -11,15 +24,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, TypeAlias
 
-from bothesis.agent.models import ConversationMessage, Evidence
-from bothesis.agent.protocol import EvidenceItem, Item, Response
-
-ModelMessage: TypeAlias = dict[str, Any]
-"""One rendered provider wire message, as produced by ``TurnInput`` rendering."""
-
-MAX_EVIDENCE_SNIPPET_CHARACTERS = 220
+from bothesis.agent.models import ConversationMessage
+from bothesis.agent.protocol import Item
 
 
 class AgentExecutionError(RuntimeError):
@@ -98,61 +105,15 @@ class ConversationWindow:
 
 
 @dataclass(frozen=True, slots=True)
-class ModelStreamCompleted:
-    """One provider stream normalized into a protocol response.
+class PreparedConversation:
+    """The canonical input items and base instructions for one turn."""
 
-    ``items`` is the canonical, provider-neutral output of this sampling
-    request (in :mod:`bothesis.agent.protocol` terms) so the next request can
-    replay it verbatim through :class:`~bothesis.agent.turn_input.TurnInput`;
-    ``response`` is the neutral view the runtime reasons about.
-    """
-
-    response: Response
-    duration_ms: int
-    items: tuple[Item, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class TextDelta:
-    """One raw assistant text fragment, not yet citation-processed.
-
-    Yielded live as the provider streams tokens so the Turn Loop can push it
-    straight through the citation renderer instead of waiting for the whole
-    sampling response to finish. Internal signalling only — never a public
-    :class:`~bothesis.agent.protocol.RuntimeStreamEvent`.
-    """
-
-    text: str
+    items: tuple[Item, ...]
+    instructions: str
 
 
 def duration_ms(started_at: float) -> int:
     return round((perf_counter() - started_at) * 1_000)
-
-
-def evidence_reference(evidence: Evidence) -> EvidenceItem:
-    return EvidenceItem(
-        id=evidence.id,
-        document_id=evidence.document_id,
-        title=evidence.title,
-        page=evidence.page,
-        section=evidence.section,
-        uri=evidence.uri,
-        source=evidence.source,
-        snippet=_evidence_snippet(evidence.content),
-        relevance_score=evidence.relevance_score,
-    )
-
-
-def _evidence_snippet(
-    content: str,
-    max_characters: int = MAX_EVIDENCE_SNIPPET_CHARACTERS,
-) -> str | None:
-    normalized = " ".join(content.split())
-    if not normalized:
-        return None
-    if len(normalized) <= max_characters:
-        return normalized
-    return f"{normalized[: max_characters - 1].rstrip()}…"
 
 
 def _compact_json(value: object) -> str:
@@ -168,21 +129,15 @@ def _message_payload(
 # Import primary runtime classes only after the shared package contracts exist.
 from bothesis.agent.agent import Agent  # noqa: E402
 from bothesis.agent.conversation_compression import ConversationMemory  # noqa: E402
-from bothesis.agent.conversation_session import ConversationSession  # noqa: E402
-from bothesis.agent.message_emitter import MessageEmitter  # noqa: E402
+from bothesis.agent.conversation_loop import ConversationLoop  # noqa: E402
 
 __all__ = [
     "Agent",
     "AgentConfig",
     "AgentExecutionError",
+    "ConversationLoop",
     "ConversationMemory",
-    "ConversationSession",
     "ConversationWindow",
-    "MAX_EVIDENCE_SNIPPET_CHARACTERS",
-    "MessageEmitter",
-    "ModelMessage",
-    "ModelStreamCompleted",
-    "TextDelta",
+    "PreparedConversation",
     "duration_ms",
-    "evidence_reference",
 ]

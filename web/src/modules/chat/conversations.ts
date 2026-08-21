@@ -6,6 +6,7 @@ import type {
   ChatMessagePart,
   ChatConversation,
 } from "./types";
+import { finalTurnText } from "./message-stream.ts";
 
 const CONVERSATIONS_KEY_BASE = "bothesis-conversations";
 const MESSAGE_PREFIX_BASE = "bothesis-messages:";
@@ -111,14 +112,20 @@ function resolveSessionId(id: string) {
 }
 
 function normalizeCachedMessage(message: CachedChatMessage): CachedChatMessage {
-  return { ...message, parts: message.parts.map(normalizeStoredPart) };
+  return {
+    ...message,
+    parts: message.parts.flatMap((part) => {
+      const normalized = normalizeStoredPart(part);
+      return normalized ? [normalized] : [];
+    }),
+  };
 }
 
-function normalizeStoredPart(part: ChatMessagePart): ChatMessagePart {
+function normalizeStoredPart(part: ChatMessagePart): ChatMessagePart | undefined {
   if (part.type === "text" && part.state === "streaming") {
     return { ...part, state: "done" };
   }
-  return part;
+  return part.type === "text" || part.type === "data-document" ? part : undefined;
 }
 
 function normalizeCachedMessages(messages: CachedChatMessage[]) {
@@ -126,9 +133,13 @@ function normalizeCachedMessages(messages: CachedChatMessage[]) {
 }
 
 export function getMessageText(message: ChatMessage): string {
+  if (message.role === "assistant") {
+    const semanticText = finalTurnText(message.turn);
+    if (semanticText) return semanticText;
+  }
   return message.parts
     .filter((part): part is Extract<ChatMessagePart, { type: "text" }> => (
-      part.type === "text" && part.phase !== "commentary"
+      part.type === "text"
     ))
     .map((part) => part.text)
     .join("");
@@ -141,11 +152,19 @@ export function titleFromMessage(message: string) {
 }
 
 export function cachedToUIMessage(message: CachedChatMessage): ChatMessage {
-  if (message.parts.length) {
+  // An assistant reply's content lives entirely in ``turn`` — its own ``parts``
+  // is always empty (see useBothesisChat.ts). Gating this branch on parts alone
+  // dropped ``turn`` for every restored assistant message and rendered it as an
+  // empty bubble, since AssistantTurn reads only ``turn``.
+  if (message.parts.length || message.turn) {
     return {
       id: message.id,
       role: message.role,
-      parts: message.parts.map(normalizeStoredPart),
+      parts: message.parts.flatMap((part) => {
+        const normalized = normalizeStoredPart(part);
+        return normalized ? [normalized] : [];
+      }),
+      turn: message.turn,
     };
   }
 
@@ -161,7 +180,11 @@ export function uiToCachedMessage(message: ChatMessage): CachedChatMessage {
     id: message.id,
     role: message.role === "user" ? "user" : "assistant",
     content: getMessageText(message),
-    parts: message.parts.map(normalizeStoredPart),
+    parts: message.parts.flatMap((part) => {
+      const normalized = normalizeStoredPart(part);
+      return normalized ? [normalized] : [];
+    }),
+    turn: message.turn,
     createdAt: Date.now(),
   };
 }

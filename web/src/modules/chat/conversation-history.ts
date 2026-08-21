@@ -4,6 +4,7 @@ import type {
   ChatMessagePart,
   ConversationDocument,
 } from "./types";
+import { getMessageText } from "./conversations.ts";
 
 export const MAX_HISTORY_MESSAGES = 24;
 export const MAX_HISTORY_CHARACTERS = 24_000;
@@ -11,13 +12,7 @@ export const MAX_HISTORY_MESSAGE_CHARACTERS = 8_000;
 const CLIP_MARKER = "\n…\n";
 
 export function conversationMessageText(message: ChatMessage) {
-  return message.parts
-    .filter((part): part is Extract<ChatMessagePart, { type: "text" }> => (
-      part.type === "text" && part.phase !== "commentary"
-    ))
-    .map((part) => part.text)
-    .join("")
-    .trim();
+  return getMessageText(message).trim();
 }
 
 export function historyFromMessages(messages: ChatMessage[]): AgentHistoryMessage[] {

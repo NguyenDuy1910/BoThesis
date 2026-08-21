@@ -3,11 +3,11 @@ import test from "node:test";
 
 import { StreamEventDeduplicator } from "../src/modules/chat/stream-deduplicator.ts";
 
-test("accepts ordered events and rejects duplicate IDs or sequences", () => {
+test("accepts ordered events and rejects duplicate sequence numbers", () => {
   const deduplicator = new StreamEventDeduplicator();
 
-  assert.equal(deduplicator.shouldAccept({ event_id: "event-1", sequence: 1 }), true);
-  assert.equal(deduplicator.shouldAccept({ event_id: "event-1", sequence: 2 }), false);
-  assert.equal(deduplicator.shouldAccept({ event_id: "event-2", sequence: 1 }), false);
-  assert.equal(deduplicator.shouldAccept({ event_id: "event-2", sequence: 2 }), true);
+  assert.equal(deduplicator.shouldAccept({ sequence_number: 1 }), true);
+  assert.equal(deduplicator.shouldAccept({ sequence_number: 1 }), false);
+  assert.equal(deduplicator.shouldAccept({ sequence_number: 0 }), false);
+  assert.equal(deduplicator.shouldAccept({ sequence_number: 2 }), true);
 });
