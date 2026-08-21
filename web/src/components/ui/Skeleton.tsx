@@ -9,7 +9,8 @@ interface SkeletonProps {
 export function Skeleton({ className }: SkeletonProps) {
   return (
     <div
-      className={cn("animate-pulse rounded-xl bg-slate-200/80", className)}
+      aria-hidden="true"
+      className={cn("animate-pulse rounded-md bg-[var(--border)]", className)}
     />
   );
 }
@@ -34,7 +35,7 @@ export function TreeSkeleton() {
 
 export function ListSkeleton({ count = 6 }: { count?: number }) {
   return (
-    <div className="divide-y divide-slate-100">
+    <div className="divide-y divide-[var(--border)]">
       {Array.from({ length: count }).map((_, i) => (
         <div key={i} className="space-y-2 px-4 py-3">
           <Skeleton className="h-4 w-3/4" />

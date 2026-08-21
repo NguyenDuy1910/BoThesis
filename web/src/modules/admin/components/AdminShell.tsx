@@ -15,16 +15,16 @@ export function AdminShell({ children }: AdminShellProps) {
 
   return (
     <ToastProvider>
-      <div className="flex h-dvh w-screen overflow-hidden bg-slate-50 text-slate-900">
+      <div className="admin-shell">
         <AdminSidebar
           collapsed={collapsed}
           onToggle={() => setCollapsed(!collapsed)}
           mobileOpen={mobileOpen}
           onMobileClose={() => setMobileOpen(false)}
         />
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-slate-50">
+        <div className="admin-shell__workspace">
           <AdminTopbar onMobileMenuOpen={() => setMobileOpen(true)} />
-          <main className="min-h-0 flex-1 overflow-y-auto px-4 py-4 lg:px-6">
+          <main className="admin-shell__main" id="main-content">
             {children}
           </main>
         </div>

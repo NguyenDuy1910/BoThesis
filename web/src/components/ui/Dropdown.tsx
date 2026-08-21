@@ -173,12 +173,12 @@ export function Dropdown({
           setOpen(true);
         }}
         className={cn(
-          "inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/25 disabled:pointer-events-none disabled:bg-slate-100 disabled:text-slate-400",
+          "inline-flex h-9 items-center justify-center gap-2 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-medium text-[var(--text-secondary)] transition-[border-color,background-color,color] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:pointer-events-none disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)] disabled:opacity-50",
           buttonClassName
         )}
       >
         {label}
-        {showChevron && <ChevronDown className={cn("h-4 w-4 transition-transform", open && "rotate-180")} />}
+        {showChevron && <ChevronDown aria-hidden="true" className={cn("h-4 w-4 transition-transform", open && "rotate-180")} />}
       </button>
       {open &&
         typeof document !== "undefined" &&
@@ -198,7 +198,7 @@ export function Dropdown({
             }}
             style={menuStyle}
             className={cn(
-              "z-[60] min-w-48 overflow-y-auto rounded-lg border border-slate-200 bg-white p-1 shadow-xl shadow-slate-950/10",
+              "z-[60] min-w-48 overflow-y-auto overscroll-contain rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1 shadow-[var(--shadow-lg)]",
               menuClassName
             )}
           >
@@ -254,13 +254,13 @@ export function DropdownItem({
       type={type}
       role="menuitem"
       className={cn(
-        "flex min-h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20",
+        "flex min-h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
         destructive
-          ? "text-red-700 hover:bg-red-50"
+          ? "text-[var(--danger)] hover:bg-[var(--danger-soft)]"
           : selected
-            ? "bg-teal-50 text-teal-800"
-            : "text-slate-700 hover:bg-slate-50 hover:text-slate-950",
-        "disabled:pointer-events-none disabled:text-slate-400 disabled:hover:bg-transparent",
+            ? "bg-[var(--surface-selected)] text-[var(--brand-accent)]"
+            : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
+        "disabled:pointer-events-none disabled:text-[var(--text-muted)] disabled:opacity-50 disabled:hover:bg-transparent",
         className
       )}
       {...props}

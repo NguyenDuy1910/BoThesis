@@ -11,14 +11,15 @@ interface SelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
 }
 
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(
-  ({ className, error, options, placeholder, ...props }, ref) => {
+  ({ className, error, options, placeholder, "aria-invalid": ariaInvalid, ...props }, ref) => {
     return (
       <select
+        aria-invalid={error || ariaInvalid || undefined}
         ref={ref}
         className={cn(
           ui.control,
           "appearance-none pr-8",
-          error && "border-red-300 focus:border-red-300 focus:ring-red-200",
+          error && "border-[var(--danger-border)] focus:border-[var(--danger)] focus:ring-[var(--danger-soft)]",
           className
         )}
         {...props}

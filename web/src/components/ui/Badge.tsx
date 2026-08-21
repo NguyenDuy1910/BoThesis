@@ -5,21 +5,21 @@ import { cn } from "@/lib/cn";
 type BadgeVariant = "default" | "primary" | "success" | "warning" | "danger" | "info";
 
 const variantClasses: Record<BadgeVariant, string> = {
-  default: "bg-slate-100 text-slate-700 ring-slate-200",
-  primary: "bg-teal-50 text-teal-800 ring-teal-200",
-  success: "bg-emerald-50 text-emerald-700 ring-emerald-200",
-  warning: "bg-amber-50 text-amber-800 ring-amber-200",
-  danger: "bg-red-50 text-red-700 ring-red-200",
-  info: "bg-blue-50 text-blue-800 ring-blue-200",
+  default: "bg-[var(--bg-subtle)] text-[var(--text-secondary)] ring-[var(--border)]",
+  primary: "bg-[var(--primary-soft)] text-[var(--brand-accent)] ring-[var(--border)]",
+  success: "bg-[var(--success-soft)] text-[var(--success)] ring-[var(--success-border)]",
+  warning: "bg-[var(--warning-soft)] text-[var(--warning)] ring-[var(--warning-border)]",
+  danger: "bg-[var(--danger-soft)] text-[var(--danger)] ring-[var(--danger-border)]",
+  info: "bg-[var(--info-soft)] text-[var(--info)] ring-[var(--info-border)]",
 };
 
 const dotClasses: Record<BadgeVariant, string> = {
-  default: "bg-slate-400",
-  primary: "bg-teal-600",
-  success: "bg-emerald-600",
-  warning: "bg-amber-500",
-  danger: "bg-red-600",
-  info: "bg-blue-600",
+  default: "bg-[var(--text-muted)]",
+  primary: "bg-[var(--brand-accent)]",
+  success: "bg-[var(--success)]",
+  warning: "bg-[var(--warning)]",
+  danger: "bg-[var(--danger)]",
+  info: "bg-[var(--info)]",
 };
 
 interface BadgeProps {
@@ -38,7 +38,7 @@ export function Badge({ variant = "default", children, className, dot = false }:
         className
       )}
     >
-      {dot && <span className={cn("h-1.5 w-1.5 rounded-full", dotClasses[variant])} />}
+      {dot && <span aria-hidden="true" className={cn("h-1.5 w-1.5 rounded-full", dotClasses[variant])} />}
       {children}
     </span>
   );

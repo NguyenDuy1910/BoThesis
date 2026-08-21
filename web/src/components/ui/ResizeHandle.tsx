@@ -24,13 +24,13 @@ export function ResizeHandle({ onPointerDown, onDoubleClick, className }: Resize
       className={cn(
         "relative flex w-1.5 cursor-col-resize items-center justify-center shrink-0",
         "before:absolute before:inset-y-0 before:-left-1 before:-right-1",
-        "group transition-colors hover:bg-slate-100 active:bg-slate-200",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20",
+        "group transition-colors hover:bg-[var(--surface-hover)] active:bg-[var(--surface-selected)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
         className
       )}
     >
       <div className="absolute inset-y-0 flex items-center justify-center pointer-events-none">
-        <GripVertical className="h-4 w-4 text-slate-300 transition-colors group-hover:text-slate-500 group-active:text-slate-700" />
+        <GripVertical aria-hidden="true" className="h-4 w-4 text-[var(--border-strong)] transition-colors group-hover:text-[var(--text-muted)] group-active:text-[var(--text-secondary)]" />
       </div>
     </div>
   );

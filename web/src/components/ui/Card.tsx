@@ -19,7 +19,7 @@ interface CardHeaderProps {
 
 export function CardHeader({ children, className }: CardHeaderProps) {
   return (
-    <div className={cn("border-b border-slate-100 px-4 py-3", className)}>
+    <div className={cn("border-b border-[var(--border)] px-4 py-3", className)}>
       {children}
     </div>
   );

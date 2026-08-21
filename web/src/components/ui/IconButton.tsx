@@ -7,11 +7,11 @@ type IconButtonVariant = "ghost" | "secondary" | "danger" | "primary";
 type IconButtonSize = "sm" | "md" | "lg";
 
 const variantClasses: Record<IconButtonVariant, string> = {
-  ghost: "border border-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-950",
+  ghost: "border border-transparent text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
   secondary:
-    "border border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950",
-  danger: "border border-transparent text-slate-500 hover:bg-red-50 hover:text-red-700",
-  primary: "border border-teal-700 bg-teal-700 text-white hover:bg-teal-800",
+    "border border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
+  danger: "border border-transparent text-[var(--text-muted)] hover:bg-[var(--danger-soft)] hover:text-[var(--danger)]",
+  primary: "border border-[var(--primary)] bg-[var(--primary)] text-[var(--text-on-brand)] hover:bg-[var(--primary-hover)]",
 };
 
 const sizeClasses: Record<IconButtonSize, string> = {
@@ -40,12 +40,13 @@ export function IconButton({
 }: IconButtonProps) {
   return (
     <button
+      aria-busy={loading || undefined}
       aria-label={label}
       title={props.title ?? label}
       className={cn(
         "inline-flex shrink-0 items-center justify-center transition",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/25 focus-visible:ring-offset-1 focus-visible:ring-offset-white",
-        "disabled:pointer-events-none disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-300 disabled:shadow-none",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)]",
+        "disabled:pointer-events-none disabled:border-[var(--border)] disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)] disabled:opacity-50 disabled:shadow-none",
         variantClasses[variant],
         sizeClasses[size],
         className
@@ -54,7 +55,7 @@ export function IconButton({
       type={type}
       {...props}
     >
-      {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : children}
+      {loading ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : children}
     </button>
   );
 }

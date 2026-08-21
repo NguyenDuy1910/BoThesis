@@ -8,13 +8,13 @@ type ButtonSize = "sm" | "md" | "lg";
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    "border border-teal-700 bg-teal-700 text-white hover:border-teal-800 hover:bg-teal-800 active:bg-teal-900",
+    "border border-[var(--primary)] bg-[var(--primary)] text-[var(--text-on-brand)] hover:border-[var(--primary-hover)] hover:bg-[var(--primary-hover)] active:opacity-90",
   secondary:
-    "border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 active:bg-slate-100",
+    "border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-panel)] hover:text-[var(--text)] active:bg-[var(--surface-selected)]",
   ghost:
-    "border border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-900 active:bg-slate-200",
+    "border border-transparent text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] active:bg-[var(--surface-selected)]",
   danger:
-    "border border-red-200 bg-white text-red-700 hover:border-red-300 hover:bg-red-50 active:bg-red-100",
+    "border border-[var(--danger-border)] bg-[var(--surface)] text-[var(--danger)] hover:bg-[var(--danger-soft)] active:opacity-85",
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
@@ -45,20 +45,21 @@ export function Button({
 }: ButtonProps) {
   return (
     <button
+      aria-busy={loading || undefined}
       className={cn(
         "inline-flex shrink-0 items-center justify-center font-medium leading-none transition",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/25 focus-visible:ring-offset-1 focus-visible:ring-offset-white",
-        "disabled:pointer-events-none disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-400 disabled:shadow-none",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)]",
+        "disabled:pointer-events-none disabled:border-[var(--border)] disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)] disabled:opacity-50 disabled:shadow-none",
         variantClasses[variant],
         sizeClasses[size],
-        selected && variant !== "primary" && "border-teal-200 bg-teal-50 text-teal-800",
+        selected && variant !== "primary" && "border-[var(--border-strong)] bg-[var(--surface-selected)] text-[var(--brand-accent)]",
         className
       )}
       disabled={disabled || loading}
       type={type}
       {...props}
     >
-      {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+      {loading && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
       {!loading && icon}
       {children}
     </button>

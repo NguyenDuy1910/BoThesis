@@ -7,6 +7,7 @@ import {
   Copy,
   FileSearch,
   ArrowDown,
+  FilePenLine,
   ListChecks,
   LoaderCircle,
   Menu,
@@ -14,13 +15,13 @@ import {
   RefreshCw,
   Send,
   ShieldCheck,
-  Sparkles,
   Square,
   X,
 } from "lucide-react";
 import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
+import { ProductMark } from "@/components/ui/ProductMark";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
 import {
   releaseConversationDocument,
@@ -43,7 +44,7 @@ import type {
   ChatMessagePart,
   ConversationDocument,
 } from "@/modules/chat/types";
-import { AppSidebar, BothesisMark } from "./AppSidebar";
+import { AppSidebar } from "./AppSidebar";
 import { AnswerSources } from "./AnswerSources";
 import { AssistantTurn } from "./AssistantTurn";
 
@@ -64,7 +65,7 @@ const suggestions = [
     title: "Decision memo",
     description: "Draft a concise decision memo from the most relevant internal context.",
     prompt: "Draft a concise decision memo from the most relevant internal context.",
-    icon: Sparkles,
+    icon: FilePenLine,
   },
   {
     title: "Source lookup",
@@ -399,7 +400,7 @@ function ChatConversation({
   const { hasMoreBelow, jumpToLatest } = useJumpToLatest(chatScrollRef, messageStackRef);
 
   return (
-    <section className="main-pane">
+    <section className="main-pane" id="main-content">
       <header className="topbar">
         <div className="topbar__left">
           <button
@@ -408,10 +409,10 @@ function ChatConversation({
             onClick={onOpenSidebar}
             type="button"
           >
-            <Menu size={18} />
+            <Menu aria-hidden="true" size={18} />
           </button>
           <div className="topbar__title-wrap">
-            <span className="topbar__identity-mark"><BothesisMark decorative /></span>
+            <span className="topbar__identity-mark"><ProductMark decorative size="sm" /></span>
             <span className="topbar__title-copy">
               <span className="topbar__eyebrow">Knowledge assistant</span>
               <h1 title={conversationTitle ?? "New conversation"}>{conversationTitle ?? "New conversation"}</h1>
@@ -452,10 +453,10 @@ function ChatConversation({
             </button>
           )}
 
-          {error && !hasMessageError && <div className="chat-inner"><div className="error-box">{error.message}</div></div>}
+          {error && !hasMessageError && <div className="chat-inner"><div className="error-box" role="alert">{error.message} Try again or start a new conversation.</div></div>}
           {!isConfigured && (
             <div className="chat-inner">
-              <div className="error-box">Chat is inactive until the BoThesis API URL and request context are configured.</div>
+              <div className="error-box" role="status">Chat is unavailable because workspace access has not been configured. Contact your administrator.</div>
             </div>
           )}
           <ChatComposer
@@ -552,18 +553,18 @@ const MessageView = memo(function MessageView({
           onRevealingChange={setIsRevealing}
           turn={message.turn}
         />
-        {streamError && <div className="error-box">{streamError}</div>}
+        {streamError && <div className="error-box" role="alert">{streamError}</div>}
         {hasSettled && <AnswerSources turn={message.turn} />}
         {hasSettled && (text || streamError) && (
           <div className="answer-footer">
-            <div className="assistant-actions" aria-label="Assistant message actions">
+            <div className="assistant-actions" aria-label="Assistant message actions" role="group">
               {text && (
                 <button aria-label={copied ? "Copied" : "Copy response"} className="assistant-action" onClick={() => void copy(text)} title={copied ? "Copied" : "Copy"} type="button">
-                  {copied ? <Check size={14} /> : <Copy size={14} />}
+                  {copied ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
                 </button>
               )}
               <button aria-label={streamError ? "Retry response" : "Regenerate response"} className={clsx("assistant-action", streamError && "assistant-action--retry")} onClick={() => onRegenerate(message.id)} title={streamError ? "Retry" : "Regenerate"} type="button">
-                <RefreshCw size={14} />
+                <RefreshCw aria-hidden="true" size={14} />
                 {streamError && <span>Retry</span>}
               </button>
             </div>
@@ -658,8 +659,11 @@ function ChatComposer({
           type="file"
         />
         <textarea
+          aria-describedby="composer-help"
           aria-label="Message assistant"
+          autoComplete="off"
           disabled={!isConfigured}
+          name="message"
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -667,7 +671,7 @@ function ChatComposer({
               void onSubmit(input);
             }
           }}
-          placeholder="Ask a question about your company knowledge..."
+          placeholder="Ask about your company knowledge…"
           ref={textareaRef}
           rows={1}
           value={input}
@@ -681,7 +685,7 @@ function ChatComposer({
             title="Attach files"
             type="button"
           >
-            <Plus size={16} />
+            <Plus aria-hidden="true" size={16} />
             <span>Attach</span>
           </button>
           <span className="composer__privacy"><ShieldCheck aria-hidden="true" size={13} /> Permission-aware</span>
@@ -697,19 +701,19 @@ function ChatComposer({
             onClick={isStreaming ? onStop : undefined}
             type={isStreaming ? "button" : "submit"}
           >
-            {isStreaming ? <Square className="composer-send__stop-icon" size={11} strokeWidth={0} /> : <Send className="composer-send__send-icon" size={17} />}
+            {isStreaming ? <Square aria-hidden="true" className="composer-send__stop-icon" size={11} strokeWidth={0} /> : <Send aria-hidden="true" className="composer-send__send-icon" size={17} />}
           </button>
         </div>
       </form>
-      <p className="composer-disclaimer">BoThesis can make mistakes. Verify important decisions with the cited sources.</p>
+      <p className="composer-disclaimer" id="composer-help">BoThesis can make mistakes. Verify important decisions with the cited sources.</p>
     </div>
   );
 }
 
 function attachmentProgressLabel(item: ComposerDocument) {
-  if (item.progress === "starting") return "Starting";
-  if (item.progress === "uploading") return "Uploading";
-  if (item.progress === "validating") return "Validating";
+  if (item.progress === "starting") return "Starting…";
+  if (item.progress === "uploading") return "Uploading…";
+  if (item.progress === "validating") return "Validating…";
   if (item.progress === "failed") return "Failed";
   return formatFileSize(item.sizeBytes);
 }
@@ -725,22 +729,24 @@ function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
     <div className="welcome">
       <div className="welcome__content">
         <div className="welcome-hero">
-          <span className="welcome-hero__mark"><BothesisMark className="bothesis-mark--welcome" decorative /></span>
+          <div className="welcome-identity">
+            <span aria-hidden="true" />
+            Grounded enterprise assistance
+          </div>
           <div className="welcome-heading">
-            <p className="welcome-eyebrow">Your enterprise knowledge partner</p>
             <h2>What would you like to understand?</h2>
           </div>
-          <p className="welcome-copy">Ask BoThesis to find trusted context, compare business signals, or turn what your organization knows into a clear next step.</p>
+          <p className="welcome-copy">Find trusted context, compare business signals, or turn what your organization knows into a clear next step.</p>
           <div className="welcome-trust" aria-label="Assistant capabilities">
-            <span><ShieldCheck aria-hidden="true" size={14} /> Permission-aware</span>
-            <span><FileSearch aria-hidden="true" size={14} /> Source-backed answers</span>
+            <span><ShieldCheck aria-hidden="true" size={14} /> Searches only content you can access</span>
+            <span><FileSearch aria-hidden="true" size={14} /> Keeps evidence with every answer</span>
           </div>
         </div>
         <p className="suggestions__label">Try a starting point</p>
         <div className="suggestions">
           {suggestions.map((suggestion) => (
             <button className="suggestion" key={suggestion.title} onClick={() => void onSelect(suggestion.prompt)} type="button">
-              <span className="suggestion__icon"><suggestion.icon size={17} /></span>
+              <span className="suggestion__icon"><suggestion.icon aria-hidden="true" size={17} /></span>
               <span className="suggestion__copy"><span className="suggestion__title">{suggestion.title}</span><span className="suggestion__description">{suggestion.description}</span></span>
             </button>
           ))}

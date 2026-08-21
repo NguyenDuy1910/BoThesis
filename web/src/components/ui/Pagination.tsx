@@ -19,18 +19,19 @@ export function Pagination({ page, pageSize, total, onPageChange, className }: P
   const end = Math.min(page * pageSize, total);
 
   return (
-    <div className={cn("flex min-h-11 flex-col gap-2 border-b border-slate-200 bg-white px-3 py-2 sm:flex-row sm:items-center sm:justify-between", className)}>
-      <p className="text-xs text-slate-600">
-        Showing {start}-{end} of {total}
+    <div className={cn("flex min-h-11 flex-col gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 py-2 sm:flex-row sm:items-center sm:justify-between", className)}>
+      <p className="text-xs text-[var(--text-muted)]">
+        Showing {start}–{end} of {total}
       </p>
       <div className="flex items-center gap-1">
         <button
           aria-label="Previous page"
           onClick={() => onPageChange(page - 1)}
           disabled={page <= 1}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-600 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20 disabled:pointer-events-none disabled:text-slate-300"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:pointer-events-none disabled:opacity-40"
+          type="button"
         >
-          <ChevronLeft className="h-4 w-4" />
+          <ChevronLeft aria-hidden="true" className="h-4 w-4" />
         </button>
         {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
           let pageNum: number;
@@ -47,13 +48,15 @@ export function Pagination({ page, pageSize, total, onPageChange, className }: P
             <button
               key={pageNum}
               aria-current={page === pageNum ? "page" : undefined}
+              aria-label={`Page ${pageNum}`}
               onClick={() => onPageChange(pageNum)}
               className={cn(
-                "inline-flex h-7 w-7 items-center justify-center rounded-md text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20",
+                "inline-flex h-7 w-7 items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
                 page === pageNum
-                  ? "bg-teal-700 text-white"
-                  : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"
+                  ? "bg-[var(--primary)] text-[var(--text-on-brand)]"
+                  : "text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
               )}
+              type="button"
             >
               {pageNum}
             </button>
@@ -63,9 +66,10 @@ export function Pagination({ page, pageSize, total, onPageChange, className }: P
           aria-label="Next page"
           onClick={() => onPageChange(page + 1)}
           disabled={page >= totalPages}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-600 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20 disabled:pointer-events-none disabled:text-slate-300"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:pointer-events-none disabled:opacity-40"
+          type="button"
         >
-          <ChevronRight className="h-4 w-4" />
+          <ChevronRight aria-hidden="true" className="h-4 w-4" />
         </button>
       </div>
     </div>

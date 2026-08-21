@@ -75,32 +75,38 @@ export function Dialog({
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="fixed inset-0 bg-slate-950/35" onClick={onClose} />
+      <button
+        aria-label="Close dialog"
+        className="fixed inset-0 cursor-default bg-slate-950/40"
+        onClick={onClose}
+        tabIndex={-1}
+        type="button"
+      />
       <div
         ref={dialogRef}
         aria-modal="true"
         role="dialog"
         aria-labelledby={titleId}
         className={cn(
-          "relative z-10 w-full max-w-lg rounded-lg border border-slate-200 bg-white shadow-xl shadow-slate-950/10",
+          "relative z-10 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto overscroll-contain rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-[var(--shadow-lg)]",
           "animate-in fade-in-0 zoom-in-95",
           className
         )}
       >
-        <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-          <h2 id={titleId} className="text-base font-semibold text-slate-950">{title}</h2>
+        <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+          <h2 id={titleId} className="text-base font-semibold text-[var(--text)]">{title}</h2>
           <button
             aria-label="Close dialog"
             onClick={onClose}
-            className="rounded-md p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/25"
+            className="rounded-md p-1.5 text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
             type="button"
           >
-            <X className="h-4 w-4" />
+            <X aria-hidden="true" className="h-4 w-4" />
           </button>
         </div>
         <div className="px-4 py-4">{children}</div>
         {footer && (
-          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 bg-slate-50/60 px-4 py-3">
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--border)] bg-[var(--bg-panel)] px-4 py-3">
             {footer}
           </div>
         )}
