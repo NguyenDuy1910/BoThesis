@@ -576,6 +576,7 @@ def _get_agent() -> Any:
         from bothesis.agent import Agent, AgentConfig
         from bothesis.agent.tools import ToolRegistry
         from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
+        from bothesis.agent.transports.openai import OpenAITransport
         from bothesis.agent.transports.openrouter import OpenRouterTransport
         from bothesis.document_index.vector_store import VectorStore
         from bothesis.knowledge.document_index import QdrantSemanticRetriever

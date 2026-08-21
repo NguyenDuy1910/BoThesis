@@ -152,7 +152,11 @@ export function titleFromMessage(message: string) {
 }
 
 export function cachedToUIMessage(message: CachedChatMessage): ChatMessage {
-  if (message.parts.length) {
+  // An assistant reply's content lives entirely in ``turn`` — its own ``parts``
+  // is always empty (see useBothesisChat.ts). Gating this branch on parts alone
+  // dropped ``turn`` for every restored assistant message and rendered it as an
+  // empty bubble, since AssistantTurn reads only ``turn``.
+  if (message.parts.length || message.turn) {
     return {
       id: message.id,
       role: message.role,

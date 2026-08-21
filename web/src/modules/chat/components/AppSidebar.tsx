@@ -4,10 +4,13 @@ import clsx from "clsx";
 import { type FormEvent, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
+  Laptop,
   MessageSquare,
+  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Search,
+  Sun,
   UserCircle,
   X,
 } from "lucide-react";
@@ -24,6 +27,7 @@ import {
 } from "@/modules/chat/sidebar-navigation";
 import type { ChatConversation } from "@/modules/chat/types";
 import { ConversationActionsMenu } from "./ConversationActionsMenu";
+import { useTheme } from "../hooks/useTheme";
 
 export function BothesisMark({
   className,
@@ -623,6 +627,8 @@ function RecentChatList({
 }
 
 function SidebarFooter({ collapsed }: { collapsed: boolean }) {
+  const { theme, resolvedTheme, toggleTheme } = useTheme();
+
   return (
     <div className="sidebar-footer">
       <div
@@ -637,6 +643,22 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
             <small>Private to your access</small>
           </span>
         )}
+        <button
+          aria-label={`Switch theme (currently ${theme})`}
+          className="sidebar-icon-btn"
+          onClick={toggleTheme}
+          style={{ marginLeft: "auto" }}
+          title={`Theme: ${theme} (${resolvedTheme})`}
+          type="button"
+        >
+          {theme === "system" ? (
+            <Laptop size={16} />
+          ) : resolvedTheme === "dark" ? (
+            <Moon size={16} />
+          ) : (
+            <Sun size={16} />
+          )}
+        </button>
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { ChevronRight, Database, LoaderCircle, Search, Wrench } from "lucide-react";
+import { Check, ChevronRight, Database, LoaderCircle, Search, Wrench } from "lucide-react";
 import { memo } from "react";
 
 import { assistantTurnItems, type AssistantTurnItem } from "../assistant-turn";
@@ -64,7 +64,7 @@ function ToolActivity({ item }: { item: Extract<AssistantTurnItem, { kind: "tool
       role={item.state === "active" ? "status" : undefined}
     >
       {item.state === "completed" ? (
-        <span aria-hidden="true" className="assistant-turn__tool-complete">›</span>
+        <Check aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
       ) : (
         <Icon aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
       )}

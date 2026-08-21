@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
+from openai import PermissionDeniedError
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
@@ -71,6 +73,51 @@ class ScriptedTransport:
             return
         yield text_delta("Employees receive 20 days of annual leave [[cite:chunk-1]].")
         yield turn_done("stop")
+
+
+def test_default_agent_composes_the_openai_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bothesis.agent.transports import openai as openai_transport
+
+    class TestOpenAITransport:
+        provider = "openai"
+        model = "gpt-test"
+
+    monkeypatch.setattr(openai_transport, "OpenAITransport", TestOpenAITransport)
+    monkeypatch.setattr(main, "_agent", None)
+
+    assert isinstance(main._get_agent().model, TestOpenAITransport)
+
+
+class PermissionDeniedTransport:
+    provider = "openai"
+    model = "gpt-test"
+
+    async def stream_response(self, **_: Any) -> Any:
+        request = httpx.Request("POST", "https://api.openai.test/v1/responses")
+        response = httpx.Response(403, request=request)
+        raise PermissionDeniedError(
+            "Your request was blocked.",
+            response=response,
+            body=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_returns_a_safe_model_access_error_for_openai_denials() -> None:
+    events = [
+        event
+        async for event in Agent(PermissionDeniedTransport(), ToolRegistry()).run(  # type: ignore[arg-type]
+            "Hello",
+            AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[]),
+        )
+    ]
+
+    assert [event.type for event in events] == ["response.failed"]
+    assert events[0].response.error is not None
+    assert events[0].response.error.code == "model_access_denied"
+    assert "configured model" in events[0].response.error.message
 
 
 class StubRetriever:

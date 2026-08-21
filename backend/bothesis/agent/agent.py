@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator
 from contextlib import nullcontext
 from uuid import uuid4
 
+from openai import PermissionDeniedError
+
 from bothesis.agent import AgentConfig, AgentExecutionError
 from bothesis.agent.conversation_compression import ConversationMemory
 from bothesis.agent.conversation_session import ConversationSession
@@ -97,6 +99,14 @@ class Agent:
                 )
                 if run_trace is not None:
                     run_trace.fail(stage="model")
+                error_code = "agent_execution_failed"
+                error_message = "model response failed"
+                if isinstance(exc.__cause__, PermissionDeniedError):
+                    error_code = "model_access_denied"
+                    error_message = (
+                        "OpenAI denied the request. Verify that the configured "
+                        "model is enabled for this API project."
+                    )
                 sequence_number += 1
                 yield ResponseFailedEvent(
                     sequence_number=sequence_number,
@@ -104,7 +114,8 @@ class Agent:
                         id=f"resp_{uuid4().hex}",
                         status="failed",
                         error=ResponseError(
-                            code="agent_execution_failed", message="model response failed"
+                            code=error_code,
+                            message=error_message,
                         ),
                     ),
                 )
