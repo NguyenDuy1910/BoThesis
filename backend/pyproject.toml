@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "asyncpg>=0.29,<1",
     "boto3>=1.35,<2",
+    "beautifulsoup4>=4.12,<5",
     "fastapi>=0.141.1",
     "httpx>=0.27",
     "langfuse==4.14.3",

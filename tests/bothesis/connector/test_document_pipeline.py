@@ -413,6 +413,44 @@ def test_s3_constructor_uses_the_standard_boto_session(
     assert "aws_secret_access_key" not in captured["client_kwargs"]
 
 
+def test_cloudflare_r2_uses_the_same_boto3_s3_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _PresigningS3Client()
+    captured: dict[str, Any] = {}
+
+    class _Session:
+        def __init__(self, **kwargs: str | None) -> None:
+            captured["session_kwargs"] = kwargs
+
+        def client(self, service: str, **kwargs: Any) -> _PresigningS3Client:
+            captured["service"] = service
+            captured["client_kwargs"] = kwargs
+            return client
+
+    monkeypatch.setattr(aws_s3.boto3, "Session", _Session)
+
+    storage = S3DocumentStorage.for_cloudflare_r2(
+        bucket="documents",
+        account_id="account-id",
+        access_key_id="r2-access-key",
+        secret_access_key="r2-secret-key",
+    )
+
+    assert storage.provider == "cloudflare_r2"
+    assert storage.bucket == "documents"
+    assert captured["session_kwargs"] == {
+        "region_name": "auto",
+        "aws_access_key_id": "r2-access-key",
+        "aws_secret_access_key": "r2-secret-key",
+    }
+    assert captured["service"] == "s3"
+    assert captured["client_kwargs"]["endpoint_url"] == (
+        "https://account-id.r2.cloudflarestorage.com"
+    )
+    assert captured["client_kwargs"]["config"].s3 == {"addressing_style": "path"}
+
+
 class _S3Body:
     def __init__(self, content: bytes) -> None:
         self._content = content

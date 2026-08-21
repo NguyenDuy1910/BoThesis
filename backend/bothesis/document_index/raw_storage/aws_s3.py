@@ -1,4 +1,4 @@
-"""AWS S3 implementation of the raw document storage contract."""
+"""S3-compatible raw document storage implemented with boto3."""
 
 from __future__ import annotations
 
@@ -18,24 +18,31 @@ from . import (
 )
 
 _NOT_FOUND_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
+_AWS_S3_PROVIDER = "aws_s3"
+_CLOUDFLARE_R2_PROVIDER = "cloudflare_r2"
+_STORAGE_PROVIDERS = frozenset({_AWS_S3_PROVIDER, _CLOUDFLARE_R2_PROVIDER})
 
 
 class S3DocumentStorage:
-    """Store raw binaries in S3 using the standard AWS credential chain.
+    """Store raw binaries in AWS S3 or Cloudflare R2 through boto3.
 
-    Configuration is explicit at construction time. When ``client`` is not
-    supplied, boto3 resolves credentials from the standard AWS credential
-    chain, including local profiles, environment variables, and workload
-    roles. Passing a client keeps the adapter independently testable.
+    Both providers expose the S3 API, so object operations and presigning stay
+    in this one adapter. AWS S3 uses the standard boto3 credential chain. R2
+    uses its account endpoint, path-style addressing, ``auto`` as its signing
+    region, and an R2 API-token access-key pair. Passing ``client`` keeps the
+    adapter independently testable.
     """
 
     def __init__(
         self,
         *,
         bucket: str,
+        provider: str = _AWS_S3_PROVIDER,
         region: str | None = None,
         endpoint_url: str | None = None,
-        addressing_style: str = "auto",
+        addressing_style: str | None = None,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
         timeout_seconds: float = 20,
         max_pool_connections: int = 20,
         client: Any | None = None,
@@ -43,8 +50,23 @@ class S3DocumentStorage:
         normalized_bucket = bucket.strip()
         if not normalized_bucket:
             raise ValueError("S3 bucket must not be blank")
-        if addressing_style not in {"auto", "path", "virtual"}:
-            raise ValueError("addressing_style must be auto, path, or virtual")
+        normalized_provider = _provider(provider)
+        normalized_endpoint = _optional_string(endpoint_url)
+        normalized_region = _optional_string(region)
+        normalized_addressing_style = _addressing_style(
+            addressing_style,
+            provider=normalized_provider,
+        )
+        normalized_access_key_id, normalized_secret_access_key = _credentials(
+            access_key_id,
+            secret_access_key,
+        )
+        if normalized_provider == _CLOUDFLARE_R2_PROVIDER:
+            if normalized_endpoint is None:
+                raise ValueError("Cloudflare R2 requires an endpoint URL")
+            if normalized_addressing_style != "path":
+                raise ValueError("Cloudflare R2 requires path-style addressing")
+            normalized_region = normalized_region or "auto"
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
         if max_pool_connections < 1:
@@ -52,24 +74,73 @@ class S3DocumentStorage:
 
         if client is None:
             try:
-                session = boto3.Session(region_name=_optional_string(region))
+                session_arguments: dict[str, str | None] = {
+                    "region_name": normalized_region,
+                }
+                if normalized_access_key_id is not None:
+                    session_arguments["aws_access_key_id"] = normalized_access_key_id
+                    session_arguments["aws_secret_access_key"] = (
+                        normalized_secret_access_key
+                    )
+                session = boto3.Session(**session_arguments)
                 client = session.client(
                     "s3",
-                    endpoint_url=_optional_string(endpoint_url),
+                    endpoint_url=normalized_endpoint,
                     config=Config(
                         signature_version="s3v4",
                         connect_timeout=timeout_seconds,
                         read_timeout=timeout_seconds,
                         max_pool_connections=max_pool_connections,
                         retries={"mode": "standard", "max_attempts": 3},
-                        s3={"addressing_style": addressing_style},
+                        s3={"addressing_style": normalized_addressing_style},
                     ),
                 )
             except (BotoCoreError, ValueError) as exc:
-                raise ObjectStorageError("AWS S3 client configuration failed") from exc
+                raise ObjectStorageError("S3-compatible client configuration failed") from exc
 
         self._bucket = normalized_bucket
+        self._provider = normalized_provider
         self._client = client
+
+    @classmethod
+    def for_cloudflare_r2(
+        cls,
+        *,
+        bucket: str,
+        account_id: str | None = None,
+        endpoint_url: str | None = None,
+        access_key_id: str | None = None,
+        secret_access_key: str | None = None,
+        timeout_seconds: float = 20,
+        max_pool_connections: int = 20,
+        client: Any | None = None,
+    ) -> S3DocumentStorage:
+        """Build an R2 adapter with the S3-compatible settings R2 requires."""
+
+        return cls(
+            bucket=bucket,
+            provider=_CLOUDFLARE_R2_PROVIDER,
+            region="auto",
+            endpoint_url=_r2_endpoint(account_id, endpoint_url),
+            addressing_style="path",
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            timeout_seconds=timeout_seconds,
+            max_pool_connections=max_pool_connections,
+            client=client,
+        )
+
+    @property
+    def bucket(self) -> str:
+        """Return the configured bucket for source-lineage metadata."""
+
+        return self._bucket
+
+    @property
+    def provider(self) -> str:
+        """Return the concrete S3-compatible provider identifier."""
+
+        return self._provider
 
     def presign_upload(
         self,
@@ -226,6 +297,46 @@ def _optional_string(value: object, *, strip_quotes: bool = False) -> str | None
     if strip_quotes:
         normalized = normalized.strip('"')
     return normalized or None
+
+
+def _provider(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in _STORAGE_PROVIDERS:
+        supported = ", ".join(sorted(_STORAGE_PROVIDERS))
+        raise ValueError(f"storage provider must be one of: {supported}")
+    return normalized
+
+
+def _addressing_style(value: str | None, *, provider: str) -> str:
+    normalized = _optional_string(value)
+    if normalized is None:
+        return "path" if provider == _CLOUDFLARE_R2_PROVIDER else "auto"
+    if normalized not in {"auto", "path", "virtual"}:
+        raise ValueError("addressing_style must be auto, path, or virtual")
+    return normalized
+
+
+def _credentials(
+    access_key_id: str | None,
+    secret_access_key: str | None,
+) -> tuple[str | None, str | None]:
+    normalized_access_key_id = _optional_string(access_key_id)
+    normalized_secret_access_key = _optional_string(secret_access_key)
+    if (normalized_access_key_id is None) != (normalized_secret_access_key is None):
+        raise ValueError(
+            "access_key_id and secret_access_key must be configured together"
+        )
+    return normalized_access_key_id, normalized_secret_access_key
+
+
+def _r2_endpoint(account_id: str | None, endpoint_url: str | None) -> str:
+    normalized_endpoint = _optional_string(endpoint_url)
+    if normalized_endpoint is not None:
+        return normalized_endpoint
+    normalized_account_id = _optional_string(account_id)
+    if normalized_account_id is None:
+        raise ValueError("Cloudflare R2 requires account_id or endpoint_url")
+    return f"https://{normalized_account_id}.r2.cloudflarestorage.com"
 
 
 __all__ = ["S3DocumentStorage"]

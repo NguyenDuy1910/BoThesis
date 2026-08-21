@@ -735,41 +735,92 @@ def _get_document_runtime() -> _DocumentRuntime:
         )
 
         session_factory = get_session_factory()
-        bucket = (
-            os.getenv("BOTHESIS_S3_BUCKET")
-            or os.getenv("BOTHESIS_OBJECT_STORAGE_BUCKET")
-            or ""
-        ).strip()
-        endpoint_url = (
-            os.getenv("BOTHESIS_S3_ENDPOINT_URL")
-            or os.getenv("BOTHESIS_OBJECT_STORAGE_ENDPOINT")
-            or ""
-        ).strip()
-        if endpoint_url and not bucket:
-            raise RuntimeError("BOTHESIS_S3_BUCKET is required when S3 is configured")
-        storage = (
-            S3DocumentStorage(
-                bucket=bucket,
-                region=(
-                    os.getenv("BOTHESIS_S3_REGION")
-                    or os.getenv("AWS_REGION")
-                    or os.getenv("AWS_DEFAULT_REGION")
-                    or None
-                ),
-                endpoint_url=endpoint_url or None,
-                addressing_style=(
-                    os.getenv("BOTHESIS_S3_ADDRESSING_STYLE") or "auto"
-                ).strip(),
-                timeout_seconds=float(
-                    os.getenv("BOTHESIS_S3_TIMEOUT_SECONDS", "20")
-                ),
-                max_pool_connections=int(
-                    os.getenv("BOTHESIS_S3_MAX_POOL_CONNECTIONS", "20")
-                ),
+        storage_provider = (
+            os.getenv("BOTHESIS_OBJECT_STORAGE_PROVIDER") or "aws_s3"
+        ).strip().lower()
+        if storage_provider == "aws_s3":
+            bucket = (
+                os.getenv("BOTHESIS_S3_BUCKET")
+                or os.getenv("BOTHESIS_OBJECT_STORAGE_BUCKET")
+                or ""
+            ).strip()
+            endpoint_url = (
+                os.getenv("BOTHESIS_S3_ENDPOINT_URL")
+                or os.getenv("BOTHESIS_OBJECT_STORAGE_ENDPOINT")
+                or ""
+            ).strip()
+            if endpoint_url and not bucket:
+                raise RuntimeError(
+                    "BOTHESIS_S3_BUCKET is required when AWS S3 is configured"
+                )
+            storage = (
+                S3DocumentStorage(
+                    bucket=bucket,
+                    region=(
+                        os.getenv("BOTHESIS_S3_REGION")
+                        or os.getenv("AWS_REGION")
+                        or os.getenv("AWS_DEFAULT_REGION")
+                        or None
+                    ),
+                    endpoint_url=endpoint_url or None,
+                    addressing_style=(
+                        os.getenv("BOTHESIS_S3_ADDRESSING_STYLE") or "auto"
+                    ).strip(),
+                    timeout_seconds=float(
+                        os.getenv("BOTHESIS_S3_TIMEOUT_SECONDS", "20")
+                    ),
+                    max_pool_connections=int(
+                        os.getenv("BOTHESIS_S3_MAX_POOL_CONNECTIONS", "20")
+                    ),
+                )
+                if bucket
+                else None
             )
-            if bucket
-            else None
-        )
+        elif storage_provider == "cloudflare_r2":
+            bucket = (
+                os.getenv("BOTHESIS_R2_BUCKET")
+                or os.getenv("BOTHESIS_OBJECT_STORAGE_BUCKET")
+                or ""
+            ).strip()
+            account_id = (os.getenv("BOTHESIS_R2_ACCOUNT_ID") or "").strip()
+            endpoint_url = (os.getenv("BOTHESIS_R2_ENDPOINT_URL") or "").strip()
+            access_key_id = (os.getenv("BOTHESIS_R2_ACCESS_KEY_ID") or "").strip()
+            secret_access_key = (
+                os.getenv("BOTHESIS_R2_SECRET_ACCESS_KEY") or ""
+            ).strip()
+            if any((account_id, endpoint_url, access_key_id, secret_access_key)) and not bucket:
+                raise RuntimeError(
+                    "BOTHESIS_R2_BUCKET is required when Cloudflare R2 is configured"
+                )
+            if bucket and not (account_id or endpoint_url):
+                raise RuntimeError(
+                    "BOTHESIS_R2_ACCOUNT_ID or BOTHESIS_R2_ENDPOINT_URL is required"
+                )
+            if bucket and not (access_key_id and secret_access_key):
+                raise RuntimeError(
+                    "BOTHESIS_R2_ACCESS_KEY_ID and BOTHESIS_R2_SECRET_ACCESS_KEY are required"
+                )
+            storage = (
+                S3DocumentStorage.for_cloudflare_r2(
+                    bucket=bucket,
+                    account_id=account_id or None,
+                    endpoint_url=endpoint_url or None,
+                    access_key_id=access_key_id or None,
+                    secret_access_key=secret_access_key or None,
+                    timeout_seconds=float(
+                        os.getenv("BOTHESIS_R2_TIMEOUT_SECONDS", "20")
+                    ),
+                    max_pool_connections=int(
+                        os.getenv("BOTHESIS_R2_MAX_POOL_CONNECTIONS", "20")
+                    ),
+                )
+                if bucket
+                else None
+            )
+        else:
+            raise RuntimeError(
+                "BOTHESIS_OBJECT_STORAGE_PROVIDER must be aws_s3 or cloudflare_r2"
+            )
         _document_runtime = _DocumentRuntime(
             uploads=UploadService(
                 session_factory,

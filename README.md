@@ -75,14 +75,16 @@ QDRANT_COLLECTION=bothesis
 QDRANT_API_KEY=  # set a key only when authentication is enabled
 ```
 
-Chat document uploads can use AWS S3.
+Chat document uploads can use AWS S3 or Cloudflare R2 through the same boto3
+S3-compatible adapter.
 The browser uploads bytes directly to its presigned URL; configure the bucket's
 CORS policy to allow `PUT` from the WebUI origin with the `Content-Type` header.
 Without object storage, the API permits a PostgreSQL blob fallback up to 20 MiB.
-AWS credentials are resolved through boto3's standard credential chain. For
-local development, use `aws configure`, `AWS_PROFILE`, or the normal
-`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` environment variables. In AWS,
-prefer a container or instance role.
+Set `BOTHESIS_OBJECT_STORAGE_PROVIDER` to select the provider. AWS credentials
+are resolved through boto3's standard credential chain. For local development,
+use `aws configure`, `AWS_PROFILE`, or the normal `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` environment variables. In AWS, prefer a container or
+instance role.
 
 ```dotenv
 BOTHESIS_S3_BUCKET=bothesis-documents
@@ -93,6 +95,21 @@ BOTHESIS_S3_ADDRESSING_STYLE=auto
 BOTHESIS_DOCUMENT_MAX_UPLOAD_BYTES=104857600
 BOTHESIS_DOCUMENT_MAX_DATABASE_BLOB_BYTES=20971520
 BOTHESIS_DOCUMENT_DIRECT_MAX_BYTES=20971520
+```
+
+For Cloudflare R2, create an R2 API token with S3 credentials and configure its
+access key and secret through your deployment secret manager. R2 is configured
+with its account endpoint, `auto` signing region, and path-style addresses by
+the adapter; no Cloudflare SDK is used.
+
+```dotenv
+BOTHESIS_OBJECT_STORAGE_PROVIDER=cloudflare_r2
+BOTHESIS_R2_BUCKET=bothesis-documents
+BOTHESIS_R2_ACCOUNT_ID=your-cloudflare-account-id
+BOTHESIS_R2_ACCESS_KEY_ID=...
+BOTHESIS_R2_SECRET_ACCESS_KEY=...
+# Optional: override the endpoint derived from the account ID.
+BOTHESIS_R2_ENDPOINT_URL=
 ```
 
 The API starts at `http://127.0.0.1:8000`.
