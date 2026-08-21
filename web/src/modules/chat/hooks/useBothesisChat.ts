@@ -37,14 +37,27 @@ export function useBothesisChat({
   onFinishRef.current = onFinish;
   const isConfigured = Boolean(getBothesisChatConfiguration());
 
+  // Reset on a real conversation switch only. ``initialMessages`` gets a fresh
+  // array identity from every ChatShell refresh — including the ones behind
+  // rename, delete, and the save that follows each completed turn — and keying
+  // the reset on it aborted the in-flight stream and dropped ``runtime`` from
+  // the messages it replaced. The rehydrated copy is what we just persisted, so
+  // there is nothing to adopt for a conversation already on screen.
+  const loadedConversationRef = useRef(conversationId);
   useEffect(() => {
+    if (loadedConversationRef.current === conversationId) return;
+    loadedConversationRef.current = conversationId;
     controllerRef.current?.abort();
+    controllerRef.current = null;
     messagesRef.current = initialMessages;
     setMessages(initialMessages);
     setStatus("ready");
     setError(null);
     activeAssistantIdRef.current = null;
   }, [conversationId, initialMessages]);
+
+  // Leaving the conversation must not leave the request running.
+  useEffect(() => () => controllerRef.current?.abort(), []);
 
   const updateAssistant = useCallback((assistantId: string, event: AgentStreamEvent) => {
     // The stream can deliver its first event before React commits the render

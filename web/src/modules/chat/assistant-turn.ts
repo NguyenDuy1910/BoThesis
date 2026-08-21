@@ -1,4 +1,4 @@
-import type { AgentItemStore, ChatMessagePart } from "./types";
+import type { AgentItem, AgentItemStore, ChatMessagePart } from "./types";
 
 export type AssistantTurnItem =
   | {
@@ -14,7 +14,8 @@ export type AssistantTurnItem =
       detail?: string;
       category: "document" | "retrieval" | "tool";
       state: "active" | "completed" | "error" | "skipped";
-      count: number;
+      resultCount?: number;
+      durationMs?: number;
     }
   | {
       kind: "response";
@@ -34,29 +35,18 @@ export function assistantTurnItems(
     if (part.type === "data-status") {
       const category = inlineToolCategory(part);
       if (!category) continue;
-      const label = cleanActivityLabel(part.data.label, part.data.toolName);
-      const id = part.data.stepId ?? part.id ?? `tool-${index}`;
-      const existingIndex = items.findIndex((item) => item.kind === "tool" && item.id === id);
-      const next = {
+      // ``upsertStatusPart`` keeps exactly one status part per step, so each
+      // step is seen once here and needs no de-duplication.
+      items.push({
         kind: "tool",
-        id,
-        label,
+        id: part.data.stepId ?? part.id ?? `tool-${index}`,
+        label: cleanActivityLabel(part.data.label, part.data.toolName),
         detail: part.data.detail?.trim() || undefined,
         category,
         state: part.data.state,
-        count: 1,
-      } as const;
-      if (existingIndex === -1) {
-        items.push(next);
-      } else {
-        const existing = items[existingIndex] as Extract<AssistantTurnItem, { kind: "tool" }>;
-        items[existingIndex] = {
-          ...next,
-          id: existing.id,
-          count: existing.count + 1,
-          detail: next.detail ?? existing.detail,
-        };
-      }
+        resultCount: part.data.resultCount,
+        durationMs: part.data.durationMs,
+      });
       continue;
     }
 
@@ -82,6 +72,11 @@ function runtimeItems(runtime: AgentItemStore): AssistantTurnItem[] {
   const orderedIds = [...runtime.historyItemIds, ...runtime.activeItemIds.filter(
     (id) => !runtime.historyItemIds.includes(id),
   )];
+  const resultsByCallId = new Map<string, Extract<AgentItem, { type: "tool_result" }>>();
+  for (const candidate of Object.values(runtime.items)) {
+    if (candidate.type === "tool_result") resultsByCallId.set(candidate.call_id, candidate);
+  }
+
   for (const id of orderedIds) {
     const item = runtime.items[id];
     if (!item) continue;
@@ -106,21 +101,20 @@ function runtimeItems(runtime: AgentItemStore): AssistantTurnItem[] {
       continue;
     }
     if (item.type !== "tool_call" || !item.id) continue;
-    const result = Object.values(runtime.items).find((candidate) => (
-      candidate.type === "tool_result" && candidate.call_id === item.call_id
-    ));
+    const result = resultsByCallId.get(item.call_id);
     const active = runtime.activeItemIds.includes(item.id);
-    const state = result?.type === "tool_result"
+    const state = result
       ? result.status === "completed" ? "completed" : result.status === "skipped" ? "skipped" : "error"
       : active ? "active" : item.status === "skipped" ? "skipped" : item.status === "failed" ? "error" : "completed";
     items.push({
       kind: "tool",
       id: item.id,
       label: cleanActivityLabel(item.label ?? "", item.name),
-      detail: result?.type === "tool_result" ? result.error ?? undefined : undefined,
+      detail: result?.error ?? undefined,
       category: item.category,
       state,
-      count: 1,
+      resultCount: result?.result_count ?? undefined,
+      durationMs: result?.duration_ms ?? undefined,
     });
   }
   return items;

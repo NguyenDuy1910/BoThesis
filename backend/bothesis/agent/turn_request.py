@@ -11,10 +11,12 @@ fresh ``TurnRequest`` per user message and delegates entirely to it.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import nullcontext
 from dataclasses import replace
-from time import perf_counter
+from time import perf_counter, time_ns
+
 from bothesis.agent import (
     AgentConfig,
     AgentExecutionError,
@@ -47,6 +49,8 @@ from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.agent.turn_input import ResponseItem
 from bothesis.observability import AgentRunTrace, LangfuseTracing
+
+_log = logging.getLogger(__name__)
 
 
 class TurnRequest:
@@ -87,11 +91,12 @@ class TurnRequest:
 
         started_at = perf_counter()
         state = ConversationRun(user_message=user_message)
+        item_delta_sequence = 0
 
         yield TurnStarted()
-        for item in self._register_document_evidence(ctx.documents, state):
-            yield ItemStarted(item=item)
-            yield ItemCompleted(item=item)
+        # for item in self._register_document_evidence(ctx.documents, state):
+        #     yield ItemStarted(item=item)
+        #     yield ItemCompleted(item=item)
 
         turn_input = await self._memory.prepare(user_message, ctx)
 
@@ -143,6 +148,17 @@ class TurnRequest:
                         render_citations=bool(state.evidence),
                     ):
                         streamed_character_count += len(message_event.delta)
+                        item_delta_sequence += 1
+                        _log.debug(
+                            "stream_timing boundary=item_delta_emitted "
+                            "at_unix_ms=%d request_id=%s item_delta_sequence=%d "
+                            "item_id=%s text_characters=%d",
+                            time_ns() // 1_000_000,
+                            ctx.request_id,
+                            item_delta_sequence,
+                            message_event.item_id,
+                            len(message_event.delta),
+                        )
                         yield message_event
 
             if completed is None:
@@ -167,6 +183,17 @@ class TurnRequest:
                     for message_event in self._messages.complete(phase="commentary"):
                         if message_event.type == "item.delta":
                             streamed_character_count += len(message_event.delta)
+                            item_delta_sequence += 1
+                            _log.debug(
+                                "stream_timing boundary=item_delta_emitted "
+                                "at_unix_ms=%d request_id=%s item_delta_sequence=%d "
+                                "item_id=%s text_characters=%d",
+                                time_ns() // 1_000_000,
+                                ctx.request_id,
+                                item_delta_sequence,
+                                message_event.item_id,
+                                len(message_event.delta),
+                            )
                         yield message_event
 
                 # Persist semantic model output before executing its requested tools.
@@ -226,6 +253,17 @@ class TurnRequest:
             for message_event in self._messages.complete(phase="final_answer"):
                 if message_event.type == "item.delta":
                     streamed_character_count += len(message_event.delta)
+                    item_delta_sequence += 1
+                    _log.debug(
+                        "stream_timing boundary=item_delta_emitted "
+                        "at_unix_ms=%d request_id=%s item_delta_sequence=%d "
+                        "item_id=%s text_characters=%d",
+                        time_ns() // 1_000_000,
+                        ctx.request_id,
+                        item_delta_sequence,
+                        message_event.item_id,
+                        len(message_event.delta),
+                    )
                 yield message_event
             state.answer_character_count += streamed_character_count
             state.used_evidence_ids.update(self._messages.used_evidence_ids)

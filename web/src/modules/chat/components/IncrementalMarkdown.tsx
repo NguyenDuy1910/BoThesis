@@ -2,8 +2,10 @@
 
 import {
   Children,
+  createContext,
   isValidElement,
   memo,
+  useContext,
   useEffect,
   useId,
   useMemo,
@@ -18,21 +20,21 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import remend, { type RemendOptions } from "remend";
+
+import {
+  nextRevealLength,
+  REVEAL_COMMIT_INTERVAL_MS,
+  splitStreamingMarkdown,
+} from "../streaming-markdown";
 
 const MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkMath];
 const MARKDOWN_REHYPE_PLUGINS = [rehypeKatex];
 
-// The backend already coalesces tokens into word/phrase chunks; the client only
-// eases them onto screen at a STABLE cadence so text flows like natural words
-// rather than a per-frame typewriter. Reveal is committed on a fixed interval —
-// NOT every animation frame — so markdown is re-parsed ~30x/s instead of ~60x/s,
-// and each commit snaps to a word boundary so a half-typed token is never shown.
-// Catch-up stays proportional to the backlog (so a burst eases in instead of
-// dumping) but a raised floor keeps the tail from decelerating into a crawl.
-const SMOOTH_COMMIT_INTERVAL_MS = 32;
-const SMOOTH_MIN_CHARS_PER_COMMIT = 10;
-const SMOOTH_MAX_CHARS_PER_COMMIT = 110;
-const SMOOTH_BACKLOG_DIVISOR = 4;
+// Only the streaming tail can hold a half-written marker, so self-healing runs
+// there and nowhere else. `text-only` keeps a partial `[label](htt` as plain
+// text instead of minting a placeholder href the reader could click.
+const TAIL_REMEND_OPTIONS: RemendOptions = { linkMode: "text-only" };
 
 const MERMAID_THEME_VARIABLES = {
   fontFamily: "Hanken Grotesk, Arial, sans-serif",
@@ -49,155 +51,118 @@ const MERMAID_THEME_VARIABLES = {
   textColor: "#374151",
 };
 
-// Completed answers render mermaid diagrams.
-const MARKDOWN_COMPONENTS = createMarkdownComponents({ renderMermaid: true });
-// While streaming, stable segments AND the tail share ONE components object so a
-// block keeps the same component identity when it crosses the stable boundary
-// (no remount/flash). Mermaid stays a code block until the answer is complete —
-// it is async/stateful and would flash if it moved between streaming subtrees.
-const STREAMING_COMPONENTS = createMarkdownComponents({ renderMermaid: false });
+// ONE components object for every render — the finished prefix, the arriving
+// tail, and the completed answer. Element types stay identical across the whole
+// turn, so the transition out of streaming is a diff rather than a remount.
+const MARKDOWN_COMPONENTS: Components = {
+  a: MarkdownLink,
+  blockquote: MarkdownBlockquote,
+  h1: MarkdownHeading1,
+  h2: MarkdownHeading2,
+  h3: MarkdownHeading3,
+  hr: MarkdownRule,
+  pre: MarkdownPre,
+  code: MarkdownCode,
+  table: MarkdownTable,
+};
 
-function createMarkdownComponents({ renderMermaid }: { renderMermaid: boolean }): Components {
-  return {
-    a: MarkdownLink,
-    blockquote: MarkdownBlockquote,
-    h1: MarkdownHeading1,
-    h2: MarkdownHeading2,
-    h3: MarkdownHeading3,
-    hr: MarkdownRule,
-    pre: (props) => <MarkdownPre {...props} renderMermaid={renderMermaid} />,
-    code: MarkdownCode,
-    table: MarkdownTable,
-  };
-}
+// Mermaid renders only once the answer is complete: it is async and stateful, so
+// rendering it from half-written source would flash. Passing that through
+// context instead of a second components object keeps ``pre`` one component.
+const MermaidRenderingContext = createContext(false);
 
 export const StreamingMarkdown = memo(function StreamingMarkdown({
   text,
   isStreaming,
+  onRevealingChange,
 }: {
   text: string;
   isStreaming: boolean;
+  /** Report whether text is still easing onto screen, stream ended or not. */
+  onRevealingChange?: (isRevealing: boolean) => void;
 }) {
-  const displayedContent = useSmoothContent(text, isStreaming);
-
-  const { stableSegments, streamingMarkdown } = useMemo(
-    () =>
-      isStreaming
-        ? splitStreamingMarkdown(displayedContent)
-        : { stableSegments: [], streamingMarkdown: displayedContent },
-    [displayedContent, isStreaming],
+  const revealed = useRevealedText(text, isStreaming);
+  // Keep draining after the stream ends: snapping to the full text there is
+  // what made a fast answer land in one paint.
+  const isRevealing = isStreaming || revealed.length < text.length;
+  useEffect(() => {
+    onRevealingChange?.(isRevealing);
+  }, [isRevealing, onRevealingChange]);
+  const { stable, tail } = useMemo(
+    () => (isRevealing ? splitStreamingMarkdown(revealed) : { stable: revealed, tail: "" }),
+    [revealed, isRevealing],
   );
 
-  if (!isStreaming) {
-    return (
-      <MarkdownRenderer content={displayedContent} components={MARKDOWN_COMPONENTS} />
-    );
-  }
-
   return (
-    <>
-      {stableSegments.map((segment, index) => (
-        <StableMarkdown key={getStableSegmentKey(segment, index)} content={segment} />
-      ))}
-      {streamingMarkdown ? (
-        <StreamingMarkdownTail content={streamingMarkdown} />
-      ) : null}
-    </>
+    <MermaidRenderingContext.Provider value={!isRevealing}>
+      <StableMarkdown content={stable} />
+      {tail ? <StreamingMarkdownTail content={tail} /> : null}
+    </MermaidRenderingContext.Provider>
   );
 });
 
 export const IncrementalMarkdown = StreamingMarkdown;
 
-function useSmoothContent(target: string, isStreaming: boolean): string {
-  const [displayed, setDisplayed] = useState(() => (isStreaming ? "" : target));
-  const targetRef = useRef(target);
-  const displayedLenRef = useRef(isStreaming ? 0 : target.length);
-  const rafRef = useRef<number | null>(null);
+/**
+ * Ease the accumulated text onto screen at a steady cadence.
+ *
+ * Deltas are appended to one canonical string by the message reducer; this only
+ * decides how much of that string is painted per commit. The reveal is capped at
+ * one commit per interval so markdown is parsed ~30x/s instead of once per
+ * delta, and the step scales with the backlog so a burst — or a whole answer
+ * that arrives at once — still finishes within a few hundred milliseconds.
+ */
+function useRevealedText(text: string, isStreaming: boolean): string {
+  const [revealed, setRevealed] = useState(() => (isStreaming ? "" : text));
+  const targetRef = useRef(text);
+  const revealedLengthRef = useRef(revealed.length);
+  const frameRef = useRef<number | null>(null);
   const lastCommitRef = useRef(0);
-
-  targetRef.current = target;
+  targetRef.current = text;
 
   useEffect(() => {
-    if (!isStreaming) {
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-      displayedLenRef.current = target.length;
-      setDisplayed(target);
+    // A regenerated answer replaces the text instead of extending it.
+    if (text.length < revealedLengthRef.current) {
+      revealedLengthRef.current = text.length;
+      lastCommitRef.current = 0;
+      setRevealed(text);
       return;
     }
+    if (revealedLengthRef.current >= text.length || frameRef.current !== null) return;
 
-    // A new / regenerated answer resets the reveal buffer.
-    if (target.length < displayedLenRef.current) {
-      displayedLenRef.current = target.length;
-      lastCommitRef.current = 0;
-      setDisplayed(target);
-    }
-
-    const tick = (now: number) => {
-      rafRef.current = null;
-      const full = targetRef.current;
-      const currentLen = displayedLenRef.current;
-      const remaining = full.length - currentLen;
-      if (remaining <= 0) return;
-
-      // Hold a steady cadence: at most one reveal per commit interval so the
-      // markdown parse + paint happen ~30x/s, not on every frame. The first
-      // reveal (lastCommit === 0) paints immediately so text never feels late.
-      if (lastCommitRef.current && now - lastCommitRef.current < SMOOTH_COMMIT_INTERVAL_MS) {
-        rafRef.current = requestAnimationFrame(tick);
+    const commit = (now: number) => {
+      frameRef.current = null;
+      const target = targetRef.current;
+      if (revealedLengthRef.current >= target.length) return;
+      if (lastCommitRef.current && now - lastCommitRef.current < REVEAL_COMMIT_INTERVAL_MS) {
+        frameRef.current = requestAnimationFrame(commit);
         return;
       }
-
-      const step = Math.min(
-        SMOOTH_MAX_CHARS_PER_COMMIT,
-        Math.max(SMOOTH_MIN_CHARS_PER_COMMIT, Math.ceil(remaining / SMOOTH_BACKLOG_DIVISOR)),
-      );
-      let nextLen = Math.min(full.length, currentLen + step);
-
-      // Reveal whole words: never leave a half-typed token on screen — unless
-      // snapping back would stall progress (a very long token) or we are
-      // finishing the text.
-      if (nextLen < full.length) {
-        const boundary = revealWordBoundary(full, nextLen);
-        if (boundary > currentLen) nextLen = boundary;
-      }
-
-      displayedLenRef.current = nextLen;
+      const length = nextRevealLength(target, revealedLengthRef.current);
+      revealedLengthRef.current = length;
       lastCommitRef.current = now;
-      setDisplayed(full.slice(0, nextLen));
-
-      if (nextLen < targetRef.current.length) {
-        rafRef.current = requestAnimationFrame(tick);
+      setRevealed(target.slice(0, length));
+      if (length < targetRef.current.length) {
+        frameRef.current = requestAnimationFrame(commit);
       }
     };
 
-    if (rafRef.current === null && displayedLenRef.current < target.length) {
-      rafRef.current = requestAnimationFrame(tick);
-    }
+    frameRef.current = requestAnimationFrame(commit);
+  }, [text]);
 
-    return () => {
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
-    };
-  }, [target, isStreaming]);
+  useEffect(() => () => {
+    if (frameRef.current === null) return;
+    cancelAnimationFrame(frameRef.current);
+    // Clear the handle as well: StrictMode remounts run this between the two
+    // effect passes, and a stale handle would make the reveal never restart.
+    frameRef.current = null;
+  }, []);
 
-  return displayed;
-}
-
-function revealWordBoundary(text: string, pos: number): number {
-  for (let index = pos; index > 0; index -= 1) {
-    const char = text[index - 1];
-    if (char === " " || char === "\n" || char === "\t") return index;
-  }
-  return pos;
+  return revealed;
 }
 
 const StableMarkdown = memo(function StableMarkdown({ content }: { content: string }) {
-  return <MarkdownRenderer content={content} components={STREAMING_COMPONENTS} />;
+  return <MarkdownRenderer content={content} />;
 });
 
 const StreamingMarkdownTail = memo(function StreamingMarkdownTail({
@@ -205,22 +170,19 @@ const StreamingMarkdownTail = memo(function StreamingMarkdownTail({
 }: {
   content: string;
 }) {
-  return (
-    <MarkdownRenderer
-      content={content}
-      components={STREAMING_COMPONENTS}
-      normalizeMath={false}
-    />
-  );
+  // Close the markers the model has opened but not yet finished, so bold, code,
+  // and links render as formatting while they arrive rather than flashing their
+  // raw `**` / backtick / bracket syntax at the reader for a frame.
+  const healed = useMemo(() => remend(content, TAIL_REMEND_OPTIONS), [content]);
+
+  return <MarkdownRenderer content={healed} normalizeMath={false} />;
 });
 
 function MarkdownRenderer({
   content,
-  components,
   normalizeMath = true,
 }: {
   content: string;
-  components: Components;
   normalizeMath?: boolean;
 }) {
   const normalizedContent = useMemo(
@@ -232,7 +194,7 @@ function MarkdownRenderer({
     <ReactMarkdown
       remarkPlugins={MARKDOWN_REMARK_PLUGINS}
       rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
-      components={components}
+      components={MARKDOWN_COMPONENTS}
     >
       {normalizedContent}
     </ReactMarkdown>
@@ -270,79 +232,9 @@ function normalizeMarkdownMathText(content: string): string {
     });
 }
 
-function splitStreamingMarkdown(content: string): {
-  stableSegments: string[];
-  streamingMarkdown: string;
-} {
-  if (!content) return { stableSegments: [], streamingMarkdown: "" };
-
-  const boundary = getStableMarkdownBoundary(content);
-  if (boundary <= 0) {
-    return { stableSegments: [], streamingMarkdown: content };
-  }
-
-  return {
-    stableSegments: splitMarkdownSegments(content.slice(0, boundary)),
-    streamingMarkdown: content.slice(boundary),
-  };
-}
-
-function getStableMarkdownBoundary(content: string): number {
-  if (isInsideOpenCodeFence(content)) {
-    const fenceStart = findLastFenceStart(content);
-    if (fenceStart > 0) {
-      const before = content.slice(0, fenceStart);
-      const splitIdx = before.lastIndexOf("\n\n");
-      if (splitIdx >= 0) {
-        return splitIdx + 2;
-      }
-    }
-    return 0;
-  }
-
-  const splitIdx = content.lastIndexOf("\n\n");
-  return splitIdx >= 0 ? splitIdx + 2 : 0;
-}
-
-function splitMarkdownSegments(content: string): string[] {
-  return content
-    .split(/(\n\n+)/)
-    .reduce<string[]>((segments, piece, index, pieces) => {
-      if (!piece) return segments;
-      if (/^\n\n+$/.test(piece)) {
-        const previous = segments.pop() ?? "";
-        const next = pieces[index + 1] ?? "";
-        if (next) {
-          segments.push(previous + piece + next);
-          pieces[index + 1] = "";
-        } else if (previous) {
-          segments.push(previous + piece);
-        }
-        return segments;
-      }
-      segments.push(piece);
-      return segments;
-    }, [])
-    .filter((segment) => segment.trim().length > 0);
-}
-
-function getStableSegmentKey(segment: string, index: number) {
-  return `${index}:${segment.length}:${segment.slice(0, 24)}`;
-}
-
 function isInsideOpenCodeFence(content: string): boolean {
   const matches = content.match(/^```/gm);
   return Boolean(matches && matches.length % 2 === 1);
-}
-
-function findLastFenceStart(content: string): number {
-  const regex = /^```/gm;
-  let lastIdx = -1;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(content)) !== null) {
-    lastIdx = match.index;
-  }
-  return lastIdx;
 }
 
 function MarkdownHeading1({
@@ -409,12 +301,9 @@ function MarkdownTable({
 
 function MarkdownPre({
   children,
-  renderMermaid,
   ...props
-}: HTMLAttributes<HTMLPreElement> & {
-  children?: ReactNode;
-  renderMermaid: boolean;
-}) {
+}: HTMLAttributes<HTMLPreElement> & { children?: ReactNode }) {
+  const renderMermaid = useContext(MermaidRenderingContext);
   if (!hasVisibleCodeContent(children)) return null;
 
   const codeMeta = getCodeBlockMeta(children);

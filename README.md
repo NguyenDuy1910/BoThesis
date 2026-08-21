@@ -101,6 +101,23 @@ The API starts at `http://127.0.0.1:8000`.
 - OpenAPI: `http://127.0.0.1:8000/docs`
 - Chat stream: `POST http://127.0.0.1:8000/api/v1/agent/chat`
 
+### Terminal chat client
+
+After `uv sync`, run the lightweight Textual client from `backend/`:
+
+```bash
+uv run python -m bothesis.tui
+```
+
+It talks only to the running API at `BOTHESIS_API_URL` (default
+`http://127.0.0.1:8000`) and defaults to the local streaming-test user UUID
+used by the WebUI. Set `BOTHESIS_USER_ID` (and optionally
+`BOTHESIS_TENANT_ID`) to use a different development identity. Use Ctrl+Enter
+to send a multiline message. `/clear` starts a new conversation, `/raw`
+toggles the receive-order SSE log, and `/exit` or `/quit` closes the client.
+An authenticated deployment can instead use `BOTHESIS_ACCESS_TOKEN` or the
+matching command-line options.
+
 ### Frontend
 
 In another terminal:

@@ -71,8 +71,20 @@ test("tool completion updates the existing ordered row", () => {
     category: "retrieval",
     state: "completed",
     detail: undefined,
-    count: 1,
+    resultCount: undefined,
+    durationMs: undefined,
   }]);
+});
+
+test("tool rows carry the result count and duration the stream reported", () => {
+  const completed = toolPart("search-2", "Observe · Search Knowledge", "completed");
+  completed.data.resultCount = 12;
+  completed.data.durationMs = 1420;
+  const [item] = assistantTurnItems([completed], false);
+
+  assert.equal(item?.kind, "tool");
+  assert.equal(item?.kind === "tool" && item.resultCount, 12);
+  assert.equal(item?.kind === "tool" && item.durationMs, 1420);
 });
 
 function toolPart(

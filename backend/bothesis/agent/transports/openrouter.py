@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Mapping, Sequence
+from time import time_ns
 from typing import Any
 
 import httpx
+
+_log = logging.getLogger(__name__)
 
 
 class OpenRouterTransport:
@@ -83,6 +87,8 @@ class OpenRouterTransport:
         ) as response:
             response.raise_for_status()
             data_lines: list[str] = []
+            native_chunk_sequence = 0
+            text_delta_sequence = 0
             async for line in response.aiter_lines():
                 if not line:
                     if data_lines:
@@ -90,6 +96,19 @@ class OpenRouterTransport:
                         data_lines.clear()
                         if payload is None:
                             return
+                        native_chunk_sequence += 1
+                        text_characters = self._text_delta_characters(payload)
+                        if text_characters:
+                            text_delta_sequence += 1
+                        _log.debug(
+                            "stream_timing boundary=native_provider_chunk_received "
+                            "at_unix_ms=%d native_chunk_sequence=%d "
+                            "text_delta_sequence=%s text_characters=%d",
+                            time_ns() // 1_000_000,
+                            native_chunk_sequence,
+                            text_delta_sequence if text_characters else "-",
+                            text_characters,
+                        )
                         yield payload
                     continue
                 if line.startswith(":"):
@@ -99,6 +118,19 @@ class OpenRouterTransport:
             if data_lines:
                 payload = self._stream_payload(data_lines)
                 if payload is not None:
+                    native_chunk_sequence += 1
+                    text_characters = self._text_delta_characters(payload)
+                    if text_characters:
+                        text_delta_sequence += 1
+                    _log.debug(
+                        "stream_timing boundary=native_provider_chunk_received "
+                        "at_unix_ms=%d native_chunk_sequence=%d "
+                        "text_delta_sequence=%s text_characters=%d",
+                        time_ns() // 1_000_000,
+                        native_chunk_sequence,
+                        text_delta_sequence if text_characters else "-",
+                        text_characters,
+                    )
                     yield payload
 
     async def embeddings(
@@ -156,6 +188,20 @@ class OpenRouterTransport:
         if not isinstance(payload, dict):
             raise ValueError("OpenRouter returned a non-object response")
         return payload
+
+    @staticmethod
+    def _text_delta_characters(payload: Mapping[str, Any]) -> int:
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return 0
+        choice = choices[0]
+        if not isinstance(choice, Mapping):
+            return 0
+        delta = choice.get("delta")
+        if not isinstance(delta, Mapping):
+            return 0
+        content = delta.get("content")
+        return len(content) if isinstance(content, str) else 0
 
     @staticmethod
     def _stream_payload(data_lines: Sequence[str]) -> dict[str, Any] | None:
