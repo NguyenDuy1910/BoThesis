@@ -1,9 +1,22 @@
 """Public contracts and runtime entry points for the BoThesis agent.
 
-The package has one execution path: :class:`Agent` delegates to
-:class:`ConversationSession`, which constructs one Turn Request per user
-message to alternate dynamically between native tool calls and final
-response generation.
+The package has one execution path. :class:`Agent` validates a request and
+delegates to :class:`~bothesis.agent.conversation_loop.ConversationLoop`, which
+runs one user turn as a chain of OpenResponses responses, alternating between
+function calls and final answer generation.
+
+Layering, top to bottom:
+
+``protocol``
+    the OpenResponses data contracts, and nothing else;
+``transports``
+    provider communication plus normalization onto those contracts;
+``reducer``
+    reconstruction of a response from its event stream;
+``conversation_loop``
+    orchestration of one turn;
+``tools``
+    tool execution.
 """
 
 from __future__ import annotations
@@ -11,13 +24,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, TypeAlias
 
 from bothesis.agent.models import ConversationMessage
-from bothesis.agent.protocol import Item, Response
+from bothesis.agent.protocol import Item
 
-ModelMessage: TypeAlias = dict[str, Any]
-"""One rendered provider wire message, as produced by ``TurnInput`` rendering."""
 
 class AgentExecutionError(RuntimeError):
     """The agent could not safely complete a request."""
@@ -95,19 +105,11 @@ class ConversationWindow:
 
 
 @dataclass(frozen=True, slots=True)
-class ModelStreamCompleted:
-    """One provider stream normalized into a protocol response.
+class PreparedConversation:
+    """The canonical input items and base instructions for one turn."""
 
-    ``items`` is the canonical, provider-neutral output of this sampling
-    request (in :mod:`bothesis.agent.protocol` terms) so the next request can
-    replay it verbatim through :class:`~bothesis.agent.turn_input.TurnInput`;
-    ``response`` is the neutral view the runtime reasons about.
-    """
-
-    response: Response
-    duration_ms: int
-    items: tuple[Item, ...] = ()
-    used_evidence_ids: frozenset[str] = frozenset()
+    items: tuple[Item, ...]
+    instructions: str
 
 
 def duration_ms(started_at: float) -> int:
@@ -127,16 +129,15 @@ def _message_payload(
 # Import primary runtime classes only after the shared package contracts exist.
 from bothesis.agent.agent import Agent  # noqa: E402
 from bothesis.agent.conversation_compression import ConversationMemory  # noqa: E402
-from bothesis.agent.conversation_session import ConversationSession  # noqa: E402
+from bothesis.agent.conversation_loop import ConversationLoop  # noqa: E402
 
 __all__ = [
     "Agent",
     "AgentConfig",
     "AgentExecutionError",
+    "ConversationLoop",
     "ConversationMemory",
-    "ConversationSession",
     "ConversationWindow",
-    "ModelMessage",
-    "ModelStreamCompleted",
+    "PreparedConversation",
     "duration_ms",
 ]

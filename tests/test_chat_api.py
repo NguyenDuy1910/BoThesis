@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -13,66 +12,59 @@ import pytest
 from openai import PermissionDeniedError
 from fastapi.testclient import TestClient
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+
+import native_responses as native
 
 import main
 import bothesis.db.engine as db_engine
 from bothesis.agent import Agent, AgentConfig
-from bothesis.agent.models import AgentContext, ConversationDocument, Evidence
+from bothesis.agent.models import AgentContext
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
 from bothesis.knowledge.document_index import RetrievedDocument
 from bothesis.services import AuthContext
 
 
-def text_delta(text: str) -> dict[str, Any]:
-    return {"choices": [{"delta": {"content": text}}]}
+def search_call(output_index: int = 0) -> list[Any]:
+    return native.function_call(
+        item_id="fc_1",
+        output_index=output_index,
+        call_id="search-1",
+        name="knowledge_search",
+        argument_deltas=['{"queries":["leave policy"]}'],
+    )
 
 
-def turn_done(
-    finish_reason: str,
-    *,
-    tool_calls: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    delta: dict[str, Any] = {}
-    if tool_calls:
-        delta["tool_calls"] = [
-            {"index": index, **call} for index, call in enumerate(tool_calls)
-        ]
-    return {"choices": [{"delta": delta, "finish_reason": finish_reason}]}
-
-
-class ScriptedTransport:
-    provider = "openrouter"
-    model = "openai/gpt-5.4-mini"
+class ScriptedTransport(native.ScriptedResponsesTransport):
+    """Retrieve once, then answer with a citation marker."""
 
     def __init__(self) -> None:
-        self.stream_requests: list[list[dict[str, Any]]] = []
-
-    async def stream_chat(
-        self,
-        *,
-        messages: Sequence[Mapping[str, Any]],
-        **_: Any,
-    ) -> AsyncIterator[dict[str, Any]]:
-        self.stream_requests.append([dict(message) for message in messages])
-        if len(self.stream_requests) == 1:
-            yield turn_done(
-                "tool_calls",
-                tool_calls=[
-                    {
-                        "id": "search-1",
-                        "type": "function",
-                        "function": {
-                            "name": "knowledge_search",
-                            "arguments": '{"queries":["leave policy"]}',
-                        },
-                    }
+        super().__init__(
+            [
+                [*native.created("resp_a"), *search_call(), *native.completed("resp_a")],
+                [
+                    *native.created("resp_b"),
+                    *native.message(
+                        item_id="msg_1",
+                        output_index=0,
+                        deltas=[
+                            "Employees receive 20 days of annual leave "
+                            "[[cite:chunk-1]]."
+                        ],
+                        phase="final_answer",
+                    ),
+                    *native.completed("resp_b"),
                 ],
-            )
-            return
-        yield text_delta("Employees receive 20 days of annual leave [[cite:chunk-1]].")
-        yield turn_done("stop")
+            ]
+        )
+
+    @property
+    def stream_requests(self) -> list[list[dict[str, Any]]]:
+        """The canonical input items of each sampling request."""
+
+        return [request["input"] for request in self.requests]
 
 
 def test_default_agent_composes_the_openai_transport(
@@ -157,142 +149,67 @@ class StubRetriever:
         ]
 
 
-class InterleavedTransport:
-    provider = "openrouter"
-    model = "openai/gpt-5.4-mini"
+class InterleavedTransport(native.ScriptedResponsesTransport):
+    """Emit user-visible commentary before retrieving, then answer."""
 
     def __init__(self) -> None:
-        self.turn = 0
-
-    async def stream_chat(
-        self,
-        *,
-        messages: Sequence[Mapping[str, Any]],
-        **_: Any,
-    ) -> AsyncIterator[dict[str, Any]]:
-        self.turn += 1
-        if self.turn == 1:
-            yield text_delta("I’ll check the relevant source first.")
-            yield turn_done(
-                "tool_calls",
-                tool_calls=[
-                    {
-                        "id": "search-1",
-                        "type": "function",
-                        "function": {
-                            "name": "knowledge_search",
-                            "arguments": '{"queries":["leave policy"]}',
-                        },
-                    }
+        super().__init__(
+            [
+                [
+                    *native.created("resp_a"),
+                    *native.message(
+                        item_id="msg_1",
+                        output_index=0,
+                        deltas=["I’ll check the relevant source first."],
+                        phase="commentary",
+                    ),
+                    *search_call(output_index=1),
+                    *native.completed("resp_a"),
                 ],
-            )
-            return
-        yield text_delta("Employees receive 20 days ")
-        yield text_delta("[[cite:chunk-1]].")
-        yield turn_done("stop")
+                [
+                    *native.created("resp_b"),
+                    *native.message(
+                        item_id="msg_2",
+                        output_index=0,
+                        deltas=["Employees receive 20 days ", "[[cite:chunk-1]]."],
+                        phase="final_answer",
+                    ),
+                    *native.completed("resp_b"),
+                ],
+            ]
+        )
 
 
-class OpenRouterReasoningSummaryTransport:
-    provider = "openrouter"
-    model = "openai/gpt-5.4-mini"
-
-    def __init__(self) -> None:
-        self.stream_requests: list[list[dict[str, Any]]] = []
-
-    async def stream_chat(
-        self,
-        *,
-        messages: Sequence[Mapping[str, Any]],
-        **_: Any,
-    ) -> AsyncIterator[dict[str, Any]]:
-        self.stream_requests.append([dict(message) for message in messages])
-        if len(self.stream_requests) == 1:
-            yield {
-                "choices": [{"delta": {"reasoning": "private raw reasoning", "reasoning_details": [
-                    {
-                        "type": "reasoning.summary",
-                        "summary": "I should search the policy.",
-                        "id": "summary-1",
-                        "format": "openai-responses-v1",
-                        "index": 0,
-                    },
-                    {
-                        "type": "reasoning.encrypted",
-                        "data": "opaque",
-                        "id": "encrypted-1",
-                        "format": "openai-responses-v1",
-                        "index": 1,
-                    },
-                ]}}]
-            }
-            yield turn_done(
-                "tool_calls",
-                tool_calls=[{
-                    "id": "search-1",
-                    "type": "function",
-                    "function": {
-                        "name": "knowledge_search",
-                        "arguments": '{"queries":["leave policy"]}',
-                    },
-                }],
-            )
-            return
-        yield text_delta("Employees receive 20 days.")
-        yield turn_done("stop")
-
-
-class PausingTransport:
-    provider = "openrouter"
-    model = "openai/gpt-5.4-mini"
+class ReasoningTransport(native.ScriptedResponsesTransport):
+    """Emit a reasoning item, retrieve, then answer."""
 
     def __init__(self) -> None:
-        self.release = asyncio.Event()
-
-    async def stream_chat(
-        self,
-        *,
-        messages: Sequence[Mapping[str, Any]],
-        **_: Any,
-    ) -> AsyncIterator[dict[str, Any]]:
-        yield text_delta("first ")
-        await self.release.wait()
-        yield text_delta("second")
-        yield turn_done("stop")
-
-
-class SplitCitationTransport:
-    provider = "openrouter"
-    model = "openai/gpt-5.4-mini"
-
-    def __init__(self) -> None:
-        self.release = asyncio.Event()
-
-    async def stream_chat(
-        self,
-        *,
-        messages: Sequence[Mapping[str, Any]],
-        **_: Any,
-    ) -> AsyncIterator[dict[str, Any]]:
-        yield text_delta("Policy [")
-        await self.release.wait()
-        yield text_delta("[cite:ev-1]] applies")
-        yield turn_done("stop")
-
-
-class LiteralBracketTransport:
-    provider = "openrouter"
-    model = "openai/gpt-5.4-mini"
-
-    async def stream_chat(
-        self,
-        *,
-        messages: Sequence[Mapping[str, Any]],
-        **_: Any,
-    ) -> AsyncIterator[dict[str, Any]]:
-        yield text_delta("Array[")
-        await asyncio.sleep(0)
-        yield text_delta("0]")
-        yield turn_done("stop")
+        super().__init__(
+            [
+                [
+                    *native.created("resp_a"),
+                    *native.reasoning(
+                        item_id="rs_1",
+                        output_index=0,
+                        summary="I should search the policy.",
+                        text="private raw reasoning",
+                        encrypted_content="opaque",
+                    ),
+                    *search_call(output_index=1),
+                    *native.completed("resp_a"),
+                ],
+                [
+                    *native.created("resp_b"),
+                    *native.message(
+                        item_id="msg_1",
+                        output_index=0,
+                        deltas=["Employees receive 20 days."],
+                        phase="final_answer",
+                    ),
+                    *native.completed("resp_b"),
+                ],
+            ]
+        )
 
 
 class _SessionContext:
@@ -385,7 +302,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         for event in events
         if event["type"] == "response.output_text.annotation.added"
     )
-    assert annotation["type"] == "citation"
+    assert annotation["type"] == "bothesis:document_citation"
     assert annotation["citation"]["document_id"] == "doc-1"
     assert annotation["citation"]["source"] == "confluence"
     assert len(retriever.contexts) == 1
@@ -394,12 +311,14 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         "external_group:finance",
     )
     assert retriever.contexts[0].is_admin is True
-    model_request = transport.stream_requests[0]
-    assert model_request[0]["role"] == "system"
-    assert model_request[1:] == [
-        {"role": "user", "content": "Recent scope question"},
-        {"role": "assistant", "content": "Recent scope answer"},
+    # ``/responses`` takes instructions as a request parameter, so the input is
+    # items only — there is no synthetic leading system message.
+    assert "<agent_instructions>" in transport.requests[0]["instructions"]
+    assert transport.stream_requests[0] == [
+        {"type": "message", "role": "user", "content": "Recent scope question"},
+        {"type": "message", "role": "assistant", "content": "Recent scope answer"},
         {
+            "type": "message",
             "role": "user",
             "content": "<user_message>What is the leave policy?</user_message>",
         },
@@ -454,10 +373,12 @@ def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_openrouter_replays_native_reasoning_and_traces_only_summary() -> None:
+async def test_a_reasoning_item_replays_as_a_canonical_input_item() -> None:
+    """Reasoning continues through the specified fields, not a provider blob."""
+
     registry = ToolRegistry()
     registry.register(KnowledgeSearchTool(StubRetriever()))
-    transport = OpenRouterReasoningSummaryTransport()
+    transport = ReasoningTransport()
     events = [
         event
         async for event in Agent(transport, registry).run(
@@ -467,127 +388,22 @@ async def test_openrouter_replays_native_reasoning_and_traces_only_summary() -> 
     ]
 
     assert events[-1].type == "response.completed"
-    replay = transport.stream_requests[1]
-    assistant = next(
-        message for message in replay if message.get("role") == "assistant"
-    )
-    assert assistant["reasoning"] == "private raw reasoning"
-    assert assistant["reasoning_details"] == [
-        {
-            "type": "reasoning.summary",
-            "summary": "I should search the policy.",
-            "id": "summary-1",
-            "format": "openai-responses-v1",
-            "index": 0,
-        },
-        {
-            "type": "reasoning.encrypted",
-            "data": "opaque",
-            "id": "encrypted-1",
-            "format": "openai-responses-v1",
-            "index": 1,
-        },
-    ]
+    replayed = transport.requests[1]["input"]
+    reasoning = next(item for item in replayed if item.get("type") == "reasoning")
+    assert reasoning == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "I should search the policy."}],
+        "id": "rs_1",
+        "encrypted_content": "opaque",
+    }
+    # Raw reasoning text is never replayed: the specification's input item
+    # carries the summary and the opaque continuation blob only.
+    assert "private raw reasoning" not in json.dumps(replayed)
 
 
-@pytest.mark.asyncio
-async def test_agent_emits_text_before_sampling_completion() -> None:
-    transport = PausingTransport()
-    agent = Agent(transport, ToolRegistry())
-    stream = agent.run(
-        "Stream this answer",
-        AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[]),
-    )
-
-    assert (await anext(stream)).type == "response.created"
-    started = await asyncio.wait_for(anext(stream), timeout=0.1)
-    part_added = await asyncio.wait_for(anext(stream), timeout=0.1)
-    first_delta = await asyncio.wait_for(anext(stream), timeout=0.1)
-
-    assert started.type == "response.output_item.added"
-    assert started.item.type == "message"
-    assert part_added.type == "response.content_part.added"
-    assert first_delta.type == "response.output_text.delta"
-    assert first_delta.delta == "first "
-
-    transport.release.set()
-    remaining = [event async for event in stream]
-    assert [event.type for event in remaining] == [
-        "response.output_text.delta",
-        "response.output_text.done",
-        "response.content_part.done",
-        "response.output_item.done",
-        "response.completed",
-    ]
-    assert remaining[-1].response.output_text == "first second"
-
-
-@pytest.mark.asyncio
-async def test_agent_keeps_only_citation_boundary_buffered() -> None:
-    transport = SplitCitationTransport()
-    agent = Agent(transport, ToolRegistry())
-    evidence = Evidence(
-        id="ev-1",
-        document_id="doc-1",
-        title="Policy",
-        content="Grounded policy",
-    )
-    stream = agent.run(
-        "Stream cited text",
-        AgentContext(
-            user_id="user-1",
-            tenant_id="tenant-1",
-            roles=[],
-            documents=(ConversationDocument(
-                id="doc-1",
-                title="Policy",
-                content_type="text/plain",
-                mode="indexed",
-                citation_id="ev-1",
-                evidence=(evidence,),
-            ),),
-        ),
-    )
-
-    assert (await anext(stream)).type == "response.created"
-    assert (await anext(stream)).type == "response.output_item.added"
-    assert (await anext(stream)).type == "response.content_part.added"
-    first_delta = await asyncio.wait_for(anext(stream), timeout=0.1)
-    assert first_delta.type == "response.output_text.delta"
-    assert first_delta.delta == "Policy "
-
-    transport.release.set()
-    remaining = [event async for event in stream]
-    assert [event.delta for event in remaining if event.type == "response.output_text.delta"] == [
-        " applies"
-    ]
-    citation = next(
-        event.annotation
-        for event in remaining
-        if event.type == "response.output_text.annotation.added"
-    )
-    assert citation["citation"]["id"] == "ev-1"
-    completed_part = next(
-        event.part
-        for event in remaining
-        if event.type == "response.content_part.done"
-    )
-    assert completed_part.text == "Policy  applies"
-    assert completed_part.annotations[0]["citation"]["id"] == "ev-1"
-
-
-@pytest.mark.asyncio
-async def test_agent_does_not_delay_literal_brackets_without_evidence() -> None:
-    stream = Agent(LiteralBracketTransport(), ToolRegistry()).run(
-        "Stream literal brackets",
-        AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[]),
-    )
-    events = [event async for event in stream]
-
-    assert [event.delta for event in events if event.type == "response.output_text.delta"] == [
-        "Array[",
-        "0]",
-    ]
+# Incremental delta forwarding, citation-boundary buffering and literal-bracket
+# handling are covered by tests/bothesis/agent/test_conversation_loop.py, which
+# exercises the same paths without going through the HTTP layer.
 
 
 def test_chat_api_rejects_unbounded_history() -> None:

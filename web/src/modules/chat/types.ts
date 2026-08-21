@@ -17,12 +17,11 @@ export interface ConversationDocument {
   status: "available" | "failed";
 }
 
-export type OutputItemStatus =
-  | "in_progress"
-  | "completed"
-  | "incomplete"
-  | "failed"
-  | "skipped";
+/** The OpenResponses item state machine. */
+export type OutputItemStatus = "in_progress" | "completed" | "incomplete";
+
+/** Whether an assistant message is intermediate commentary or the answer. */
+export type MessagePhase = "commentary" | "final_answer";
 
 export type ResponseStatus =
   | "queued"
@@ -43,7 +42,10 @@ export interface CitationReference {
   restricted?: boolean;
 }
 
-/** An opaque protocol annotation. Citation annotations carry ``citation``. */
+/** The one BoThesis annotation type; the specification only defines url_citation. */
+export const DOCUMENT_CITATION_TYPE = "bothesis:document_citation";
+
+/** An opaque protocol annotation. Document citations carry `citation`. */
 export interface OutputTextAnnotation {
   type: string;
   start_index?: number;
@@ -68,6 +70,16 @@ export interface RefusalPart {
   refusal: string;
 }
 
+export interface ReasoningTextPart {
+  type: "reasoning_text";
+  text: string;
+}
+
+export interface SummaryTextPart {
+  type: "summary_text";
+  text: string;
+}
+
 /** Keep provider-specific parts intact even when the UI does not render them. */
 export interface ExtensionContentPart {
   type: string;
@@ -78,6 +90,8 @@ export type ContentPart =
   | OutputTextPart
   | InputTextPart
   | RefusalPart
+  | ReasoningTextPart
+  | SummaryTextPart
   | ExtensionContentPart;
 
 interface OutputItemBase {
@@ -90,6 +104,8 @@ export interface MessageItem extends OutputItemBase {
   type: "message";
   role: "assistant" | "user" | "system" | "developer";
   content: ContentPart[];
+  /** Absent until the response settles, or when the provider omits it. */
+  phase?: MessagePhase | null;
 }
 
 export interface FunctionCallItem extends OutputItemBase {
@@ -107,7 +123,10 @@ export interface FunctionCallOutputItem extends OutputItemBase {
 
 export interface ReasoningItem extends OutputItemBase {
   type: "reasoning";
-  summary: Array<{ type: "summary_text"; text: string }>;
+  /** Raw reasoning text, when the provider exposes it. */
+  content?: Array<ReasoningTextPart | SummaryTextPart>;
+  summary: Array<SummaryTextPart>;
+  /** The opaque blob a provider needs to continue a reasoning session. */
   encrypted_content?: string | null;
 }
 
@@ -127,6 +146,8 @@ export interface ResponseEnvelope {
   id: string;
   status: ResponseStatus;
   output: OutputItem[];
+  /** The response this one continues, which chains a turn's responses. */
+  previous_response_id?: string | null;
   error?: { code?: string; message?: string } | null;
   incomplete_details?: { reason?: string } | null;
 }
@@ -137,6 +158,7 @@ export interface ResponseState {
   status: ResponseStatus;
   items: Record<string, OutputItem>;
   itemOrder: string[];
+  previousResponseId?: string;
 }
 
 /**
@@ -149,81 +171,100 @@ export interface TurnState {
   status: "streaming" | "completed" | "failed";
   responses: Record<string, ResponseState>;
   responseOrder: string[];
+  /**
+   * The response opened by the most recent `response.created`. Item-level
+   * events carry no response id — the specification identifies the response
+   * being mutated by the lifecycle events that bracket it.
+   */
+  currentResponseId?: string;
   error?: string;
 }
 
-export type ResponseStreamEvent = { sequence_number?: number } & (
-  | { type: "response.created"; response_id: string; response: ResponseEnvelope }
-  | {
-      type: "response.output_item.added";
-      response_id: string;
+interface StreamEventBase {
+  sequence_number?: number;
+}
+
+/** An event addressing one content part of one output item. */
+interface ContentEventBase extends StreamEventBase {
+  item_id: string;
+  output_index: number;
+  content_index: number;
+}
+
+/** An event addressing one reasoning summary part of one output item. */
+interface SummaryEventBase extends StreamEventBase {
+  item_id: string;
+  output_index: number;
+  summary_index: number;
+}
+
+/**
+ * The OpenResponses server-sent event union. No event carries a response id:
+ * the response being mutated is the one opened by the most recent
+ * `response.created`, and `previous_response_id` chains the several responses
+ * one agent turn produces.
+ */
+export type ResponseStreamEvent =
+  | (StreamEventBase & {
+      type:
+        | "response.created"
+        | "response.queued"
+        | "response.in_progress"
+        | "response.completed"
+        | "response.incomplete"
+        | "response.failed";
+      response: ResponseEnvelope;
+    })
+  | (StreamEventBase & {
+      type: "response.output_item.added" | "response.output_item.done";
       output_index: number;
       item: OutputItem;
-    }
-  | {
-      type: "response.content_part.added";
-      response_id: string;
-      item_id: string;
-      output_index: number;
-      content_index: number;
+    })
+  | (ContentEventBase & {
+      type: "response.content_part.added" | "response.content_part.done";
       part: ContentPart;
-    }
-  | {
-      type: "response.content_part.done";
-      response_id: string;
-      item_id: string;
-      output_index: number;
-      content_index: number;
-      part: ContentPart;
-    }
-  | {
-      type: "response.output_text.delta";
-      response_id: string;
-      item_id: string;
-      output_index: number;
-      content_index: number;
-      delta: string;
-    }
-  | {
-      type: "response.output_text.done";
-      response_id: string;
-      item_id: string;
-      output_index: number;
-      content_index: number;
-      text: string;
-    }
-  | {
+    })
+  | (ContentEventBase & { type: "response.output_text.delta"; delta: string })
+  | (ContentEventBase & { type: "response.output_text.done"; text: string })
+  | (ContentEventBase & {
       type: "response.output_text.annotation.added";
-      response_id: string;
-      item_id: string;
-      output_index: number;
-      content_index: number;
+      annotation_index: number;
       annotation: OutputTextAnnotation;
-    }
-  | {
+    })
+  | (ContentEventBase & { type: "response.refusal.delta"; delta: string })
+  | (ContentEventBase & { type: "response.refusal.done"; refusal: string })
+  | (ContentEventBase & { type: "response.reasoning.delta"; delta: string })
+  | (ContentEventBase & { type: "response.reasoning.done"; text: string })
+  | (SummaryEventBase & {
+      type:
+        | "response.reasoning_summary_part.added"
+        | "response.reasoning_summary_part.done";
+      part: ContentPart;
+    })
+  | (SummaryEventBase & {
+      type: "response.reasoning_summary_text.delta";
+      delta: string;
+    })
+  | (SummaryEventBase & {
+      type: "response.reasoning_summary_text.done";
+      text: string;
+    })
+  | (StreamEventBase & {
       type: "response.function_call_arguments.delta";
-      response_id: string;
       item_id: string;
       output_index: number;
       delta: string;
-    }
-  | {
+    })
+  | (StreamEventBase & {
       type: "response.function_call_arguments.done";
-      response_id: string;
       item_id: string;
       output_index: number;
       arguments: string;
-    }
-  | {
-      type: "response.output_item.done";
-      response_id: string;
-      output_index: number;
-      item: OutputItem;
-    }
-  | { type: "response.completed"; response: ResponseEnvelope }
-  | { type: "response.incomplete"; response: ResponseEnvelope }
-  | { type: "response.failed"; response: ResponseEnvelope }
-);
+    })
+  | (StreamEventBase & {
+      type: "error";
+      error: { type?: string; code?: string | null; message: string };
+    });
 
 export type ChatMessagePart =
   | {

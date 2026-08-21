@@ -1,4 +1,5 @@
 import { isMessageItem, isOutputTextPart, orderedTurnItems } from "./message-stream.ts";
+import { DOCUMENT_CITATION_TYPE } from "./types.ts";
 import type { CitationReference, TurnState } from "./types";
 
 export interface AnswerSource {
@@ -26,7 +27,7 @@ export function answerSources(turn: TurnState | undefined): AnswerSource[] {
     for (const part of item.content) {
       if (!isOutputTextPart(part)) continue;
       for (const annotation of part.annotations) {
-        if (annotation.type !== "citation" || !annotation.citation) continue;
+        if (annotation.type !== DOCUMENT_CITATION_TYPE || !annotation.citation) continue;
         const source = toAnswerSource(annotation.citation);
         if (!source) continue;
         const existing = sources.get(source.id);

@@ -203,11 +203,14 @@ def _output_item(observation: ToolObservation, max_characters: int) -> FunctionC
         content = "Tool completed without a textual result."
     if len(content) > max_characters:
         content = f"{content[: max(1, max_characters - 1)].rstrip()}…"
+    # A developer-supplied output is always ``completed``: the specification
+    # defines no failure status for an item, so a tool failure is reported in
+    # ``output`` and the runtime outcome stays in telemetry.
     return FunctionCallOutputItem(
         id=f"tool-output:{observation.call.call_id}",
         call_id=observation.call.call_id,
         output=content,
-        status=observation.status,
+        status="completed",
     )
 
 

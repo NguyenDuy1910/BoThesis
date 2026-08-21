@@ -6,9 +6,11 @@ import type {
   OutputItem,
   OutputTextAnnotation,
   OutputTextPart,
+  ReasoningItem,
   ResponseEnvelope,
   ResponseState,
   ResponseStreamEvent,
+  SummaryTextPart,
   TurnState,
 } from "./types";
 
@@ -25,8 +27,12 @@ export function emptyTurnState(id: string): TurnState {
 }
 
 /**
- * The sole stream reducer. It converts protocol mutations into a materialized
+ * The sole stream reducer. It folds OpenResponses events into a materialized
  * Turn / Response / OutputItem tree; no raw event is retained for rendering.
+ *
+ * Item-level events carry no response id, exactly as the specification defines
+ * them: the response being mutated is the one opened by the most recent
+ * `response.created`, tracked here as `currentResponseId`.
  */
 export function reduceResponseStreamEvent(
   current: TurnState,
@@ -34,70 +40,85 @@ export function reduceResponseStreamEvent(
 ): TurnState {
   switch (event.type) {
     case "response.created":
-      return reconcileResponse(
-        { ...current, status: "streaming", error: undefined },
-        event.response_id,
-        event.response,
-      );
+    case "response.queued":
+    case "response.in_progress":
+      return {
+        ...reconcileResponse(current, event.response),
+        currentResponseId: event.response.id,
+        status: "streaming",
+        error: undefined,
+      };
     case "response.output_item.added":
-      return upsertItem(current, event.response_id, event.output_index, event.item, false);
+      return upsertItem(current, event.output_index, event.item, false);
     case "response.output_item.done":
-      return upsertItem(current, event.response_id, event.output_index, event.item, true);
+      return upsertItem(current, event.output_index, event.item, true);
     case "response.content_part.added":
     case "response.content_part.done":
-      return updateMessageContent(
-        current,
-        event.response_id,
-        event.item_id,
-        event.output_index,
-        event.content_index,
-        () => cloneContentPart(event.part),
-      );
+      return updateContent(current, event, () => cloneContentPart(event.part));
     case "response.output_text.delta":
-      return updateMessageContent(
-        current,
-        event.response_id,
-        event.item_id,
-        event.output_index,
-        event.content_index,
-        (part) => ({ ...part, text: part.text + event.delta }),
-      );
+      return updateContent(current, event, (part) => ({
+        ...part,
+        text: part.text + event.delta,
+      }));
     case "response.output_text.done":
-      return updateMessageContent(
-        current,
-        event.response_id,
-        event.item_id,
-        event.output_index,
-        event.content_index,
-        (part) => ({ ...part, text: event.text }),
-      );
+      return updateContent(current, event, (part) => ({ ...part, text: event.text }));
+    case "response.refusal.delta":
+      return updateContent(current, event, () => ({
+        type: "refusal",
+        refusal: event.delta,
+      }));
+    case "response.refusal.done":
+      return updateContent(current, event, () => ({
+        type: "refusal",
+        refusal: event.refusal,
+      }));
     case "response.output_text.annotation.added":
-      return updateMessageContent(
+      return updateContent(current, event, (part) => ({
+        ...part,
+        annotations: insertAnnotation(
+          part.annotations,
+          event.annotation_index,
+          event.annotation,
+        ),
+      }));
+    case "response.reasoning.delta":
+      return updateReasoning(current, event, "content", event.content_index, (text) =>
+        text + event.delta);
+    case "response.reasoning.done":
+      return updateReasoning(
         current,
-        event.response_id,
-        event.item_id,
-        event.output_index,
+        event,
+        "content",
         event.content_index,
-        (part) => ({ ...part, annotations: mergeAnnotations(part.annotations, [event.annotation]) }),
+        () => event.text,
+      );
+    case "response.reasoning_summary_part.added":
+    case "response.reasoning_summary_part.done":
+      return updateReasoning(current, event, "summary", event.summary_index, () =>
+        partText(event.part));
+    case "response.reasoning_summary_text.delta":
+      return updateReasoning(current, event, "summary", event.summary_index, (text) =>
+        text + event.delta);
+    case "response.reasoning_summary_text.done":
+      return updateReasoning(
+        current,
+        event,
+        "summary",
+        event.summary_index,
+        () => event.text,
       );
     case "response.function_call_arguments.delta":
-      return updateFunctionCall(
-        current,
-        event.response_id,
-        event.item_id,
-        event.output_index,
-        (item) => ({ ...item, arguments: item.arguments + event.delta }),
-      );
+      return updateFunctionCall(current, event.item_id, event.output_index, (item) => ({
+        ...item,
+        arguments: item.arguments + event.delta,
+      }));
     case "response.function_call_arguments.done":
-      return updateFunctionCall(
-        current,
-        event.response_id,
-        event.item_id,
-        event.output_index,
-        (item) => ({ ...item, arguments: event.arguments }),
-      );
+      return updateFunctionCall(current, event.item_id, event.output_index, (item) => ({
+        ...item,
+        arguments: event.arguments,
+      }));
     case "response.completed": {
-      const next = reconcileResponse(current, event.response.id, event.response);
+      const next = reconcileResponse(current, event.response);
       const response = next.responses[event.response.id];
       return {
         ...next,
@@ -110,13 +131,15 @@ export function reduceResponseStreamEvent(
     }
     case "response.incomplete":
     case "response.failed": {
-      const next = reconcileResponse(current, event.response.id, event.response);
+      const next = reconcileResponse(current, event.response);
       return {
         ...next,
         status: "failed",
         error: responseFailureMessage(event.response),
       };
     }
+    case "error":
+      return { ...current, status: "failed", error: event.error.message };
   }
 }
 
@@ -152,16 +175,25 @@ export function orderedTurnItems(turn: TurnState | undefined): OrderedOutputItem
   });
 }
 
-/** The final response is what should be copied into the next chat request. */
+/**
+ * The text to carry into the next request. The final response's `final_answer`
+ * messages are the answer; a provider that omits `phase` yields every
+ * assistant message instead.
+ */
 export function finalTurnText(turn: TurnState | undefined): string {
   if (!turn) return "";
   const finalResponseId = turn.responseOrder.at(-1);
   const response = finalResponseId ? turn.responses[finalResponseId] : undefined;
   if (!response) return "";
-  return response.itemOrder
+  const messages = response.itemOrder
     .map((id) => response.items[id])
     .filter(isMessageItem)
-    .filter((item) => item.role === "assistant")
+    .filter((item) => item.role === "assistant");
+  const answers = messages.filter((item) => item.phase === "final_answer");
+  const selected = answers.length > 0
+    ? answers
+    : messages.filter((item) => item.phase !== "commentary");
+  return selected
     .flatMap((item) => item.content)
     .filter(isOutputTextPart)
     .map((part) => part.text)
@@ -178,72 +210,110 @@ export function isFunctionCallItem(item: OutputItem | undefined): item is Functi
     && typeof (item as Partial<FunctionCallItem>).name === "string";
 }
 
+export function isReasoningItem(item: OutputItem | undefined): item is ReasoningItem {
+  return item?.type === "reasoning";
+}
+
 export function isOutputTextPart(part: ContentPart): part is OutputTextPart {
   return part.type === "output_text"
     && typeof (part as Partial<OutputTextPart>).text === "string";
 }
 
-function reconcileResponse(
-  current: TurnState,
-  responseId: string,
-  response: ResponseEnvelope,
-): TurnState {
-  const existing = current.responses[responseId] ?? emptyResponseState(responseId, response.status);
-  let nextResponse: ResponseState = { ...existing, status: response.status };
+interface ContentAddress {
+  item_id: string;
+  output_index: number;
+  content_index: number;
+}
+
+interface SummaryAddress {
+  item_id: string;
+  output_index: number;
+}
+
+function reconcileResponse(current: TurnState, response: ResponseEnvelope): TurnState {
+  const existing = current.responses[response.id]
+    ?? emptyResponseState(response.id, response.status);
+  let next: ResponseState = {
+    ...existing,
+    status: response.status,
+    previousResponseId: response.previous_response_id ?? existing.previousResponseId,
+  };
   for (const [index, item] of response.output.entries()) {
-    nextResponse = upsertResponseItem(nextResponse, responseId, index, item, true);
+    next = upsertResponseItem(next, index, item, true);
   }
-  return withResponse(current, nextResponse);
+  return withResponse(current, next);
 }
 
 function upsertItem(
   current: TurnState,
-  responseId: string,
   outputIndex: number,
   item: OutputItem,
   done: boolean,
 ): TurnState {
-  const response = current.responses[responseId]
-    ?? emptyResponseState(responseId, "in_progress");
-  return withResponse(
-    current,
-    upsertResponseItem(response, responseId, outputIndex, item, done),
-  );
+  const response = activeResponse(current);
+  return withResponse(current, upsertResponseItem(response, outputIndex, item, done));
 }
 
-function updateMessageContent(
+function updateContent(
   current: TurnState,
-  responseId: string,
-  itemId: string,
-  outputIndex: number,
-  contentIndex: number,
+  address: ContentAddress,
   update: (part: OutputTextPart) => ContentPart,
 ): TurnState {
-  const response = current.responses[responseId]
-    ?? emptyResponseState(responseId, "in_progress");
-  const key = itemKey(response, itemId, outputIndex, responseId);
+  const response = activeResponse(current);
+  const key = itemKey(response, address.item_id, address.output_index);
   const existing = response.items[key];
-  const message = isMessageItem(existing) ? existing : syntheticMessage(itemId);
+  const message = isMessageItem(existing) ? existing : syntheticMessage(address.item_id);
   const content = [...message.content];
-  const previous = content[contentIndex];
+  const previous = content[address.content_index];
   const textPart = previous && isOutputTextPart(previous)
     ? previous
     : { type: "output_text" as const, text: "", annotations: [] };
-  content[contentIndex] = update(textPart);
-  const nextItem: MessageItem = { ...message, id: itemId, content };
-  return withResponse(current, replaceResponseItem(response, key, nextItem, outputIndex));
+  content[address.content_index] = update(textPart);
+  const nextItem: MessageItem = { ...message, id: address.item_id, content };
+  return withResponse(
+    current,
+    replaceResponseItem(response, key, nextItem, address.output_index),
+  );
+}
+
+function updateReasoning(
+  current: TurnState,
+  address: SummaryAddress,
+  field: "content" | "summary",
+  index: number,
+  update: (text: string) => string,
+): TurnState {
+  const response = activeResponse(current);
+  const key = itemKey(response, address.item_id, address.output_index);
+  const existing = response.items[key];
+  const item: ReasoningItem = isReasoningItem(existing)
+    ? existing
+    : { type: "reasoning", id: address.item_id, status: "in_progress", summary: [] };
+  const parts = [...(item[field] ?? [])];
+  const previous = parts[index];
+  parts[index] = {
+    type: field === "summary" ? "summary_text" : "reasoning_text",
+    text: update(previous ? partText(previous) : ""),
+  } as SummaryTextPart;
+  return withResponse(
+    current,
+    replaceResponseItem(
+      response,
+      key,
+      { ...item, id: address.item_id, [field]: parts },
+      address.output_index,
+    ),
+  );
 }
 
 function updateFunctionCall(
   current: TurnState,
-  responseId: string,
   itemId: string,
   outputIndex: number,
   update: (item: FunctionCallItem) => FunctionCallItem,
 ): TurnState {
-  const response = current.responses[responseId]
-    ?? emptyResponseState(responseId, "in_progress");
-  const key = itemKey(response, itemId, outputIndex, responseId);
+  const response = activeResponse(current);
+  const key = itemKey(response, itemId, outputIndex);
   const existing = response.items[key];
   const item = isFunctionCallItem(existing)
     ? existing
@@ -255,7 +325,20 @@ function updateFunctionCall(
         arguments: "",
         status: "in_progress" as const,
       };
-  return withResponse(current, replaceResponseItem(response, key, update(item), outputIndex));
+  return withResponse(
+    current,
+    replaceResponseItem(response, key, update(item), outputIndex),
+  );
+}
+
+/**
+ * The response currently being mutated. A stream always opens one with
+ * `response.created`; a placeholder only guards against a truncated stream.
+ */
+function activeResponse(current: TurnState): ResponseState {
+  const id = current.currentResponseId ?? current.responseOrder.at(-1);
+  if (id && current.responses[id]) return current.responses[id];
+  return emptyResponseState(id ?? "response", "in_progress");
 }
 
 function withResponse(current: TurnState, response: ResponseState): TurnState {
@@ -274,12 +357,11 @@ function emptyResponseState(id: string, status: ResponseState["status"]): Respon
 
 function upsertResponseItem(
   response: ResponseState,
-  responseId: string,
   outputIndex: number,
   incoming: OutputItem,
   done: boolean,
 ): ResponseState {
-  const key = itemKey(response, incoming.id, outputIndex, responseId);
+  const key = itemKey(response, incoming.id, outputIndex);
   const previous = response.items[key];
   const item = mergeOutputItem(previous, incoming, key, done);
   return replaceResponseItem(response, key, item, outputIndex);
@@ -305,11 +387,9 @@ function itemKey(
   response: ResponseState,
   itemId: string | undefined,
   outputIndex: number,
-  responseId: string,
 ): string {
-  if (itemId && response.items[itemId]) return itemId;
   if (itemId) return itemId;
-  return response.itemOrder[outputIndex] ?? `${responseId}:output:${outputIndex}`;
+  return response.itemOrder[outputIndex] ?? `${response.id}:output:${outputIndex}`;
 }
 
 function mergeOutputItem(
@@ -323,6 +403,15 @@ function mergeOutputItem(
     id: incoming.id ?? id,
     status: incoming.status ?? (done ? "completed" : "in_progress"),
   });
+  if (isReasoningItem(previous) && isReasoningItem(normalized)) {
+    return {
+      ...previous,
+      ...normalized,
+      // The final item may repeat only the shell; keep what was streamed.
+      content: normalized.content?.length ? normalized.content : previous.content,
+      summary: normalized.summary?.length ? normalized.summary : previous.summary,
+    };
+  }
   if (!isMessageItem(previous) || !isMessageItem(normalized)) return normalized;
   return {
     ...previous,
@@ -349,6 +438,22 @@ function cloneOutputItem(item: OutputItem): OutputItem {
 function cloneContentPart(part: ContentPart): ContentPart {
   if (!isOutputTextPart(part)) return { ...part };
   return { ...part, annotations: [...(part.annotations ?? [])] };
+}
+
+function partText(part: ContentPart): string {
+  return typeof (part as { text?: unknown }).text === "string"
+    ? (part as { text: string }).text
+    : "";
+}
+
+function insertAnnotation(
+  current: OutputTextAnnotation[],
+  index: number,
+  annotation: OutputTextAnnotation,
+): OutputTextAnnotation[] {
+  const annotations = [...current];
+  annotations.splice(Math.min(index, annotations.length), 0, annotation);
+  return annotations;
 }
 
 function mergeAnnotations(

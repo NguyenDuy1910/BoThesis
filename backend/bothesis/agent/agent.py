@@ -1,4 +1,11 @@
-"""Thin public façade for the BoThesis agent runtime."""
+"""Thin public façade for the BoThesis agent runtime.
+
+:class:`Agent` validates the request, wraps the native transport in the adapter
+that canonicalizes it, and streams one conversation turn. It is the only place
+a stream-wide ``sequence_number`` is assigned: one SSE stream carries the
+several responses of a turn, and the specification requires the number to
+increase monotonically across the whole stream.
+"""
 
 from __future__ import annotations
 
@@ -11,12 +18,16 @@ from openai import PermissionDeniedError
 
 from bothesis.agent import AgentConfig, AgentExecutionError
 from bothesis.agent.conversation_compression import ConversationMemory
-from bothesis.agent.conversation_session import ConversationSession
+from bothesis.agent.conversation_loop import ConversationLoop
 from bothesis.agent.models import AgentContext
-from bothesis.agent.protocol import Response, ResponseError, ResponseFailedEvent, ResponseStreamEvent
+from bothesis.agent.protocol import (
+    Response,
+    ResponseError,
+    ResponseFailedEvent,
+    ResponseStreamEvent,
+)
 from bothesis.agent.tools import ToolRegistry
-from bothesis.agent.transports.openai import OpenAITransport
-from bothesis.agent.transports.openrouter import OpenRouterTransport
+from bothesis.agent.transports import response_stream
 from bothesis.observability import LangfuseTracing
 
 _log = logging.getLogger(__name__)
@@ -27,7 +38,7 @@ class Agent:
 
     def __init__(
         self,
-        model: OpenAITransport | OpenRouterTransport,
+        model: object,
         tools: ToolRegistry,
         *,
         config: AgentConfig | None = None,
@@ -39,8 +50,8 @@ class Agent:
         self.config = config or AgentConfig()
         self.memory = memory or ConversationMemory(config=self.config)
         self._tracing = tracing
-        self._conversation_session = ConversationSession(
-            model,
+        self._loop = ConversationLoop(
+            response_stream(model),
             tools,
             memory=self.memory,
             config=self.config,
@@ -52,29 +63,25 @@ class Agent:
         user_message: str,
         ctx: AgentContext,
     ) -> AsyncIterator[ResponseStreamEvent]:
-        """Yield ordered response state mutations for one conversation Turn."""
+        """Yield ordered response state mutations for one conversation turn."""
 
         sequence_number = 0
 
-        def failure(message: str) -> ResponseFailedEvent:
+        def failure(code: str, message: str) -> ResponseFailedEvent:
             return ResponseFailedEvent(
-                sequence_number=sequence_number + 1,
+                sequence_number=sequence_number,
                 response=Response(
                     id=f"resp_{uuid4().hex}",
                     status="failed",
-                    error=ResponseError(code="invalid_request", message=message),
+                    error=ResponseError(code=code, message=message),
                 ),
             )
 
         normalized_message = user_message.strip()
-        if not normalized_message:
-            yield failure("message must not be empty")
-            return
-        if len(normalized_message) > self.config.max_user_message_characters:
-            yield failure("message exceeds the allowed length")
-            return
-        if not ctx.tenant_id or not ctx.user_id:
-            yield failure("tenant and user context are required")
+        rejection = _rejection(normalized_message, ctx, self.config)
+        if rejection is not None:
+            sequence_number += 1
+            yield failure("invalid_request", rejection)
             return
 
         trace_context = (
@@ -84,41 +91,47 @@ class Agent:
         )
         with trace_context as run_trace:
             try:
-                async for event in self._conversation_session.run_session(
+                async for event in self._loop.run(
                     normalized_message,
                     ctx,
                     run_trace=run_trace,
                 ):
                     sequence_number += 1
-                    yield event.model_copy(update={"sequence_number": sequence_number})
+                    yield event.model_copy(
+                        update={"sequence_number": sequence_number}
+                    )
             except AgentExecutionError as exc:
-                _log.error(
-                    "agent execution failed: %s",
-                    exc,
-                    exc_info=True,
-                )
+                _log.error("agent execution failed: %s", exc, exc_info=True)
                 if run_trace is not None:
                     run_trace.fail(stage="model")
-                error_code = "agent_execution_failed"
-                error_message = "model response failed"
-                if isinstance(exc.__cause__, PermissionDeniedError):
-                    error_code = "model_access_denied"
-                    error_message = (
-                        "OpenAI denied the request. Verify that the configured "
-                        "model is enabled for this API project."
-                    )
                 sequence_number += 1
-                yield ResponseFailedEvent(
-                    sequence_number=sequence_number,
-                    response=Response(
-                        id=f"resp_{uuid4().hex}",
-                        status="failed",
-                        error=ResponseError(
-                            code=error_code,
-                            message=error_message,
-                        ),
-                    ),
-                )
+                yield failure(*_failure_reason(exc))
+
+
+def _rejection(
+    message: str, ctx: AgentContext, config: AgentConfig
+) -> str | None:
+    """Return why a request cannot be accepted, or ``None`` when it can."""
+
+    if not message:
+        return "message must not be empty"
+    if len(message) > config.max_user_message_characters:
+        return "message exceeds the allowed length"
+    if not ctx.tenant_id or not ctx.user_id:
+        return "tenant and user context are required"
+    return None
+
+
+def _failure_reason(exc: AgentExecutionError) -> tuple[str, str]:
+    """Turn an internal failure into a safe, actionable client error."""
+
+    if isinstance(exc.__cause__, PermissionDeniedError):
+        return (
+            "model_access_denied",
+            "OpenAI denied the request. Verify that the configured model is "
+            "enabled for this API project.",
+        )
+    return "agent_execution_failed", "model response failed"
 
 
 __all__ = ["Agent"]

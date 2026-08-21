@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { answerSources, sourcesLabel } from "../src/modules/chat/sources.ts";
+import { DOCUMENT_CITATION_TYPE } from "../src/modules/chat/types.ts";
 import type { OutputTextAnnotation, TurnState } from "../src/modules/chat/types.ts";
 
 test("collects a citation once when it arrives in annotation and final content", () => {
@@ -52,7 +53,7 @@ test("the summary counts cited sources", () => {
 });
 
 function annotation(citation: NonNullable<OutputTextAnnotation["citation"]>): OutputTextAnnotation {
-  return { type: "citation", citation };
+  return { type: DOCUMENT_CITATION_TYPE, citation };
 }
 
 function turnWithAnnotations(annotations: OutputTextAnnotation[]): TurnState {

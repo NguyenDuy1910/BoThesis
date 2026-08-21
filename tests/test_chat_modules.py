@@ -20,7 +20,6 @@ from bothesis.agent.models import (
     ToolOutput,
 )
 from bothesis.agent.protocol import FunctionCallItem, InputText
-from bothesis.agent.response_stream import _openrouter_tool_call_events
 from bothesis.agent.tools import Tool, ToolDefinition, ToolExecutor, ToolRegistry
 
 
@@ -145,25 +144,9 @@ async def test_citation_renderer_carries_split_markers_between_deltas() -> None:
     assert used_evidence_ids == {"ev-1"}
 
 
-def test_openrouter_function_call_deltas_preserve_the_call_identity() -> None:
-    events = _openrouter_tool_call_events(
-        "resp-1",
-        {},
-        [
-            {
-                "id": "tool-1",
-                "type": "function",
-                "function": {
-                    "name": "knowledge_search",
-                    "arguments": '{"query":"leave policy"}',
-                },
-            }
-        ]
-    )
-
-    assert events[0].item.name == "knowledge_search"
-    assert events[0].item.call_id == "tool-1"
-    assert events[1].delta == '{"query":"leave policy"}'
+# Native OpenRouter tool-call normalization is covered by
+# tests/bothesis/agent/test_openrouter_adapter.py, which drives the adapter
+# through its public streaming contract instead of a private helper.
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 ---
 sidebar_position: 3
 title: "BoThesis Agent Architecture"
-description: "Canonical LLM loop, protocol items, streaming events, tools, grounding, and runtime boundaries"
+description: "OpenResponses as the canonical language of the agent: items, events, reducer, provider adapters, conversation loop, tools, grounding"
 ---
 
 # BoThesis Agent Architecture
@@ -20,331 +20,322 @@ The agent package orchestrates model decisions and tools. Connector extraction,
 document persistence, vector storage, and retrieval implementation remain in
 their own packages.
 
+## OpenResponses is the protocol
+
+The agent speaks [Open Responses](https://www.openresponses.org) (version
+`2026-04-24`), an open, vendor-neutral specification for LLM APIs. It is the
+canonical language of the agent, not one of several dialects:
+
+- there is no BoThesis event model, and no translation step into or out of one;
+- a provider's native protocol exists only inside its transport adapter;
+- anything above the transport layer works with the same canonical models.
+
+Every supported provider serves `POST /responses` in OpenResponses format:
+OpenAI, whose Responses API the specification was derived from, and OpenRouter,
+whose endpoint is documented as *"using OpenResponses API format"* and whose
+request, item, and streaming-event schemas are field-identical. So there is one
+projection for all of them, not one per provider:
+
 ```text
-Web chat UI
-  │ SSE RuntimeEvent
-  ▼
-FastAPI /api/v1/agent/chat
-  │ AgentContext: authenticated tenant, user, reader IDs, documents, history
-  ▼
-Agent → ConversationSession → TurnRequest
-  │                         │
-  │                         ├─ SamplingRequest → provider transport
-  │                         └─ ToolExecutor → permission-scoped tool
-  ▼
-RuntimeEvent stream: commentary, tool activity, citations, completion/failure
+OpenAI  POST /responses          OpenRouter  POST /responses
+        │                                          │
+        └──────────────┬───────────────────────────┘
+                       ▼
+        transports/responses_adapter.py   (the whole normalization layer)
+                       │
+                       ▼
+                 OpenResponses
+                       │
+             reducer.py (Response state)
+                       │
+             conversation_loop.py
 ```
+
+Only one function in the process resolves a provider,
+`transports.response_stream()`. There is no `if provider == …` anywhere else,
+and no per-provider stream reconstruction.
 
 ## Primary modules
 
 | Module | Responsibility |
 | --- | --- |
-| `agent.py` | Public streaming façade. Validates a user message and authenticated scope; converts unhandled agent failures into `turn.failed`. |
-| `conversation_session.py` | Holds shared model, tool, memory, config, and tracing dependencies. Creates one fresh `TurnRequest` per user message. |
-| `turn_request.py` | Owns the complete user-turn loop: sample, decide, execute tools, append observations, and complete. |
-| `sampling_request.py` | Owns retries for one logical model request. A retry replays the same immutable request; it is not a tool-loop iteration. |
-| `step_context.py` | Captures the immutable snapshot for one sampling request. |
-| `turn_input.py` | Holds canonical conversation history and renders it to OpenAI Responses or OpenRouter Chat Completions wire formats. |
-| `response_stream.py` | Converts native provider streams into canonical provider events, canonical output items, internal live deltas, and `ModelStreamCompleted`. |
-| `protocol/` | Provider-neutral, strictly validated contracts: content, items, requests/responses, tools, semantic events, and sampling output. |
-| `tools/` | Tool declarations, registry, execution, validation, limits, evidence projection, and tool runtime events. |
-| `citation.py` | Converts citation markers in assistant text into visible text plus safe citation events. |
-| `conversation_compression.py` | Bounds history and constructs initial `TurnInput`; it does not make routing decisions. |
-| `prompts/` | File-backed prompt roles: `agent_base`, `capability_base`, and `conversation_compression`. |
+| `protocol/` | The OpenResponses data contracts and nothing else: content parts, items, request/response envelopes, tools, and the streaming event union. Immutable Pydantic models that reject unknown fields. Never imports a provider SDK. |
+| `transports/openai.py`, `transports/openrouter.py` | Thin async boundaries over each provider's native API — base URL, credentials, attribution headers, and whatever extra APIs that provider offers. No normalization. Both expose the same `stream_response()`. |
+| `transports/responses_adapter.py` | The one adapter: renders a `ResponseRequest` into the native `/responses` request and projects native events onto canonical events, one native event at a time. |
+| `reducer.py` | `ResponseReducer` — the only component that reconstructs a `Response` from its event stream. |
+| `citation_stream.py` | `CitationProjection` — rewrites the canonical stream so internal citation markers become annotations. Canonical in, canonical out. |
+| `sampling.py` | `sample()` — retries one sampling request when the transport failed with nothing emitted. |
+| `conversation_loop.py` | `ConversationLoop` — orchestrates one user turn as a chain of responses. |
+| `tools/` | Tool declarations, registry, execution policy, validation, limits, and evidence projection. |
+| `citation.py` | Streaming-safe removal of `[[cite:ID]]` markers from model text. |
+| `conversation_compression.py` | Bounds history and builds the initial canonical items and instructions. Makes no routing decisions. |
+| `agent.py` | Public streaming façade. Validates the request, wraps the transport in its adapter, assigns stream-wide `sequence_number`s, and converts unhandled failures into `response.failed`. |
+| `prompts/` | File-backed prompt roles: `agent_base`, `capability_base`, `conversation_compression`. |
 
-## One user turn: dynamic LLM loop
+## One user turn
 
-One user message creates one `TurnRequest`. A turn contains one or more
-`SamplingRequest`s. There are no mandatory planning, query-rewriting,
-retrieval, review, or synthesis stages. The model decides whether to answer or
-call a declared tool after each observation.
+One user message is one turn. A turn contains one or more sampling requests.
+There are no mandatory planning, query-rewriting, retrieval, review, or
+synthesis stages: after each observation the model decides whether to answer or
+call a declared tool.
 
 ```text
 user message + AgentContext
           │
           ▼
-ConversationMemory.prepare()
-          │  agent_base + bounded history + access-checked documents
-          ▼
-TurnInput
+ConversationMemory.prepare()  →  PreparedConversation(items, instructions)
           │
-          ├─────────────────────────────────────────────────────┐
-          │                                                     │
-          ▼                                                     │
-capture_step_context()                                          │
-          │                                                     │
-          ▼                                                     │
-run_sampling_request()                                          │
-          │  provider stream → canonical events/items           │
-          ▼                                                     │
-SamplingRequestOutput                                           │
-          │                                                     │
-    ┌─────┴──────────────┐                                      │
-    │ no function calls  │ function calls                       │
-    ▼                    ▼                                      │
-final answer       ToolExecutor.execute()                        │
-    │                    │ validate → execute → evidence        │
-    │                    ▼                                      │
-    │            FunctionCallOutputItem(s) ─────────────────────┘
-    ▼
-RunCompleted
+          ├──────────────────────────────────────────────────────────┐
+          ▼                                                          │
+ResponseRequest(input=items, previous_response_id=…)                  │
+          │                                                          │
+          ▼                                                          │
+sample()  →  adapter  →  CitationProjection  →  ResponseReducer       │
+          │      (every event forwarded to the client immediately)    │
+          ▼                                                          │
+Response (settled by response.completed / .incomplete / .failed)      │
+          │                                                          │
+    ┌─────┴──────────────┐                                           │
+    │ no function calls  │ function calls                            │
+    ▼                    ▼                                           │
+final_answer_text   ToolExecutor.execute()                            │
+                         │ validate → execute → evidence             │
+                         ▼                                           │
+                  FunctionCallOutputItem(s) ────────────────────────┘
 ```
+
+Each response's `output` is appended verbatim to the next request's `input`,
+followed by the tool observations. Each response records the previous one in
+`previous_response_id`, so a client can follow the chain.
 
 ### Turn state and limits
 
-`ConversationRun` is mutable state for exactly one user turn. It records model
-iterations, tool rounds, tool-call count, durations, discovered evidence, used
-evidence IDs, and executed tool signatures.
+`ConversationRun` is mutable state for exactly one turn: model iterations, tool
+rounds, tool-call count, durations, discovered evidence, used evidence IDs, and
+executed tool signatures.
 
-`AgentConfig` provides circuit breakers. The loop limits model turns, tool
-rounds, total tool calls, tool execution time, tool-output context size,
-history size, user-message size, and provider retry count. These are safety
-limits only; they do not prescribe the agent’s workflow.
+`AgentConfig` provides circuit breakers only — model turns, tool rounds, total
+tool calls, tool execution time, tool-output context size, history size,
+user-message size, and provider retry count. They are safety limits, not a
+prescribed workflow.
 
-### Sampling requests
+### Sampling requests and retries
 
-`StepContext` is captured once per sampling request. It contains:
+A `ResponseRequest` is built once per sampling request and is immutable, so a
+retry replays exactly the same request. `sample()` retries only while nothing
+has reached the caller: once any canonical event has been forwarded, the client
+has observed part of that response and the request is no longer retryable.
 
-- authenticated `AgentContext`;
-- `ModelInfo` (`openai` or `openrouter`, plus model name);
-- immutable `TurnInput` history;
-- the currently allowed `FunctionTool` declarations;
-- typed `AgentConfig` values; and
-- the sampling/turn number.
+Tool output is appended only after a response settles, so it always starts a new
+sampling request rather than modifying a retry.
 
-`run_sampling_request()` builds one `ResponseRequest` from this snapshot. On
-transient transport failure it retries the exact same snapshot. Tool output is
-added only after the sampling settles, so it always starts a new sampling
-request rather than modifying a retry.
+## Items
 
-`SamplingRequestOutput` is the small semantic output used by `TurnRequest` to
-make the next decision:
-
-- `needs_follow_up`: the response contains one or more function calls;
-- `last_agent_message`: non-empty assistant output text, when present.
-
-## Canonical protocol
-
-`bothesis.agent.protocol` is the provider-neutral boundary. Protocol models
-are immutable Pydantic models with unknown fields rejected. Provider-specific
-concepts must not leak into orchestration code.
-
-### Content parts
-
-`ContentPart` is the typed content inside a `MessageItem`.
-
-| Family | Variants | Meaning |
-| --- | --- | --- |
-| Input | `InputText`, `InputImage`, `InputFile` | User or supplied document content sent to a model. |
-| Output | `OutputText`, `Refusal` | Model-produced content. `OutputText.annotations` remains opaque because provider annotation formats differ. |
-
-### Items: persistent semantic conversation units
-
-`Item` is the canonical unit stored in a model request/response history. Items
-are ordered and can be replayed on the next sampling request.
+`Item` is the atomic unit of context, mirroring the specification's `ItemField`.
 
 | Item | Producer | Purpose |
 | --- | --- | --- |
-| `MessageItem` | User, model, or runtime | A role-based message carrying content parts. |
-| `ReasoningItem` | Provider adapter | Public reasoning summary plus opaque continuation data. Raw chain-of-thought is never modeled or streamed to the client. |
-| `FunctionCallItem` | Model | A requested tool invocation. Arguments remain the original JSON string for faithful provider replay; `parsed_arguments()` validates it as an object before execution. |
-| `FunctionCallOutputItem` | Tool runtime | The observation paired with a function call by `call_id`. It is appended to the next model input. |
-| `ExtensionItem` | Provider adapter | Escape hatch for an unrecognized provider item type. It preserves provider fields for replay without making them common orchestration concepts. |
+| `MessageItem` | User, model, or runtime | A role-based message carrying content parts. `phase` labels an assistant message as `commentary` or `final_answer`. |
+| `ReasoningItem` | Provider adapter | `content` (raw reasoning), `summary` (public summary), and `encrypted_content` (the opaque continuation blob). Only summary and encrypted content are replayed. |
+| `FunctionCallItem` | Model | A requested tool invocation. `arguments` stays the provider's JSON string for faithful replay; `parsed_arguments()` validates it as an object before execution. |
+| `FunctionCallOutputItem` | Tool runtime | The observation paired with a call by `call_id`. Always `completed`: a tool failure is reported inside `output`. |
+| `CompactionItem` | Provider | Conversation state a provider compacted into an opaque blob. |
+| `ExtensionItem` | Provider adapter | Escape hatch for an item type the protocol does not model (hosted tools, for example). Preserves every provider field for replay. |
 
-`pair_function_calls()` correlates calls and outputs through `call_id`. Do not
-replace a function call with its output: both are needed in history and are
-required by provider tool-calling protocols.
+A function call and its output are both history: never replace one with the
+other.
 
-### Request and response envelopes
+### Item and response state machines
 
-`ResponseRequest` contains canonical input items, optional instructions,
-tool declarations, tool choice, generation settings, and opaque
-`provider_options`. It is rendered by provider adapters rather than being sent
-directly on the wire.
+Items are `in_progress` → `completed`, or `incomplete` when the model was
+interrupted partway through — in which case the item must be last and the
+response is `incomplete` too. There is no `failed` or `skipped` item status.
 
-`Response` contains ordered output items, status, usage, incomplete/failure
-details, and opaque metadata. Its `output_text`, `function_calls`, and
-`output_annotations` properties are derived views, not separate sources of
-truth.
+Responses run `queued` → `in_progress` → `completed` | `incomplete` | `failed`.
 
-### TurnInput rendering
+### Assistant `phase`
 
-`TurnInput` distinguishes fresh `UserInput` from already canonical
-`ResponseItem`. Its `items` property normalizes both into ordered `Item`s.
+The specification requires `phase` to be preserved and resent on follow-up
+requests; omitting it degrades model quality. When a provider supplies it, it is
+kept verbatim. When a provider omits it, `ResponseReducer` resolves it as the
+response settles — the moment the information exists: a response that requested
+tools carries `commentary`, a response that requested none carries the
+`final_answer`. `Response.final_answer_text` falls back to every assistant
+message when nothing declares a phase, so a provider predating the field still
+yields a usable answer.
 
-- OpenAI Responses receives `instructions` as a top-level request field and
-  receives protocol items as Responses input items.
-- OpenRouter receives `instructions` as the first system message, then
-  provider-compatible user, assistant, and tool messages.
-- Assistant reasoning, tool calls, and assistant message output are grouped
-  correctly for OpenRouter. Tool outputs use the corresponding `call_id`.
+## Streaming events
 
-Do not build provider message dictionaries in turn-loop or tool code. Change
-rendering only in `turn_input.py` or provider adapters.
+The public SSE stream is the specification's event union, unmodified:
 
-## Event design
+- lifecycle: `response.created`, `response.queued`, `response.in_progress`,
+  `response.completed`, `response.incomplete`, `response.failed`, `error`;
+- items: `response.output_item.added`, `response.output_item.done`;
+- content: `response.content_part.added`, `response.content_part.done`;
+- text: `response.output_text.delta`, `response.output_text.done`,
+  `response.output_text.annotation.added`;
+- refusals: `response.refusal.delta`, `response.refusal.done`;
+- reasoning: `response.reasoning.delta`, `response.reasoning.done`,
+  `response.reasoning_summary_part.added/.done`,
+  `response.reasoning_summary_text.delta/.done`;
+- function calls: `response.function_call_arguments.delta`,
+  `response.function_call_arguments.done`.
 
-Events have two intentionally separate levels.
+The prescribed order for one text item is:
 
 ```text
-native OpenAI/OpenRouter chunk
-        │
-        ▼
-ProviderStreamEvent       internal normalized provider lifecycle
-        │
-        ▼
-StreamResponse             canonical Item assembly + internal live signals
-        │
-        ▼
-TurnRequest / ToolExecutor / CitationRenderer
-        │
-        ▼
-RuntimeEvent               public application/SSE contract
+response.output_item.added
+  → response.content_part.added
+    → response.output_text.delta …
+    → response.output_text.done
+  → response.content_part.done
+→ response.output_item.done
 ```
 
-### ProviderStreamEvent
+`sequence_number` increases monotonically across the whole SSE stream, which
+carries every response of the turn. `Agent.run` is the single writer.
 
-`ProviderStreamEvent` is an internal union modeled after OpenResponses. It is
-used between adapters and `StreamResponse`; it is never sent to the browser.
+No item-level event carries a response id, because the specification defines
+none: the response being mutated is the one opened by the most recent
+`response.created`, and `previous_response_id` chains a turn's responses. The
+web client tracks exactly that.
 
-It includes response lifecycle events, completed output items, text deltas,
-function-argument deltas, and public reasoning-summary deltas:
+## Response reconstruction
 
-- `response.created`, `response.in_progress`, `response.completed`,
-  `response.incomplete`, `response.failed`;
-- `response.output_item.added`, `response.output_item.done`;
-- `response.output_text.delta`, `response.output_text.done`;
-- `response.function_call_arguments.delta`,
-  `response.function_call_arguments.done`; and
-- `response.reasoning_summary_text.delta`,
-  `response.reasoning_summary_text.done`.
+`ResponseReducer` folds events into a `Response` using only the specified
+addressing fields — `item_id`, `output_index`, `content_index`,
+`summary_index` — never a provider-specific assumption. `apply()` returns the
+event it was given, except that a terminal event's `response` is replaced with
+the fully reconstructed one. Consumers therefore see a settled response
+containing every item, part, annotation and argument observed on the stream.
 
-Provider adapters normalize OpenAI Responses and OpenRouter stream shapes into
-this union. `StreamResponse` collects completed items into a `Response` and
-emits `ModelStreamCompleted` once the provider stream settles.
+## Streaming is incremental
 
-`ProviderReasoningSummaryDelta` is an internal-only signal. It may be recorded
-in tracing but never enters the public event union or SSE stream.
+Every meaningful delta is forwarded the moment its provider event arrives:
 
-### RuntimeEvent
+```python
+async for provider_event in stream:
+    for event in adapter.project(provider_event):
+        yield event
+```
 
-`RuntimeEvent` is the public application stream. `ResponseStreamEvent` is a
-backwards-compatible alias for it. FastAPI serializes each runtime event as an
-SSE `data:` JSON frame.
+Nothing accumulates deltas until the provider finishes. The one bounded
+exception is a citation marker split across deltas: `CitationRenderer` holds
+back only the partial-marker suffix, never the text before it.
 
-| Event | Emitted by | Client meaning |
-| --- | --- | --- |
-| `assistant.commentary.delta` | `TurnRequest` | Optional, intentional user-facing progress. It is never raw model output. |
-| `assistant.message.delta` | `TurnRequest` via `CitationRenderer` | A visible fragment of the final assistant answer. |
-| `assistant.message.done` | `TurnRequest` | The final assistant answer is complete. |
-| `tool.started` | `ToolExecutor` | A requested tool activity has begun or has been accepted for projection. Arguments are excluded from JSON output. |
-| `tool.completed` | `ToolExecutor` | A tool outcome with status, duration, result count, and safe activity metadata. |
-| `citation.available` | `ToolExecutor` or document registration | Safe metadata for evidence discovered in this turn. No full evidence content is exposed. |
-| `citation` | `CitationRenderer` | The streamed answer used a known evidence ID. |
-| `document.progress` | Document preparation flow | An attachment preparation/indexing status update. |
-| `turn.completed` | `TurnRequest` | Terminal success with timing and tool-count metrics. |
-| `turn.failed` | `Agent` | Terminal, safe failure message. |
+Both providers emit per-item lifecycle events natively, so nothing has to be
+inferred or deferred: the adapter forwards each `output_item.added`,
+`content_part.added`, delta, and `done` event as it arrives.
 
-### Commentary and final answer projection
+## Custom extensions
 
-Provider text remains internal while a sampling request is in progress because
-the runtime cannot know whether that sampling will request a tool. If it does,
-the text is an intermediate model artifact and is never sent to the client.
-When a completed sampling has no tool calls, its accumulated text is projected
-through the citation renderer as `assistant.message.delta` events, followed by
-`assistant.message.done`. The client renders those events directly as the
-final answer; it never infers a final sampling round or promotes commentary.
+The specification requires implementer-specific types to be slug-prefixed and
+permits optional fields on standard types when documented. BoThesis adds exactly
+two things, both because OpenResponses does not cover the requirement:
 
-`assistant.commentary.delta` is reserved for deliberate, safe progress copy.
-Tool lifecycle events remain the normal progress UI signal.
+| Extension | Why |
+| --- | --- |
+| `bothesis:document_citation` annotation | The specification defines only `url_citation`, which cannot carry enterprise document lineage (document id, page, section, access source). |
 
-### Citation event rules
+That is the entire extension surface. A reasoning item, in particular, needs no
+BoThesis-specific field: `summary` plus `encrypted_content` are what every
+provider uses to continue a reasoning session.
 
-Tools return `Evidence` objects internally. The runtime registers each unique
-evidence ID and emits `citation.available` using a safe `EvidenceReference`
-(title, source, location, URI, relevance, and bounded snippet). Tool output is
-then sent to the next sampling request as text containing evidence IDs.
+Before adding anything else, check whether an existing item, annotation, content
+part, `ExtensionItem`, `ExtensionTool`, or `ResponseRequest.provider_options`
+already covers it.
 
-The model cites evidence using `[[cite:EVIDENCE_ID]]`. `CitationRenderer`
-buffers streaming text so a marker split across deltas remains valid. A known
-marker becomes a `citation` event; an unknown or malformed marker remains
-visible text. The renderer never invents citations.
+## Citations and enterprise grounding
 
-## Tools and enterprise grounding
+Tools return `Evidence` internally, and tool output reaching the model contains
+evidence IDs. The model cites with `[[cite:EVIDENCE_ID]]`.
+`CitationProjection` then, on the canonical stream:
+
+- strips markers from `response.output_text.delta`, forwarding cleaned text
+  immediately;
+- emits `response.output_text.annotation.added` with a
+  `bothesis:document_citation` annotation at the character offset the marker
+  occupied;
+- rewrites `response.output_text.done`, `response.content_part.done` and the
+  message in `response.output_item.done` to the cleaned text plus annotations,
+  so a client reading only the settled response sees what a client following the
+  deltas assembled.
+
+An unknown or malformed marker stays visible text. The renderer never invents a
+citation.
+
+## Tools
 
 `ToolRegistry` is the explicit allowlist. A `Tool` owns its `ToolDefinition`
-(model name, description, JSON Schema, public activity label/category) and its
-own `execute(arguments, ToolContext)` implementation.
+(name, description, JSON Schema, activity label/category) and its own
+`execute(arguments, ToolContext)`.
 
-`ToolExecutor` owns generic tool runtime policy:
+`ToolExecutor` owns generic runtime policy:
 
-1. Parse function-call JSON and validate it against the registered schema.
-2. Reject unknown tools, invalid arguments, duplicate exact calls, or calls
-   beyond the configured limit as model observations.
-3. Execute independent valid calls concurrently while preserving model call
-   order in output items and UI events.
-4. Apply timeouts and convert execution failures into safe `ToolOutput`s.
-5. Register evidence, emit runtime events, and create bounded
-   `FunctionCallOutputItem`s for the next model sampling.
+1. parse function-call JSON and validate it against the registered schema;
+2. reject unknown tools, invalid arguments, duplicate exact calls, or calls
+   beyond the configured limit as model observations;
+3. execute independent valid calls concurrently while preserving model call
+   order in the output items;
+4. apply timeouts and convert execution failures into safe `ToolOutput`s;
+5. register evidence and create bounded `FunctionCallOutputItem`s for the next
+   sampling request.
 
-`ToolContext` contains `AgentContext`; tools must use the authenticated tenant,
-roles, reader IDs, and admin state rather than any model-supplied identity.
+`ToolContext` carries `AgentContext`; tools must use the authenticated tenant,
+roles, reader IDs, and admin state, never a model-supplied identity.
 
 `KnowledgeSearch` is the standard retrieval example. It requires a
-`ScopedKnowledgeRetriever`; an unscoped retriever must not provide model
-context. It queries only access-permitted evidence, preserves document and
-source lineage, bounds content/evidence, and returns evidence IDs usable by
-the citation renderer.
+`ScopedKnowledgeRetriever`, queries only access-permitted evidence, preserves
+document and source lineage, bounds content, and returns evidence IDs the
+citation projection can resolve.
 
 ## Prompt roles
 
-Only three file-backed prompt roles exist:
-
 | Prompt | Runtime role |
 | --- | --- |
-| `agent_base.md` | Primary conversational-agent instruction used by `ConversationMemory.prepare()`. It gives dynamic retrieval/tool/grounding guidance without requiring stages. |
-| `capability_base.md` | Base instruction for an isolated structured capability, if such a model operation is introduced. It is not the conversational agent prompt. |
-| `conversation_compression.md` | Instruction for a future specialized conversation-compression operation. It preserves useful future context without inventing facts. |
+| `agent_base.md` | Primary conversational-agent instruction used by `ConversationMemory.prepare()`. Dynamic retrieval/tool/grounding guidance without prescribed stages. |
+| `capability_base.md` | Base instruction for an isolated structured capability, if such an operation is introduced. Not the conversational agent prompt. |
+| `conversation_compression.md` | Instruction for a specialized conversation-compression operation. |
 
 `template_render.py` only loads files, renders declared variables, and rejects
-missing or unexpected values. It must not contain routing, retrieval, fallback,
+missing or unexpected values. It must contain no routing, retrieval, fallback,
 or workflow logic.
 
 ## Change rules
 
-- Preserve `AgentContext` and `ToolContext` permission boundaries. Never allow
-  model-provided tool arguments to choose tenant or user identity.
-- Preserve canonical items across sampling requests. Do not retain only text
-  when a response contains reasoning continuation data or function calls.
-- Add provider-specific fields through `ExtensionItem`, `ExtensionTool`, or
-  `ResponseRequest.provider_options` unless a behavior is genuinely shared by
-  all supported providers.
-- Add browser-visible events only to `RuntimeEvent`; do not expose provider
-  lifecycle events or raw reasoning.
-- Keep runtime events safe to serialize. Do not include raw documents, secrets,
-  unfiltered tool arguments, or private reasoning.
-- Emit evidence only after access checks and retain enough lineage to support
+- Start from the specification. If OpenResponses represents a concept, use its
+  representation; do not reshape it around an internal convenience.
+- Keep `protocol/` free of behavior and free of provider imports.
+- Add provider knowledge only inside a transport adapter. The conversation loop
+  must never branch on a provider.
+- Reconstruct response state only in `ResponseReducer`.
+- Preserve canonical items across sampling requests, including reasoning
+  continuation data and `phase`.
+- Preserve `AgentContext` and `ToolContext` permission boundaries. Never let
+  model-provided arguments choose tenant or user identity.
+- Keep stream payloads safe to serialize: no raw documents, secrets, or
+  unfiltered tool arguments.
+- Emit evidence only after access checks, retaining enough lineage for
   citations.
-- Keep tools isolated adapters. Add generic execution policy to
-  `ToolExecutor`, not individual tool implementations or `TurnRequest`.
-- Prefer tests under `tests/`: protocol contracts in
-  `tests/bothesis/agent/test_protocol.py`; runtime/API behavior in existing
-  agent, chat, and retrieval test modules.
+- Keep tools isolated adapters. Generic execution policy belongs in
+  `ToolExecutor`.
+- Tests live under `tests/`, mirroring the package: `test_protocol.py`,
+  `test_reducer.py`, `test_responses_adapter.py`, `test_conversation_loop.py`.
+  `tests/native_responses.py` builds native provider events, and the adapter and
+  loop suites run the same scripts for every provider.
 
 ## Key invariants
 
-1. One `TurnRequest` represents one user request; one turn may contain many
-   sampling requests.
-2. One `StepContext` is immutable for one sampling request and all of its
+1. One `Agent.run` is one user turn; a turn may contain many sampling requests,
+   chained by `previous_response_id`.
+2. One `ResponseRequest` is immutable for one sampling request and all of its
    retries.
-3. A function call and its function-call output are both canonical history
-   items and are correlated by `call_id`.
-4. Provider stream events are internal; runtime events are the public SSE
-   contract.
-5. Raw chain-of-thought never reaches `RuntimeEvent` or the client.
-6. Enterprise facts need available evidence and source lineage when grounding
-   is required.
-7. Permission filtering occurs before evidence or analytics data reaches the
+3. A function call and its output are both canonical history items, correlated
+   by `call_id`.
+4. The public SSE contract is the OpenResponses event union; there is no second
+   event vocabulary.
+5. `sequence_number` increases monotonically across the whole stream.
+6. A response settles one sampling request, never the enclosing turn.
+7. Every meaningful delta is forwarded immediately.
+8. Permission filtering happens before evidence or analytics data reaches the
    model.
-8. A final answer is carried only by `assistant.message.*`; provider text and
-   internal sampling rounds are never exposed to the client.
