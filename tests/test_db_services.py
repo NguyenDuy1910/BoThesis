@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -21,12 +23,24 @@ from bothesis.db.models import (
     Message,
     SyncRun,
 )
+from bothesis.api import register_admin_error_handlers
+from bothesis.api.admin import admin_router
+from bothesis.db.engine import get_transactional_session
+from bothesis.document_index.raw_storage import PostgresBlobStorage
 from bothesis.services import (
+    AccessRequestService,
+    AclService,
+    AdminConflictError,
+    AdminDocumentService,
+    AdminNotFoundError,
     AuthService,
     AuthorizationError,
+    DatasourceService,
     DocumentChunkInput,
     DocumentNotFoundError,
     DocumentService,
+    GroupService,
+    UserService,
 )
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
@@ -137,11 +151,11 @@ async def test_document_service_enforces_acl_and_generation_activation(
             personal.id,
             [DocumentChunkInput(content="private content", token_count=2)],
         )
-        await documents.store_blob(personal.id, b"private content")
+        await PostgresBlobStorage(session).write(personal.id, b"private content")
         assert await documents.get_document_text(personal.id, access=actor) == (
             "private content"
         )
-        assert await documents.get_blob(personal.id, access=actor) == b"private content"
+        assert await PostgresBlobStorage(session).read(personal.id) == b"private content"
         with pytest.raises(DocumentNotFoundError):
             await documents.get_document(personal.id, access=outsider_access)
 
@@ -228,3 +242,212 @@ async def test_document_service_enforces_acl_and_generation_activation(
         await documents.soft_delete_document(external.id, actor=actor)
         with pytest.raises(DocumentNotFoundError):
             await documents.get_document(external.id, access=actor)
+
+
+@pytest.mark.asyncio
+async def test_admin_services_enforce_tenant_isolation_and_group_permissions(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        tenant = await auth.create_tenant("admin-acme", "Admin Acme")
+        other_tenant = await auth.create_tenant("admin-other", "Admin Other")
+        admin = await auth.create_user("admin@acme.example")
+        other_admin = await auth.create_user("admin@other.example")
+        admin_role = await auth.create_role(
+            tenant.id,
+            "admin",
+            "Administrator",
+            permission_codes=["admin"],
+        )
+        other_admin_role = await auth.create_role(
+            other_tenant.id,
+            "admin",
+            "Administrator",
+            permission_codes=["admin"],
+        )
+        analyst_role = await auth.create_role(
+            tenant.id,
+            "analyst",
+            "Analyst",
+            permission_codes=["knowledge.read"],
+        )
+        await auth.assign_membership(admin.id, tenant.id, admin_role.id)
+        await auth.assign_membership(
+            other_admin.id, other_tenant.id, other_admin_role.id
+        )
+        actor = await auth.get_context(admin.id)
+        outsider_actor = await auth.get_context(other_admin.id)
+
+        group = await GroupService(session).create_group(
+            actor,
+            code="finance",
+            display_name="Finance",
+            permission_codes=["document.manage"],
+        )
+        created = await UserService(session).create_user(
+            actor,
+            email="analyst@acme.example",
+            display_name="Analyst",
+            role_id=analyst_role.id,
+            group_ids=[UUID(group["id"])],
+        )
+        context = await auth.get_context(UUID(created["id"]))
+
+        assert context.permission_codes == ("document.manage", "knowledge.read")
+        assert context.principal_tokens == ("group:finance",)
+        with pytest.raises(AdminNotFoundError, match="user not found"):
+            await UserService(session).get_user(
+                outsider_actor, UUID(created["id"])
+            )
+
+
+@pytest.mark.asyncio
+async def test_datasource_service_persists_validation_and_sync_lifecycle(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        tenant = await auth.create_tenant("sources", "Sources")
+        admin = await auth.create_user("sources-admin@example.com")
+        role = await auth.create_role(
+            tenant.id,
+            "admin",
+            "Administrator",
+            permission_codes=["admin"],
+        )
+        await auth.assign_membership(admin.id, tenant.id, role.id)
+        actor = await auth.get_context(admin.id)
+        service = DatasourceService(session)
+
+        datasource = await service.create_datasource(
+            actor,
+            provider="file",
+            display_name="Managed files",
+            settings={"base_dir": str(tmp_path)},
+        )
+        assert datasource["status"] == "draft"
+        assert (await service.validate_datasource(actor, int(datasource["id"])))[
+            "valid"
+        ] is True
+
+        queued = await service.trigger_sync(actor, int(datasource["id"]))
+        run_id = UUID(queued["items"][0]["id"])
+        assert queued["items"][0]["status"] == "pending"
+        with pytest.raises(AdminConflictError, match="active ingestion"):
+            await service.delete_datasource(actor, int(datasource["id"]))
+        cancelled = await service.cancel_sync(actor, run_id)
+        assert cancelled["status"] == "cancelled"
+        retried = await service.retry_sync(actor, run_id)
+        assert retried["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_access_decision_and_acl_policy_materialize_document_access(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        documents = DocumentService(session)
+        tenant = await auth.create_tenant("access", "Access")
+        admin = await auth.create_user("access-admin@example.com")
+        reader = await auth.create_user("reader@access.example")
+        admin_role = await auth.create_role(
+            tenant.id,
+            "admin",
+            "Administrator",
+            permission_codes=["admin"],
+        )
+        reader_role = await auth.create_role(
+            tenant.id,
+            "reader",
+            "Reader",
+            permission_codes=["knowledge.read"],
+        )
+        await auth.assign_membership(admin.id, tenant.id, admin_role.id)
+        await auth.assign_membership(reader.id, tenant.id, reader_role.id)
+        actor = await auth.get_context(admin.id)
+        document = await documents.create_enterprise_document(
+            tenant.id,
+            origin="generated",
+            created_by_user_id=admin.id,
+            title="Governed plan",
+            allowed_principal_tokens=["group:leaders"],
+        )
+
+        requests = AccessRequestService(session)
+        request = await requests.create_request(
+            actor,
+            requester_user_id=reader.id,
+            resource_type="document",
+            resource_id=str(document.id),
+            access_type="read",
+        )
+        approved = await requests.decide_request(
+            actor, UUID(request["id"]), decision="approved"
+        )
+        await session.refresh(document)
+        assert approved["status"] == "approved"
+        assert "email:reader@access.example" in document.allowed_principal_tokens
+
+        policy = await AclService(session).create_policy(
+            actor,
+            name="Leadership plan",
+            resource_type="document",
+            resource_id=str(document.id),
+            allowed_principal_tokens=["group:leaders"],
+            denied_principal_tokens=["group:contractors"],
+        )
+        detail = await AdminDocumentService(session).get_document(actor, document.id)
+        assert detail["allowed_principal_tokens"] == ["group:leaders"]
+        assert detail["denied_principal_tokens"] == ["group:contractors"]
+        assert policy["resource_id"] == str(document.id)
+
+
+@pytest.mark.asyncio
+async def test_admin_api_uses_database_identity_and_trusted_tenant_boundary(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        tenant = await auth.create_tenant("api-admin", "API Admin")
+        admin = await auth.create_user("api-admin@example.com")
+        role = await auth.create_role(
+            tenant.id,
+            "admin",
+            "Administrator",
+            permission_codes=["admin"],
+        )
+        await auth.assign_membership(admin.id, tenant.id, role.id)
+
+    async def test_session():
+        async with session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except BaseException:
+                await session.rollback()
+                raise
+
+    app = FastAPI()
+    app.state.allow_insecure_development_identity = True
+    register_admin_error_handlers(app)
+    app.include_router(admin_router, prefix="/api/v1")
+    app.dependency_overrides[get_transactional_session] = test_session
+    headers = {
+        "X-Bothesis-User-Id": str(admin.id),
+        "X-Bothesis-Tenant-Id": str(tenant.id),
+    }
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/v1/admin/overview", headers=headers)
+        assert response.status_code == 200
+        assert response.json()["tenant"]["id"] == str(tenant.id)
+
+        denied = await client.get(
+            "/api/v1/admin/users",
+            headers={**headers, "X-Bothesis-Tenant-Id": str(uuid4())},
+        )
+        assert denied.status_code == 403

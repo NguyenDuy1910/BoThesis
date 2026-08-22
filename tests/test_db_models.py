@@ -10,12 +10,17 @@ from bothesis.db.models import Base
 
 
 EXPECTED_TABLES = {
+    "access_requests",
+    "acl_policies",
+    "audit_logs",
     "connector_scopes",
     "connectors",
     "conversations",
     "document_blobs",
     "document_chunks",
     "documents",
+    "group_memberships",
+    "groups",
     "memories",
     "message_documents",
     "messages",

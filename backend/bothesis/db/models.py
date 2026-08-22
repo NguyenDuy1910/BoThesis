@@ -126,6 +126,23 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     principal_tokens: Mapped[list[UserPrincipalToken]] = relationship(
         back_populates="user"
     )
+    group_memberships: Mapped[list[GroupMembership]] = relationship(
+        back_populates="user"
+    )
+    access_requests: Mapped[list[AccessRequest]] = relationship(
+        back_populates="requester_user",
+        foreign_keys="AccessRequest.requester_user_id",
+    )
+    reviewed_access_requests: Mapped[list[AccessRequest]] = relationship(
+        back_populates="reviewed_by_user",
+        foreign_keys="AccessRequest.reviewed_by_user_id",
+    )
+    created_acl_policies: Mapped[list[AclPolicy]] = relationship(
+        back_populates="created_by_user",
+    )
+    audit_events: Mapped[list[AuditLog]] = relationship(
+        back_populates="actor_user",
+    )
 
 
 class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -142,6 +159,12 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     memberships: Mapped[list[TenantMembership]] = relationship(back_populates="tenant")
     connectors: Mapped[list[Connector]] = relationship(back_populates="tenant")
     documents: Mapped[list[Document]] = relationship(back_populates="tenant")
+    groups: Mapped[list[Group]] = relationship(back_populates="tenant")
+    access_requests: Mapped[list[AccessRequest]] = relationship(
+        back_populates="tenant"
+    )
+    acl_policies: Mapped[list[AclPolicy]] = relationship(back_populates="tenant")
+    audit_logs: Mapped[list[AuditLog]] = relationship(back_populates="tenant")
 
 
 class Role(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -195,6 +218,167 @@ class TenantMembership(TimestampMixin, Base):
     user: Mapped[User] = relationship(back_populates="tenant_membership")
     tenant: Mapped[Tenant] = relationship(back_populates="memberships")
     role: Mapped[Role] = relationship(back_populates="memberships")
+
+
+class Group(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "groups"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "code"),
+        UniqueConstraint("tenant_id", "principal_token"),
+        Index(None, "tenant_id", "status"),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("tenants.id"),
+        nullable=False,
+    )
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    principal_token: Mapped[str] = mapped_column(String(512), nullable=False)
+    permission_codes: Mapped[list[str]] = _text_array_column()
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    tenant: Mapped[Tenant] = relationship(back_populates="groups")
+    memberships: Mapped[list[GroupMembership]] = relationship(
+        back_populates="group"
+    )
+
+
+class GroupMembership(TimestampMixin, Base):
+    __tablename__ = "group_memberships"
+    __table_args__ = (
+        Index(None, "user_id", "status"),
+        Index(None, "group_id", "status"),
+    )
+
+    group_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("groups.id"),
+        primary_key=True,
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        primary_key=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    group: Mapped[Group] = relationship(back_populates="memberships")
+    user: Mapped[User] = relationship(back_populates="group_memberships")
+
+
+class AccessRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "access_requests"
+    __table_args__ = (
+        Index(None, "tenant_id", "status", "created_at"),
+        Index(None, "requester_user_id", "status"),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("tenants.id"),
+        nullable=False,
+    )
+    requester_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+    resource_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    access_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id"),
+    )
+    review_note: Mapped[str | None] = mapped_column(Text)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    tenant: Mapped[Tenant] = relationship(back_populates="access_requests")
+    requester_user: Mapped[User] = relationship(
+        back_populates="access_requests",
+        foreign_keys=[requester_user_id],
+    )
+    reviewed_by_user: Mapped[User | None] = relationship(
+        back_populates="reviewed_access_requests",
+        foreign_keys=[reviewed_by_user_id],
+    )
+
+
+class AclPolicy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "acl_policies"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name"),
+        Index(None, "tenant_id", "resource_type", "resource_id"),
+        Index(None, "tenant_id", "status"),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("tenants.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    allowed_principal_tokens: Mapped[list[str]] = _text_array_column()
+    denied_principal_tokens: Mapped[list[str]] = _text_array_column()
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id"),
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    tenant: Mapped[Tenant] = relationship(back_populates="acl_policies")
+    created_by_user: Mapped[User | None] = relationship(
+        back_populates="created_acl_policies"
+    )
+
+
+class AuditLog(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index(None, "tenant_id", "created_at"),
+        Index(None, "tenant_id", "action", "created_at"),
+        Index(None, "actor_user_id", "created_at"),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("tenants.id"),
+        nullable=False,
+    )
+    actor_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id"),
+    )
+    action: Mapped[str] = mapped_column(String(96), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(512))
+    outcome: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="success", server_default="success"
+    )
+    details: Mapped[JsonObject] = _json_object_column()
+
+    tenant: Mapped[Tenant] = relationship(back_populates="audit_logs")
+    actor_user: Mapped[User | None] = relationship(back_populates="audit_events")
 
 
 class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -647,6 +831,9 @@ class DocumentBlob(CreatedAtMixin, Base):
 
 
 __all__ = [
+    "AccessRequest",
+    "AclPolicy",
+    "AuditLog",
     "Base",
     "Connector",
     "ConnectorScope",
@@ -654,6 +841,8 @@ __all__ = [
     "Document",
     "DocumentBlob",
     "DocumentChunk",
+    "Group",
+    "GroupMembership",
     "Memory",
     "Message",
     "MessageDocument",

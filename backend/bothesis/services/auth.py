@@ -19,6 +19,8 @@ from sqlalchemy.orm import joinedload
 
 from bothesis.db.models import (
     Connector,
+    Group,
+    GroupMembership,
     Role,
     Tenant,
     TenantMembership,
@@ -426,6 +428,26 @@ class AuthService:
                 UserPrincipalToken.deleted_at.is_(None),
             )
         )
+        group_rows = (
+            await self._session.execute(
+                select(Group.principal_token, Group.permission_codes)
+                .join(GroupMembership, GroupMembership.group_id == Group.id)
+                .where(
+                    GroupMembership.user_id == user_id,
+                    GroupMembership.status == ACTIVE_STATUS,
+                    GroupMembership.deleted_at.is_(None),
+                    Group.tenant_id == membership.tenant_id,
+                    Group.status == ACTIVE_STATUS,
+                    Group.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        group_principal_tokens = {row.principal_token for row in group_rows}
+        group_permission_codes = {
+            permission
+            for row in group_rows
+            for permission in row.permission_codes
+        }
 
         return AuthContext(
             user_id=user.id,
@@ -434,8 +456,17 @@ class AuthService:
             tenant_id=membership.tenant_id,
             role_id=membership.role_id,
             role_code=membership.role.code,
-            permission_codes=tuple(sorted(set(membership.role.permission_codes))),
-            principal_tokens=tuple(sorted(set(principal_tokens))),
+            permission_codes=tuple(
+                sorted(
+                    {
+                        *membership.role.permission_codes,
+                        *group_permission_codes,
+                    }
+                )
+            ),
+            principal_tokens=tuple(
+                sorted({*principal_tokens, *group_principal_tokens})
+            ),
         )
 
     async def _soft_delete_principal_tokens(self, user_id: UUID) -> None:

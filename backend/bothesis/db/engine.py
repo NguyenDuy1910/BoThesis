@@ -76,6 +76,18 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+async def get_transactional_session() -> AsyncIterator[AsyncSession]:
+    """Yield one request unit of work with commit/rollback semantics."""
+
+    async with get_session_factory()() as session:
+        try:
+            yield session
+            await session.commit()
+        except BaseException:
+            await session.rollback()
+            raise
+
+
 @asynccontextmanager
 async def session_scope(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
@@ -107,5 +119,6 @@ __all__ = [
     "get_engine",
     "get_session",
     "get_session_factory",
+    "get_transactional_session",
     "session_scope",
 ]

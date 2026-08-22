@@ -780,6 +780,118 @@ Table document_blobs {
 
 
 // ============================================================================
+// 13. ADMIN GROUPS AND MEMBERSHIPS
+// ============================================================================
+
+Table groups {
+  id uuid [pk, not null]
+  tenant_id uuid [not null]
+  code varchar(64) [not null]
+  display_name varchar(255) [not null]
+  description text
+  principal_token varchar(512) [not null]
+  permission_codes text[] [not null, default: '{}']
+  status varchar(16) [not null, default: 'active']
+  deleted_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (tenant_id, code) [unique]
+    (tenant_id, principal_token) [unique]
+    (tenant_id, status)
+  }
+}
+
+Table group_memberships {
+  group_id uuid [not null]
+  user_id uuid [not null]
+  status varchar(16) [not null, default: 'active']
+  joined_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (group_id, user_id) [pk]
+    (user_id, status)
+    (group_id, status)
+  }
+}
+
+
+// ============================================================================
+// 14. ACCESS REQUESTS AND MATERIALIZED ACL POLICIES
+// ============================================================================
+
+Table access_requests {
+  id uuid [pk, not null]
+  tenant_id uuid [not null]
+  requester_user_id uuid [not null]
+  resource_type varchar(32) [not null]
+  resource_id varchar(512) [not null]
+  access_type varchar(32) [not null]
+  reason text
+  status varchar(16) [not null, default: 'pending']
+  reviewed_by_user_id uuid
+  review_note text
+  reviewed_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (tenant_id, status, created_at)
+    (requester_user_id, status)
+  }
+}
+
+Table acl_policies {
+  id uuid [pk, not null]
+  tenant_id uuid [not null]
+  name varchar(255) [not null]
+  resource_type varchar(32) [not null]
+  resource_id varchar(512) [not null]
+  allowed_principal_tokens text[] [not null, default: '{}']
+  denied_principal_tokens text[] [not null, default: '{}']
+  status varchar(16) [not null, default: 'active']
+  created_by_user_id uuid
+  deleted_at timestamptz
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (tenant_id, name) [unique]
+    (tenant_id, resource_type, resource_id)
+    (tenant_id, status)
+  }
+}
+
+
+// ============================================================================
+// 15. APPEND-ONLY ADMIN AUDIT LOG
+// ============================================================================
+
+Table audit_logs {
+  id uuid [pk, not null]
+  tenant_id uuid [not null]
+  actor_user_id uuid
+  action varchar(96) [not null]
+  resource_type varchar(32) [not null]
+  resource_id varchar(512)
+  outcome varchar(16) [not null, default: 'success']
+  details jsonb [not null, default: '{}']
+  created_at timestamptz [not null, default: `now()`]
+
+  indexes {
+    (tenant_id, created_at)
+    (tenant_id, action, created_at)
+    (actor_user_id, created_at)
+  }
+}
+
+
+// ============================================================================
 // RELATIONSHIPS
 // ============================================================================
 
@@ -791,6 +903,20 @@ Ref: roles.tenant_id > tenants.id
 Ref: tenant_memberships.user_id > users.id
 Ref: tenant_memberships.tenant_id > tenants.id
 Ref: tenant_memberships.role_id > roles.id
+
+Ref: groups.tenant_id > tenants.id
+Ref: group_memberships.group_id > groups.id
+Ref: group_memberships.user_id > users.id
+
+Ref: access_requests.tenant_id > tenants.id
+Ref: access_requests.requester_user_id > users.id
+Ref: access_requests.reviewed_by_user_id > users.id
+
+Ref: acl_policies.tenant_id > tenants.id
+Ref: acl_policies.created_by_user_id > users.id
+
+Ref: audit_logs.tenant_id > tenants.id
+Ref: audit_logs.actor_user_id > users.id
 
 
 // Chat

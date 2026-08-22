@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronRight, CircleAlert } from "lucide-react";
+import { ChevronRight, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -15,7 +15,7 @@ export function AdminTopbar({ onMobileMenuOpen }: AdminTopbarProps) {
   const segments = pathname.split("/").filter(Boolean).slice(1);
   const breadcrumbs = segments.map((segment, index) => ({
     href: "/admin/" + segments.slice(0, index + 1).join("/"),
-    label: segment.replace(/[-_]/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
+    label: breadcrumbLabels[segment] ?? segment.replace(/[-_]/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
   }));
 
   return (
@@ -37,9 +37,16 @@ export function AdminTopbar({ onMobileMenuOpen }: AdminTopbarProps) {
         </nav>
       </div>
       <div className="admin-topbar__status" role="status">
-        <CircleAlert aria-hidden="true" size={14} />
-        Backend required
+        <ShieldCheck aria-hidden="true" size={14} />
+        Server enforced
       </div>
     </header>
   );
 }
+
+const breadcrumbLabels: Record<string, string> = {
+  acl: "ACL Policies",
+  connectors: "Data Sources",
+  "access-requests": "Access Requests",
+  "audit-logs": "Audit Logs",
+};

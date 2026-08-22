@@ -28,11 +28,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRouter
 from pydantic import BaseModel, EmailStr, Field
+from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.engine import get_session
 
 from bothesis.health import HealthReport, HealthService, HealthSettings
+
+if __name__ == "__main__":
+    load_dotenv(Path(__file__).with_name(".env"), override=False)
 
 _log = logging.getLogger(__name__)
 
@@ -950,8 +954,8 @@ async def _resolve_access(
             session,
             claimed_user_id=user_id,
             claimed_tenant_id=tenant_id,
-            allow_insecure_development_identity=_environment_boolean(
-                _INSECURE_DEVELOPMENT_IDENTITY_ENV
+            allow_insecure_development_identity=bool(
+                request.app.state.allow_insecure_development_identity
             ),
         )
     except Exception as exc:
@@ -1576,6 +1580,14 @@ app = FastAPI(
     description="Enterprise knowledge and BI assistant.",
     lifespan=_app_lifespan,
 )
+app.state.allow_insecure_development_identity = _environment_boolean(
+    _INSECURE_DEVELOPMENT_IDENTITY_ENV
+)
+
+from bothesis.api import register_admin_error_handlers
+from bothesis.api.admin import admin_router
+
+register_admin_error_handlers(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1594,6 +1606,7 @@ app.include_router(connectors_router, prefix=_PREFIX)
 app.include_router(documents_router, prefix=_PREFIX)
 app.include_router(crons_router, prefix=_PREFIX)
 app.include_router(bi_router, prefix=_PREFIX)
+app.include_router(admin_router, prefix=_PREFIX)
 
 
 def _get_health_service() -> HealthService:

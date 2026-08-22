@@ -67,19 +67,27 @@ class ScriptedTransport(native.ScriptedResponsesTransport):
         return [request["input"] for request in self.requests]
 
 
-def test_default_agent_composes_the_openai_transport(
+def test_default_agent_composes_the_openrouter_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from bothesis.agent.transports import openai as openai_transport
+    from bothesis.agent.transports import openrouter as openrouter_transport
 
-    class TestOpenAITransport:
-        provider = "openai"
+    class TestOpenRouterTransport:
+        DEFAULT_BASE_URL = "https://openrouter.test/v1"
+        provider = "openrouter"
         model = "gpt-test"
 
-    monkeypatch.setattr(openai_transport, "OpenAITransport", TestOpenAITransport)
+        def __init__(self, **_: Any) -> None:
+            pass
+
+    monkeypatch.setattr(
+        openrouter_transport,
+        "OpenRouterTransport",
+        TestOpenRouterTransport,
+    )
     monkeypatch.setattr(main, "_agent", None)
 
-    assert isinstance(main._get_agent().model, TestOpenAITransport)
+    assert isinstance(main._get_agent().model, TestOpenRouterTransport)
 
 
 class PermissionDeniedTransport:
