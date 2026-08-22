@@ -121,6 +121,7 @@ class StubSemanticVectorStore:
     def __init__(self) -> None:
         self.calls: list[tuple[list[float], object, int]] = []
         self.access_contexts: list[object] = []
+        self.payload_filters: list[object] = []
         self.lifecycle_filter_calls = 0
 
     def build_lifecycle_filter(self) -> object:
@@ -132,8 +133,10 @@ class StubSemanticVectorStore:
         _search_params: object,
         *,
         access_context: object,
+        payload_filters: object,
     ) -> object:
         self.access_contexts.append(access_context)
+        self.payload_filters.append(payload_filters)
         return "scoped-filter"
 
     async def semantic_search(
@@ -220,6 +223,7 @@ async def test_semantic_retriever_forwards_authenticated_acl_scope() -> None:
         "user-1",
     )
     assert getattr(access, "is_admin") is False
+    assert store.payload_filters == [context]
     assert store.lifecycle_filter_calls == 0
     assert store.calls == [([0.1, 0.2], "scoped-filter", 3)]
 
@@ -332,6 +336,7 @@ def test_tool_registry_exposes_declarations_through_the_protocol() -> None:
     registry.register(KnowledgeSearchTool(StubRetriever([])))
 
     assert [tool.name for tool in registry.function_tools()] == ["knowledge_search"]
+    assert registry.function_tools(()) == ()
     definition = registry.definitions()[0]
     assert definition.activity_label == "Search knowledge base"
     assert definition.activity_category == "retrieval"

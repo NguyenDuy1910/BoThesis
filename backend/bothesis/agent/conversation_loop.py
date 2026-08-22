@@ -99,6 +99,10 @@ class ConversationLoop:
             allow_tools = (
                 state.tool_round < self._config.max_tool_rounds
                 and state.tool_call_count < self._config.max_tool_calls
+                and (
+                    ctx.allowed_tool_names is None
+                    or bool(ctx.allowed_tool_names)
+                )
             )
             request = self._request(
                 items,
@@ -134,7 +138,10 @@ class ConversationLoop:
                 continue
 
             answer = response.final_answer_text.strip()
-            if not answer or self._tools.is_tool_arguments_payload(answer):
+            if not answer or self._tools.is_tool_arguments_payload(
+                answer,
+                ctx.allowed_tool_names,
+            ):
                 raise AgentExecutionError(
                     "model returned neither a final answer nor a valid tool call"
                 )
@@ -160,7 +167,11 @@ class ConversationLoop:
     ) -> ResponseRequest:
         """Build the one immutable request this sampling attempt replays."""
 
-        tools = self._tools.function_tools() if allow_tools else ()
+        tools = (
+            self._tools.function_tools(ctx.allowed_tool_names)
+            if allow_tools
+            else ()
+        )
         return ResponseRequest(
             input=items,
             model=self._config.model or self._transport.model,
@@ -266,6 +277,7 @@ class ConversationLoop:
             remaining_calls=self._config.max_tool_calls - state.tool_call_count,
             previous_signatures=state.executed_tool_signatures,
             evidence=state.evidence,
+            allowed_tool_names=ctx.allowed_tool_names,
         )
         state.tool_call_count += batch.executed_call_count
         state.tool_duration_ms += batch.duration_ms

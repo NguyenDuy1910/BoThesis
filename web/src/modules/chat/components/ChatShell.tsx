@@ -24,9 +24,14 @@ import { useClipboard } from "@/lib/hooks/useClipboard";
 import { ProductMark } from "@/components/ui/ProductMark";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
 import {
+  getAvailableChatConnectors,
   releaseConversationDocument,
   uploadConversationDocument,
 } from "@/modules/chat/api";
+import { connectorDefinition } from "@/modules/connectors/catalog";
+import { PluginPicker } from "@/modules/connectors/components/PluginPicker";
+import { SelectedPluginChips } from "@/modules/connectors/components/SelectedPluginChips";
+import type { ChatConnector, ChatConnectorMode } from "@/modules/connectors/types";
 import {
   cachedToUIMessage,
   conversationAdapter,
@@ -238,6 +243,12 @@ function ChatConversation({
 }) {
   const [input, setInput] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<ComposerDocument[]>([]);
+  const [connectors, setConnectors] = useState<ChatConnector[]>([]);
+  const [connectorsError, setConnectorsError] = useState<string | null>(null);
+  const [connectorsLoading, setConnectorsLoading] = useState(true);
+  const [connectorMode, setConnectorMode] = useState<ChatConnectorMode>("auto");
+  const [selectedConnectorIds, setSelectedConnectorIds] = useState<string[]>([]);
+  const [connectorRevision, setConnectorRevision] = useState(0);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const messageStackRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -276,6 +287,34 @@ function ChatConversation({
   const isUploading = composerAttachments.some((item) => (
     item.progress !== "ready" && item.progress !== "failed"
   ));
+  const selectedConnectors = connectors.filter((connector) => selectedConnectorIds.includes(connector.id));
+  const activeConnectorLabel = connectorMode === "selected"
+    ? selectedConnectors.length === 1
+      ? connectorDefinition(selectedConnectors[0]?.provider ?? "")?.name ?? selectedConnectors[0]?.display_name
+      : selectedConnectors.length > 1 ? "selected sources" : undefined
+    : connectorMode === "auto" ? "permitted knowledge" : undefined;
+
+  useEffect(() => {
+    if (!isConfigured) {
+      setConnectorsLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setConnectorsLoading(true);
+    setConnectorsError(null);
+    getAvailableChatConnectors(controller.signal)
+      .then((items) => {
+        setConnectors(items);
+        setSelectedConnectorIds((current) => current.filter((id) => items.some((item) => item.id === id)));
+      })
+      .catch((cause) => {
+        if (!controller.signal.aborted) setConnectorsError(cause instanceof Error ? cause.message : "Could not load permitted connectors.");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setConnectorsLoading(false);
+      });
+    return () => controller.abort();
+  }, [connectorRevision, isConfigured]);
 
   useEffect(() => () => {
     for (const controller of uploadControllersRef.current.values()) controller.abort();
@@ -336,17 +375,24 @@ function ChatConversation({
     const text = value.trim() || (readyDocuments.length
       ? "Please analyze the attached file."
       : "");
-    if (!text || isUploading || isStreaming || !isConfigured) return;
+    if (!text || isUploading || isStreaming || !isConfigured || connectorMode === "selected" && !selectedConnectorIds.length) return;
     clearError();
     setInput("");
     setComposerAttachments([]);
-    await sendMessage({ text, documents: readyDocuments });
+    await sendMessage({
+      text,
+      documents: readyDocuments,
+      connectorMode,
+      connectorIds: selectedConnectorIds,
+    });
   }, [
     clearError,
     composerAttachments,
     isConfigured,
     isStreaming,
     isUploading,
+    connectorMode,
+    selectedConnectorIds,
     sendMessage,
   ]);
 
@@ -394,8 +440,8 @@ function ChatConversation({
   }, [composerAttachments]);
 
   const handleRegenerate = useCallback((messageId: string) => {
-    void regenerate({ messageId });
-  }, [regenerate]);
+    void regenerate({ messageId, connectorMode, connectorIds: selectedConnectorIds });
+  }, [connectorMode, regenerate, selectedConnectorIds]);
 
   const { hasMoreBelow, jumpToLatest } = useJumpToLatest(chatScrollRef, messageStackRef);
 
@@ -431,6 +477,7 @@ function ChatConversation({
                 <Welcome onSelect={submit} />
               ) : (
                 <MessageList
+                  activityConnectorLabel={activeConnectorLabel}
                   isStreaming={isStreaming}
                   lastMessageId={lastMessage?.id}
                   messages={messages}
@@ -461,15 +508,23 @@ function ChatConversation({
           )}
           <ChatComposer
             attachments={composerAttachments}
+            connectorMode={connectorMode}
+            connectors={connectors}
+            connectorsError={connectorsError}
+            connectorsLoading={connectorsLoading}
             input={input}
             isConfigured={isConfigured}
             isStreaming={isStreaming}
             isUploading={isUploading}
             onChange={setInput}
+            onConnectorModeChange={setConnectorMode}
+            onConnectorReload={() => setConnectorRevision((value) => value + 1)}
+            onConnectorSelectionChange={setSelectedConnectorIds}
             onFiles={selectAttachments}
             onRemoveAttachment={removeAttachment}
             onStop={stop}
             onSubmit={submit}
+            selectedConnectorIds={selectedConnectorIds}
             textareaRef={textareaRef}
           />
       </div>
@@ -478,12 +533,14 @@ function ChatConversation({
 }
 
 function MessageList({
+  activityConnectorLabel,
   isStreaming,
   lastMessageId,
   messages,
   onRegenerate,
   stackRef,
 }: {
+  activityConnectorLabel?: string;
   isStreaming: boolean;
   lastMessageId?: string;
   messages: ChatMessage[];
@@ -494,6 +551,7 @@ function MessageList({
     <div className="message-stack" ref={stackRef}>
       {messages.map((message) => (
         <MessageView
+          activityConnectorLabel={isStreaming && message.id === lastMessageId ? activityConnectorLabel : undefined}
           isStreaming={isStreaming && message.id === lastMessageId}
           key={message.id}
           message={message}
@@ -505,10 +563,12 @@ function MessageList({
 }
 
 const MessageView = memo(function MessageView({
+  activityConnectorLabel,
   isStreaming,
   message,
   onRegenerate,
 }: {
+  activityConnectorLabel?: string;
   isStreaming: boolean;
   message: ChatMessage;
   onRegenerate: (messageId: string) => void;
@@ -549,6 +609,7 @@ const MessageView = memo(function MessageView({
     <div className="message-row assistant">
       <div className="message-body">
         <AssistantTurn
+          activityConnectorLabel={activityConnectorLabel}
           isStreaming={isStreaming}
           onRevealingChange={setIsRevealing}
           turn={message.turn}
@@ -589,27 +650,43 @@ function reserveActiveTurnSpace(scroller: HTMLDivElement, stack: HTMLDivElement)
 
 function ChatComposer({
   attachments,
+  connectorMode,
+  connectors,
+  connectorsError,
+  connectorsLoading,
   input,
   isConfigured,
   isStreaming,
   isUploading,
   onChange,
+  onConnectorModeChange,
+  onConnectorReload,
+  onConnectorSelectionChange,
   onFiles,
   onRemoveAttachment,
   onStop,
   onSubmit,
+  selectedConnectorIds,
   textareaRef,
 }: {
   attachments: ComposerDocument[];
+  connectorMode: ChatConnectorMode;
+  connectors: ChatConnector[];
+  connectorsError: string | null;
+  connectorsLoading: boolean;
   input: string;
   isConfigured: boolean;
   isStreaming: boolean;
   isUploading: boolean;
   onChange: (value: string) => void;
+  onConnectorModeChange: (mode: ChatConnectorMode) => void;
+  onConnectorReload: () => void;
+  onConnectorSelectionChange: (ids: string[]) => void;
   onFiles: (files: FileList) => void;
   onRemoveAttachment: (key: string) => void;
   onStop: () => void;
   onSubmit: (text: string) => Promise<void>;
+  selectedConnectorIds: string[];
   textareaRef: RefObject<HTMLTextAreaElement | null>;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -620,6 +697,12 @@ function ChatComposer({
   return (
     <div className="composer-wrap">
       <form className="composer" onSubmit={submit}>
+        {connectorMode === "selected" && (
+          <SelectedPluginChips
+            connectors={connectors.filter((connector) => selectedConnectorIds.includes(connector.id))}
+            onRemove={(connectorId) => onConnectorSelectionChange(selectedConnectorIds.filter((id) => id !== connectorId))}
+          />
+        )}
         {attachments.length > 0 && (
           <div className="composer-attachments">
             {attachments.map((item) => (
@@ -677,6 +760,17 @@ function ChatComposer({
           value={input}
         />
         <div className="composer__footer">
+          <PluginPicker
+            connectors={connectors}
+            disabled={!isConfigured || isStreaming}
+            error={connectorsError}
+            loading={connectorsLoading}
+            mode={connectorMode}
+            onModeChange={onConnectorModeChange}
+            onReload={onConnectorReload}
+            onSelectionChange={onConnectorSelectionChange}
+            selectedIds={selectedConnectorIds}
+          />
           <button
             aria-label="Attach files"
             className="composer-tool"
@@ -697,6 +791,7 @@ function ChatComposer({
               isUploading
               || (!input.trim() && !attachments.some((item) => item.progress === "ready"))
               || !isConfigured
+              || connectorMode === "selected" && !selectedConnectorIds.length
             )}
             onClick={isStreaming ? onStop : undefined}
             type={isStreaming ? "button" : "submit"}

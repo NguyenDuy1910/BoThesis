@@ -16,7 +16,7 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -33,7 +33,8 @@ import { Pagination } from "@/components/ui/Pagination";
 import { SearchInput } from "@/components/ui/SearchInput";
 import { Select } from "@/components/ui/Select";
 import { useToast } from "@/components/ui/Toast";
-import { adminRequest, queryString } from "@/modules/admin/api";
+import { adminRequest, queryString, useAdminQuery } from "@/modules/admin/api";
+import { ConnectorRegistryPage } from "@/modules/admin/components/DataSourcesPage";
 
 type AdminRow = Record<string, any>;
 
@@ -64,14 +65,6 @@ interface SectionDefinition {
 const PAGE_SIZE = 20;
 
 const sections: Record<string, SectionDefinition> = {
-  connectors: {
-    endpoint: "/datasources",
-    title: "Data Sources",
-    description: "Configure trusted source boundaries, validate connections, and start governed synchronization.",
-    emptyTitle: "No data sources configured",
-    createLabel: "Add data source",
-    statusOptions: statusOptions("draft", "active", "disabled", "error"),
-  },
   "ingestion/jobs": {
     endpoint: "/ingestion/jobs",
     title: "Ingestion",
@@ -137,6 +130,7 @@ const sections: Record<string, SectionDefinition> = {
 export function AdminPage({ section }: { section: string }) {
   if (section === "overview" || !section) return <OverviewPage />;
   if (section === "spaces") return <SpacesPage />;
+  if (section === "connectors") return <ConnectorRegistryPage />;
   const definition = sections[section];
   if (!definition) {
     return (
@@ -301,9 +295,6 @@ function ResourceActions({ reload, row, section }: { reload: () => void; row: Ad
   const action = (label: string, path: string, method = "POST", body?: unknown, variant: "primary" | "secondary" | "danger" = "secondary") => (
     <Button key={label} loading={pending === label} onClick={() => mutate(label, path, method, body)} size="sm" variant={variant}>{label}</Button>
   );
-  if (section === "connectors") {
-    return <div className="flex justify-end gap-1">{["draft", "error"].includes(row.status) && action("Validate", `/datasources/${row.id}/validate`)}{row.status === "active" && action("Sync", `/datasources/${row.id}/sync`, "POST", {})}{row.status === "active" && action("Disable", `/datasources/${row.id}`, "PATCH", { status: "disabled" })}{row.status === "disabled" && action("Enable", `/datasources/${row.id}`, "PATCH", { status: "active" })}</div>;
-  }
   if (section === "ingestion/jobs") {
     return <div className="flex justify-end gap-1">{["pending", "running"].includes(row.status) && action("Cancel", `/ingestion/jobs/${row.id}/cancel`, "POST", undefined, "danger")}{["failed", "cancelled"].includes(row.status) && action("Retry", `/ingestion/jobs/${row.id}/retry`)}</div>;
   }
@@ -361,7 +352,6 @@ function CreateFields({ dependencies, section }: { dependencies: Record<string, 
   if (section === "users") return <><Field name="email" label="Email" type="email" /><Field name="display_name" label="Display name" /><FormField label="Role" htmlFor="new-user-role" required><Select id="new-user-role" name="role_id" required placeholder="Select a role" options={(dependencies.roles ?? []).map((role) => ({ value: role.id, label: `${role.display_name} (${role.code})` }))} /></FormField><Field name="group_ids" label="Group IDs" helper="Optional comma-separated group UUIDs." /></>;
   if (section === "roles") return <><Field name="code" label="Role code" /><Field name="display_name" label="Display name" /><Field name="permission_codes" label="Permission codes" helper="Comma-separated application capabilities, for example knowledge.read, source.manage." /></>;
   if (section === "groups") return <><Field name="code" label="Group code" /><Field name="display_name" label="Display name" /><Field name="description" label="Description" required={false} /><Field name="permission_codes" label="Permission codes" helper="Optional comma-separated capabilities contributed by this group." required={false} /></>;
-  if (section === "connectors") return <><FormField label="Provider" htmlFor="new-source-provider" required><Select id="new-source-provider" name="provider" options={[{ value: "file", label: "Managed files" }, { value: "confluence", label: "Confluence" }]} /></FormField><Field name="display_name" label="Display name" /><Field name="base_dir" label="Managed file directory" helper="Used only for the managed-file provider." required={false} /><Field name="wiki_base" label="Confluence URL" helper="Used only for Confluence, for example https://company.atlassian.net/wiki." required={false} /><Field name="space" label="Confluence space key" required={false} /><Field name="credential_secret_ref" label="Credential reference" helper="Use an env:// reference. Never paste secret values here." required={false} /></>;
   if (section === "access-requests") return <><FormField label="Requester" htmlFor="new-request-user" required><Select id="new-request-user" name="requester_user_id" required placeholder="Select a user" options={(dependencies.users ?? []).map((user) => ({ value: user.id, label: user.display_name ? `${user.display_name} · ${user.email}` : user.email }))} /></FormField><FormField label="Resource type" htmlFor="new-request-type" required><Select id="new-request-type" name="resource_type" options={[{ value: "document", label: "Document" }, { value: "group", label: "Group" }, { value: "role", label: "Role" }]} /></FormField><Field name="resource_id" label="Resource UUID" /><Field name="access_type" label="Access type" defaultValue="read" /><Field name="reason" label="Reason" required={false} /></>;
   if (section === "acl") return <><Field name="name" label="Policy name" /><FormField label="Document" htmlFor="new-policy-document" required><Select id="new-policy-document" name="resource_id" required placeholder="Select a document" options={(dependencies.documents ?? []).map((document) => ({ value: document.id, label: document.title ?? document.id }))} /></FormField><Field name="allowed_principal_tokens" label="Allowed principals" helper="Comma-separated tokens such as group:finance or email:user@example.com." /><Field name="denied_principal_tokens" label="Denied principals" helper="Optional comma-separated deny tokens." required={false} /></>;
   return null;
@@ -392,38 +382,13 @@ function createPayload(section: string, form: FormData): { endpoint: string; pay
   if (section === "users") return { endpoint: "/users", payload: { email: value("email"), display_name: value("display_name"), role_id: value("role_id"), group_ids: list("group_ids") } };
   if (section === "roles") return { endpoint: "/roles", payload: { code: value("code"), display_name: value("display_name"), permission_codes: list("permission_codes") } };
   if (section === "groups") return { endpoint: "/groups", payload: { code: value("code"), display_name: value("display_name"), description: value("description") || undefined, permission_codes: list("permission_codes") } };
-  if (section === "connectors") {
-    const provider = value("provider");
-    const settings = provider === "confluence" ? { wiki_base: value("wiki_base"), is_cloud: true, space: value("space") } : { base_dir: value("base_dir") || "/tmp/bothesis-manual-uploads" };
-    return { endpoint: "/datasources", payload: { provider, display_name: value("display_name"), settings, credential_secret_ref: value("credential_secret_ref") || undefined } };
-  }
   if (section === "access-requests") return { endpoint: "/access-requests", payload: { requester_user_id: value("requester_user_id"), resource_type: value("resource_type"), resource_id: value("resource_id"), access_type: value("access_type"), reason: value("reason") || undefined } };
   if (section === "acl") return { endpoint: "/acl-policies", payload: { name: value("name"), resource_type: "document", resource_id: value("resource_id"), allowed_principal_tokens: list("allowed_principal_tokens"), denied_principal_tokens: list("denied_principal_tokens") } };
   throw new Error("This resource cannot be created from the current Admin screen.");
 }
 
-function useAdminQuery<T>(path: string) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [revision, setRevision] = useState(0);
-  const reload = useCallback(() => setRevision((value) => value + 1), []);
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    adminRequest<T>(path, { signal: controller.signal })
-      .then(setData)
-      .catch((caught) => { if (!controller.signal.aborted) setError(message(caught)); })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
-  }, [path, revision]);
-  return { data, error, loading, reload };
-}
-
 function columnsFor(section: string): Column<AdminRow>[] {
   const id = { key: "id", label: "ID", width: 112, render: (row: AdminRow) => <code className="font-mono text-[0.6875rem] text-[var(--text-muted)]" title={row.id}>{shortId(row.id)}</code> };
-  if (section === "connectors") return [{ key: "display_name", label: "Data source", sortable: true, render: (row) => <Identity primary={row.display_name} secondary={titleCase(row.provider)} /> }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "scope_count", label: "Scopes", align: "right" }, { key: "document_count", label: "Documents", align: "right" }, { key: "last_synced_at", label: "Last synced", render: (row) => formatDate(row.last_synced_at) }, id];
   if (section === "ingestion/jobs") return [{ key: "datasource", label: "Data source", render: (row) => <Identity primary={row.datasource?.display_name ?? "Unknown source"} secondary={row.scope?.display_name ?? "Unknown scope"} /> }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "progress", label: "Indexed", render: (row) => `${row.indexed_document_count}/${row.discovered_document_count}` }, { key: "generation", label: "Generation", align: "right" }, { key: "created_at", label: "Created", render: (row) => formatDate(row.created_at) }, id];
   if (section === "documents") return [{ key: "title", label: "Document", sortable: true, render: (row) => <Identity primary={row.title ?? "Untitled document"} secondary={`${titleCase(row.origin)} · ${formatBytes(row.size_bytes)}`} /> }, { key: "datasource", label: "Source", render: (row) => row.datasource?.display_name ?? "Tenant created" }, { key: "indexing_status", label: "Indexing", render: (row) => <StatusBadge status={row.indexing_status} /> }, { key: "lifecycle_status", label: "Lifecycle", render: (row) => <StatusBadge status={row.lifecycle_status} /> }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
   if (section === "users") return [{ key: "display_name", label: "User", sortable: true, render: (row) => <Identity primary={row.display_name ?? row.email} secondary={row.display_name ? row.email : "No display name"} /> }, { key: "role", label: "Role", render: (row) => row.membership?.role?.display_name ?? "No role" }, { key: "groups", label: "Groups", render: (row) => row.groups?.length ? row.groups.map((group: AdminRow) => group.display_name).join(", ") : "None" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "last_login_at", label: "Last login", render: (row) => formatDate(row.last_login_at) }, id];

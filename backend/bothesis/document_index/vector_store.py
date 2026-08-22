@@ -47,6 +47,7 @@ class VectorStoreFilterBuilder:
     FILTER_FIELD_MAP: dict[str, str] = {
         "source_type": "source_type",
         "doc_id": "document_id",
+        "connector_ids": "connector_id",
     }
 
     # A tuple makes generated filters deterministic, which helps auditing and
@@ -70,6 +71,7 @@ class VectorStoreFilterBuilder:
         "attachment_id",
         "comment_id",
         "sheet_name",
+        "connector_ids",
     )
 
     @classmethod

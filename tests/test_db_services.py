@@ -328,9 +328,24 @@ async def test_datasource_service_persists_validation_and_sync_lifecycle(
             settings={"base_dir": str(tmp_path)},
         )
         assert datasource["status"] == "draft"
+        uploaded = await service.upload_file(
+            actor,
+            int(datasource["id"]),
+            file_name="policy.txt",
+            content=b"Enterprise policy",
+        )
+        assert uploaded["file_name"] == "policy.txt"
+        assert uploaded["size_bytes"] == len(b"Enterprise policy")
+        assert (tmp_path / f"{uploaded['id']}.json").is_file()
         assert (await service.validate_datasource(actor, int(datasource["id"])))[
             "valid"
         ] is True
+        chat_connectors = await service.list_chat_connectors(actor)
+        assert chat_connectors["total"] == 1
+        assert chat_connectors["items"][0]["id"] == datasource["id"]
+        assert chat_connectors["items"][0]["capabilities"] == [
+            "knowledge_search"
+        ]
 
         queued = await service.trigger_sync(actor, int(datasource["id"]))
         run_id = UUID(queued["items"][0]["id"])

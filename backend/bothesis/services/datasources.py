@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
+import json
+from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,11 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bothesis.connector.base import StaticCredentialsProvider
 from bothesis.connector.confluence.connector import ConfluenceConnector
 from bothesis.connector.file.file_connector import ManualFileUploadConnector
+from bothesis.connector.file.processing import FileProcessor
 from bothesis.db.models import Connector, ConnectorScope, Document, SyncRun
 from bothesis.integrations import SecretResolver
 from bothesis.services import (
     ACTIVE_STATUS,
     INACTIVE_STATUS,
+    KNOWLEDGE_READ_PERMISSION,
     SOURCE_MANAGE_PERMISSION,
     AdminConflictError,
     AdminExternalUnavailableError,
@@ -26,6 +30,7 @@ from bothesis.services import (
     AdminValidationError,
     AuditService,
     AuthContext,
+    AuthorizationError,
     normalize_page,
     normalize_required_text,
     require_tenant_permission,
@@ -73,6 +78,60 @@ class DatasourceService:
                     "scope_type": "folder",
                 },
             ]
+        }
+
+    async def list_chat_connectors(
+        self,
+        actor: AuthContext,
+        *,
+        connector_ids: Sequence[int] | None = None,
+    ) -> dict[str, Any]:
+        """Return active tenant connections that can back chat retrieval.
+
+        Connector visibility requires tenant knowledge access. Content returned
+        through any listed connection is still independently constrained by
+        the user's indexed document ACLs during retrieval.
+        """
+
+        tenant_id = require_tenant_permission(actor, KNOWLEDGE_READ_PERMISSION)
+        normalized_ids = (
+            tuple(dict.fromkeys(connector_ids))
+            if connector_ids is not None
+            else None
+        )
+        if normalized_ids is not None and any(value < 1 for value in normalized_ids):
+            raise AuthorizationError("one or more selected connectors are unavailable")
+        filters = [
+            Connector.tenant_id == tenant_id,
+            Connector.status == ACTIVE_STATUS,
+        ]
+        if normalized_ids is not None:
+            if not normalized_ids:
+                return {"items": [], "total": 0}
+            filters.append(Connector.id.in_(normalized_ids))
+        connectors = list(
+            await self._session.scalars(
+                select(Connector)
+                .where(*filters)
+                .order_by(Connector.display_name, Connector.id)
+            )
+        )
+        if normalized_ids is not None and {
+            connector.id for connector in connectors
+        } != set(normalized_ids):
+            raise AuthorizationError("one or more selected connectors are unavailable")
+        return {
+            "items": [
+                {
+                    "id": str(connector.id),
+                    "provider": connector.provider,
+                    "display_name": connector.display_name,
+                    "status": connector.status,
+                    "capabilities": ["knowledge_search"],
+                }
+                for connector in connectors
+            ],
+            "total": len(connectors),
         }
 
     async def list_datasources(
@@ -181,6 +240,12 @@ class DatasourceService:
         )
         self._session.add(connector)
         await self._session.flush()
+        if normalized_provider == "file" and not normalized_settings.get("base_dir"):
+            connector.settings = {
+                **normalized_settings,
+                "base_dir": str(_managed_file_directory(tenant_id, connector.id)),
+            }
+            normalized_settings = dict(connector.settings)
         source_scopes = scopes or _default_scopes(
             normalized_provider, normalized_settings
         )
@@ -196,6 +261,68 @@ class DatasourceService:
             },
         )
         return await self.get_datasource(actor, connector.id)
+
+    async def upload_file(
+        self,
+        actor: AuthContext,
+        connector_id: int,
+        *,
+        file_name: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        """Store one validated raw file for a tenant-scoped managed connection."""
+
+        tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
+        connector = await self._connector(tenant_id, connector_id)
+        if connector.provider != "file":
+            raise AdminValidationError("files can only be uploaded to a managed file connection")
+
+        normalized_file_name = _upload_file_name(file_name)
+        settings = dict(connector.settings)
+        base_dir_value = settings.get("base_dir")
+        if not isinstance(base_dir_value, str) or not base_dir_value.strip():
+            raise AdminValidationError("managed file connection does not have a storage directory")
+        base_dir = Path(base_dir_value).expanduser().resolve()
+        processor = FileProcessor(
+            max_file_bytes=int(settings.get("max_file_bytes") or 20 * 1024 * 1024)
+        )
+        try:
+            processed = processor.process_bytes(content, file_name=normalized_file_name)
+        except ValueError as exc:
+            raise AdminValidationError(str(exc)) from exc
+
+        external_id = uuid4().hex
+        stored_name = f"{external_id}-{normalized_file_name}"
+        record = {
+            "external_id": external_id,
+            "path": stored_name,
+            "file_name": normalized_file_name,
+            "sha256": processed.sha256,
+            "size_bytes": processed.size_bytes,
+            "mime_type": processed.mime_type,
+            "uploaded_at": datetime.now(UTC).isoformat(),
+            "metadata": {"source_kind": "manual_upload"},
+        }
+        await asyncio.to_thread(base_dir.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread((base_dir / stored_name).write_bytes, processed.raw_bytes)
+        await asyncio.to_thread(
+            (base_dir / f"{external_id}.json").write_text,
+            json.dumps(record, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        await self._audit.record(
+            actor,
+            action="datasource.file_uploaded",
+            resource_type="datasource",
+            resource_id=str(connector.id),
+            details={"mime_type": processed.mime_type, "size_bytes": processed.size_bytes},
+        )
+        return {
+            "id": external_id,
+            "file_name": normalized_file_name,
+            "mime_type": processed.mime_type,
+            "size_bytes": processed.size_bytes,
+        }
 
     async def update_datasource(
         self,
@@ -770,6 +897,17 @@ def _confluence_runtime(
         )
     )
     return runtime
+
+
+def _managed_file_directory(tenant_id: UUID, connector_id: int) -> Path:
+    return Path("/tmp/bothesis-manual-uploads") / str(tenant_id) / str(connector_id)
+
+
+def _upload_file_name(value: str) -> str:
+    normalized = normalize_required_text(value, "file name", 240)
+    if normalized in {".", ".."} or "/" in normalized or "\\" in normalized or "\x00" in normalized:
+        raise AdminValidationError("file name is invalid")
+    return normalized
 
 
 def _connector_payload(

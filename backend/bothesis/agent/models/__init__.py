@@ -59,6 +59,8 @@ class AgentContext:
     conversation_id: str | None = None
     request_id: str | None = None
     history: tuple[ConversationMessage, ...] = ()
+    connector_ids: tuple[int, ...] | None = None
+    allowed_tool_names: tuple[str, ...] | None = None
     trace_step: int | None = None
     retrieval_round: int = 0
     retrieval_query_count: int = 0

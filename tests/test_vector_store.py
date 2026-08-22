@@ -113,6 +113,27 @@ def test_filters_are_deterministic_and_keep_zero_ancestor_ids() -> None:
     assert acl_list_condition.match == qmodels.MatchAny(any=["reader-1", "reader-2"])
 
 
+def test_connector_selection_is_applied_inside_the_tenant_acl_filter() -> None:
+    query_filter = VectorStore.build_retrieval_filter(
+        None,
+        access_context=SimpleNamespace(
+            tenant_id="tenant-1",
+            reader_ids=["email:user@example.test"],
+            space_keys=[],
+            is_admin=False,
+        ),
+        payload_filters=SimpleNamespace(connector_ids=(12, 14)),
+    )
+
+    connector_condition = next(
+        condition
+        for condition in query_filter.must or []
+        if isinstance(condition, qmodels.FieldCondition)
+        and condition.key == "connector_id"
+    )
+    assert connector_condition.match == qmodels.MatchAny(any=[12, 14])
+
+
 def test_admin_filter_keeps_tenant_and_tombstone_boundaries() -> None:
     query_filter = VectorStore.build_retrieval_filter(
         None,

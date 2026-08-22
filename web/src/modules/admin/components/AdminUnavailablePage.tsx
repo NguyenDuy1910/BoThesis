@@ -21,7 +21,7 @@ const sectionContent = {
     icon: DatabaseZap,
   },
   connectors: {
-    title: "Data Sources are not connected",
+    title: "Connector registry is unavailable",
     description: "Connector configuration, validation, synchronization, and lifecycle status require administration APIs that are not available in this deployment.",
     icon: Plug,
   },

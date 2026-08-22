@@ -98,13 +98,20 @@ class QdrantSemanticRetriever:
         limit: int,
         ctx: AgentContext,
     ) -> list[RetrievedDocument]:
-        if self._allow_unscoped_admin_retrieval and ctx.is_admin:
+        if ctx.connector_ids == ():
+            return []
+        if (
+            self._allow_unscoped_admin_retrieval
+            and ctx.is_admin
+            and ctx.connector_ids is None
+        ):
             query_filter = self._store.build_lifecycle_filter()
         else:
             access = _retrieval_access(ctx)
             query_filter = self._store.build_retrieval_filter(
                 None,
                 access_context=access,
+                payload_filters=ctx,
             )
         return await self._search(query, limit=limit, query_filter=query_filter)
 

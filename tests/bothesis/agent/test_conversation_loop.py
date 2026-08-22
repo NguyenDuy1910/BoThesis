@@ -417,6 +417,19 @@ async def test_tools_are_withheld_once_the_tool_round_limit_is_reached() -> None
 
 
 @pytest.mark.asyncio
+async def test_request_tool_allowlist_can_disable_plugins_for_one_turn() -> None:
+    transport = ScriptedResponsesTransport([final_answer("Answered without tools.")])
+
+    events = await run(
+        Agent(transport, registry_with_lookup()),
+        allowed_tool_names=(),
+    )
+
+    assert events[-1].type == "response.completed"
+    assert "tools" not in transport.requests[0]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("user_message", "overrides", "expected"),
     [

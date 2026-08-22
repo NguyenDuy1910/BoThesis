@@ -46,7 +46,7 @@ export function AdminTopbar({ onMobileMenuOpen }: AdminTopbarProps) {
 
 const breadcrumbLabels: Record<string, string> = {
   acl: "ACL Policies",
-  connectors: "Data Sources",
+  connectors: "Connectors",
   "access-requests": "Access Requests",
   "audit-logs": "Audit Logs",
 };

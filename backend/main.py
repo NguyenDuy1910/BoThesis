@@ -27,7 +27,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRouter
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -153,6 +153,18 @@ class ChatRequest(BaseModel):
     roles: list[str] = Field(default_factory=list, deprecated=True)
     conversation_id: str | None = None
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=24)
+    connector_mode: Literal["auto", "selected", "off"] = "auto"
+    connector_ids: list[int] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_connector_selection(self) -> ChatRequest:
+        if self.connector_mode == "selected" and not self.connector_ids:
+            raise ValueError("selected connector mode requires at least one connector")
+        if self.connector_mode != "selected" and self.connector_ids:
+            raise ValueError("connector IDs are only accepted in selected mode")
+        if len(self.connector_ids) != len(set(self.connector_ids)):
+            raise ValueError("connector IDs must be unique")
+        return self
 
 
 class DocumentUploadStartRequest(BaseModel):
@@ -925,7 +937,7 @@ def _document_http_error(exc: Exception) -> HTTPException:
             detail=str(exc),
         )
     if isinstance(exc, AuthorizationError):
-        return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+        return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     if isinstance(exc, AuthServiceError):
         return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
     if isinstance(exc, ObjectStorageError):
@@ -1081,8 +1093,41 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
                 user_id=body.user_id,
                 tenant_id=body.tenant_id,
             )
+            from bothesis.services import (
+                KNOWLEDGE_READ_PERMISSION,
+                require_tenant_permission,
+            )
+
+            require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
+            selected_connector_ids: tuple[int, ...] | None = None
+            allowed_tool_names: tuple[str, ...] | None = (
+                () if body.connector_mode == "off" else None
+            )
+            if body.connector_mode == "selected":
+                from bothesis.services import DatasourceService
+
+                authorized = await DatasourceService(
+                    auth_session
+                ).list_chat_connectors(
+                    access,
+                    connector_ids=body.connector_ids,
+                )
+                selected_connector_ids = tuple(
+                    int(item["id"]) for item in authorized["items"]
+                )
+                allowed_tool_names = tuple(
+                    sorted(
+                        {
+                            capability
+                            for item in authorized["items"]
+                            for capability in item["capabilities"]
+                        }
+                    )
+                )
     except HTTPException:
         raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
     if access.tenant_id is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1111,6 +1156,8 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
             ConversationMessage(role=message.role, content=message.content)
             for message in body.history
         ),
+        connector_ids=selected_connector_ids,
+        allowed_tool_names=allowed_tool_names,
     )
     try:
         agent = _get_agent()
@@ -1138,6 +1185,19 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@agent_router.get("/connectors")
+async def list_chat_connectors(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """List active tenant connections available to the chat picker."""
+
+    from bothesis.services import DatasourceService
+
+    access = await _resolve_access(request, session)
+    return await DatasourceService(session).list_chat_connectors(access)
 
 
 def _conversation_id(value: str | None) -> UUID:

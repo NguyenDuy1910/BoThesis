@@ -197,3 +197,19 @@ async def test_tool_executor_runs_independent_calls_concurrently_and_matches_cal
         ("first", "one"),
         ("second", "two"),
     ]
+
+    blocked = await ToolExecutor(
+        registry, timeout_seconds=1, max_output_characters=100
+    ).execute(
+        (FunctionCallItem(call_id="blocked", name="echo", arguments='{"value":"no"}'),),
+        context=ToolContext(agent_context=AgentContext(user_id="u", tenant_id="t", roles=[])),
+        remaining_calls=1,
+        previous_signatures=set(),
+        evidence={},
+        allowed_tool_names=(),
+    )
+
+    assert blocked.executed_call_count == 0
+    assert blocked.output_items[0].output == (
+        "Tool error: Tool is not available for this request."
+    )

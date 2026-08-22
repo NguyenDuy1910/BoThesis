@@ -24,7 +24,7 @@ from bothesis.agent.models import AgentContext
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
 from bothesis.knowledge.document_index import RetrievedDocument
-from bothesis.services import AuthContext
+from bothesis.services import AuthContext, DatasourceService
 
 
 def search_call(output_index: int = 0) -> list[Any]:
@@ -264,6 +264,29 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(main, "_agent", agent)
+    async def allow_selected_connectors(
+        _service: DatasourceService,
+        _actor: AuthContext,
+        *,
+        connector_ids: list[int],
+    ) -> dict[str, Any]:
+        assert connector_ids == [12]
+        return {
+            "items": [{
+                "id": "12",
+                "provider": "confluence",
+                "display_name": "Company Confluence",
+                "status": "active",
+                "capabilities": ["knowledge_search"],
+            }],
+            "total": 1,
+        }
+
+    monkeypatch.setattr(
+        DatasourceService,
+        "list_chat_connectors",
+        allow_selected_connectors,
+    )
     user_id, tenant_id = _install_access(monkeypatch)
     conversation_id = uuid4()
 
@@ -280,6 +303,8 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
                     {"role": "user", "content": "Recent scope question"},
                     {"role": "assistant", "content": "Recent scope answer"},
                 ],
+                "connector_mode": "selected",
+                "connector_ids": [12],
             },
         )
 
@@ -319,6 +344,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         "external_group:finance",
     )
     assert retriever.contexts[0].is_admin is True
+    assert retriever.contexts[0].connector_ids == (12,)
     # ``/responses`` takes instructions as a request parameter, so the input is
     # items only — there is no synthetic leading system message.
     assert "<agent_instructions>" in transport.requests[0]["instructions"]
@@ -446,3 +472,16 @@ def test_chat_api_rejects_history_message_over_context_budget() -> None:
         )
 
     assert response.status_code == 422
+
+
+def test_chat_request_requires_a_bounded_explicit_connector_selection() -> None:
+    with pytest.raises(ValueError, match="requires at least one connector"):
+        main.ChatRequest(message="hello", connector_mode="selected")
+
+    request = main.ChatRequest(
+        message="hello",
+        connector_mode="selected",
+        connector_ids=[12, 14],
+    )
+
+    assert request.connector_ids == [12, 14]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Any
+from urllib.parse import unquote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response, status
@@ -304,6 +305,24 @@ async def create_datasource(
 ) -> dict[str, Any]:
     return await _datasources(session).create_datasource(
         actor, **body.model_dump()
+    )
+
+
+@admin_router.put("/datasources/{connector_id}/files", status_code=status.HTTP_201_CREATED)
+async def upload_datasource_file(
+    connector_id: int,
+    request: Request,
+    session: Session,
+    actor: AdminContext,
+    x_bothesis_file_name: Annotated[
+        str | None, Header(alias="X-Bothesis-File-Name")
+    ] = None,
+) -> dict[str, Any]:
+    return await _datasources(session).upload_file(
+        actor,
+        connector_id,
+        file_name=unquote(x_bothesis_file_name or ""),
+        content=await request.body(),
     )
 
 
