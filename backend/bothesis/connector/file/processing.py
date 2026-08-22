@@ -16,6 +16,8 @@ from typing import Any, BinaryIO
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
+from bothesis.knowledge.protocol import BoundingBox
+
 DEFAULT_MAX_FILE_BYTES = 20 * 1024 * 1024
 DEFAULT_MAX_TEXT_CHARACTERS = 2_000_000
 DEFAULT_MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
@@ -97,8 +99,10 @@ class ParsedSection:
     """One source-preserving unit produced before deterministic chunking."""
 
     content: str
+    element_id: str | None = None
     page_number: int | None = None
     heading_path: tuple[str, ...] | None = None
+    bounding_box: BoundingBox | None = None
     metadata: Mapping[str, Any] | None = None
 
 
@@ -176,8 +180,10 @@ class FileProcessor:
         sections = tuple(
             ParsedSection(
                 content=_normalise_text(section.content),
+                element_id=section.element_id,
                 page_number=section.page_number,
                 heading_path=section.heading_path,
+                bounding_box=section.bounding_box,
                 metadata=dict(section.metadata or {}),
             )
             for section in raw_sections
@@ -388,9 +394,11 @@ def _extract_docx_sections(
         def flush() -> None:
             if not paragraphs:
                 return
+            element_id = f"paragraph_{len(sections) + 1:03d}"
             sections.append(
                 ParsedSection(
                     content="\n".join(paragraphs),
+                    element_id=element_id,
                     heading_path=tuple(heading_path) or None,
                     metadata={"section_type": "docx_body"},
                 )
@@ -422,6 +430,7 @@ def _extract_docx_sections(
                 sections.append(
                     ParsedSection(
                         content=content,
+                        element_id=f"{match.group(1)}_{match.group(2)}",
                         heading_path=(label,),
                         metadata={"section_type": match.group(1)},
                     )
@@ -624,6 +633,7 @@ def _extract_pdf_sections(data: bytes) -> list[ParsedSection]:
     return [
         ParsedSection(
             content=page.extract_text() or "",
+            element_id=f"page_{page_number:03d}",
             page_number=page_number,
             metadata={"page_number": page_number},
         )

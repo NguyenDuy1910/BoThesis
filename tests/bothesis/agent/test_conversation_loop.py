@@ -41,6 +41,8 @@ from bothesis.agent.models import (
 )
 from bothesis.agent.tools import Tool, ToolDefinition, ToolRegistry
 from bothesis.agent.transports import RESPONSES_PROVIDERS
+from bothesis.knowledge.protocol import CitationInfo
+from bothesis.knowledge.protocol import CitationSpan
 
 PROVIDERS = sorted(RESPONSES_PROVIDERS)
 
@@ -244,10 +246,11 @@ async def test_text_reaches_the_client_before_the_response_settles() -> None:
 async def test_citation_markers_become_annotations_and_leave_the_text_clean() -> None:
     evidence = Evidence(
         id="ev-1",
-        document_id="doc-1",
+        item_id="doc-1",
+        chunk_id="chunk-1",
         title="Policy",
         content="Grounded policy",
-        page="3",
+        citation=CitationInfo(spans=(CitationSpan(page=3),)),
     )
     document = ConversationDocument(
         id="doc-1",
@@ -287,7 +290,7 @@ async def test_citation_markers_become_annotations_and_leave_the_text_clean() ->
     assert "[[cite:" not in "".join(deltas)
     assert len(annotations) == 1
     assert annotations[0].annotation["type"] == "bothesis:document_citation"
-    assert annotations[0].annotation["citation"]["page"] == "3"
+    assert annotations[0].annotation["citation"]["spans"][0]["page"] == 3
     assert annotations[0].annotation_index == 0
     assert response.final_answer_text == "Leave is 20 days  per year."
     assert response.output_annotations[0]["citation"]["id"] == "ev-1"
@@ -299,7 +302,7 @@ async def test_a_partial_citation_marker_is_the_only_text_held_back() -> None:
 
     release = asyncio.Event()
     evidence = Evidence(
-        id="ev-1", document_id="doc-1", title="Policy", content="Grounded"
+        id="ev-1", item_id="doc-1", chunk_id="chunk-1", title="Policy", content="Grounded"
     )
     document = ConversationDocument(
         id="doc-1",

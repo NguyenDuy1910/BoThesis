@@ -16,15 +16,23 @@ from ..contracts import StorageContract
 from ..models import (
     ConnectorCheckpoint,
     ConnectorScope,
-    Document,
-    DocumentSource,
-    HierarchyNode,
-    HierarchyNodeType,
-    SourceACL,
-    SourceChange,
     SourceCheckpoint,
-    SourceDocument,
-    TextSection,
+)
+from bothesis.knowledge.protocol import (
+    AccessPolicy,
+    AnyItem,
+    ChangeType,
+    CollectionItem,
+    CollectionKind,
+    DocumentItem,
+    DocumentKind,
+    Hierarchy,
+    ItemChange,
+    SourceIdentity,
+    SourceProvider,
+    StorageObject,
+    StorageProvider,
+    TextPart,
 )
 from .processing import FileProcessor
 
@@ -47,14 +55,14 @@ class ManualUploadRecord:
     sha256: str
     uploaded_at: datetime
     modified_at: datetime
-    acl: SourceACL
+    access: AccessPolicy
     metadata: dict[str, str | list[str]]
 
 
 class ManualFileUploadConnector(BaseSourceConnector):
     """Incremental adapter for admin-uploaded files and their record JSON."""
 
-    source = DocumentSource.FILE.value
+    source = SourceProvider.FILE.value
     checkpoint_model = SourceCheckpoint
 
     def __init__(
@@ -73,7 +81,7 @@ class ManualFileUploadConnector(BaseSourceConnector):
         self._records: dict[str, ManualUploadRecord] = {}
         self._next_checkpoint = SourceCheckpoint()
         self._storage: StorageContract | None = None
-        self._default_acl = _acl_from_mapping(config.get("acl") or config)
+        self._default_access = _access_from_mapping(config.get("acl") or config)
 
     def set_storage(self, storage: StorageContract) -> None:
         self._storage = storage
@@ -95,7 +103,7 @@ class ManualFileUploadConnector(BaseSourceConnector):
         self,
         checkpoint: ConnectorCheckpoint,
         scope: ConnectorScope,
-    ) -> list[SourceChange]:
+    ) -> list[ItemChange]:
         previous = checkpoint if isinstance(checkpoint, SourceCheckpoint) else SourceCheckpoint()
         previous_position = (_parse_optional_datetime(previous.updated_at), previous.cursor or "")
         records = await asyncio.to_thread(
@@ -110,11 +118,10 @@ class ManualFileUploadConnector(BaseSourceConnector):
         self._records = {record.external_id: record for record in records}
 
         changes = [
-            SourceChange(
-                external_id=record.external_id,
-                external_version=record.sha256,
-                etag=record.sha256,
-                last_modified_at=record.modified_at,
+            ItemChange(
+                type=ChangeType.UPSERT,
+                item_id=record.external_id,
+                occurred_at=record.modified_at,
             )
             for record in records
             if (record.modified_at, record.external_id) > previous_position
@@ -129,7 +136,7 @@ class ManualFileUploadConnector(BaseSourceConnector):
             self._next_checkpoint = previous
         return changes
 
-    async def fetch_document(self, external_id: str) -> SourceDocument:
+    async def fetch_item(self, external_id: str) -> AnyItem:
         record = self._records.get(external_id)
         if record is None:
             record = await asyncio.to_thread(self._load_record, external_id)
@@ -162,40 +169,80 @@ class ManualFileUploadConnector(BaseSourceConnector):
             "file_name": record.file_name,
             "sha256": record.sha256,
         }
-        return SourceDocument(
+        source = SourceIdentity(
+            connector_id=str(self.config.get("connector_id") or MANUAL_UPLOAD_SOURCE),
+            provider=SourceProvider.FILE,
             external_id=record.external_id,
-            source=DocumentSource.FILE,
-            semantic_identifier=record.file_name,
-            title=record.file_name,
-            sections=[TextSection(text=processed.text)],
-            metadata=metadata,
             external_version=record.sha256,
             etag=record.sha256,
-            doc_created_at=record.uploaded_at,
-            doc_updated_at=record.modified_at,
-            parent_hierarchy_raw_node_id=MANUAL_UPLOAD_HIERARCHY_NODE_ID,
-            acl=record.acl,
-            raw_storage_bucket=raw_storage_bucket,
-            raw_storage_key=raw_storage_key,
-            raw_storage_region=raw_storage_region,
-            mime_type=record.mime_type or processed.mime_type,
-            file_name=record.file_name,
-            size_bytes=processed.size_bytes,
+        )
+        original = None
+        if raw_storage_key:
+            original = StorageObject(
+                provider=StorageProvider.S3,
+                bucket=raw_storage_bucket,
+                key=raw_storage_key,
+                region=raw_storage_region,
+                file_name=record.file_name,
+                mime_type=record.mime_type or processed.mime_type,
+                size_bytes=processed.size_bytes,
+                checksum=record.sha256,
+            )
+        if not processed.text.strip():
+            from bothesis.knowledge.protocol import FileItem
+
+            opaque_original = original or StorageObject(
+                provider=StorageProvider.LOCAL,
+                key=str(record.path),
+                file_name=record.file_name,
+                mime_type=record.mime_type or processed.mime_type,
+                size_bytes=processed.size_bytes,
+                checksum=record.sha256,
+            )
+
+            return FileItem(
+                id=record.external_id,
+                title=record.file_name,
+                source=source,
+                hierarchy=Hierarchy(parent_id=MANUAL_UPLOAD_HIERARCHY_NODE_ID),
+                access=record.access,
+                metadata=metadata,
+                created_at=record.uploaded_at,
+                updated_at=record.modified_at,
+                original=opaque_original,
+            )
+        return DocumentItem(
+            title=record.file_name,
+            id=record.external_id,
+            source=source,
+            hierarchy=Hierarchy(parent_id=MANUAL_UPLOAD_HIERARCHY_NODE_ID),
+            access=record.access,
+            metadata=metadata,
+            created_at=record.uploaded_at,
+            updated_at=record.modified_at,
+            document_kind=(
+                DocumentKind.IMAGE
+                if (record.mime_type or processed.mime_type or "").startswith("image/")
+                else DocumentKind.PDF
+                if (record.mime_type or processed.mime_type) == "application/pdf"
+                else DocumentKind.DOCUMENT
+            ),
+            original=original,
+            content=[TextPart(text=processed.text)],
         )
 
-    async def fetch_acl(self, external_id: str) -> SourceACL:
-        record = self._records.get(external_id)
-        if record is None:
-            record = await asyncio.to_thread(self._load_record, external_id)
-        return record.acl.model_copy(deep=True)
-
-    async def fetch_hierarchy(self, scope: ConnectorScope) -> list[HierarchyNode]:
+    async def fetch_hierarchy(self, scope: ConnectorScope) -> list[CollectionItem]:
         del scope
         return [
-            HierarchyNode(
-                raw_node_id=MANUAL_UPLOAD_HIERARCHY_NODE_ID,
-                display_name=MANUAL_UPLOAD_DISPLAY_NAME,
-                node_type=HierarchyNodeType.FOLDER,
+            CollectionItem(
+                id=MANUAL_UPLOAD_HIERARCHY_NODE_ID,
+                title=MANUAL_UPLOAD_DISPLAY_NAME,
+                collection_kind=CollectionKind.FOLDER,
+                source=SourceIdentity(
+                    connector_id=str(self.config.get("connector_id") or MANUAL_UPLOAD_SOURCE),
+                    provider=SourceProvider.FILE,
+                    external_id=MANUAL_UPLOAD_HIERARCHY_NODE_ID,
+                ),
             )
         ]
 
@@ -270,7 +317,7 @@ class ManualFileUploadConnector(BaseSourceConnector):
             sha256=actual_sha256,
             uploaded_at=uploaded_at,
             modified_at=modified_at,
-            acl=_acl_from_mapping(data.get("acl") or {}, default=self._default_acl),
+            access=_access_from_mapping(data.get("acl") or {}, default=self._default_access),
             metadata=metadata,
         )
 
@@ -285,7 +332,7 @@ class LocalFileConnector(LoadConnector):
         batch_size: int = 50,
         *,
         processor: FileProcessor | None = None,
-        acl: SourceACL | None = None,
+        access: AccessPolicy | None = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be at least one")
@@ -295,14 +342,14 @@ class LocalFileConnector(LoadConnector):
             raise ValueError("file_names must be empty or match file_locations")
         self.batch_size = batch_size
         self._processor = processor or FileProcessor()
-        self._acl = acl or SourceACL()
+        self._access = access or AccessPolicy()
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
         del credentials
         return None
 
     def load_from_state(self) -> GenerateDocumentsOutput:
-        batch: list[Document | HierarchyNode] = []
+        batch: list[AnyItem] = []
         for index, path in enumerate(self.file_locations):
             if not path.is_file():
                 raise FileNotFoundError(f"Local connector file not found: {path}")
@@ -310,25 +357,31 @@ class LocalFileConnector(LoadConnector):
             processed = self._processor.process_path(path, file_name=display_name)
             external_id = _local_file_id(path)
             batch.append(
-                Document(
+                DocumentItem(
                     id=external_id,
-                    external_id=external_id,
-                    external_version=processed.sha256,
-                    etag=processed.sha256,
-                    source=DocumentSource.FILE,
-                    semantic_identifier=display_name,
                     title=display_name,
+                    source=SourceIdentity(
+                        connector_id=MANUAL_UPLOAD_SOURCE,
+                        provider=SourceProvider.FILE,
+                        external_id=external_id,
+                        external_version=processed.sha256,
+                        etag=processed.sha256,
+                    ),
+                    access=self._access,
                     metadata={
                         "source_kind": "local_file",
                         "file_name": display_name,
                         "sha256": processed.sha256,
                     },
-                    sections=[TextSection(text=processed.text)],
-                    external_access=self._acl.to_external_access(),
-                    mime_type=processed.mime_type,
-                    file_name=display_name,
-                    size_bytes=processed.size_bytes,
-                    doc_updated_at=datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+                    document_kind=(
+                        DocumentKind.IMAGE
+                        if (processed.mime_type or "").startswith("image/")
+                        else DocumentKind.PDF
+                        if processed.mime_type == "application/pdf"
+                        else DocumentKind.DOCUMENT
+                    ),
+                    content=[TextPart(text=processed.text)],
+                    updated_at=datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
                 )
             )
             if len(batch) >= self.batch_size:
@@ -338,9 +391,13 @@ class LocalFileConnector(LoadConnector):
             yield batch
 
 
-def _acl_from_mapping(value: Any, *, default: SourceACL | None = None) -> SourceACL:
+def _access_from_mapping(
+    value: Any,
+    *,
+    default: AccessPolicy | None = None,
+) -> AccessPolicy:
     if not isinstance(value, Mapping):
-        return default.model_copy(deep=True) if default else SourceACL()
+        return default.model_copy(deep=True) if default else AccessPolicy()
     has_acl_key = any(
         key in value
         for key in (
@@ -352,13 +409,15 @@ def _acl_from_mapping(value: Any, *, default: SourceACL | None = None) -> Source
         )
     )
     if not has_acl_key:
-        return default.model_copy(deep=True) if default else SourceACL()
-    return SourceACL(
-        user_emails=value.get("user_emails") or [],
-        user_group_ids=value.get("user_group_ids") or [],
-        source_reader_ids=value.get("source_reader_ids") or [],
-        is_public=bool(value.get("is_public", value.get("public", False))),
-    )
+        return default.model_copy(deep=True) if default else AccessPolicy()
+    readers = [
+        *(f"email:{email}" for email in value.get("user_emails") or []),
+        *(f"external_group:{group}" for group in value.get("user_group_ids") or []),
+        *(str(reader) for reader in value.get("source_reader_ids") or []),
+    ]
+    if bool(value.get("is_public", value.get("public", False))):
+        readers.append("public")
+    return AccessPolicy.from_reader_ids(readers)
 
 
 def _confined_path(base_dir: Path, candidate: Path) -> Path:

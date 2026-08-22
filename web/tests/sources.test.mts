@@ -2,42 +2,49 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { answerSources, sourcesLabel } from "../src/modules/chat/sources.ts";
+import { resolveHighlightRange } from "../src/modules/knowledge/highlight.ts";
 import { DOCUMENT_CITATION_TYPE } from "../src/modules/chat/types.ts";
 import type { OutputTextAnnotation, TurnState } from "../src/modules/chat/types.ts";
 
 test("collects a citation once when it arrives in annotation and final content", () => {
-  const citation = annotation({ id: "e1", title: "Access Policy", uri: "https://kb/e1" });
+  const citation = annotation({
+    id: "e1",
+    item_id: "item-1",
+    chunk_id: "chunk-1",
+    title: "Access Policy",
+    original_url: "https://kb/e1",
+  });
   const sources = answerSources(turnWithAnnotations([citation, citation]));
 
   assert.equal(sources.length, 1);
   assert.equal(sources[0]?.title, "Access Policy");
-  assert.equal(sources[0]?.url, "https://kb/e1");
+  assert.equal(sources[0]?.originalUrl, "https://kb/e1");
+  assert.equal(sources[0]?.internalUrl, "/knowledge/items/item-1?chunk=chunk-1");
 });
 
 test("keeps citations in content order", () => {
   const sources = answerSources(turnWithAnnotations([
-    annotation({ id: "first", title: "Decision Memo" }),
-    annotation({ id: "second", title: "Background" }),
+    annotation({ id: "first", item_id: "item-1", chunk_id: "first", title: "Decision Memo" }),
+    annotation({ id: "second", item_id: "item-2", chunk_id: "second", title: "Background" }),
   ]));
 
   assert.deepEqual(sources.map((source) => source.id), ["first", "second"]);
 });
 
-test("a restricted citation is listed but never linked", () => {
+test("an internal citation always links to the exact viewer target", () => {
   const [source] = answerSources(turnWithAnnotations([
-    annotation({ id: "secret", title: "Board Pack", uri: "https://kb/secret", restricted: true }),
+    annotation({ id: "secret", item_id: "item-3", chunk_id: "secret", title: "Board Pack" }),
   ]));
 
-  assert.equal(source?.restricted, true);
-  assert.equal(source?.url, undefined);
+  assert.equal(source?.internalUrl, "/knowledge/items/item-3?chunk=secret");
 });
 
 test("page and section become one locator", () => {
   const [source] = answerSources(turnWithAnnotations([
-    annotation({ id: "source", page: 12, section: "Controls" }),
+    annotation({ id: "source", item_id: "item-4", chunk_id: "source", spans: [{ page: 12 }], section: "Controls" }),
   ]));
 
-  assert.equal(source?.locator, "Controls · p. 12");
+  assert.equal(source?.locator, "p. 12 · Controls");
 });
 
 test("non-citation annotations are ignored", () => {
@@ -45,11 +52,53 @@ test("non-citation annotations are ignored", () => {
 });
 
 test("the summary counts cited sources", () => {
-  assert.equal(sourcesLabel(answerSources(turnWithAnnotations([annotation({ id: "a" })]))), "1 source");
+  assert.equal(sourcesLabel(answerSources(turnWithAnnotations([annotation({ id: "a", item_id: "item-a", chunk_id: "a" })]))), "1 source");
   assert.equal(
-    sourcesLabel(answerSources(turnWithAnnotations([annotation({ id: "a" }), annotation({ id: "b" })]))),
+    sourcesLabel(answerSources(turnWithAnnotations([
+      annotation({ id: "a", item_id: "item-a", chunk_id: "a" }),
+      annotation({ id: "b", item_id: "item-b", chunk_id: "b" }),
+    ]))),
     "2 sources",
   );
+});
+
+test("element offsets highlight the exact retrieved chunk text", () => {
+  const element = "The partition leader handles all reads and writes.";
+  const chunk = "leader handles all reads";
+  const start = element.indexOf(chunk);
+
+  assert.deepEqual(
+    resolveHighlightRange(element, {
+      chunk_text: chunk,
+      start_offset: start,
+      end_offset: start + chunk.length,
+    }),
+    { start, end: start + chunk.length },
+  );
+});
+
+test("highlighting falls back to matching normalized evidence text", () => {
+  assert.deepEqual(
+    resolveHighlightRange("Intro\nExact cited paragraph\nOutro", {
+      chunk_text: "Exact cited paragraph",
+      start_offset: 0,
+      end_offset: 4,
+    }),
+    { start: 6, end: 27 },
+  );
+});
+
+test("multi-span citations highlight each normalized element independently", () => {
+  const citation = {
+    chunk_text: "one\n\ntwo",
+    spans: [
+      { element_id: "p1", start_offset: 0, end_offset: 3 },
+      { element_id: "p2", start_offset: 0, end_offset: 3 },
+    ],
+  };
+
+  assert.deepEqual(resolveHighlightRange("one", citation, citation.spans[0]), { start: 0, end: 3 });
+  assert.deepEqual(resolveHighlightRange("two", citation, citation.spans[1]), { start: 0, end: 3 });
 });
 
 function annotation(citation: NonNullable<OutputTextAnnotation["citation"]>): OutputTextAnnotation {

@@ -16,6 +16,7 @@ from bothesis.agent.protocol import (
     ResponseOutputTextDoneEvent,
     ResponseStreamEvent,
 )
+from bothesis.knowledge import CitationResolver
 
 _PartKey = tuple[int, int]
 
@@ -159,18 +160,31 @@ class CitationProjection:
 def _document_citation(evidence: Evidence, offset: int) -> Annotation:
     """Build the one BoThesis annotation type from an evidence record."""
 
+    locator = evidence.citation.model_dump(mode="json", exclude_none=True)
+    source = (
+        evidence.source.model_dump(mode="json", exclude_none=True)
+        if evidence.source is not None
+        else None
+    )
+    internal_url = CitationResolver.internal_path(evidence.item_id, evidence.chunk_id)
+    original_url = (
+        CitationResolver.original_url(evidence.source, evidence.citation)
+        if evidence.source is not None
+        else None
+    )
     return {
         "type": DOCUMENT_CITATION_TYPE,
         "start_index": offset,
         "end_index": offset,
         "citation": {
             "id": evidence.id,
-            "document_id": evidence.document_id,
+            "item_id": evidence.item_id,
+            "chunk_id": evidence.chunk_id,
             "title": evidence.title,
-            "page": evidence.page,
-            "section": evidence.section,
-            "uri": evidence.uri,
-            "source": evidence.source,
+            **locator,
+            "source": source,
+            "internal_url": internal_url,
+            "original_url": original_url,
         },
     }
 

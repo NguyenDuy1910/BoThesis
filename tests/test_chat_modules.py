@@ -75,7 +75,8 @@ def test_conversation_policy_preserves_recent_turn_and_summarizes_only_older() -
 async def test_conversation_context_uses_distinct_xml_sections() -> None:
     evidence = Evidence(
         id="ev-1",
-        document_id="doc-1",
+        item_id="doc-1",
+        chunk_id="chunk-1",
         title="Leave policy",
         content="Employees receive 20 days of annual leave.",
     )
@@ -124,7 +125,8 @@ async def test_citation_renderer_carries_split_markers_between_deltas() -> None:
     evidence = {
         "ev-1": Evidence(
             id="ev-1",
-            document_id="doc-1",
+            item_id="doc-1",
+            chunk_id="chunk-1",
             title="Leave policy",
             content="Grounded content",
         )

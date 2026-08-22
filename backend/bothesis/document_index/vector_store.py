@@ -19,20 +19,31 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client import models as qmodels
 
 from bothesis.agent.models import Evidence
-from bothesis.connector.qdrant import ChunkKind, QdrantChunkPayload
+from bothesis.connector.qdrant import (
+    QdrantChunkPayload,
+    QdrantPayloadContext,
+    make_contextual_text,
+)
+from bothesis.knowledge.protocol import (
+    CitationInfo,
+    CitationSpan,
+    ChunkContext,
+    ContextualChunk,
+    DocumentKind,
+    EffectiveAccess,
+    Hierarchy,
+    SourceIdentity,
+    SourceProvider,
+)
 from bothesis.db.models import Document, DocumentChunk
 from bothesis.services import AuthContext
 
 log = logging.getLogger(__name__)
 
-ACL_FIELD = "access_control_list"
+ACL_FIELD = "reader_ids"
 NO_READER_IDS = "__no_reader_ids__"
 _NO_TENANT_ID = "__no_tenant_id__"
 _SEARCH_RETRY_DELAYS = (0.5, 1.0)
-
-
-def _qdrant_json_path_segment(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def acl_match_condition(reader_ids: list[str] | set[str]) -> qmodels.Filter:
@@ -44,34 +55,20 @@ def no_access_qdrant_condition() -> qmodels.Filter:
 
 
 class VectorStoreFilterBuilder:
-    FILTER_FIELD_MAP: dict[str, str] = {
-        "source_type": "source_type",
-        "doc_id": "document_id",
-        "connector_ids": "connector_id",
-    }
-
     # A tuple makes generated filters deterministic, which helps auditing and
     # makes equivalent retrieval requests easier to compare in tests/logs.
     FILTERABLE_LIST_FIELDS: tuple[str, ...] = (
-        "source_system",
-        "doc_type",
-        "domains",
-        "project_key",
-        "space_key",
-        "ticket_status",
-        "ticket_type",
-        "source_type",
+        "provider",
+        "document_kind",
         "content_type",
-        "chunk_kind",
-        "language",
-        "doc_id",
-        "section_id",
+        "item_id",
+        "chunk_id",
+        "section",
         "external_id",
-        "parent_content_id",
-        "attachment_id",
-        "comment_id",
-        "sheet_name",
-        "connector_ids",
+        "parent_id",
+        "root_id",
+        "ancestor_ids",
+        "connector_id",
     )
 
     @classmethod
@@ -90,9 +87,11 @@ class VectorStoreFilterBuilder:
         field_map: dict[str, str] | None = None,
     ) -> list[Any]:
         conditions: list[Any] = []
-        resolved_field_map = {**cls.FILTER_FIELD_MAP, **(field_map or {})}
+        resolved_field_map = {"section": "citation_section", **(field_map or {})}
         for logical_name in cls.FILTERABLE_LIST_FIELDS:
             values = getattr(filters, logical_name, [])
+            if not values and logical_name == "connector_id":
+                values = getattr(filters, "connector_ids", [])
             if not values:
                 continue
             qdrant_field = resolved_field_map.get(logical_name, logical_name)
@@ -198,7 +197,7 @@ class VectorStore:
         document_id: str,
         payload: dict[str, Any],
         *,
-        document_id_field: str = "document_id",
+        document_id_field: str = "item_id",
         collection_name: str | None = None,
     ) -> Any:
         return await self.set_payload(
@@ -215,7 +214,7 @@ class VectorStore:
         acl: Mapping[str, int] | Iterable[str],
         *,
         acl_field: str = ACL_FIELD,
-        document_id_field: str = "document_id",
+        document_id_field: str = "item_id",
         collection_name: str | None = None,
     ) -> Any:
         raw_reader_ids = acl.keys() if isinstance(acl, Mapping) else acl
@@ -231,7 +230,7 @@ class VectorStore:
         self,
         document_id: str,
         *,
-        document_id_field: str = "document_id",
+        document_id_field: str = "item_id",
         is_deleted_field: str = "is_deleted",
         acl_field: str = ACL_FIELD,
         collection_name: str | None = None,
@@ -443,7 +442,7 @@ class VectorStore:
         query_text: str,
         *,
         base_filter: Any | None = None,
-        content_field: str = "content",
+        content_field: str = "chunk_text",
         limit: int = 100,
         collection_name: str | None = None,
     ) -> Any:
@@ -471,7 +470,7 @@ class VectorStore:
         limit: int,
         offset: Any | None = None,
         include_deleted: bool = False,
-        document_id_field: str = "document_id",
+        document_id_field: str = "item_id",
         is_deleted_field: str = "is_deleted",
         collection_name: str | None = None,
     ) -> Any:
@@ -503,7 +502,7 @@ class VectorStore:
         *,
         base_filter: Any | None = None,
         limit: int = 10,
-        document_id_field: str = "document_id",
+        document_id_field: str = "item_id",
         is_deleted_field: str = "is_deleted",
         collection_name: str | None = None,
     ) -> Any:
@@ -532,9 +531,9 @@ class VectorStore:
         window: int = 2,
         limit: int | None = None,
         base_filter: Any | None = None,
-        document_id_field: str = "document_id",
+        document_id_field: str = "item_id",
         is_deleted_field: str = "is_deleted",
-        chunk_id_field: str = "chunk_id",
+        chunk_index_field: str = "chunk_index",
         collection_name: str | None = None,
     ) -> Any:
         must = self._document_context_must(
@@ -545,7 +544,7 @@ class VectorStore:
         )
         must.append(
             qmodels.FieldCondition(
-                key=chunk_id_field,
+                    key=chunk_index_field,
                 range=qmodels.Range(
                     gte=chunk_position - window,
                     lte=chunk_position + window,
@@ -570,9 +569,9 @@ class VectorStore:
         *,
         base_filter: Any | None = None,
         limit: int = 5,
-        document_id_field: str = "document_id",
+        document_id_field: str = "item_id",
         is_deleted_field: str = "is_deleted",
-        chunk_kind_field: str = "chunk_kind",
+        chunk_kind_field: str = "document_kind",
         collection_name: str | None = None,
     ) -> Any:
         must = self._document_context_must(
@@ -606,10 +605,10 @@ class VectorStore:
         ancestor_node_id: int | None = None,
         base_filter: Any | None = None,
         limit: int = 8,
-        document_id_field: str = "document_id",
+        document_id_field: str = "item_id",
         is_deleted_field: str = "is_deleted",
-        hierarchy_node_id_field: str = "hierarchy_node_id",
-        ancestor_ids_field: str = "ancestor_hierarchy_node_ids",
+        hierarchy_node_id_field: str = "parent_id",
+        ancestor_ids_field: str = "ancestor_ids",
         collection_name: str | None = None,
     ) -> Any:
         if hierarchy_node_id is None and ancestor_node_id is None:
@@ -661,10 +660,10 @@ class VectorStore:
         payload_filters: Any | None = None,
         is_deleted_field: str = "is_deleted",
         tenant_id_field: str = "tenant_id",
-        document_id_field: str = "document_id",
-        source_type_field: str = "source_type",
-        space_key_field: str = "space_key",
-        ancestor_ids_field: str = "ancestor_hierarchy_node_ids",
+        document_id_field: str = "item_id",
+        source_type_field: str = "provider",
+        space_key_field: str = "parent_id",
+        ancestor_ids_field: str = "ancestor_ids",
     ) -> qmodels.Filter:
         tenant_id = getattr(access_context, "tenant_id", None)
         if isinstance(tenant_id, str) and tenant_id.strip():
@@ -686,14 +685,14 @@ class VectorStore:
                 tenant_id_field=tenant_id_field,
             )
 
-        field_map = {
-            "doc_id": document_id_field,
-            "source_type": source_type_field,
-        }
         conditions.extend(
             VectorStoreFilterBuilder.business_conditions(
                 payload_filters,
-                field_map=field_map,
+                field_map={
+                    "item_id": document_id_field,
+                    "provider": source_type_field,
+                    "connector_id": "connector_id",
+                },
             )
         )
         conditions.extend(
@@ -750,9 +749,9 @@ class VectorStore:
         cls,
         params: Any | None,
         *,
-        source_type_field: str = "source_type",
-        space_key_field: str = "space_key",
-        ancestor_ids_field: str = "ancestor_hierarchy_node_ids",
+        source_type_field: str = "provider",
+        space_key_field: str = "parent_id",
+        ancestor_ids_field: str = "ancestor_ids",
     ) -> qmodels.Filter | None:
         conditions = cls._search_param_conditions(
             params,
@@ -801,7 +800,7 @@ class VectorStore:
     def document_filter(
         document_id: str,
         *,
-        document_id_field: str = "document_id",
+        document_id_field: str = "item_id",
     ) -> qmodels.Filter:
         return qmodels.Filter(
             must=[
@@ -817,20 +816,12 @@ class VectorStore:
         ids = cls._normalise_reader_ids(reader_ids)
         if not ids:
             ids = [NO_READER_IDS]
-        object_key_matches = [
-            qmodels.FieldCondition(
-                key=f'{ACL_FIELD}."{_qdrant_json_path_segment(rid)}"',
-                match=qmodels.MatchValue(value=1),
-            )
-            for rid in ids
-        ]
         return qmodels.Filter(
             should=[
                 qmodels.FieldCondition(
                     key=ACL_FIELD,
                     match=qmodels.MatchAny(any=ids),
                 ),
-                *object_key_matches,
             ]
         )
 
@@ -854,28 +845,28 @@ class VectorStore:
         ancestor_ids_field: str,
     ) -> list[Any]:
         conditions: list[Any] = []
-        source_type = getattr(params, "source_type", None)
-        if source_type:
+        provider = getattr(params, "provider", None)
+        if provider:
             conditions.append(
                 qmodels.FieldCondition(
                     key=source_type_field,
-                    match=qmodels.MatchValue(value=source_type),
+                    match=qmodels.MatchValue(value=provider),
                 )
             )
-        space_key = getattr(params, "space_key", None)
-        if space_key:
+        parent_id = getattr(params, "parent_id", None)
+        if parent_id:
             conditions.append(
                 qmodels.FieldCondition(
                     key=space_key_field,
-                    match=qmodels.MatchValue(value=space_key),
+                    match=qmodels.MatchValue(value=parent_id),
                 )
             )
-        ancestor_node_id = getattr(params, "ancestor_node_id", None)
-        if ancestor_node_id is not None:
+        ancestor_id = getattr(params, "ancestor_id", None)
+        if ancestor_id is not None:
             conditions.append(
                 qmodels.FieldCondition(
                     key=ancestor_ids_field,
-                    match=qmodels.MatchValue(value=ancestor_node_id),
+                    match=qmodels.MatchValue(value=ancestor_id),
                 )
             )
         return conditions
@@ -986,7 +977,6 @@ class QdrantDocumentIndex:
                     chunk,
                     access=access,
                     embedding_model=embedding_model,
-                    source_fingerprint=source_fingerprint,
                 ),
             )
             for chunk, vector in zip(chunks, vectors, strict=True)
@@ -1011,7 +1001,7 @@ class QdrantDocumentIndex:
             must=[
                 *(base_filter.must or []),
                 qmodels.FieldCondition(
-                    key="document_id",
+                    key="item_id",
                     match=qmodels.MatchValue(value=str(document.id)),
                 ),
             ]
@@ -1028,7 +1018,7 @@ class QdrantDocumentIndex:
             payload = getattr(point, "payload", None)
             if not isinstance(payload, dict):
                 continue
-            content = payload.get("content")
+            content = payload.get("chunk_text")
             if not isinstance(content, str) or not content.strip():
                 continue
             raw_score = getattr(point, "score", None)
@@ -1040,17 +1030,24 @@ class QdrantDocumentIndex:
                         document.id,
                         int(payload.get("chunk_index") or 0),
                     ),
-                    document_id=str(document.id),
+                    item_id=str(document.id),
+                    chunk_id=str(
+                        payload.get("chunk_id")
+                        or f"{document.id}:{int(payload.get('chunk_index') or 0)}"
+                    ),
                     title=str(payload.get("title") or document.title or document.id),
                     content=content,
-                    page=(
-                        str(payload["page_number"])
-                        if payload.get("page_number") is not None
-                        else None
+                    source=SourceIdentity(
+                        connector_id=str(payload.get("connector_id") or "upload"),
+                        provider=SourceProvider.FILE,
+                        external_id=str(payload.get("external_id") or document.id),
+                        url=(
+                            str(payload["source_url"])
+                            if payload.get("source_url") is not None
+                            else None
+                        ),
                     ),
-                    section=_document_section(payload),
-                    uri=None,
-                    source="upload",
+                    citation=_citation_from_payload(payload),
                     relevance_score=score,
                 )
             )
@@ -1068,8 +1065,7 @@ class QdrantDocumentIndex:
             str(document_id),
             {
                 "tenant_id": str(access.tenant_id),
-                "owner_user_id": str(access.user_id),
-                "access_control_list": [str(access.user_id)],
+                "reader_ids": [str(access.user_id)],
             },
         )
 
@@ -1090,46 +1086,157 @@ def _document_payload(
     *,
     access: AuthContext,
     embedding_model: str,
-    source_fingerprint: str,
 ) -> dict[str, Any]:
     metadata = dict(chunk.metadata_)
-    page_number = chunk.start_page_number or chunk.end_page_number
-    sheet_name = metadata.get("sheet_name")
-    return QdrantChunkPayload(
-        tenant_id=str(access.tenant_id),
-        owner_user_id=str(access.user_id),
-        connector_id="upload",
-        document_id=str(document.id),
-        external_id=str(document.id),
-        chunk_id=chunk.chunk_index,
+    title = document.title or str(document.id)
+    metadata_element_id = _metadata_text(chunk.metadata_, "element_id")
+    element_id = metadata_element_id or f"element_{chunk.chunk_index + 1:03d}"
+    start_offset = _metadata_int(chunk.metadata_, "start_offset")
+    end_offset = _metadata_int(chunk.metadata_, "end_offset")
+    section_path = list(chunk.heading_path or ())
+    citation_spans = _metadata_citation_spans(metadata)
+    if not citation_spans:
+        # Existing durable chunks may predate span storage.  Convert their
+        # bounded metadata once at projection time; newly written chunks use
+        # only ``citation_spans``.
+        citation_spans = (
+            CitationSpan(
+                page=chunk.start_page_number or chunk.end_page_number,
+                element_id=element_id,
+                start_offset=start_offset if start_offset is not None else 0,
+                end_offset=end_offset if end_offset is not None else len(chunk.content),
+                bounding_box=_metadata_bbox(metadata.get("bounding_box")),
+            ),
+        )
+    summary = metadata.get("summary")
+    summary_text = summary if isinstance(summary, str) else None
+    document_kind = (
+        DocumentKind.IMAGE
+        if (document.mime_type or "").startswith("image/")
+        else DocumentKind.PDF
+        if document.mime_type == "application/pdf"
+        else DocumentKind.DOCUMENT
+    )
+    contextual = ContextualChunk(
+        id=f"{document.id}:{chunk.chunk_index}",
+        item_id=str(document.id),
         chunk_index=chunk.chunk_index,
-        section_id=f"{document.id}::{chunk.chunk_index}",
-        section_index=chunk.chunk_index,
-        title=document.title or str(document.id),
-        section_title=(chunk.heading_path[-1] if chunk.heading_path else None),
-        semantic_identifier=document.title or str(document.id),
-        content=chunk.content,
-        source="upload",
-        source_type="upload",
-        source_system="upload",
-        chunk_kind=ChunkKind.FILE,
-        content_type=document.mime_type or "application/octet-stream",
-        access_control_list=[str(access.user_id)],
-        metadata={
-            str(key): value
-            for key, value in metadata.items()
-            if isinstance(value, (str, list))
-        },
-        sheet_name=(sheet_name if isinstance(sheet_name, str) and sheet_name else None),
-        page_number=page_number,
-        heading_path=list(chunk.heading_path or ()),
-        file_name=str(document.metadata_.get("file_name") or document.title or ""),
-        size_bytes=document.size_bytes or 0,
-        embedding_model=embedding_model,
-        source_fingerprint=source_fingerprint,
+        content_type="text",
+        chunk_text=chunk.content,
+        contextual_text=make_contextual_text(
+            title=title,
+            context=ChunkContext(section_path=section_path, summary=summary_text),
+            chunk_text=chunk.content,
+        ),
+        context=ChunkContext(section_path=section_path, summary=summary_text),
+        title=title,
+        document_kind=document_kind.value,
+        source=SourceIdentity(
+            connector_id="upload",
+            provider=SourceProvider.FILE,
+            external_id=str(document.id),
+            url=document.source_url,
+        ),
+        hierarchy=Hierarchy(),
+        access=EffectiveAccess(reader_ids=[str(access.user_id)]),
+        citation=CitationInfo(
+            section=section_path[-1] if section_path else None,
+            section_path=tuple(section_path),
+            anchor=_metadata_text(chunk.metadata_, "anchor"),
+            spans=tuple(citation_spans),
+        ),
+    )
+    return QdrantChunkPayload.from_contextual_chunk(
+        contextual,
+        QdrantPayloadContext(
+            tenant_id=str(access.tenant_id),
+            connector_id="upload",
+            scope_id=str(document.connector_scope_id) if document.connector_scope_id else None,
+            embedding_model=embedding_model,
+        ),
     ).for_qdrant()
 
 
-def _document_section(payload: dict[str, Any]) -> str | None:
-    value = payload.get("section_title") or payload.get("sheet_name")
-    return str(value) if value is not None else None
+def _citation_from_payload(payload: dict[str, Any]) -> CitationInfo:
+    return CitationInfo(
+        section=_payload_text(payload, "citation_section"),
+        section_path=tuple(_payload_strings(payload, "citation_section_path")),
+        anchor=_payload_text(payload, "citation_anchor"),
+        spans=tuple(_payload_citation_spans(payload.get("citation_spans"))),
+    )
+
+
+def _payload_text(payload: Mapping[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _payload_strings(payload: Mapping[str, Any], key: str) -> list[str]:
+    value = payload.get(key)
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _payload_int(payload: Mapping[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
+
+
+def _metadata_text(metadata: Mapping[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _metadata_int(metadata: Mapping[str, Any], key: str) -> int | None:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
+
+
+def _metadata_bbox(value: object) -> Any:
+    from bothesis.knowledge.protocol import BoundingBox
+
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        return BoundingBox.model_validate(value)
+    except ValueError:
+        return None
+
+
+def _metadata_citation_spans(metadata: Mapping[str, Any]) -> tuple[CitationSpan, ...]:
+    return tuple(_payload_citation_spans(metadata.get("citation_spans")))
+
+
+def _payload_citation_spans(value: object) -> list[CitationSpan]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    spans: list[CitationSpan] = []
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            spans.append(
+                CitationSpan(
+                    page=_payload_int(raw, "page"),
+                    element_id=_payload_text(raw, "element_id"),
+                    start_offset=_payload_int(raw, "start_offset"),
+                    end_offset=_payload_int(raw, "end_offset"),
+                    bounding_box=_metadata_bbox(raw.get("bounding_box")),
+                )
+            )
+        except ValueError:
+            continue
+    return spans

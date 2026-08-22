@@ -33,13 +33,38 @@ export type ResponseStatus =
 
 export interface CitationReference {
   id?: string;
-  document_id?: string;
+  item_id?: string;
+  chunk_id?: string;
   title?: string;
-  page?: string | number | null;
   section?: string | null;
-  uri?: string | null;
-  source?: string | null;
-  restricted?: boolean;
+  section_path?: string[] | null;
+  anchor?: string | null;
+  spans?: CitationSpan[] | null;
+  source?: CitationSource | null;
+  internal_url?: string | null;
+  original_url?: string | null;
+}
+
+export interface BoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface CitationSpan {
+  page?: number | null;
+  element_id?: string | null;
+  start_offset?: number | null;
+  end_offset?: number | null;
+  bounding_box?: BoundingBox | null;
+}
+
+export interface CitationSource {
+  connector_id?: string | number;
+  provider?: string;
+  external_id?: string;
+  url?: string | null;
 }
 
 /** The one BoThesis annotation type; the specification only defines url_citation. */

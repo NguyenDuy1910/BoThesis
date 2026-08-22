@@ -114,6 +114,60 @@ BOTHESIS_R2_ENDPOINT_URL=
 
 The API starts at `http://127.0.0.1:8000`.
 
+### Database migrations
+
+BoThesis uses numbered SQL migrations in `backend/migrations/` rather than
+Alembic. Start the local PostgreSQL service from the repository root:
+
+```bash
+docker compose -f deployment/compose.yml up -d postgres
+```
+
+For a completely fresh database, create the base tables once from the SQLAlchemy
+models. Run this from `backend/` so the local `.env` file is loaded:
+
+```bash
+cd backend
+
+uv run python - <<'PY'
+import asyncio
+from dotenv import load_dotenv
+from bothesis.db.engine import get_engine
+from bothesis.db.models import Base
+
+load_dotenv()
+
+async def main():
+    engine = get_engine()
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await engine.dispose()
+
+asyncio.run(main())
+PY
+
+cd ..
+```
+
+Apply all numbered migrations in order:
+
+```bash
+set -e
+
+for migration in backend/migrations/*.sql; do
+  docker compose -f deployment/compose.yml exec -T postgres \
+    sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    < "$migration"
+done
+```
+
+If a migration reports that a core table such as `documents` or `tenants` does
+not exist, run the fresh-database initialization above first, then rerun this
+migration loop.
+
+The migration scripts are idempotent and can be run again safely against the
+same database.
+
 - Health: `http://127.0.0.1:8000/health`
 - OpenAPI: `http://127.0.0.1:8000/docs`
 - Chat stream: `POST http://127.0.0.1:8000/api/v1/agent/chat`

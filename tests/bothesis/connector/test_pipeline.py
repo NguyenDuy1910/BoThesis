@@ -9,18 +9,23 @@ from bothesis.connector.base import BaseSourceConnector
 from bothesis.connector.models import (
     ConnectorCheckpoint,
     ConnectorScope,
-    DocumentSource,
-    HierarchyNode,
-    HierarchyNodeType,
-    SourceACL,
-    SourceChange,
-    SourceChangeType,
     SourceCheckpoint,
-    SourceDocument,
-    TextSection,
 )
 from bothesis.connector.pipeline import ConnectorPipeline, ConnectorPipelineConfig
 from bothesis.connector.qdrant import ChunkingConfig, QdrantChunkRecord, QdrantPayloadContext
+from bothesis.knowledge.protocol import (
+    AccessPolicy,
+    ChangeType,
+    CollectionItem,
+    CollectionKind,
+    DocumentItem,
+    DocumentKind,
+    Hierarchy,
+    ItemChange,
+    SourceIdentity,
+    SourceProvider,
+    TextPart,
+)
 
 
 class RecordingSink:
@@ -32,14 +37,14 @@ class RecordingSink:
         self.write_batches.append(list(records))
         return len(records)
 
-    async def soft_delete_document(
+    async def soft_delete_item(
         self,
         *,
         tenant_id: str,
         connector_id: str | int,
-        document_id: str,
+        item_id: str,
     ) -> None:
-        self.deletes.append((tenant_id, connector_id, document_id))
+        self.deletes.append((tenant_id, connector_id, item_id))
 
 
 class StubConnector(BaseSourceConnector):
@@ -60,43 +65,51 @@ class StubConnector(BaseSourceConnector):
 
     async def discover_changes(
         self, checkpoint: ConnectorCheckpoint, scope: ConnectorScope
-    ) -> list[SourceChange]:
+    ) -> list[ItemChange]:
         del checkpoint, scope
         return [
-            SourceChange(external_id="doc-1", external_version="v1"),
-            SourceChange(external_id="doc-2", external_version="v2"),
-            SourceChange(external_id="doc-old", change_type=SourceChangeType.DELETE),
-            SourceChange(external_id="doc-1", external_version="v1"),
+            ItemChange(type=ChangeType.UPSERT, item_id="doc-1"),
+            ItemChange(type=ChangeType.UPSERT, item_id="doc-2"),
+            ItemChange(type=ChangeType.DELETE, item_id="doc-old"),
+            ItemChange(type=ChangeType.UPSERT, item_id="doc-1"),
         ]
 
-    async def fetch_document(self, external_id: str) -> SourceDocument:
+    async def fetch_item(self, external_id: str) -> DocumentItem:
         self.active_fetches += 1
         self.max_active_fetches = max(self.max_active_fetches, self.active_fetches)
         try:
             await asyncio.sleep(0.01)
             if external_id == self.fail_document:
                 raise RuntimeError("source failed")
-            return SourceDocument(
-                external_id=external_id,
-                source=DocumentSource.FILE,
-                semantic_identifier=external_id,
-                sections=[TextSection(text=external_id + " " + "x" * 150)],
-                acl=SourceACL(),
+            return DocumentItem(
+                id=external_id,
+                title=external_id,
+                document_kind=DocumentKind.DOCUMENT,
+                source=SourceIdentity(
+                    connector_id="connector-1",
+                    provider=SourceProvider.FILE,
+                    external_id=external_id,
+                    external_version="v1",
+                ),
+                hierarchy=Hierarchy(parent_id="root"),
+                access=AccessPolicy.from_reader_ids(["external_group:staff"]),
+                content=[TextPart(text=external_id + " " + "x" * 150)],
             )
         finally:
             self.active_fetches -= 1
 
-    async def fetch_acl(self, external_id: str) -> SourceACL:
-        del external_id
-        return SourceACL(user_group_ids={"staff"})
-
-    async def fetch_hierarchy(self, scope: ConnectorScope) -> list[HierarchyNode]:
+    async def fetch_hierarchy(self, scope: ConnectorScope) -> list[CollectionItem]:
         del scope
         return [
-            HierarchyNode(
-                raw_node_id="root",
-                display_name="Root",
-                node_type=HierarchyNodeType.FOLDER,
+            CollectionItem(
+                id="root",
+                title="Root",
+                collection_kind=CollectionKind.FOLDER,
+                source=SourceIdentity(
+                    connector_id="connector-1",
+                    provider=SourceProvider.FILE,
+                    external_id="root",
+                ),
             )
         ]
 
@@ -126,10 +139,10 @@ async def test_pipeline_batches_payloads_bounds_fetches_and_advances_checkpoint(
     result = await pipeline.run_scope(SCOPE, SourceCheckpoint())
 
     assert result.discovered_changes == 3
-    assert result.processed_documents == 2
+    assert result.processed_items == 2
     assert result.written_chunks == 4
-    assert result.deleted_documents == 1
-    assert result.replaced_documents == 2
+    assert result.deleted_items == 1
+    assert result.replaced_items == 2
     assert result.checkpoint_advanced is True
     assert result.checkpoint == SourceCheckpoint(cursor="complete")
     assert connector.max_active_fetches == 2
@@ -139,9 +152,9 @@ async def test_pipeline_batches_payloads_bounds_fetches_and_advances_checkpoint(
         ("tenant-1", "connector-1", "doc-2"),
         ("tenant-1", "connector-1", "doc-1"),
     ]
-    assert result.hierarchy[0].raw_node_id == "root"
+    assert result.hierarchy[0].id == "root"
     assert all(
-        record.payload.access_control_list == ["external_group:staff"]
+        record.payload.reader_ids == ["external_group:staff"]
         for batch in sink.write_batches
         for record in batch
     )
@@ -167,6 +180,6 @@ async def test_pipeline_does_not_advance_checkpoint_after_partial_failure() -> N
 
     assert result.checkpoint_advanced is False
     assert result.checkpoint == initial
-    assert result.processed_documents == 1
-    assert result.failures[0].external_id == "doc-2"
+    assert result.processed_items == 1
+    assert result.failures[0].item_id == "doc-2"
     assert result.failures[0].operation == "fetch"

@@ -23,7 +23,16 @@ from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
-from bothesis.knowledge.document_index import RetrievedDocument
+from bothesis.knowledge.protocol import (
+    CitationInfo,
+    CitationSpan,
+    ChunkContext,
+    ContextualChunk,
+    EffectiveAccess,
+    Hierarchy,
+    SourceIdentity,
+    SourceProvider,
+)
 from bothesis.services import AuthContext, DatasourceService
 
 
@@ -124,7 +133,7 @@ class StubRetriever:
     def __init__(self) -> None:
         self.contexts: list[Any] = []
 
-    async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
+    async def search(self, query: str, *, limit: int) -> list[ContextualChunk]:
         assert query == "leave policy"
         assert limit == 5
         return self._documents()
@@ -135,23 +144,45 @@ class StubRetriever:
         *,
         limit: int,
         ctx: Any,
-    ) -> list[RetrievedDocument]:
+    ) -> list[ContextualChunk]:
         assert query == "leave policy"
         assert limit == 5
         self.contexts.append(ctx)
         return self._documents()
 
     @staticmethod
-    def _documents() -> list[RetrievedDocument]:
+    def _documents() -> list[ContextualChunk]:
         return [
-            RetrievedDocument(
+            ContextualChunk(
                 id="chunk-1",
-                document_id="doc-1",
+                item_id="doc-1",
+                chunk_index=0,
+                content_type="text",
                 title="Leave policy",
-                content="Employees receive 20 days of annual leave.",
-                source="confluence",
-                uri="https://knowledge.example/leave-policy",
-                metadata={"section_title": "Annual leave"},
+                chunk_text="Employees receive 20 days of annual leave.",
+                contextual_text=(
+                    "Document: Leave policy\nSection: Annual leave\n\n"
+                    "Employees receive 20 days of annual leave."
+                ),
+                context=ChunkContext(section_path=["Annual leave"]),
+                document_kind="document",
+                source=SourceIdentity(
+                    connector_id="connector-1",
+                    provider=SourceProvider.CONFLUENCE,
+                    external_id="doc-1",
+                    url="https://knowledge.example/leave-policy",
+                ),
+                hierarchy=Hierarchy(),
+                access=EffectiveAccess(reader_ids=["public"]),
+                citation=CitationInfo(
+                    section="Annual leave",
+                    section_path=("Annual leave",),
+                    spans=(CitationSpan(
+                        element_id="paragraph_001",
+                        start_offset=0,
+                        end_offset=len("Employees receive 20 days of annual leave."),
+                    ),),
+                ),
                 relevance_score=0.9,
             )
         ]
@@ -336,8 +367,9 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         if event["type"] == "response.output_text.annotation.added"
     )
     assert annotation["type"] == "bothesis:document_citation"
-    assert annotation["citation"]["document_id"] == "doc-1"
-    assert annotation["citation"]["source"] == "confluence"
+    assert annotation["citation"]["item_id"] == "doc-1"
+    assert annotation["citation"]["chunk_id"] == "chunk-1"
+    assert annotation["citation"]["source"]["provider"] == "confluence"
     assert len(retriever.contexts) == 1
     assert retriever.contexts[0].reader_ids == (
         "email:person@example.test",

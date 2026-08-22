@@ -11,9 +11,9 @@ from bothesis.agent.models import Evidence, ToolContext, ToolOutput
 from bothesis.agent.tools import Tool, ToolDefinition
 from bothesis.knowledge.document_index import (
     KnowledgeRetriever,
-    RetrievedDocument,
     ScopedKnowledgeRetriever,
 )
+from bothesis.knowledge.protocol import ContextualChunk
 from bothesis.observability import LangfuseTracing
 
 
@@ -118,7 +118,7 @@ class KnowledgeSearch(Tool):
         results = await asyncio.gather(
             *(self._search_query(query, ctx) for query in queries),
         )
-        documents: list[RetrievedDocument] = []
+        documents: list[ContextualChunk] = []
         failures: list[str] = []
         seen_document_ids: set[str] = set()
         for query_documents, failure in results:
@@ -163,7 +163,7 @@ class KnowledgeSearch(Tool):
             )
 
         evidence = [
-            self._evidence_from_document(document) for document in documents
+            self._evidence_from_chunk(document) for document in documents
         ]
         return ToolOutput(
             content=self._context_from_documents(documents),
@@ -180,7 +180,7 @@ class KnowledgeSearch(Tool):
         self,
         query: str,
         ctx: ToolContext,
-    ) -> tuple[list[RetrievedDocument], str | None]:
+    ) -> tuple[list[ContextualChunk], str | None]:
         started_at = perf_counter()
         trace_context = (
             self._tracing.retrieval(
@@ -224,12 +224,12 @@ class KnowledgeSearch(Tool):
                 return [], "retrieval_failure"
 
             if retrieval_trace is not None:
-                evidence = [self._evidence_from_document(document) for document in documents]
+                evidence = [self._evidence_from_chunk(document) for document in documents]
                 retrieval_trace.complete(
                     outcome="success" if documents else "empty",
                     result_count=len(documents),
                     source_types=[
-                        document.source for document in documents if document.source
+                        document.source.provider.value for document in documents
                     ],
                     results=evidence,
                     duration_ms=self._duration_ms(started_at),
@@ -262,34 +262,32 @@ class KnowledgeSearch(Tool):
                 queries.append(query)
         return queries, None
 
-    def _context_from_documents(self, documents: list[RetrievedDocument]) -> str:
+    def _context_from_documents(self, documents: list[ContextualChunk]) -> str:
         blocks: list[str] = []
         remaining_characters = self._max_context_characters
         for document in documents:
-            prefix = f"[{document.id}] {document.title}"
-            if document.source:
-                prefix += f"\nSource: {document.source}"
-            if document.uri:
-                prefix += f"\nURI: {document.uri}"
+            prefix = f"[{document.id}] {document.title or document.item_id}"
+            prefix += f"\nSource: {document.source.provider.value}"
+            if document.source.url:
+                prefix += f"\nSource URL: {document.source.url}"
             prefix += "\nExcerpt: "
             available_content = remaining_characters - len(prefix) - 2
             if available_content <= 0:
                 break
-            block = f"{prefix}{self._clip(document.content, available_content)}"
+            block = f"{prefix}{self._clip(document.chunk_text, available_content)}"
             blocks.append(block)
             remaining_characters -= len(block) + 2
         return "Retrieved access-permitted enterprise evidence:\n\n" + "\n\n".join(blocks)
 
-    def _evidence_from_document(self, document: RetrievedDocument) -> Evidence:
-        section = document.metadata.get("section_title")
+    def _evidence_from_chunk(self, document: ContextualChunk) -> Evidence:
         return Evidence(
             id=document.id,
-            document_id=document.document_id,
-            title=document.title,
-            content=self._clip(document.content, self._max_evidence_characters),
-            section=section if isinstance(section, str) and section.strip() else None,
-            uri=document.uri,
+            item_id=document.item_id,
+            chunk_id=document.id,
+            title=document.title or document.item_id,
+            content=self._clip(document.chunk_text, self._max_evidence_characters),
             source=document.source,
+            citation=document.citation,
             relevance_score=document.relevance_score,
         )
 

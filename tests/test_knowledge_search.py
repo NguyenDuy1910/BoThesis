@@ -16,30 +16,78 @@ from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
 from bothesis.knowledge.document_index import (
     QdrantKeywordRetriever,
     QdrantSemanticRetriever,
-    RetrievedDocument,
     ScopedKnowledgeRetriever,
+)
+from bothesis.knowledge import CitationResolver
+from bothesis.knowledge.protocol import (
+    CitationInfo,
+    CitationSpan,
+    ChunkContext,
+    ContextualChunk,
+    EffectiveAccess,
+    Hierarchy,
+    SourceIdentity,
+    SourceProvider,
 )
 
 CONTEXT = AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[])
 TOOL_CONTEXT = ToolContext(agent_context=CONTEXT)
-DOCUMENT = RetrievedDocument(
-    id="chunk-1",
-    document_id="doc-1",
-    title="Leave policy",
-    content="Employees receive 20 days of annual leave.",
-    source="confluence",
-    uri="https://knowledge.example/leave-policy",
-    metadata={"section_title": "Annual leave"},
-    relevance_score=0.91,
-)
+def _chunk(*, score: float = 0.91) -> ContextualChunk:
+    return ContextualChunk(
+        id="chunk-1",
+        item_id="doc-1",
+        chunk_index=0,
+        content_type="text",
+        chunk_text="Employees receive 20 days of annual leave.",
+        contextual_text=(
+            "Document: Leave policy\nSection: Annual leave\n\n"
+            "Employees receive 20 days of annual leave."
+        ),
+        context=ChunkContext(section_path=["Annual leave"]),
+        title="Leave policy",
+        document_kind="document",
+        source=SourceIdentity(
+            connector_id="connector-1",
+            provider=SourceProvider.CONFLUENCE,
+            external_id="doc-1",
+            url="https://knowledge.example/leave-policy",
+        ),
+        hierarchy=Hierarchy(),
+        access=EffectiveAccess(reader_ids=["public"]),
+        citation=CitationInfo(
+            section="Annual leave",
+            section_path=("Annual leave",),
+            spans=(CitationSpan(
+                element_id="paragraph_001",
+                start_offset=0,
+                end_offset=len("Employees receive 20 days of annual leave."),
+            ),),
+        ),
+        relevance_score=score,
+    )
+
+
+DOCUMENT = _chunk()
+
+
+def test_citation_resolver_builds_internal_and_native_targets() -> None:
+    citation = CitationInfo(anchor="replication")
+    source = DOCUMENT.source
+
+    assert CitationResolver.internal_path("item:kafka", "item:kafka:12") == (
+        "/knowledge/items/item%3Akafka?chunk=item%3Akafka%3A12"
+    )
+    assert CitationResolver.original_url(source, citation) == (
+        "https://knowledge.example/leave-policy#replication"
+    )
 
 
 class StubRetriever(ScopedKnowledgeRetriever):
-    def __init__(self, documents: list[RetrievedDocument]) -> None:
+    def __init__(self, documents: list[ContextualChunk]) -> None:
         self.documents = documents
         self.calls: list[tuple[str, int]] = []
 
-    async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
+    async def search(self, query: str, *, limit: int) -> list[ContextualChunk]:
         self.calls.append((query, limit))
         return self.documents
 
@@ -49,12 +97,12 @@ class StubRetriever(ScopedKnowledgeRetriever):
         *,
         limit: int,
         ctx: AgentContext,
-    ) -> list[RetrievedDocument]:
+    ) -> list[ContextualChunk]:
         return await self.search(query, limit=limit)
 
 
 class ScopedStubRetriever(StubRetriever):
-    def __init__(self, documents: list[RetrievedDocument]) -> None:
+    def __init__(self, documents: list[ContextualChunk]) -> None:
         super().__init__(documents)
         self.contexts: list[AgentContext] = []
 
@@ -64,30 +112,30 @@ class ScopedStubRetriever(StubRetriever):
         *,
         limit: int,
         ctx: AgentContext,
-    ) -> list[RetrievedDocument]:
+    ) -> list[ContextualChunk]:
         self.calls.append((query, limit))
         self.contexts.append(ctx)
         return self.documents
 
 
 class FailingRetriever(ScopedKnowledgeRetriever):
-    async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
+    async def search(self, query: str, *, limit: int) -> list[ContextualChunk]:
         raise RuntimeError("Qdrant unavailable")
 
     async def search_scoped(
         self, query: str, *, limit: int, ctx: AgentContext
-    ) -> list[RetrievedDocument]:
+    ) -> list[ContextualChunk]:
         return await self.search(query, limit=limit)
 
 
 class BlockingRetriever(ScopedKnowledgeRetriever):
-    async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
+    async def search(self, query: str, *, limit: int) -> list[ContextualChunk]:
         await asyncio.Event().wait()
         return []
 
     async def search_scoped(
         self, query: str, *, limit: int, ctx: AgentContext
-    ) -> list[RetrievedDocument]:
+    ) -> list[ContextualChunk]:
         return await self.search(query, limit=limit)
 
 
@@ -97,12 +145,22 @@ class StubVectorStore:
             id="chunk-1",
             score=0.91,
             payload={
-                "document_id": "doc-1",
+                "item_id": "doc-1",
+                "chunk_id": "chunk-1",
+                "chunk_index": 0,
                 "title": "Leave policy",
-                "content": "Employees receive 20 days of annual leave.",
-                "source": "confluence",
-                "source_link": "https://knowledge.example/leave-policy",
-                "section_title": "Annual leave",
+                "document_kind": "document",
+                "content_type": "text",
+                "chunk_text": "Employees receive 20 days of annual leave.",
+                "contextual_text": "Document: Leave policy\nSection: Annual leave\n\nEmployees receive 20 days of annual leave.",
+                "provider": "confluence",
+                "connector_id": "connector-1",
+                "external_id": "doc-1",
+                "source_url": "https://knowledge.example/leave-policy",
+                "context_section_path": ["Annual leave"],
+                "citation_section_path": ["Annual leave"],
+                "citation_section": "Annual leave",
+                "reader_ids": ["public"],
             },
         )
         return [point], None
@@ -151,12 +209,23 @@ class StubSemanticVectorStore:
             SimpleNamespace(
                 id="chunk-1",
                 score=0.91,
-                payload={
-                    "document_id": "doc-1",
+            payload={
+                    "item_id": "doc-1",
+                    "chunk_id": "chunk-1",
+                    "chunk_index": 0,
                     "title": "Leave policy",
-                    "content": "Employees receive 20 days of annual leave.",
-                    "source": "confluence",
-                    "source_link": "https://knowledge.example/leave-policy",
+                    "document_kind": "document",
+                    "content_type": "text",
+                    "chunk_text": "Employees receive 20 days of annual leave.",
+                    "contextual_text": "Document: Leave policy\nSection: Annual leave\n\nEmployees receive 20 days of annual leave.",
+                    "provider": "confluence",
+                    "connector_id": "connector-1",
+                    "external_id": "doc-1",
+                    "source_url": "https://knowledge.example/leave-policy",
+                    "context_section_path": ["Annual leave"],
+                    "citation_section_path": ["Annual leave"],
+                    "citation_section": "Annual leave",
+                    "reader_ids": ["public"],
                 },
             )
         ]
@@ -171,13 +240,13 @@ async def test_keyword_retriever_normalizes_qdrant_payloads() -> None:
     assert len(results) == 1
     document = results[0]
     assert document.id == "chunk-1"
-    assert document.document_id == "doc-1"
+    assert document.item_id == "doc-1"
     assert document.title == "Leave policy"
-    assert document.source == "confluence"
-    assert document.uri == "https://knowledge.example/leave-policy"
+    assert document.source.provider.value == "confluence"
+    assert document.source.url == "https://knowledge.example/leave-policy"
     assert document.relevance_score == 0.91
-    assert document.metadata["section_title"] == "Annual leave"
-    assert "content" not in document.metadata
+    assert document.citation.section == "Annual leave"
+    assert document.citation.section_path == ("Annual leave",)
 
 
 @pytest.mark.asyncio
@@ -264,9 +333,12 @@ async def test_knowledge_search_returns_bounded_evidence_and_source_metadata() -
     assert "[chunk-1] Leave policy" in result.content
     assert len(result.evidence) == 1
     evidence = result.evidence[0]
-    assert evidence.source == "confluence"
-    assert evidence.uri == "https://knowledge.example/leave-policy"
-    assert evidence.section == "Annual leave"
+    assert evidence.source is not None
+    assert evidence.source.provider.value == "confluence"
+    assert evidence.source.url == "https://knowledge.example/leave-policy"
+    assert evidence.citation.section == "Annual leave"
+    assert evidence.item_id == "doc-1"
+    assert evidence.chunk_id == "chunk-1"
 
 
 @pytest.mark.asyncio

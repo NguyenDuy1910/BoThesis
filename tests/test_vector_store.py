@@ -77,14 +77,14 @@ def test_missing_access_context_is_denied_for_a_nonexistent_tenant() -> None:
 
 
 def test_filters_are_deterministic_and_keep_zero_ancestor_ids() -> None:
-    payload_filters = SimpleNamespace(source_system=["jira"], doc_id=["doc-1"])
+    payload_filters = SimpleNamespace(provider=["jira"], item_id=["doc-1"])
     access_context = SimpleNamespace(
         tenant_id="tenant-1",
         reader_ids=["reader-2", "reader-1"],
         space_keys=[],
         is_admin=False,
     )
-    search_params = SimpleNamespace(ancestor_node_id=0)
+    search_params = SimpleNamespace(ancestor_id="0")
 
     query_filter = VectorStore.build_retrieval_filter(
         search_params,
@@ -100,9 +100,9 @@ def test_filters_are_deterministic_and_keep_zero_ancestor_ids() -> None:
     ] == [
         "is_deleted",
         "tenant_id",
-        "source_system",
-        "document_id",
-        "ancestor_hierarchy_node_ids",
+        "provider",
+        "item_id",
+        "ancestor_ids",
     ]
     acl_filter = next(
         condition for condition in query_filter.must if isinstance(condition, qmodels.Filter)

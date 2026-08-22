@@ -75,15 +75,15 @@ async def test_manual_upload_discovers_incrementally_and_preserves_acl(tmp_path)
     )
 
     changes = await connector.discover_changes(SourceCheckpoint(), scope)
-    assert [change.external_id for change in changes] == ["upload-1"]
-    document = await connector.fetch_document("upload-1")
-    assert document.get_text_content() == "Enterprise policy"
-    assert document.external_version == digest
-    assert document.acl.to_reader_ids() == [
+    assert [change.item_id for change in changes] == ["upload-1"]
+    item = await connector.fetch_item("upload-1")
+    assert item.get_text_content() == "Enterprise policy"
+    assert item.source.external_version == digest
+    assert item.access.to_reader_ids() == [
         "email:owner@example.com",
         "external_group:finance",
     ]
-    assert document.acl.is_public is False
+    assert item.access.is_public is False
 
     second_changes = await connector.discover_changes(connector.next_checkpoint(), scope)
     assert second_changes == []
@@ -123,4 +123,4 @@ def test_local_file_connector_batches_real_documents(tmp_path) -> None:
         "content 1",
         "content 2",
     ]
-    assert all(not item.external_access.is_public for batch in batches for item in batch)
+    assert all(not item.access.is_public for batch in batches for item in batch)

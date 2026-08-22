@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, not_, or_, select, update
+from sqlalchemy import String, and_, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload, with_loader_criteria
@@ -645,6 +645,74 @@ class DocumentService:
             raise DocumentNotFoundError(f"document not found: {document_id}")
         return document
 
+    async def get_document_by_item_id(
+        self,
+        item_id: str,
+        *,
+        access: AuthContext,
+        include_chunks: bool = False,
+    ) -> Document:
+        """Resolve a canonical item ID without exposing inaccessible documents."""
+
+        normalized = item_id.strip()
+        if not normalized:
+            raise DocumentNotFoundError("document not found")
+        candidates = {normalized}
+        if "::" in normalized:
+            candidates.add(normalized.rsplit("::", 1)[-1])
+        statement = self._visible_documents(access).where(
+            or_(
+                Document.external_id.in_(sorted(candidates)),
+                Document.id.cast(String) == normalized,
+            )
+        )
+        if include_chunks:
+            statement = statement.options(
+                selectinload(Document.chunks),
+                with_loader_criteria(
+                    DocumentChunk,
+                    DocumentChunk.deleted_at.is_(None),
+                ),
+            )
+        document = await self._session.scalar(
+            statement.order_by(Document.updated_at.desc(), Document.id).limit(1)
+        )
+        if document is None:
+            raise DocumentNotFoundError(f"document not found: {item_id}")
+        return document
+
+    async def get_document_and_chunk_by_item_id(
+        self,
+        item_id: str,
+        chunk_id: str,
+        *,
+        access: AuthContext,
+    ) -> tuple[Document, DocumentChunk | None]:
+        """Resolve one citation without loading every chunk in the item."""
+
+        document = await self.get_document_by_item_id(item_id, access=access)
+        normalized_chunk_id = chunk_id.strip()
+        if not normalized_chunk_id:
+            return document, None
+        chunk_index: int | None = None
+        prefix = f"{document.id}:"
+        if normalized_chunk_id.startswith(prefix):
+            suffix = normalized_chunk_id.removeprefix(prefix)
+            if suffix.isdigit():
+                chunk_index = int(suffix)
+        statement = select(DocumentChunk).where(
+            DocumentChunk.document_id == document.id,
+            DocumentChunk.deleted_at.is_(None),
+        )
+        if chunk_index is not None:
+            statement = statement.where(DocumentChunk.chunk_index == chunk_index)
+        else:
+            statement = statement.where(
+                DocumentChunk.id.cast(String) == normalized_chunk_id
+            )
+        record = await self._session.scalar(statement)
+        return document, record
+
     async def list_documents(
         self,
         *,
@@ -676,16 +744,19 @@ class DocumentService:
         document_id: UUID,
         *,
         access: AuthContext,
+        limit: int | None = None,
     ) -> list[DocumentChunk]:
         await self.get_document(document_id, access=access)
-        result = await self._session.scalars(
-            select(DocumentChunk)
-            .where(
-                DocumentChunk.document_id == document_id,
-                DocumentChunk.deleted_at.is_(None),
-            )
-            .order_by(DocumentChunk.chunk_index)
-        )
+        if limit is not None and not 1 <= limit <= 1_000:
+            raise ValueError("chunk limit must be between 1 and 1000")
+        statement = select(DocumentChunk)
+        statement = statement.where(
+            DocumentChunk.document_id == document_id,
+            DocumentChunk.deleted_at.is_(None),
+        ).order_by(DocumentChunk.chunk_index)
+        if limit is not None:
+            statement = statement.limit(limit)
+        result = await self._session.scalars(statement)
         return list(result)
 
     async def get_document_text(
@@ -929,7 +1000,30 @@ def _chunk_record(
         start_page_number=value.start_page_number,
         end_page_number=value.end_page_number,
         heading_path=headings,
-        metadata_=dict(value.metadata or {}),
+        metadata_={
+            **dict(value.metadata or {}),
+            **(
+                {
+                    "citation_spans": [
+                        span.model_dump(mode="json", exclude_none=True)
+                        for span in value.citation_spans
+                    ]
+                }
+                if value.citation_spans
+                else {}
+            ),
+            **({"element_id": value.element_id} if value.element_id else {}),
+            **(
+                {"start_offset": value.start_offset}
+                if value.start_offset is not None
+                else {}
+            ),
+            **(
+                {"end_offset": value.end_offset}
+                if value.end_offset is not None
+                else {}
+            ),
+        },
     )
 
 

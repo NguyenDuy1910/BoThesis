@@ -14,6 +14,7 @@ from uuid import UUID
 
 from bothesis.db.models import Document
 from bothesis.document_index.raw_storage import PresignedRequest
+from bothesis.knowledge.protocol import CitationSpan
 
 ACTIVE_STATUS = "active"
 INACTIVE_STATUS = "inactive"
@@ -130,10 +131,14 @@ class DocumentChunkInput:
     """Canonical chunk content written to PostgreSQL before vector indexing."""
 
     content: str
+    element_id: str | None = None
+    start_offset: int | None = None
+    end_offset: int | None = None
     token_count: int | None = None
     start_page_number: int | None = None
     end_page_number: int | None = None
     heading_path: tuple[str, ...] | None = None
+    citation_spans: tuple[CitationSpan, ...] = ()
     metadata: Mapping[str, Any] | None = None
 
 

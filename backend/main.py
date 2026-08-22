@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import os
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -34,6 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bothesis.db.engine import get_session
 
 from bothesis.health import HealthReport, HealthService, HealthSettings
+from bothesis.knowledge import CitationResolver
+from bothesis.knowledge.protocol import BoundingBox, CitationInfo, CitationSpan, SourceIdentity, SourceProvider
 
 if __name__ == "__main__":
     load_dotenv(Path(__file__).with_name(".env"), override=False)
@@ -278,6 +281,44 @@ class DocumentDetail(BaseModel):
     url: str | None
     metadata: dict[str, Any]
     indexed_at: str
+
+
+class ViewerElement(BaseModel):
+    element_id: str
+    text: str
+    page: int | None = Field(default=None, ge=1)
+    section: str | None = None
+    section_path: list[str] = Field(default_factory=list)
+    anchor: str | None = None
+    bounding_box: BoundingBox | None = None
+
+
+class ViewerFocus(BaseModel):
+    chunk_id: str
+    chunk_text: str
+    citation: CitationInfo
+
+
+class KnowledgeItemViewer(BaseModel):
+    item_id: str
+    title: str
+    content_type: str
+    external_url: str | None = None
+    document_url: str | None = None
+    elements: list[ViewerElement]
+    focus: ViewerFocus | None = None
+
+
+class KnowledgeCitationResponse(BaseModel):
+    """A permission-checked citation resolved at click time."""
+
+    item_id: str
+    chunk_id: str
+    title: str
+    content_type: str
+    document_url: str | None = None
+    external_url: str | None = None
+    citation: CitationInfo
 
 
 # --- Crons ---
@@ -1349,6 +1390,527 @@ async def get_sync_status(
 # Document Index router
 # ---------------------------------------------------------------------------
 
+knowledge_router = APIRouter(prefix="/knowledge", tags=["knowledge"])
+
+
+@knowledge_router.get(
+    "/items/{item_id:path}/citations/{chunk_id:path}",
+    response_model=KnowledgeCitationResponse,
+)
+async def get_knowledge_citation(
+    item_id: str,
+    chunk_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> KnowledgeCitationResponse:
+    """Resolve a citation and any raw-document URL only when it is opened."""
+
+    try:
+        access = await _resolve_access(request, session)
+        from bothesis.services import DocumentNotFoundError, DocumentService
+
+        document, record = await DocumentService(session).get_document_and_chunk_by_item_id(
+            item_id,
+            chunk_id,
+            access=access,
+        )
+    except DocumentNotFoundError:
+        return await _qdrant_citation(item_id, chunk_id, access)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
+
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="citation not found")
+    citation = _record_citation(record)
+    source = _file_source(document)
+    return KnowledgeCitationResponse(
+        item_id=item_id,
+        chunk_id=chunk_id,
+        title=document.title or str(document.id),
+        content_type=document.mime_type or "text/plain",
+        document_url=_presigned_document_url(document),
+        external_url=CitationResolver.original_url(source, citation),
+        citation=citation,
+    )
+
+
+@knowledge_router.get(
+    "/items/{item_id:path}",
+    response_model=KnowledgeItemViewer,
+)
+async def get_knowledge_item_viewer(
+    item_id: str,
+    request: Request,
+    chunk: str | None = Query(default=None, min_length=1, max_length=512),
+    session: AsyncSession = Depends(get_session),
+) -> KnowledgeItemViewer:
+    """Return a permission-checked normalized document for citation navigation."""
+
+    try:
+        access = await _resolve_access(request, session)
+        from bothesis.services import DocumentNotFoundError, DocumentService
+
+        document_service = DocumentService(session)
+        if chunk:
+            document, targeted_chunk = await document_service.get_document_and_chunk_by_item_id(
+                item_id,
+                chunk,
+                access=access,
+            )
+        else:
+            document = await document_service.get_document_by_item_id(
+                item_id,
+                access=access,
+            )
+            targeted_chunk = None
+    except DocumentNotFoundError:
+        return await _qdrant_item_viewer(item_id, chunk, access)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _document_http_error(exc) from exc
+
+    if targeted_chunk is not None:
+        viewer_records = [targeted_chunk]
+    elif chunk is None:
+        viewer_records = await document_service.get_chunks(
+            document.id,
+            access=access,
+            limit=100,
+        )
+    else:
+        viewer_records = []
+    elements, chunks_by_id = _viewer_elements(document, records=viewer_records)
+    focus = None
+    if chunk:
+        record = chunks_by_id.get(chunk)
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="citation not found")
+        focus = ViewerFocus(
+            chunk_id=chunk,
+            chunk_text=record.content,
+            citation=_record_citation(record),
+        )
+    return KnowledgeItemViewer(
+        item_id=item_id,
+        title=document.title or str(document.id),
+        content_type=document.mime_type or "text/plain",
+        external_url=CitationResolver.original_url(
+            _file_source(document),
+            _record_citation(chunks_by_id[chunk]) if chunk in chunks_by_id else CitationInfo(),
+        ),
+        document_url=_presigned_document_url(document) if chunk else None,
+        elements=elements,
+        focus=focus,
+    )
+
+
+def _viewer_elements(
+    document: Any,
+    *,
+    records: list[Any] | None = None,
+) -> tuple[list[ViewerElement], dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    chunks_by_id: dict[str, Any] = {}
+    item_id = str(document.id)
+    source_records = document.chunks if records is None else records
+    for record in sorted(source_records, key=lambda value: value.chunk_index):
+        chunk_id = f"{item_id}:{record.chunk_index}"
+        chunks_by_id[chunk_id] = record
+        chunks_by_id[f"{record.id}"] = record
+        citation = _record_citation(record)
+        _add_citation_content(groups, record.content, citation)
+
+    elements = [
+        ViewerElement(
+            element_id=element_id,
+            text="".join(value["chars"]).rstrip(),
+            page=value["page"],
+            section=value["section"],
+            section_path=value["section_path"],
+            anchor=value["anchor"],
+            bounding_box=value["bounding_box"],
+        )
+        for element_id, value in groups.items()
+        if "".join(value["chars"]).strip()
+    ]
+    return elements, chunks_by_id
+
+
+def _viewer_text(metadata: Mapping[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _viewer_int(metadata: dict[str, Any], key: str) -> int | None:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
+
+
+def _viewer_bbox(value: object) -> BoundingBox | None:
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        return BoundingBox.model_validate(value)
+    except ValueError:
+        return None
+
+
+async def _qdrant_item_viewer(
+    item_id: str,
+    chunk_id: str | None,
+    access: Any,
+) -> KnowledgeItemViewer:
+    """Resolve connector-backed items from the permission-filtered index.
+
+    Connector items are not required to be upload Documents in PostgreSQL, but
+    their normalized chunks still contain enough structure for an internal
+    evidence viewer. The same tenant/ACL/tombstone filter is applied before any
+    payload is exposed.
+    """
+
+    if access.tenant_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
+    try:
+        payloads = await _qdrant_payloads(item_id, access, chunk_id=chunk_id)
+        if not payloads:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="document not found")
+        return _viewer_from_payloads(item_id, chunk_id, payloads)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="document not found",
+        ) from exc
+
+
+def _viewer_from_payloads(
+    item_id: str,
+    chunk_id: str | None,
+    payloads: list[dict[str, Any]],
+) -> KnowledgeItemViewer:
+    ordered = sorted(payloads, key=lambda payload: _viewer_payload_int(payload, "chunk_index") or 0)
+    groups: dict[str, dict[str, Any]] = {}
+    by_chunk: dict[str, dict[str, Any]] = {}
+    for payload in ordered:
+        index = _viewer_payload_int(payload, "chunk_index") or 0
+        current_chunk_id = _viewer_payload_text(payload, "chunk_id") or f"{item_id}:{index}"
+        by_chunk[current_chunk_id] = payload
+        by_chunk[f"{item_id}:{index}"] = payload
+        citation = _payload_citation(payload)
+        _add_citation_content(
+            groups,
+            _viewer_payload_text(payload, "chunk_text") or "",
+            citation,
+        )
+
+    elements = [
+        ViewerElement(
+            element_id=element_id,
+            text="".join(value["chars"]).rstrip(),
+            page=value["page"],
+            section=value["section"],
+            section_path=value["section_path"],
+            anchor=value["anchor"],
+            bounding_box=value["bounding_box"],
+        )
+        for element_id, value in groups.items()
+        if "".join(value["chars"]).strip()
+    ]
+    focus_payload = by_chunk.get(chunk_id or "") if chunk_id else None
+    focus = _viewer_focus_from_payload(chunk_id, focus_payload)
+    first = ordered[0]
+    first_citation = _payload_citation(first)
+    first_source = _payload_source(first, item_id)
+    return KnowledgeItemViewer(
+        item_id=item_id,
+        title=_viewer_payload_text(first, "title") or item_id,
+        content_type=_viewer_payload_text(first, "content_type") or "text/plain",
+        external_url=CitationResolver.original_url(first_source, first_citation),
+        document_url=None,
+        elements=elements,
+        focus=focus,
+    )
+
+
+def _viewer_focus_from_payload(
+    chunk_id: str | None,
+    payload: dict[str, Any] | None,
+) -> ViewerFocus | None:
+    if not chunk_id or payload is None:
+        return None
+    return ViewerFocus(
+        chunk_id=chunk_id,
+        chunk_text=_viewer_payload_text(payload, "chunk_text") or "",
+        citation=_payload_citation(payload),
+    )
+
+
+def _viewer_payload_text(payload: dict[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _viewer_payload_int(payload: dict[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
+
+
+def _viewer_payload_strings(payload: dict[str, Any], key: str) -> list[str]:
+    value = payload.get(key)
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _record_citation(record: Any) -> CitationInfo:
+    metadata = dict(record.metadata_)
+    spans = _citation_spans(metadata.get("citation_spans"))
+    if not spans:
+        element_id = _viewer_text(metadata, "element_id") or (
+            f"element_{record.chunk_index + 1:03d}"
+        )
+        start = _viewer_int(metadata, "start_offset")
+        end = _viewer_int(metadata, "end_offset")
+        spans = [
+            CitationSpan(
+                page=record.start_page_number or record.end_page_number,
+                element_id=element_id,
+                start_offset=start if start is not None else 0,
+                end_offset=end if end is not None else len(record.content),
+                bounding_box=_viewer_bbox(metadata.get("bounding_box")),
+            )
+        ]
+    section_path = tuple(record.heading_path or ())
+    return CitationInfo(
+        section=section_path[-1] if section_path else None,
+        section_path=section_path,
+        anchor=_viewer_text(metadata, "anchor"),
+        spans=tuple(spans),
+    )
+
+
+def _payload_citation(payload: Mapping[str, Any]) -> CitationInfo:
+    return CitationInfo(
+        section=_viewer_payload_text(dict(payload), "citation_section"),
+        section_path=tuple(_viewer_payload_strings(dict(payload), "citation_section_path")),
+        anchor=_viewer_payload_text(dict(payload), "citation_anchor"),
+        spans=tuple(_citation_spans(payload.get("citation_spans"))),
+    )
+
+
+def _citation_spans(value: object) -> list[CitationSpan]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    output: list[CitationSpan] = []
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            output.append(
+                CitationSpan(
+                    page=_viewer_payload_int(dict(raw), "page"),
+                    element_id=_viewer_payload_text(dict(raw), "element_id"),
+                    start_offset=_viewer_payload_int(dict(raw), "start_offset"),
+                    end_offset=_viewer_payload_int(dict(raw), "end_offset"),
+                    bounding_box=_viewer_bbox(raw.get("bounding_box")),
+                )
+            )
+        except ValueError:
+            continue
+    return output
+
+
+def _add_citation_content(
+    groups: dict[str, dict[str, Any]],
+    content: str,
+    citation: CitationInfo,
+) -> None:
+    cursor = 0
+    for index, span in enumerate(citation.spans):
+        element_id = span.element_id or f"element_{index + 1:03d}"
+        if span.start_offset is None or span.end_offset is None:
+            segment = content[cursor:]
+            start = 0
+        else:
+            length = max(0, span.end_offset - span.start_offset)
+            segment = content[cursor:cursor + length]
+            start = span.start_offset
+            cursor += length
+        if index + 1 < len(citation.spans) and content[cursor:cursor + 2] == "\n\n":
+            cursor += 2
+        group = groups.setdefault(
+            element_id,
+            {
+                "chars": [],
+                "page": span.page,
+                "section": citation.section,
+                "section_path": list(citation.section_path),
+                "anchor": citation.anchor,
+                "bounding_box": span.bounding_box,
+            },
+        )
+        chars: list[str] = group["chars"]
+        end = start + len(segment)
+        if len(chars) < end:
+            chars.extend(" " for _ in range(end - len(chars)))
+        for offset, character in enumerate(segment, start=start):
+            chars[offset] = character
+
+
+def _find_document_chunk(document: Any, chunk_id: str) -> Any | None:
+    for record in document.chunks:
+        if chunk_id in {str(record.id), f"{document.id}:{record.chunk_index}"}:
+            return record
+    return None
+
+
+def _file_source(document: Any) -> SourceIdentity:
+    return SourceIdentity(
+        connector_id="upload",
+        provider=SourceProvider.FILE,
+        external_id=str(document.id),
+        url=document.source_url,
+    )
+
+
+def _presigned_document_url(document: Any) -> str | None:
+    raw_storage_key = getattr(document, "raw_storage_key", None)
+    if not raw_storage_key:
+        return None
+    try:
+        runtime = _get_document_runtime()
+        if runtime.storage is None:
+            return None
+        request = runtime.storage.presign_download(
+            raw_storage_key,
+            expires_seconds=max(
+                1,
+                min(
+                    600,
+                    int(os.getenv("BOTHESIS_DOCUMENT_CITATION_URL_SECONDS", "300")),
+                ),
+            ),
+        )
+        return request.url
+    except Exception:
+        log.exception("could not generate citation document URL")
+        return None
+
+
+async def _qdrant_payloads(
+    item_id: str,
+    access: Any,
+    *,
+    chunk_id: str | None = None,
+) -> list[dict[str, Any]]:
+    from qdrant_client import models as qmodels
+    from bothesis.document_index.vector_store import VectorStore
+
+    reader_ids = {
+        "public",
+        str(access.user_id).strip().lower(),
+        f"email:{access.email.strip().lower()}",
+        *(token.strip().lower() for token in access.principal_tokens if token.strip()),
+    }
+    store = VectorStore(
+        collection_name=os.getenv("QDRANT_COLLECTION"),
+        url=os.getenv("QDRANT_URL"),
+        api_key=os.getenv("QDRANT_API_KEY") or None,
+        prefer_grpc=_environment_boolean("QDRANT_PREFER_GRPC"),
+        timeout=8,
+    )
+    access_conditions = store.access_conditions(
+        tenant_id=str(access.tenant_id),
+        reader_ids=reader_ids,
+        is_admin=access.is_admin,
+    )
+    conditions = [
+        *access_conditions,
+        qmodels.FieldCondition(
+            key="item_id",
+            match=qmodels.MatchValue(value=item_id),
+        ),
+    ]
+    if chunk_id:
+        conditions.append(
+            qmodels.FieldCondition(
+                key="chunk_id",
+                match=qmodels.MatchValue(value=chunk_id),
+            )
+        )
+    points, _ = await store.scroll_points(
+        scroll_filter=qmodels.Filter(must=conditions),
+        # A targeted citation only needs its own chunk.  The un-targeted
+        # landing view is deliberately bounded; large documents are opened
+        # through citation links rather than materializing the whole index.
+        limit=1 if chunk_id else 100,
+        with_payload=True,
+        with_vectors=False,
+    )
+    return [
+        dict(point.payload)
+        for point in points
+        if isinstance(getattr(point, "payload", None), dict)
+    ]
+
+
+async def _qdrant_citation(
+    item_id: str,
+    chunk_id: str,
+    access: Any,
+) -> KnowledgeCitationResponse:
+    if access.tenant_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="citation not found")
+    try:
+        payloads = await _qdrant_payloads(item_id, access, chunk_id=chunk_id)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="citation not found") from exc
+    if not payloads:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="citation not found")
+    payload = payloads[0]
+    citation = _payload_citation(payload)
+    source = _payload_source(payload, item_id)
+    return KnowledgeCitationResponse(
+        item_id=item_id,
+        chunk_id=chunk_id,
+        title=_viewer_payload_text(payload, "title") or item_id,
+        content_type=_viewer_payload_text(payload, "content_type") or "text/plain",
+        document_url=None,
+        external_url=CitationResolver.original_url(source, citation),
+        citation=citation,
+    )
+
+
+def _payload_source(payload: Mapping[str, Any], item_id: str) -> SourceIdentity:
+    provider_value = str(payload.get("provider") or SourceProvider.FILE.value)
+    try:
+        provider = SourceProvider(provider_value)
+    except ValueError:
+        provider = SourceProvider.FILE
+    return SourceIdentity(
+        connector_id=str(payload.get("connector_id") or "unknown"),
+        provider=provider,
+        external_id=str(payload.get("external_id") or item_id),
+        url=_viewer_payload_text(dict(payload), "source_url"),
+    )
+
+
 documents_router = APIRouter(prefix="/documents", tags=["documents"])
 
 
@@ -1663,6 +2225,7 @@ app.include_router(access_router, prefix=_PREFIX)
 app.include_router(agent_router, prefix=_PREFIX)
 app.include_router(attachments_router, prefix=_PREFIX)
 app.include_router(connectors_router, prefix=_PREFIX)
+app.include_router(knowledge_router, prefix=_PREFIX)
 app.include_router(documents_router, prefix=_PREFIX)
 app.include_router(crons_router, prefix=_PREFIX)
 app.include_router(bi_router, prefix=_PREFIX)

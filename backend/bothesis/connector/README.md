@@ -1,72 +1,41 @@
 # BoThesis connector pipeline
 
-This package owns every reusable document-processing step: source extraction,
-file parsing, deterministic chunking, direct-versus-retrieval routing, provider
-reference caching, and the validated hand-off to embedding/vector storage.
-Low-level S3/PostgreSQL byte storage and the Qdrant client remain in
-`bothesis.document_index` as infrastructure implementations.
+This package owns source extraction, normalized content handling, contextual
+chunking, embedding hand-off, and permission-aware synchronization. Low-level
+storage and Qdrant client operations remain in `bothesis.document_index`.
 
-## One processing pattern
+## Canonical flow
 
-All inputs enter through the connector layer and preserve a normalized source,
-lineage, and ACL before indexed content can reach retrieval:
+Source adapters produce canonical `AnyItem` values (`DocumentItem`,
+`CollectionItem`, or `FileItem`). A semantic document follows this path:
 
-1. Source adapters produce `SourceDocument` values.
-2. File-like sources reuse `connector.file.processing.FileProcessor`.
-3. Both scheduled connectors and request-owned uploads use the same
-   `ChunkingConfig`, `split_text`, and `QdrantChunkPayload` contract.
-4. `ConnectorPipeline` handles incremental source synchronization.
-5. `DocumentPipeline` handles latency-sensitive Direct, Existing Index, and
-   Index On Demand routing for uploads or other single-document callers.
+```text
+DocumentItem → ContentPart[] → Chunk → ContextualChunk → embedding → Qdrant
+```
 
-Neither pipeline runs inside the agent loop. Connector-specific clients remain
-inside their adapters, while embeddings, raw storage, and Qdrant are injected
-through typed boundaries.
+Standalone images use `DocumentItem(document_kind="image")`; they are indexed
+from captions, OCR, or descriptions rather than binary payloads.
 
-## Incremental connector contract
+`ConnectorPipeline` consumes `ItemChange` values, bounds source fetches and
+write batches, soft-deletes stale item points, and advances a checkpoint only
+when the complete scope succeeds. Point IDs are deterministic, so retries are
+safe.
 
-1. Build a `BaseSourceConnector`. Wrap synchronous source crawlers in
-   `CheckpointedSourceConnectorAdapter`.
-2. Build a `QdrantPayloadContext` with the authenticated tenant, connector, and
-   optional scope identifiers.
-3. Implement `QdrantPayloadSink.write()` to embed and upsert records, and
-   `soft_delete_document()` to tombstone using **tenant + connector + document**.
-4. Run `ConnectorPipeline.run_scope()` and persist its checkpoint only when
-   `checkpoint_advanced` is true.
+## Qdrant projection
 
-The runner bounds concurrent source fetches and Qdrant payload batch size. It
-soft-deletes the previous document version before writing its deterministic
-chunk IDs, which removes stale trailing chunks after a document becomes
-shorter. Any failed document prevents checkpoint advancement, making a rerun
-idempotent.
+`QdrantChunkPayload` is a flat retrieval projection of `ContextualChunk`. It
+contains chunk text, contextual embedding text, citation fields, provider and
+external identity, flattened hierarchy (`parent_id`, `root_id`, and
+`ancestor_ids`), tenant/tombstone governance, and resolved `reader_ids`.
 
-## Qdrant payload guarantees
+The canonical `Item` store remains the source of truth for `AccessPolicy`,
+`StorageObject`, and provider metadata. Qdrant never receives those complete
+objects or raw binary storage details. Retrieval applies tenant, tombstone,
+ACL, source, and hierarchy filters before evidence is returned.
 
-`QdrantChunkPayload` validates the fields used by retrieval and governance:
+## Uploads
 
-- tenant, connector, scope, document, external version, and chunk identity;
-- source URI, type, title, content, timestamps, file/raw-storage lineage;
-- explicit ACL reader IDs, public flag, and deletion flag;
-- filter fields including project, space, ticket type/status, document type,
-  domain, hierarchy, parent, attachment, comment, and sheet identifiers.
-
-Private documents may legitimately have an empty `access_control_list`; this
-means no reader, not public access. Source adapters remain responsible for
-mapping their native restrictions into the canonical ACL.
-
-## File support
-
-The built-in processor handles UTF text, JSON, HTML, XML, DOCX, PPTX, and XLSX
-with file/text/archive size limits. PDF extraction is loaded lazily and requires
-the optional `pypdf` package (or an injected `.pdf` extractor). Confluence
-requires `atlassian-python-api`; its HTML extraction also requires
-`beautifulsoup4`. Missing optional packages fail with an explicit runtime
-message only when that source or format is used.
-
-## On-demand document contract
-
-`DocumentPipeline` accepts durable `Document` records after authorization. It
-reuses the shared file parser and chunking policy, commits canonical PostgreSQL
-chunks before embedding, and writes only validated `QdrantChunkPayload` data.
-Images and supported small PDFs may take the Direct path without parsing;
-retrieval paths remain permission-filtered and source-grounded.
+Request-owned uploads reuse the same `ChunkingConfig`, contextual text builder,
+and flat Qdrant payload as scheduled connectors. Direct-capable files can still
+use the direct model path; indexed files remain permission-filtered and
+source-grounded.

@@ -24,7 +24,14 @@ from bothesis.connector.provider_cache import (
     ProviderCacheEntry,
     ProviderFileCache,
 )
-from bothesis.connector.qdrant import ChunkingConfig, split_text
+from bothesis.connector.qdrant import (
+    ChunkingConfig,
+    citation_spans_for_range,
+    make_contextual_text,
+    split_text_with_offsets,
+)
+from bothesis.knowledge.protocol import ChunkContext
+from bothesis.knowledge.protocol import CitationInfo, CitationSpan, SourceIdentity, SourceProvider
 from bothesis.db.models import Document, DocumentChunk
 from bothesis.document_index.raw_storage import (
     DocumentStorage,
@@ -140,19 +147,53 @@ class DocumentChunker:
         )
 
     def chunk(self, document: ParsedDocument) -> list[DocumentChunkInput]:
+        sections = [
+            (
+                section.element_id or f"element_{index + 1:03d}",
+                section.content.strip(),
+                section,
+            )
+            for index, section in enumerate(document.sections)
+            if section.content.strip()
+        ]
+        document_text = "\n\n".join(text for _, text, _ in sections)
         chunks: list[DocumentChunkInput] = []
-        for section in document.sections:
-            for fragment in split_text(section.content, self._config):
-                chunks.append(
-                    DocumentChunkInput(
-                        content=fragment,
-                        token_count=_approximate_tokens(fragment),
-                        start_page_number=section.page_number,
-                        end_page_number=section.page_number,
-                        heading_path=section.heading_path,
-                        metadata=section.metadata,
-                    )
+        for fragment, start_offset, end_offset in split_text_with_offsets(
+            document_text,
+            self._config,
+        ):
+            spans = citation_spans_for_range(
+                [
+                    (element_id, text, section.page_number, section.bounding_box)
+                    for element_id, text, section in sections
+                ],
+                start_offset,
+                end_offset,
+            )
+            if not spans:
+                continue
+            first_span = spans[0]
+            first_section = next(
+                section for element_id, _, section in sections
+                if element_id == first_span.element_id
+            )
+            pages = [span.page for span in spans if span.page is not None]
+            chunks.append(
+                DocumentChunkInput(
+                    content=fragment,
+                    # These fields remain derived DB compatibility metadata;
+                    # citation_spans is the canonical provenance contract.
+                    element_id=first_span.element_id,
+                    start_offset=first_span.start_offset,
+                    end_offset=first_span.end_offset,
+                    citation_spans=spans,
+                    token_count=_approximate_tokens(fragment),
+                    start_page_number=min(pages) if pages else None,
+                    end_page_number=max(pages) if pages else None,
+                    heading_path=first_section.heading_path,
+                    metadata=dict(first_section.metadata or {}),
                 )
+            )
         if not chunks:
             raise FileProcessingError("document has no indexable text")
         return chunks
@@ -473,10 +514,17 @@ class DocumentPipeline:
                 evidence=(
                     Evidence(
                         id=evidence_id,
-                        document_id=str(document.id),
+                        item_id=str(document.id),
+                        chunk_id=evidence_id,
                         title=_file_name(document),
                         content="Original user-supplied document provided directly to the model.",
-                        source="upload",
+                        source=SourceIdentity(
+                            connector_id="upload",
+                            provider=SourceProvider.FILE,
+                            external_id=str(document.id),
+                            url=document.source_url,
+                        ),
+                        citation=CitationInfo(),
                     ),
                 ),
                 provider_annotations=annotations,
@@ -618,7 +666,17 @@ class DocumentPipeline:
                 batch = chunk_list[start : start + self._embedding_batch_size]
                 vectors.extend(
                     await self._embedder.embed_documents(
-                        [chunk.content for chunk in batch]
+                        [
+                            make_contextual_text(
+                                title=_file_name(document),
+                                context=ChunkContext(
+                                    section_path=list(chunk.heading_path or ()),
+                                    summary=_metadata_text(chunk.metadata, "summary"),
+                                ),
+                                chunk_text=chunk.content,
+                            )
+                            for chunk in batch
+                        ]
                     )
                 )
             await self._vector_index.replace_document(
@@ -720,6 +778,13 @@ def _advisory_lock_key(document_id: UUID) -> int:
 def _file_name(document: Document) -> str:
     value = document.metadata_.get("file_name") or document.title or str(document.id)
     return str(value)
+
+
+def _metadata_text(metadata: Mapping[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def _annotation_name(annotation: Mapping[str, Any]) -> str | None:

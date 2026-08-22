@@ -207,6 +207,30 @@ def test_chunker_preserves_page_heading_and_sheet_lineage() -> None:
     assert chunks[0].metadata == {"sheet_name": "Financials", "sheet_index": 2}
 
 
+def test_chunker_keeps_multi_page_provenance_inside_one_semantic_chunk() -> None:
+    parsed = ParsedDocument(
+        file_name="report.pdf",
+        sections=(
+            ParsedSection(content="Page one evidence", element_id="p001_para01", page_number=1),
+            ParsedSection(content="Page two evidence", element_id="p002_para01", page_number=2),
+        ),
+        raw_bytes=b"pdf",
+        size_bytes=3,
+        sha256="c" * 64,
+        mime_type="application/pdf",
+    )
+
+    chunks = DocumentChunker(max_characters=100, overlap_characters=0).chunk(parsed)
+
+    assert len(chunks) == 1
+    assert [(span.page, span.element_id) for span in chunks[0].citation_spans] == [
+        (1, "p001_para01"),
+        (2, "p002_para01"),
+    ]
+    assert chunks[0].start_page_number == 1
+    assert chunks[0].end_page_number == 2
+
+
 def test_office_parsers_emit_docx_xlsx_and_pptx_sections() -> None:
     processor = FileProcessor()
 
@@ -521,7 +545,7 @@ class _RecordingVectorStore:
 
 
 @pytest.mark.asyncio
-async def test_vector_replacement_uses_deterministic_points_and_owner_acl() -> None:
+async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> None:
     tenant_id = uuid4()
     user_id = uuid4()
     document = _document("text/plain")
@@ -569,10 +593,14 @@ async def test_vector_replacement_uses_deterministic_points_and_owner_acl() -> N
     assert store.batches[0][0].id == store.batches[1][0].id
     payload = store.batches[0][0].payload
     assert payload["tenant_id"] == str(tenant_id)
-    assert payload["owner_user_id"] == str(user_id)
-    assert payload["access_control_list"] == [str(user_id)]
-    assert payload["document_id"] == str(document.id)
-    assert payload["source_fingerprint"] == "a" * 64
+    assert payload["reader_ids"] == [str(user_id)]
+    assert payload["item_id"] == str(document.id)
+    assert payload["chunk_id"] == f"{document.id}:0"
+    assert payload["chunk_text"] == "grounded content"
+    assert "Document: sample" in payload["contextual_text"]
+    assert payload["content_type"] == "text"
+    assert "access" not in payload
+    assert "storage" not in payload
 
     await index.update_document_access(document.id, access=access)
     assert store.access_updates == [
@@ -580,8 +608,7 @@ async def test_vector_replacement_uses_deterministic_points_and_owner_acl() -> N
             str(document.id),
             {
                 "tenant_id": str(tenant_id),
-                "owner_user_id": str(user_id),
-                "access_control_list": [str(user_id)],
+                "reader_ids": [str(user_id)],
             },
         )
     ]

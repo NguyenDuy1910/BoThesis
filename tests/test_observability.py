@@ -357,10 +357,10 @@ def test_retrieval_trace_captures_query_and_normalized_results() -> None:
             results=[
                 Evidence(
                     id="chunk-1",
-                    document_id="doc-1",
+                    item_id="doc-1",
+                    chunk_id="chunk-1",
                     title="Leave policy",
                     content="Employees receive 20 days of annual leave.",
-                    source="confluence",
                     relevance_score=0.91,
                 )
             ],
