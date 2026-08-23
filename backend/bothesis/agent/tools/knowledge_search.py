@@ -7,13 +7,9 @@ from contextlib import nullcontext
 from time import perf_counter
 from typing import Any
 
-from bothesis.agent.models import Evidence, ToolContext, ToolOutput
+from bothesis.agent.models import ToolContext, ToolOutput
 from bothesis.agent.tools import Tool, ToolDefinition
-from bothesis.knowledge.document_index import (
-    KnowledgeRetriever,
-    ScopedKnowledgeRetriever,
-)
-from bothesis.knowledge.protocol import ContextualChunk
+from bothesis.knowledge import Evidence, KnowledgeRetriever
 from bothesis.observability import LangfuseTracing
 
 
@@ -101,9 +97,7 @@ class KnowledgeSearch(Tool):
                     "duration_ms": 0,
                 },
             )
-        if not isinstance(self._retriever, ScopedKnowledgeRetriever):
-            # An unscoped retriever cannot establish that every result is visible
-            # to the caller, so it must never supply model context.
+        if not isinstance(self._retriever, KnowledgeRetriever):
             return ToolOutput(
                 content="",
                 error="Knowledge search is temporarily unavailable. Please try again.",
@@ -118,20 +112,20 @@ class KnowledgeSearch(Tool):
         results = await asyncio.gather(
             *(self._search_query(query, ctx) for query in queries),
         )
-        documents: list[ContextualChunk] = []
+        evidence: list[Evidence] = []
         failures: list[str] = []
-        seen_document_ids: set[str] = set()
-        for query_documents, failure in results:
+        seen_evidence_ids: set[str] = set()
+        for query_evidence, failure in results:
             if failure:
                 failures.append(failure)
-            for document in query_documents:
-                if document.id in seen_document_ids:
+            for item in query_evidence:
+                if item.id in seen_evidence_ids:
                     continue
-                seen_document_ids.add(document.id)
-                documents.append(document)
+                seen_evidence_ids.add(item.id)
+                evidence.append(item)
 
         duration_ms = self._duration_ms(started_at)
-        if not documents:
+        if not evidence:
             if failures:
                 outcome = (
                     "timeout"
@@ -162,11 +156,8 @@ class KnowledgeSearch(Tool):
                 },
             )
 
-        evidence = [
-            self._evidence_from_chunk(document) for document in documents
-        ]
         return ToolOutput(
-            content=self._context_from_documents(documents),
+            content=self._context_from_evidence(evidence),
             evidence=evidence,
             metadata={
                 "outcome": "partial_success" if failures else "success",
@@ -180,7 +171,7 @@ class KnowledgeSearch(Tool):
         self,
         query: str,
         ctx: ToolContext,
-    ) -> tuple[list[ContextualChunk], str | None]:
+    ) -> tuple[list[Evidence], str | None]:
         started_at = perf_counter()
         trace_context = (
             self._tracing.retrieval(
@@ -193,8 +184,8 @@ class KnowledgeSearch(Tool):
         )
         with trace_context as retrieval_trace:
             try:
-                documents = await asyncio.wait_for(
-                    self._retriever.search_scoped(
+                evidence = await asyncio.wait_for(
+                    self._retriever.search(
                         query,
                         limit=self._result_limit,
                         ctx=ctx.agent_context,
@@ -224,17 +215,18 @@ class KnowledgeSearch(Tool):
                 return [], "retrieval_failure"
 
             if retrieval_trace is not None:
-                evidence = [self._evidence_from_chunk(document) for document in documents]
                 retrieval_trace.complete(
-                    outcome="success" if documents else "empty",
-                    result_count=len(documents),
+                    outcome="success" if evidence else "empty",
+                    result_count=len(evidence),
                     source_types=[
-                        document.source.provider.value for document in documents
+                        item.source.provider.value
+                        for item in evidence
+                        if item.source is not None
                     ],
                     results=evidence,
                     duration_ms=self._duration_ms(started_at),
                 )
-            return documents, None
+            return evidence, None
 
     def _validated_queries(
         self,
@@ -262,34 +254,26 @@ class KnowledgeSearch(Tool):
                 queries.append(query)
         return queries, None
 
-    def _context_from_documents(self, documents: list[ContextualChunk]) -> str:
+    def _context_from_evidence(self, evidence: list[Evidence]) -> str:
         blocks: list[str] = []
         remaining_characters = self._max_context_characters
-        for document in documents:
-            prefix = f"[{document.id}] {document.title or document.item_id}"
-            prefix += f"\nSource: {document.source.provider.value}"
-            if document.source.url:
-                prefix += f"\nSource URL: {document.source.url}"
+        for item in evidence:
+            prefix = f"[{item.id}] {item.title or item.item_id}"
+            if item.source is not None:
+                prefix += f"\nSource: {item.source.provider.value}"
+                if item.source.url:
+                    prefix += f"\nSource URL: {item.source.url}"
             prefix += "\nExcerpt: "
-            available_content = remaining_characters - len(prefix) - 2
+            available_content = min(
+                remaining_characters - len(prefix) - 2,
+                self._max_evidence_characters,
+            )
             if available_content <= 0:
                 break
-            block = f"{prefix}{self._clip(document.chunk_text, available_content)}"
+            block = f"{prefix}{self._clip(item.content, available_content)}"
             blocks.append(block)
             remaining_characters -= len(block) + 2
         return "Retrieved access-permitted enterprise evidence:\n\n" + "\n\n".join(blocks)
-
-    def _evidence_from_chunk(self, document: ContextualChunk) -> Evidence:
-        return Evidence(
-            id=document.id,
-            item_id=document.item_id,
-            chunk_id=document.id,
-            title=document.title or document.item_id,
-            content=self._clip(document.chunk_text, self._max_evidence_characters),
-            source=document.source,
-            citation=document.citation,
-            relevance_score=document.relevance_score,
-        )
 
     @staticmethod
     def _clip(text: str, limit: int) -> str:
@@ -302,8 +286,4 @@ class KnowledgeSearch(Tool):
         return round((perf_counter() - started_at) * 1_000)
 
 
-# Transitional import alias while callers move to the generic Tool contract.
-KnowledgeSearchTool = KnowledgeSearch
-
-
-__all__ = ["KnowledgeSearch", "KnowledgeSearchTool"]
+__all__ = ["KnowledgeSearch"]

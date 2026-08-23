@@ -4,12 +4,16 @@ import abc
 from collections.abc import Generator
 from typing import Any, Generic, TypeVar
 
-from .models import (
+from bothesis.connector.protocol import (
+    AnyItem,
+    Chunk,
+    CollectionItem,
     ConnectorCheckpoint,
     ConnectorScope,
+    DocumentItem,
+    ItemChange,
     SlimItem,
 )
-from bothesis.knowledge.protocol import AnyItem, CollectionItem, ItemChange
 
 # ---------------------------------------------------------------------------
 # Type aliases used throughout the connector layer
@@ -90,6 +94,12 @@ class BaseSourceConnector(abc.ABC):
         """Fetch one canonical item.
         """
         raise NotImplementedError("connector does not implement fetch_item")
+
+    async def fetch_chunks(self, item: DocumentItem) -> tuple[Chunk, ...] | None:
+        """Return chunks already produced while fetching a document, if any."""
+
+        del item
+        return None
 
     async def fetch_hierarchy(self, scope: ConnectorScope) -> list[AnyItem]:
         del scope

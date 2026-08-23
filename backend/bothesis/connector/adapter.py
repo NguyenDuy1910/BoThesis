@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime, timezone
 
 from .base import BaseSourceConnector, CheckpointedConnector
-from .models import ConnectorCheckpoint, ConnectorScope
-from bothesis.knowledge.protocol import (
+from bothesis.connector.protocol import (
     AnyItem,
+    Chunk,
     CollectionItem,
+    ConnectorCheckpoint,
+    ConnectorScope,
     DocumentItem,
-    FileItem,
     ItemChange,
 )
 
@@ -88,7 +90,7 @@ class CheckpointedSourceConnectorAdapter(BaseSourceConnector):
                     next_checkpoint = stop.value or typed_checkpoint
                     return changes, items, hierarchy, next_checkpoint
                 for item in batch:
-                    if isinstance(item, (DocumentItem, FileItem)):
+                    if isinstance(item, DocumentItem):
                         normalized = item
                         items[normalized.id] = normalized
                         changes.append(
@@ -113,6 +115,17 @@ class CheckpointedSourceConnectorAdapter(BaseSourceConnector):
             return self._items[external_id].model_copy(deep=True)
         except KeyError as exc:
             raise KeyError(f"Item {external_id!r} was not discovered") from exc
+
+    async def fetch_chunks(self, item: DocumentItem) -> tuple[Chunk, ...] | None:
+        """Forward source-owned chunks when the checkpoint connector provides them."""
+
+        fetcher = getattr(self.connector, "fetch_chunks", None)
+        if fetcher is None:
+            return None
+        chunks = fetcher(item)
+        if inspect.isawaitable(chunks):
+            chunks = await chunks
+        return tuple(chunks) if chunks is not None else None
 
     async def fetch_hierarchy(self, scope: ConnectorScope) -> list[AnyItem]:
         del scope

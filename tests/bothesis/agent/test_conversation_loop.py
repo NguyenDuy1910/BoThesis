@@ -41,8 +41,8 @@ from bothesis.agent.models import (
 )
 from bothesis.agent.tools import Tool, ToolDefinition, ToolRegistry
 from bothesis.agent.transports import RESPONSES_PROVIDERS
-from bothesis.knowledge.protocol import CitationInfo
-from bothesis.knowledge.protocol import CitationSpan
+from bothesis.connector.protocol import CitationInfo
+from bothesis.connector.protocol import CitationSpan
 
 PROVIDERS = sorted(RESPONSES_PROVIDERS)
 

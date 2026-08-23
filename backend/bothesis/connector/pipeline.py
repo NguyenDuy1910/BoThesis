@@ -4,33 +4,44 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import deque
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Protocol
 
 from .base import BaseSourceConnector
-from .models import (
+from bothesis.connector.processing import DoclingChunker
+from bothesis.connector.protocol import (
+    AnyItem,
+    ChangeType,
+    Chunk,
     ConnectorCheckpoint,
     ConnectorScope,
-)
-from bothesis.knowledge.protocol import AnyItem, ChangeType, ItemChange
-from .qdrant import (
-    ChunkingConfig,
-    QdrantChunkRecord,
-    QdrantPayloadContext,
-    build_qdrant_records,
+    DocumentItem,
+    DocumentKind,
+    ItemChange,
 )
 
 log = logging.getLogger(__name__)
 
 
-class QdrantPayloadSink(Protocol):
-    """Index boundary implemented by the embedding/Qdrant worker."""
+class ConnectorIndexSink(Protocol):
+    """Index boundary supplied by ``document_index``.
 
-    async def write(self, records: Sequence[QdrantChunkRecord]) -> int:
-        """Embed and upsert every supplied record, returning the written count."""
+    Connector orchestration supplies the final canonical document and evidence
+    chunks. Contextualization, embedding, and payload projection happen behind
+    this boundary.
+    """
+
+    async def write(
+        self,
+        item: DocumentItem,
+        chunks: Sequence[Chunk],
+        *,
+        tenant_id: str,
+        connector_id: str | int,
+    ) -> int:
+        """Replace one canonical item and return the number of chunks written."""
 
     async def soft_delete_item(
         self,
@@ -73,16 +84,12 @@ class ConnectorPipelineError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class ConnectorPipelineConfig:
     fetch_concurrency: int = 8
-    payload_batch_size: int = 64
-    chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     continue_on_error: bool = False
     fetch_hierarchy: bool = True
 
     def __post_init__(self) -> None:
         if self.fetch_concurrency < 1:
             raise ValueError("fetch_concurrency must be at least one")
-        if self.payload_batch_size < 1:
-            raise ValueError("payload_batch_size must be at least one")
 
 
 class ConnectorPipeline:
@@ -95,15 +102,19 @@ class ConnectorPipeline:
     def __init__(
         self,
         connector: BaseSourceConnector,
-        sink: QdrantPayloadSink,
+        sink: ConnectorIndexSink,
         *,
-        context: QdrantPayloadContext,
+        tenant_id: str,
+        connector_id: str | int,
         config: ConnectorPipelineConfig | None = None,
+        chunker: DoclingChunker | None = None,
     ) -> None:
         self._connector = connector
         self._sink = sink
-        self._context = context
+        self._tenant_id = tenant_id
+        self._connector_id = connector_id
         self._config = config or ConnectorPipelineConfig()
+        self._chunker = chunker or DoclingChunker()
 
     async def run_scope(
         self,
@@ -126,15 +137,13 @@ class ConnectorPipeline:
         replaced_items = 0
         processed_items = 0
         written_chunks = 0
-        payload_buffer: deque[QdrantChunkRecord] = deque()
-
         for change in changes:
             if change.type != ChangeType.DELETE:
                 continue
             try:
                 await self._sink.soft_delete_item(
-                    tenant_id=self._context.tenant_id,
-                    connector_id=self._context.connector_id,
+                    tenant_id=self._tenant_id,
+                    connector_id=self._connector_id,
                     item_id=change.item_id,
                 )
                 deleted_items += 1
@@ -155,35 +164,12 @@ class ConnectorPipeline:
                     failures.append(_failure(change.item_id, "fetch", outcome))
                     continue
                 try:
-                    records = build_qdrant_records(
-                        outcome,
-                        self._context,
-                        chunking=self._config.chunking,
-                    )
-                    # Replace semantics remove stale trailing chunks when a
-                    # newer document version produces fewer chunks.
-                    await self._sink.soft_delete_item(
-                        tenant_id=self._context.tenant_id,
-                        connector_id=self._context.connector_id,
-                        item_id=outcome.id,
-                    )
+                    chunks = await self._chunks_for(outcome)
+                    written_chunks += await self._write(outcome, chunks)
                     replaced_items += 1
                     processed_items += 1
-                    payload_buffer.extend(records)
-                    while len(payload_buffer) >= self._config.payload_batch_size:
-                        write_batch = [
-                            payload_buffer.popleft()
-                            for _ in range(self._config.payload_batch_size)
-                        ]
-                        written_chunks += await self._write_batch(write_batch)
                 except Exception as exc:
                     failures.append(_failure(change.item_id, "process", exc))
-
-        if payload_buffer:
-            try:
-                written_chunks += await self._write_batch(list(payload_buffer))
-            except Exception as exc:
-                failures.append(_failure("<batch>", "write", exc))
 
         hierarchy: tuple[AnyItem, ...] = ()
         if self._config.fetch_hierarchy:
@@ -222,7 +208,7 @@ class ConnectorPipeline:
             raise ConnectorPipelineError(result)
         return result
 
-    async def _load_item(self, change: ItemChange) -> AnyItem:
+    async def _load_item(self, change: ItemChange) -> DocumentItem:
         item_id = change.item_id
         item = change.item
         if item is None:
@@ -235,14 +221,49 @@ class ConnectorPipeline:
             raise ValueError(
                 f"Connector source {self._connector.source!r} returned {item.source.provider.value!r}"
             )
+        if not isinstance(item, DocumentItem):
+            raise ValueError(
+                f"Connector change {item_id!r} did not produce a DocumentItem"
+            )
         return item
 
-    async def _write_batch(self, records: Sequence[QdrantChunkRecord]) -> int:
-        written = await self._sink.write(records)
-        if written != len(records):
-            raise RuntimeError(
-                f"Payload sink acknowledged {written} of {len(records)} records"
-            )
+    async def _chunks_for(self, item: DocumentItem) -> tuple[Chunk, ...]:
+        chunks = await self._connector.fetch_chunks(item)
+        resolved = (
+            tuple(chunks)
+            if chunks is not None
+            else tuple(self._chunker.chunk_item(item))
+        )
+        if not resolved:
+            if item.document_kind == DocumentKind.IMAGE:
+                return ()
+            raise ValueError(f"Document item {item.id!r} has no chunks")
+        seen_ids: set[str] = set()
+        seen_indexes: set[int] = set()
+        for chunk in resolved:
+            if chunk.item_id != item.id:
+                raise ValueError(
+                    f"Chunk {chunk.id!r} belongs to {chunk.item_id!r}, not {item.id!r}"
+                )
+            if chunk.id in seen_ids or chunk.chunk_index in seen_indexes:
+                raise ValueError(f"Document item {item.id!r} has duplicate chunks")
+            seen_ids.add(chunk.id)
+            seen_indexes.add(chunk.chunk_index)
+        return resolved
+
+    async def _write(
+        self,
+        item: DocumentItem,
+        chunks: Sequence[Chunk],
+    ) -> int:
+        written = await self._sink.write(
+            item,
+            chunks,
+            tenant_id=self._tenant_id,
+            connector_id=self._connector_id,
+        )
+        if written < 0:
+            raise RuntimeError("Index sink returned a negative write count")
         return written
 
 
@@ -273,5 +294,5 @@ __all__ = [
     "ConnectorPipelineError",
     "PipelineFailure",
     "PipelineResult",
-    "QdrantPayloadSink",
+    "ConnectorIndexSink",
 ]

@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-
 import pytest
 
 from bothesis.connector.base import BaseSourceConnector
-from bothesis.connector.models import (
+from bothesis.connector.protocol import (
+    Chunk,
+    CitationInfo,
+    CitationSpan,
     ConnectorCheckpoint,
     ConnectorScope,
     SourceCheckpoint,
 )
 from bothesis.connector.pipeline import ConnectorPipeline, ConnectorPipelineConfig
-from bothesis.connector.qdrant import ChunkingConfig, QdrantChunkRecord, QdrantPayloadContext
-from bothesis.knowledge.protocol import (
+from bothesis.connector.protocol import (
     AccessPolicy,
     ChangeType,
     CollectionItem,
@@ -30,12 +31,20 @@ from bothesis.knowledge.protocol import (
 
 class RecordingSink:
     def __init__(self) -> None:
-        self.write_batches: list[list[QdrantChunkRecord]] = []
+        self.writes: list[tuple[DocumentItem, tuple[Chunk, ...]]] = []
         self.deletes: list[tuple[str, str | int, str]] = []
 
-    async def write(self, records: Sequence[QdrantChunkRecord]) -> int:
-        self.write_batches.append(list(records))
-        return len(records)
+    async def write(
+        self,
+        item: DocumentItem,
+        chunks: Sequence[Chunk],
+        *,
+        tenant_id: str,
+        connector_id: str | int,
+    ) -> int:
+        del tenant_id, connector_id
+        self.writes.append((item, tuple(chunks)))
+        return len(chunks)
 
     async def soft_delete_item(
         self,
@@ -117,10 +126,24 @@ class StubConnector(BaseSourceConnector):
         return self._next
 
 
+class StubChunker:
+    def chunk_item(self, item: DocumentItem) -> list[Chunk]:
+        text = item.get_text_content()
+        return [
+            Chunk(
+                id=f"{item.id}:0",
+                item_id=item.id,
+                chunk_index=0,
+                chunk_text=text,
+                content_type="text",
+                citation=CitationInfo(
+                    spans=(CitationSpan(element_id=f"{item.id}-text"),)
+                ),
+            )
+        ]
+
+
 SCOPE = ConnectorScope(scope_type="folder", scope_value="root", display_name="Root")
-CONTEXT = QdrantPayloadContext(tenant_id="tenant-1", connector_id="connector-1")
-
-
 @pytest.mark.asyncio
 async def test_pipeline_batches_payloads_bounds_fetches_and_advances_checkpoint() -> None:
     connector = StubConnector()
@@ -128,36 +151,34 @@ async def test_pipeline_batches_payloads_bounds_fetches_and_advances_checkpoint(
     pipeline = ConnectorPipeline(
         connector,
         sink,
-        context=CONTEXT,
+        tenant_id="tenant-1",
+        connector_id="connector-1",
         config=ConnectorPipelineConfig(
             fetch_concurrency=2,
-            payload_batch_size=2,
-            chunking=ChunkingConfig(max_characters=100, overlap_characters=0),
         ),
+        chunker=StubChunker(),  # type: ignore[arg-type]
     )
 
     result = await pipeline.run_scope(SCOPE, SourceCheckpoint())
 
     assert result.discovered_changes == 3
     assert result.processed_items == 2
-    assert result.written_chunks == 4
+    assert result.written_chunks == 2
     assert result.deleted_items == 1
     assert result.replaced_items == 2
     assert result.checkpoint_advanced is True
     assert result.checkpoint == SourceCheckpoint(cursor="complete")
     assert connector.max_active_fetches == 2
-    assert [len(batch) for batch in sink.write_batches] == [2, 2]
+    assert [len(chunks) for _, chunks in sink.writes] == [1, 1]
     assert sink.deletes == [
         ("tenant-1", "connector-1", "doc-old"),
-        ("tenant-1", "connector-1", "doc-2"),
-        ("tenant-1", "connector-1", "doc-1"),
     ]
     assert result.hierarchy[0].id == "root"
-    assert all(
-        record.payload.reader_ids == ["external_group:staff"]
-        for batch in sink.write_batches
-        for record in batch
-    )
+    assert [item.id for item, _ in sink.writes] == ["doc-2", "doc-1"]
+    assert [chunks[0].chunk_text for _, chunks in sink.writes] == [
+        "doc-2 " + "x" * 150,
+        "doc-1 " + "x" * 150,
+    ]
 
 
 @pytest.mark.asyncio
@@ -168,12 +189,13 @@ async def test_pipeline_does_not_advance_checkpoint_after_partial_failure() -> N
     pipeline = ConnectorPipeline(
         connector,
         sink,
-        context=CONTEXT,
+        tenant_id="tenant-1",
+        connector_id="connector-1",
         config=ConnectorPipelineConfig(
             continue_on_error=True,
             fetch_hierarchy=False,
-            chunking=ChunkingConfig(max_characters=100, overlap_characters=0),
         ),
+        chunker=StubChunker(),  # type: ignore[arg-type]
     )
 
     result = await pipeline.run_scope(SCOPE, initial)

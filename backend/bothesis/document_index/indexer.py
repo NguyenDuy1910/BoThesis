@@ -2,208 +2,51 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from bothesis.agent.models import ConversationDocument, Evidence
-from bothesis.connector.file.processing import (
-    FileProcessingError,
-    FileProcessor,
-    ParsedDocument,
-    UnsupportedFileTypeError,
-)
-from bothesis.connector.provider_cache import (
+from bothesis.connector.protocol import (
+    AccessPolicy,
+    Chunk,
+    CitationInfo,
+    CitationSpan,
+    DocumentItem,
+    DocumentKind,
+    EffectiveAccess,
+    Hierarchy,
     ProviderCacheEntry,
     ProviderFileCache,
+    SourceIdentity,
+    SourceProvider,
 )
-from bothesis.connector.qdrant import (
-    ChunkingConfig,
-    citation_spans_for_range,
-    make_contextual_text,
-    split_text_with_offsets,
+from bothesis.document_index import (
+    CHUNKER_VERSION,
+    DEFAULT_DIRECT_MAX_BYTES,
+    DIRECT_IMAGE_TYPES,
+    PARSER_VERSION,
+    DocumentProcessingError,
+    DocumentUnavailableError,
+    PreparedDocuments,
+    VectorIndex,
 )
-from bothesis.knowledge.protocol import ChunkContext
-from bothesis.knowledge.protocol import CitationInfo, CitationSpan, SourceIdentity, SourceProvider
+from bothesis.document_index.contextualization import StructuralContextualizer
+from bothesis.document_index.embedding import EmbeddingService, embedding_texts
+from bothesis.document_index.models import ContextualChunk, PreparedDocument
 from bothesis.db.models import Document, DocumentChunk
-from bothesis.document_index.raw_storage import (
-    DocumentStorage,
-    PostgresBlobStorage,
-)
 from bothesis.services import (
     AuthContext,
+    ChatDocumentSource,
+    DEFAULT_PROCESSING_MAX_BYTES,
     DocumentChunkInput,
     DocumentService,
 )
 
 log = logging.getLogger(__name__)
-
-DEFAULT_DIRECT_MAX_BYTES = 20 * 1024 * 1024
-DEFAULT_PROCESSING_MAX_BYTES = 100 * 1024 * 1024
-PARSER_VERSION = "file-processor-v2"
-CHUNKER_VERSION = "document-chunker-v1"
-
-DIRECT_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/webp", "image/gif"})
-
-
-class DocumentProcessingError(RuntimeError):
-    pass
-
-
-class DocumentUnavailableError(DocumentProcessingError):
-    pass
-
-
-class OCRUnavailableError(DocumentProcessingError):
-    pass
-
-
-@runtime_checkable
-class Parser(Protocol):
-    def parse(self, raw_bytes: bytes, *, file_name: str) -> ParsedDocument: ...
-
-
-@runtime_checkable
-class OCRParser(Protocol):
-    async def parse(
-        self,
-        raw_bytes: bytes,
-        *,
-        file_name: str,
-        content_type: str,
-    ) -> ParsedDocument: ...
-
-
-@runtime_checkable
-class Chunker(Protocol):
-    def chunk(self, document: ParsedDocument) -> list[DocumentChunkInput]: ...
-
-
-@runtime_checkable
-class EmbeddingService(Protocol):
-    model: str
-
-    async def embed_query(self, query: str) -> list[float]: ...
-
-    async def embed_documents(self, documents: list[str]) -> list[list[float]]: ...
-
-
-@runtime_checkable
-class VectorIndex(Protocol):
-    """Derived-index operations required by the document pipeline."""
-
-    async def replace_document(
-        self,
-        document: Document,
-        chunks: Sequence[DocumentChunk],
-        vectors: Sequence[Sequence[float]],
-        *,
-        access: AuthContext,
-        embedding_model: str,
-        source_fingerprint: str,
-    ) -> None: ...
-
-    async def search_document(
-        self,
-        document: Document,
-        query_vector: list[float],
-        *,
-        access: AuthContext,
-        limit: int,
-    ) -> tuple[Evidence, ...]: ...
-
-    async def update_document_access(
-        self,
-        document_id: UUID,
-        *,
-        access: AuthContext,
-    ) -> None: ...
-
-    async def soft_delete_document(self, document_id: UUID) -> None: ...
-
-
-class FileParser:
-    """Adapt structured file extraction to the document parser contract."""
-
-    def __init__(self, processor: FileProcessor) -> None:
-        self._processor = processor
-
-    def parse(self, raw_bytes: bytes, *, file_name: str) -> ParsedDocument:
-        return self._processor.parse_bytes(raw_bytes, file_name=file_name)
-
-
-class DocumentChunker:
-    def __init__(self, *, max_characters: int = 4_000, overlap_characters: int = 400):
-        self._config = ChunkingConfig(
-            max_characters=max_characters,
-            overlap_characters=overlap_characters,
-        )
-
-    def chunk(self, document: ParsedDocument) -> list[DocumentChunkInput]:
-        sections = [
-            (
-                section.element_id or f"element_{index + 1:03d}",
-                section.content.strip(),
-                section,
-            )
-            for index, section in enumerate(document.sections)
-            if section.content.strip()
-        ]
-        document_text = "\n\n".join(text for _, text, _ in sections)
-        chunks: list[DocumentChunkInput] = []
-        for fragment, start_offset, end_offset in split_text_with_offsets(
-            document_text,
-            self._config,
-        ):
-            spans = citation_spans_for_range(
-                [
-                    (element_id, text, section.page_number, section.bounding_box)
-                    for element_id, text, section in sections
-                ],
-                start_offset,
-                end_offset,
-            )
-            if not spans:
-                continue
-            first_span = spans[0]
-            first_section = next(
-                section for element_id, _, section in sections
-                if element_id == first_span.element_id
-            )
-            pages = [span.page for span in spans if span.page is not None]
-            chunks.append(
-                DocumentChunkInput(
-                    content=fragment,
-                    # These fields remain derived DB compatibility metadata;
-                    # citation_spans is the canonical provenance contract.
-                    element_id=first_span.element_id,
-                    start_offset=first_span.start_offset,
-                    end_offset=first_span.end_offset,
-                    citation_spans=spans,
-                    token_count=_approximate_tokens(fragment),
-                    start_page_number=min(pages) if pages else None,
-                    end_page_number=max(pages) if pages else None,
-                    heading_path=first_section.heading_path,
-                    metadata=dict(first_section.metadata or {}),
-                )
-            )
-        if not chunks:
-            raise FileProcessingError("document has no indexable text")
-        return chunks
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedDocuments:
-    contexts: tuple[ConversationDocument, ...]
-    source_fingerprints: Mapping[UUID, str]
-
 
 class DocumentPipeline:
     """Process Documents through Direct or retrieval paths.
@@ -216,15 +59,11 @@ class DocumentPipeline:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
-        object_storage: DocumentStorage | None,
-        parser: Parser,
-        chunker: Chunker,
+        document_source: ChatDocumentSource,
         embedder: EmbeddingService,
         vector_index: VectorIndex,
         provider_cache: ProviderFileCache,
-        ocr_parser: OCRParser | None = None,
         direct_max_bytes: int = DEFAULT_DIRECT_MAX_BYTES,
-        processing_max_bytes: int = DEFAULT_PROCESSING_MAX_BYTES,
         retrieval_limit: int = 6,
         embedding_batch_size: int = 32,
         download_url_seconds: int = 300,
@@ -232,7 +71,6 @@ class DocumentPipeline:
         if (
             min(
                 direct_max_bytes,
-                processing_max_bytes,
                 retrieval_limit,
                 embedding_batch_size,
                 download_url_seconds,
@@ -241,15 +79,11 @@ class DocumentPipeline:
         ):
             raise ValueError("document processing limits must be greater than zero")
         self._session_factory = session_factory
-        self._object_storage = object_storage
-        self._parser = parser
-        self._chunker = chunker
+        self._document_source = document_source
         self._embedder = embedder
         self._vector_index = vector_index
         self._provider_cache = provider_cache
-        self._ocr_parser = ocr_parser
         self._direct_max_bytes = direct_max_bytes
-        self._processing_max_bytes = processing_max_bytes
         self._retrieval_limit = retrieval_limit
         self._embedding_batch_size = embedding_batch_size
         self._download_url_seconds = download_url_seconds
@@ -263,7 +97,7 @@ class DocumentPipeline:
     ) -> PreparedDocuments:
         if len(document_ids) != len(set(document_ids)):
             raise ValueError("document IDs must be unique")
-        contexts: list[ConversationDocument] = []
+        contexts: list[PreparedDocument] = []
         fingerprints: dict[UUID, str] = {}
         for document_id in document_ids:
             document = await self._load_visible_document(document_id, access=access)
@@ -399,7 +233,10 @@ class DocumentPipeline:
                 access.user_id,
                 include_hidden=True,
             )
-            await PostgresBlobStorage(session).soft_delete(document_id)
+            await self._document_source.soft_delete_raw(
+                document_id,
+                session=session,
+            )
             await documents.soft_delete_document(document_id, actor=access)
 
     async def _load_visible_document(
@@ -452,7 +289,7 @@ class DocumentPipeline:
     async def _prepare_direct(
         self,
         document: Document,
-    ) -> tuple[ConversationDocument, str]:
+    ) -> tuple[PreparedDocument, str]:
         fingerprint = _source_fingerprint(document)
         cached = await self._provider_cache.get(
             document.id,
@@ -472,18 +309,10 @@ class DocumentPipeline:
         content_type = document.mime_type or "application/octet-stream"
         file_data: str | None = None
         if not annotations:
-            if document.raw_storage_key:
-                if self._object_storage is None:
-                    raise DocumentUnavailableError("object storage is unavailable")
-                file_data = self._object_storage.presign_download(
-                    document.raw_storage_key,
-                    expires_seconds=self._download_url_seconds,
-                ).url
-            else:
-                raw_bytes = await self._read_raw(document)
-                file_data = f"data:{content_type};base64," + base64.b64encode(
-                    raw_bytes
-                ).decode("ascii")
+            file_data = await self._document_source.direct_file_data(
+                document,
+                expires_seconds=self._download_url_seconds,
+            )
 
         evidence_id = f"document:{document.id}"
         content_block: Mapping[str, Any] | None = None
@@ -504,26 +333,31 @@ class DocumentPipeline:
             else:
                 raise DocumentProcessingError("document type is not direct-capable")
         return (
-            ConversationDocument(
+            PreparedDocument(
                 id=str(document.id),
                 title=_file_name(document),
                 content_type=content_type,
                 mode="direct",
                 citation_id=evidence_id,
                 content_block=content_block,
-                evidence=(
-                    Evidence(
+                chunks=(
+                    ContextualChunk(
                         id=evidence_id,
                         item_id=str(document.id),
-                        chunk_id=evidence_id,
+                        chunk_index=0,
+                        content_type=content_type,
+                        chunk_text="Original user-supplied document provided directly to the model.",
+                        contextual_text="Original user-supplied document provided directly to the model.",
                         title=_file_name(document),
-                        content="Original user-supplied document provided directly to the model.",
+                        document_kind="document",
                         source=SourceIdentity(
                             connector_id="upload",
                             provider=SourceProvider.FILE,
                             external_id=str(document.id),
                             url=document.source_url,
                         ),
+                        hierarchy=Hierarchy(),
+                        access=EffectiveAccess(),
                         citation=CitationInfo(),
                     ),
                 ),
@@ -538,23 +372,23 @@ class DocumentPipeline:
         *,
         access: AuthContext,
         message: str,
-    ) -> tuple[ConversationDocument, str]:
+    ) -> tuple[PreparedDocument, str]:
         document = await self._ensure_indexed(document.id, access=access)
         query_vector = await self._embedder.embed_query(message)
-        evidence = await self._vector_index.search_document(
+        chunks = await self._vector_index.search_document(
             document,
             query_vector,
             access=access,
             limit=self._retrieval_limit,
         )
         return (
-            ConversationDocument(
+            PreparedDocument(
                 id=str(document.id),
                 title=_file_name(document),
                 content_type=document.mime_type or "application/octet-stream",
                 mode="indexed",
                 citation_id=f"document:{document.id}",
-                evidence=evidence,
+                chunks=chunks,
             ),
             _source_fingerprint(document),
         )
@@ -630,17 +464,22 @@ class DocumentPipeline:
 
         try:
             if not chunks_reusable:
-                raw_bytes = await self._read_raw(document)
-                digest = hashlib.sha256(raw_bytes).hexdigest()
-                parsed = await self._parse(
-                    raw_bytes,
-                    file_name=_file_name(document),
-                    content_type=document.mime_type or "application/octet-stream",
+                canonical = await self._document_source.canonicalize(
+                    document,
+                    access=access,
                 )
-                chunk_inputs = self._chunker.chunk(parsed)
+                canonical_item = canonical.item
+                source_fingerprint = canonical.source_fingerprint
+                canonical_chunks = canonical.chunks
+                chunk_inputs = [
+                    DocumentChunkInput.from_chunk(chunk) for chunk in canonical_chunks
+                ]
                 async with self._session_factory.begin() as session:
                     documents = DocumentService(session)
-                    await documents.set_content_sha256(document.id, digest)
+                    await documents.set_content_sha256(
+                        document.id,
+                        source_fingerprint,
+                    )
                     chunks = tuple(
                         await documents.replace_chunks(document.id, chunk_inputs)
                     )
@@ -648,40 +487,47 @@ class DocumentPipeline:
                         document.id,
                         {
                             "processing": {
-                                "source_fingerprint": digest,
+                                "source_fingerprint": source_fingerprint,
                                 "parser_version": PARSER_VERSION,
                                 "chunker_version": CHUNKER_VERSION,
                             }
                         },
                     )
-                document.content_sha256 = digest
-                source_fingerprint = digest
+                document.content_sha256 = source_fingerprint
             else:
+                canonical_chunks = tuple(
+                    _canonical_chunk(document, chunk) for chunk in chunks
+                )
+                canonical_item = _canonical_item(
+                    document,
+                    access=access,
+                    source_fingerprint=source_fingerprint,
+                )
                 async with self._session_factory.begin() as session:
                     await DocumentService(session).mark_index_pending(document.id)
 
+            contextualizer = StructuralContextualizer()
+            contextual_chunks = [
+                contextualizer.contextualize(
+                    chunk,
+                    title=canonical_item.title,
+                    source=canonical_item.source,
+                    hierarchy=canonical_item.hierarchy,
+                    access=canonical_item.access,
+                    document_kind=canonical_item.document_kind,
+                    summary=_metadata_text(canonical_item.metadata, "summary"),
+                )
+                for chunk in canonical_chunks
+            ]
             vectors: list[list[float]] = []
-            chunk_list = list(chunks)
-            for start in range(0, len(chunk_list), self._embedding_batch_size):
-                batch = chunk_list[start : start + self._embedding_batch_size]
+            for start in range(0, len(contextual_chunks), self._embedding_batch_size):
+                batch = contextual_chunks[start : start + self._embedding_batch_size]
                 vectors.extend(
-                    await self._embedder.embed_documents(
-                        [
-                            make_contextual_text(
-                                title=_file_name(document),
-                                context=ChunkContext(
-                                    section_path=list(chunk.heading_path or ()),
-                                    summary=_metadata_text(chunk.metadata, "summary"),
-                                ),
-                                chunk_text=chunk.content,
-                            )
-                            for chunk in batch
-                        ]
-                    )
+                    await self._embedder.embed_documents(embedding_texts(batch))
                 )
             await self._vector_index.replace_document(
                 document,
-                chunk_list,
+                contextual_chunks,
                 vectors,
                 access=access,
                 embedding_model=self._embedder.model,
@@ -709,55 +555,6 @@ class DocumentPipeline:
             if isinstance(exc, DocumentProcessingError):
                 raise
             raise DocumentProcessingError("document indexing failed") from exc
-
-    async def _parse(
-        self,
-        raw_bytes: bytes,
-        *,
-        file_name: str,
-        content_type: str,
-    ) -> ParsedDocument:
-        try:
-            return self._parser.parse(raw_bytes, file_name=file_name)
-        except (FileProcessingError, UnsupportedFileTypeError) as exc:
-            if self._ocr_parser is None:
-                if (
-                    content_type.startswith("image/")
-                    or content_type == "application/pdf"
-                ):
-                    raise OCRUnavailableError(
-                        "document retrieval requires OCR, but no OCR parser is configured"
-                    ) from exc
-                raise DocumentProcessingError(str(exc)) from exc
-            return await self._ocr_parser.parse(
-                raw_bytes,
-                file_name=file_name,
-                content_type=content_type,
-            )
-
-    async def _read_raw(
-        self,
-        document: Document,
-    ) -> bytes:
-        if (document.size_bytes or 0) > self._processing_max_bytes:
-            raise DocumentProcessingError(
-                "document exceeds the configured processing limit"
-            )
-        if document.raw_storage_key:
-            if self._object_storage is None:
-                raise DocumentUnavailableError("object storage is unavailable")
-            raw_bytes = await self._object_storage.read(
-                document.raw_storage_key,
-                max_bytes=self._processing_max_bytes,
-            )
-        else:
-            async with self._session_factory() as session:
-                raw_bytes = await PostgresBlobStorage(session).read(document.id)
-        if document.size_bytes is not None and len(raw_bytes) != document.size_bytes:
-            raise DocumentUnavailableError(
-                "stored document size no longer matches metadata"
-            )
-        return raw_bytes
 
 
 def _source_fingerprint(document: Document) -> str:
@@ -787,6 +584,111 @@ def _metadata_text(metadata: Mapping[str, Any], key: str) -> str | None:
     return None
 
 
+def _canonical_item(
+    document: Document,
+    *,
+    access: AuthContext,
+    source_fingerprint: str,
+) -> DocumentItem:
+    return DocumentItem(
+        id=str(document.id),
+        title=_file_name(document),
+        source=SourceIdentity(
+            connector_id="upload",
+            provider=SourceProvider.FILE,
+            external_id=str(document.id),
+            external_version=source_fingerprint,
+            etag=source_fingerprint,
+            url=document.source_url,
+        ),
+        document_kind=_document_kind(document.mime_type),
+        access=AccessPolicy.from_reader_ids([str(access.user_id)]),
+        hierarchy=Hierarchy(),
+        metadata={
+            str(key): value if isinstance(value, str) else list(value)
+            for key, value in document.metadata_.items()
+            if isinstance(value, str)
+            or (
+                isinstance(value, (list, tuple))
+                and all(isinstance(item, str) for item in value)
+            )
+        },
+    )
+
+
+def _document_kind(content_type: str | None) -> DocumentKind:
+    normalized = (content_type or "").casefold()
+    if normalized.startswith("image/"):
+        return DocumentKind.IMAGE
+    if normalized == "application/pdf":
+        return DocumentKind.PDF
+    if normalized in {"text/html", "application/xhtml+xml"}:
+        return DocumentKind.WEB_PAGE
+    return DocumentKind.DOCUMENT
+
+
+def _canonical_chunk(document: Document, record: DocumentChunk) -> Chunk:
+    metadata = record.metadata_
+    raw_spans = metadata.get("citation_spans")
+    spans: list[CitationSpan] = []
+    if isinstance(raw_spans, list):
+        for value in raw_spans:
+            try:
+                spans.append(CitationSpan.model_validate(value))
+            except (TypeError, ValueError):
+                continue
+    if not spans:
+        element_id = _metadata_text(metadata, "element_id")
+        start_offset = _metadata_int(metadata, "start_offset")
+        end_offset = _metadata_int(metadata, "end_offset")
+        if (start_offset is None) != (end_offset is None):
+            start_offset = None
+            end_offset = None
+        spans.append(
+            CitationSpan(
+                page=record.start_page_number or record.end_page_number,
+                element_id=element_id,
+                start_offset=start_offset,
+                end_offset=end_offset,
+            )
+        )
+    raw_section_path = metadata.get("citation_section_path")
+    if not isinstance(raw_section_path, (list, tuple)):
+        raw_section_path = record.heading_path or ()
+    section_path = tuple(
+        value
+        for value in raw_section_path
+        if isinstance(value, str) and value.strip()
+    )
+    return Chunk(
+        id=_metadata_text(metadata, "chunk_id")
+        or f"{document.id}:{record.chunk_index}",
+        item_id=str(document.id),
+        chunk_index=record.chunk_index,
+        chunk_text=record.content,
+        content_type=_metadata_text(metadata, "content_type") or "text",
+        section_path=list(section_path),
+        citation=CitationInfo(
+            section=_metadata_text(metadata, "citation_section")
+            or (section_path[-1] if section_path else None),
+            section_path=section_path,
+            anchor=_metadata_text(metadata, "citation_anchor"),
+            spans=tuple(spans),
+        ),
+    )
+
+
+def _metadata_int(metadata: Mapping[str, Any], key: str) -> int | None:
+    value = metadata.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
+
+
 def _annotation_name(annotation: Mapping[str, Any]) -> str | None:
     file_value = annotation.get("file")
     if not isinstance(file_value, Mapping):
@@ -795,21 +697,15 @@ def _annotation_name(annotation: Mapping[str, Any]) -> str | None:
     return name if isinstance(name, str) else None
 
 
-def _approximate_tokens(value: str) -> int:
-    return max(1, (len(value) + 3) // 4)
-
-
 __all__ = [
-    "Chunker",
-    "DocumentChunker",
+    "CHUNKER_VERSION",
+    "DEFAULT_DIRECT_MAX_BYTES",
+    "DEFAULT_PROCESSING_MAX_BYTES",
     "DocumentProcessingError",
     "DocumentPipeline",
     "DocumentUnavailableError",
     "EmbeddingService",
-    "FileParser",
-    "OCRParser",
-    "OCRUnavailableError",
-    "Parser",
+    "PARSER_VERSION",
     "PreparedDocuments",
     "VectorIndex",
 ]

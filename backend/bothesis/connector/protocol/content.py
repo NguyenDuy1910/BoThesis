@@ -1,32 +1,15 @@
-"""Content contained by a document item, never another top-level item."""
+"""Typed content parts contained by connector DocumentItems."""
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-
-class BoundingBox(BaseModel):
-    """A visual rectangle in the coordinate system of a rendered element."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    x: float = Field(ge=0, le=1)
-    y: float = Field(ge=0, le=1)
-    width: float = Field(gt=0, le=1)
-    height: float = Field(gt=0, le=1)
-
-    @model_validator(mode="after")
-    def _stay_inside_normalized_page(self) -> "BoundingBox":
-        if self.x + self.width > 1 or self.y + self.height > 1:
-            raise ValueError("bounding box must remain inside normalized coordinates")
-        return self
+from .citation import BoundingBox
 
 
 class ContentPart(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    # A parser may provide a native stable ID.  Chunking supplies a
-    # deterministic document-local fallback when it does not.
     element_id: str | None = Field(default=None, min_length=1)
     page: int | None = Field(default=None, ge=1)
     section: str | None = None
@@ -52,6 +35,7 @@ class ImagePart(ContentPart):
 
 class TablePart(ContentPart):
     type: Literal["table"] = "table"
+    columns: list[str] = Field(default_factory=list)
     rows: list[list[str]] = Field(default_factory=list)
     caption: str | None = None
 
@@ -80,13 +64,6 @@ AnyContentPart = Annotated[
 
 
 __all__ = [
-    "AnyContentPart",
-    "BoundingBox",
-    "CodePart",
-    "ContentPart",
-    "ImagePart",
-    "LinkPart",
-    "StructuredPart",
-    "TablePart",
-    "TextPart",
+    "AnyContentPart", "BoundingBox", "CodePart", "ContentPart", "ImagePart",
+    "LinkPart", "StructuredPart", "TablePart", "TextPart",
 ]

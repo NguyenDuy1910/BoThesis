@@ -322,7 +322,7 @@ async def upload_datasource_file(
         actor,
         connector_id,
         file_name=unquote(x_bothesis_file_name or ""),
-        content=await request.body(),
+        content=request.stream(),
     )
 
 

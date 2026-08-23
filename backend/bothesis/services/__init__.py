@@ -9,12 +9,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import Document
 from bothesis.document_index.raw_storage import PresignedRequest
-from bothesis.knowledge.protocol import CitationSpan
+from bothesis.connector.protocol import Chunk, CitationSpan, DocumentItem
 
 ACTIVE_STATUS = "active"
 INACTIVE_STATUS = "inactive"
@@ -46,6 +48,7 @@ UPLOAD_STATUSES = frozenset({"not_applicable", "pending", "available", "failed"}
 DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 DEFAULT_MAX_DATABASE_BLOB_BYTES = 20 * 1024 * 1024
 DEFAULT_UPLOAD_URL_SECONDS = 600
+DEFAULT_PROCESSING_MAX_BYTES = 100 * 1024 * 1024
 
 
 class AuthServiceError(Exception):
@@ -114,6 +117,41 @@ class AuthContext:
         return self.is_admin or required.issubset(self.permission_codes)
 
 
+@dataclass(frozen=True, slots=True)
+class CanonicalDocumentContent:
+    """Canonical source item and chunks produced for one stored document."""
+
+    item: DocumentItem
+    chunks: tuple[Chunk, ...]
+    source_fingerprint: str
+
+
+@runtime_checkable
+class ChatDocumentSource(Protocol):
+    """Raw-source boundary consumed by the chat document index pipeline."""
+
+    async def canonicalize(
+        self,
+        document: Document,
+        *,
+        access: AuthContext,
+    ) -> CanonicalDocumentContent: ...
+
+    async def direct_file_data(
+        self,
+        document: Document,
+        *,
+        expires_seconds: int,
+    ) -> str: ...
+
+    async def soft_delete_raw(
+        self,
+        document_id: UUID,
+        *,
+        session: AsyncSession,
+    ) -> None: ...
+
+
 class DocumentServiceError(Exception):
     """Base exception for durable document service failures."""
 
@@ -131,6 +169,8 @@ class DocumentChunkInput:
     """Canonical chunk content written to PostgreSQL before vector indexing."""
 
     content: str
+    chunk_id: str | None = None
+    content_type: str = "text"
     element_id: str | None = None
     start_offset: int | None = None
     end_offset: int | None = None
@@ -140,6 +180,40 @@ class DocumentChunkInput:
     heading_path: tuple[str, ...] | None = None
     citation_spans: tuple[CitationSpan, ...] = ()
     metadata: Mapping[str, Any] | None = None
+
+    @classmethod
+    def from_chunk(cls, chunk: Chunk) -> "DocumentChunkInput":
+        """Persist one connector-owned chunk without changing its evidence."""
+
+        spans = chunk.citation.spans
+        pages = [span.page for span in spans if span.page is not None]
+        first_span = spans[0] if spans else None
+        return cls(
+            content=chunk.chunk_text,
+            chunk_id=chunk.id,
+            content_type=chunk.content_type,
+            element_id=first_span.element_id if first_span else None,
+            start_offset=first_span.start_offset if first_span else None,
+            end_offset=first_span.end_offset if first_span else None,
+            token_count=max(1, (len(chunk.chunk_text) + 3) // 4),
+            start_page_number=min(pages) if pages else None,
+            end_page_number=max(pages) if pages else None,
+            heading_path=tuple(chunk.section_path),
+            citation_spans=spans,
+            metadata={
+                **(
+                    {"citation_section": chunk.citation.section}
+                    if chunk.citation.section
+                    else {}
+                ),
+                "citation_section_path": list(chunk.citation.section_path),
+                **(
+                    {"citation_anchor": chunk.citation.anchor}
+                    if chunk.citation.anchor
+                    else {}
+                ),
+            },
+        )
 
 
 class UploadServiceError(RuntimeError):
@@ -242,11 +316,13 @@ from bothesis.services.datasources import DatasourceService  # noqa: E402
 from bothesis.services.access_requests import AccessRequestService  # noqa: E402
 from bothesis.services.acl import AclService  # noqa: E402
 from bothesis.services.admin_documents import AdminDocumentService  # noqa: E402
+from bothesis.services.chat_document_source import ChatDocumentSourceService  # noqa: E402
 from bothesis.services.groups import GroupService  # noqa: E402
 from bothesis.services.roles import RoleService  # noqa: E402
 from bothesis.services.tenants import TenantService  # noqa: E402
 from bothesis.services.users import UserService  # noqa: E402
 from bothesis.services.admin import AdminService  # noqa: E402
+from bothesis.services.connector_sync import ConnectorSyncService  # noqa: E402
 
 __all__ = [
     "ACTIVE_STATUS",
@@ -268,9 +344,14 @@ __all__ = [
     "AuthService",
     "AuthServiceError",
     "AuthorizationError",
+    "CanonicalDocumentContent",
+    "ChatDocumentSource",
+    "ChatDocumentSourceService",
     "ConversationService",
+    "ConnectorSyncService",
     "DEFAULT_MAX_DATABASE_BLOB_BYTES",
     "DEFAULT_MAX_UPLOAD_BYTES",
+    "DEFAULT_PROCESSING_MAX_BYTES",
     "DEFAULT_UPLOAD_URL_SECONDS",
     "DocumentChunkInput",
     "DocumentNotFoundError",

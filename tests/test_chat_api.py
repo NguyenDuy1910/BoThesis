@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -22,17 +24,14 @@ import bothesis.db.engine as db_engine
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext
 from bothesis.agent.tools import ToolRegistry
-from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
-from bothesis.knowledge.protocol import (
+from bothesis.agent.tools.knowledge_search import KnowledgeSearch
+from bothesis.connector.protocol import (
     CitationInfo,
     CitationSpan,
-    ChunkContext,
-    ContextualChunk,
-    EffectiveAccess,
-    Hierarchy,
     SourceIdentity,
     SourceProvider,
 )
+from bothesis.knowledge import Evidence
 from bothesis.services import AuthContext, DatasourceService
 
 
@@ -89,6 +88,14 @@ def test_default_agent_composes_the_openrouter_transport(
         def __init__(self, **_: Any) -> None:
             pass
 
+        async def stream_response(
+            self,
+            *_: Any,
+            **__: Any,
+        ) -> AsyncIterator[Any]:
+            if False:
+                yield None
+
     monkeypatch.setattr(
         openrouter_transport,
         "OpenRouterTransport",
@@ -133,47 +140,33 @@ class StubRetriever:
     def __init__(self) -> None:
         self.contexts: list[Any] = []
 
-    async def search(self, query: str, *, limit: int) -> list[ContextualChunk]:
-        assert query == "leave policy"
-        assert limit == 5
-        return self._documents()
-
-    async def search_scoped(
+    async def search(
         self,
         query: str,
         *,
         limit: int,
         ctx: Any,
-    ) -> list[ContextualChunk]:
+    ) -> list[Evidence]:
         assert query == "leave policy"
         assert limit == 5
         self.contexts.append(ctx)
-        return self._documents()
+        return self._evidence()
 
     @staticmethod
-    def _documents() -> list[ContextualChunk]:
+    def _evidence() -> list[Evidence]:
         return [
-            ContextualChunk(
+            Evidence(
                 id="chunk-1",
                 item_id="doc-1",
-                chunk_index=0,
-                content_type="text",
+                chunk_id="chunk-1",
                 title="Leave policy",
-                chunk_text="Employees receive 20 days of annual leave.",
-                contextual_text=(
-                    "Document: Leave policy\nSection: Annual leave\n\n"
-                    "Employees receive 20 days of annual leave."
-                ),
-                context=ChunkContext(section_path=["Annual leave"]),
-                document_kind="document",
+                content="Employees receive 20 days of annual leave.",
                 source=SourceIdentity(
                     connector_id="connector-1",
                     provider=SourceProvider.CONFLUENCE,
                     external_id="doc-1",
                     url="https://knowledge.example/leave-policy",
                 ),
-                hierarchy=Hierarchy(),
-                access=EffectiveAccess(reader_ids=["public"]),
                 citation=CitationInfo(
                     section="Annual leave",
                     section_path=("Annual leave",),
@@ -280,10 +273,62 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
     return user_id, tenant_id
 
 
+def test_db_citation_does_not_synthesize_legacy_element_ranges() -> None:
+    record = SimpleNamespace(
+        chunk_index=4,
+        content="Projected chunk evidence",
+        heading_path=("Legacy heading",),
+        start_page_number=7,
+        end_page_number=7,
+        metadata_={
+            "element_id": "legacy_element",
+            "start_offset": 0,
+            "end_offset": len("Projected chunk evidence"),
+            "citation_section": "Canonical section",
+            "citation_section_path": ["Policy", "Canonical section"],
+            "citation_anchor": "canonical-section",
+        },
+    )
+
+    citation = main._record_citation(record)
+
+    assert citation.spans == ()
+    assert citation.section == "Canonical section"
+    assert citation.section_path == ("Policy", "Canonical section")
+    assert citation.anchor == "canonical-section"
+
+
+def test_db_viewer_does_not_split_multispan_chunk_projection() -> None:
+    record = SimpleNamespace(
+        id="record-1",
+        chunk_index=0,
+        content="First element\n\nSecond element",
+        heading_path=("Policy",),
+        metadata_={
+            "chunk_id": "chunk-multi",
+            "citation_section_path": ["Policy"],
+            "citation_spans": [
+                {"page": 1, "element_id": "p001_para_001"},
+                {"page": 2, "element_id": "p002_para_001"},
+            ],
+        },
+    )
+    document = SimpleNamespace(id="doc-1", chunks=[record])
+
+    elements, chunks_by_id = main._viewer_elements(document)
+
+    assert elements == []
+    assert chunks_by_id["chunk-multi"] is record
+    assert main._record_citation(record).spans == (
+        CitationSpan(page=1, element_id="p001_para_001"),
+        CitationSpan(page=2, element_id="p002_para_001"),
+    )
+
+
 def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     registry = ToolRegistry()
     retriever = StubRetriever()
-    registry.register(KnowledgeSearchTool(retriever))
+    registry.register(KnowledgeSearch(retriever))
     transport = ScriptedTransport()
     agent = Agent(
         transport,
@@ -393,7 +438,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
 
 def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     registry = ToolRegistry()
-    registry.register(KnowledgeSearchTool(StubRetriever()))
+    registry.register(KnowledgeSearch(StubRetriever()))
     agent = Agent(InterleavedTransport(), registry)
     monkeypatch.setattr(main, "_agent", agent)
     user_id, tenant_id = _install_access(monkeypatch)
@@ -443,7 +488,7 @@ async def test_a_reasoning_item_replays_as_a_canonical_input_item() -> None:
     """Reasoning continues through the specified fields, not a provider blob."""
 
     registry = ToolRegistry()
-    registry.register(KnowledgeSearchTool(StubRetriever()))
+    registry.register(KnowledgeSearch(StubRetriever()))
     transport = ReasoningTransport()
     events = [
         event

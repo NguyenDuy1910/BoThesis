@@ -1,124 +1,88 @@
-"""Permission-scoped reconstruction of contextual chunks from Qdrant."""
+"""Read-only Qdrant search adapter for contextual document chunks."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
-from bothesis.agent.models import AgentContext
-from bothesis.document_index.vector_store import VectorStore
-from bothesis.knowledge.protocol import (
+from bothesis.connector.protocol import (
     BoundingBox,
     CitationInfo,
     CitationSpan,
-    ChunkContext,
-    ContextualChunk,
     EffectiveAccess,
     Hierarchy,
     SourceIdentity,
     SourceProvider,
 )
+from bothesis.document_index.models import ChunkContext, ContextualChunk
 
 
-class KnowledgeRetriever(Protocol):
-    """Read-only boundary returning canonical contextual chunks."""
-
-    async def search(self, query: str, *, limit: int) -> list[ContextualChunk]:
-        """Return the most relevant indexed chunks for a query."""
-
-
-@runtime_checkable
-class ScopedKnowledgeRetriever(Protocol):
-    """Retrieval boundary that enforces the authenticated agent scope."""
-
-    async def search_scoped(
+class _VectorStore(Protocol):
+    def build_retrieval_filter(
         self,
-        query: str,
+        search_params: object | None,
         *,
+        access_context: object,
+        payload_filters: object,
+    ) -> object:
+        """Build a tenant, ACL, lifecycle, and payload filter."""
+
+    async def semantic_search(
+        self,
+        query_vector: list[float],
+        *,
+        query_filter: object,
         limit: int,
-        ctx: AgentContext,
-    ) -> list[ContextualChunk]:
-        """Return only chunks visible to the supplied agent context."""
+    ) -> list[object]:
+        """Search the configured vector collection."""
 
 
-class QueryEmbedder(Protocol):
-    """Produces one dense vector for a retrieval query."""
-
+class _QueryEmbedder(Protocol):
     async def embed_query(self, query: str) -> list[float]:
-        """Embed a non-empty query for semantic search."""
+        """Embed a non-empty retrieval query."""
 
 
-class QdrantKeywordRetriever:
-    """Adapt Qdrant keyword search into canonical contextual chunks."""
+class QdrantSearchIndex:
+    """Embed queries, search Qdrant, and rebuild canonical indexed chunks."""
 
-    def __init__(self, store: VectorStore) -> None:
-        self._store = store
-
-    async def search(self, query: str, *, limit: int) -> list[ContextualChunk]:
-        normalized_query = query.strip()
-        if not normalized_query:
-            raise ValueError("query must not be empty")
-        if limit < 1:
-            raise ValueError("limit must be at least one")
-
-        points, _ = await self._store.keyword_scroll(normalized_query, limit=limit)
-        return _normalise_points(points)
-
-
-class QdrantSemanticRetriever:
-    """Use a query embedder with permission-scoped Qdrant vector search."""
-
-    def __init__(
-        self,
-        store: VectorStore,
-        embedder: QueryEmbedder,
-        *,
-        allow_unscoped_admin_retrieval: bool = False,
-    ) -> None:
+    def __init__(self, store: _VectorStore, embedder: _QueryEmbedder) -> None:
         self._store = store
         self._embedder = embedder
-        self._allow_unscoped_admin_retrieval = allow_unscoped_admin_retrieval
 
-    async def search(self, query: str, *, limit: int) -> list[ContextualChunk]:
-        """Unscoped search for public/non-sensitive deployments only."""
-
-        return await self._search(query, limit=limit, query_filter=None)
-
-    async def search_scoped(
+    async def search(
         self,
         query: str,
         *,
         limit: int,
-        ctx: AgentContext,
+        tenant_id: str,
+        reader_ids: tuple[str, ...],
+        connector_ids: tuple[int, ...] | None,
+        is_admin: bool,
     ) -> list[ContextualChunk]:
-        if ctx.connector_ids == ():
-            return []
-        if (
-            self._allow_unscoped_admin_retrieval
-            and ctx.is_admin
-            and ctx.connector_ids is None
-        ):
-            query_filter = self._store.build_lifecycle_filter()
-        else:
-            query_filter = self._store.build_retrieval_filter(
-                None,
-                access_context=_retrieval_access(ctx),
-                payload_filters=ctx,
-            )
-        return await self._search(query, limit=limit, query_filter=query_filter)
+        """Return chunks after applying lifecycle and authenticated scope filters."""
 
-    async def _search(
-        self,
-        query: str,
-        *,
-        limit: int,
-        query_filter: object | None,
-    ) -> list[ContextualChunk]:
         normalized_query = query.strip()
         if not normalized_query:
             raise ValueError("query must not be empty")
         if limit < 1:
             raise ValueError("limit must be at least one")
+        normalized_tenant_id = (
+            tenant_id.strip() if isinstance(tenant_id, str) else ""
+        )
+        if not normalized_tenant_id:
+            raise ValueError("tenant_id must not be empty")
+        if connector_ids == ():
+            return []
+
+        query_filter = self._store.build_retrieval_filter(
+            None,
+            access_context=_RetrievalAccess(
+                tenant_id=normalized_tenant_id,
+                reader_ids=reader_ids,
+                is_admin=is_admin,
+            ),
+            payload_filters=_PayloadFilters(connector_ids=connector_ids),
+        )
 
         query_vector = await self._embedder.embed_query(normalized_query)
         points = await self._store.semantic_search(
@@ -135,35 +99,17 @@ class _RetrievalAccess:
         *,
         tenant_id: str,
         reader_ids: tuple[str, ...],
-        space_keys: tuple[str, ...] = (),
-        is_admin: bool = False,
+        is_admin: bool,
     ) -> None:
         self.tenant_id = tenant_id
         self.reader_ids = reader_ids
-        self.space_keys = space_keys
+        self.space_keys: tuple[str, ...] = ()
         self.is_admin = is_admin
 
 
-def _retrieval_access(ctx: AgentContext) -> _RetrievalAccess:
-    user = ctx.user_id.strip().lower()
-    reader_ids = {"public", user}
-    if "@" in user:
-        reader_ids.add(f"email:{user}")
-    reader_ids.update(
-        reader_id.strip().lower()
-        for reader_id in ctx.reader_ids
-        if reader_id.strip()
-    )
-    reader_ids.update(
-        f"external_group:{role.strip().lower()}"
-        for role in ctx.roles
-        if role.strip()
-    )
-    return _RetrievalAccess(
-        tenant_id=ctx.tenant_id,
-        reader_ids=tuple(sorted(reader_ids)),
-        is_admin=ctx.is_admin,
-    )
+class _PayloadFilters:
+    def __init__(self, *, connector_ids: tuple[int, ...] | None) -> None:
+        self.connector_ids = connector_ids
 
 
 def _normalise_points(points: Sequence[object]) -> list[ContextualChunk]:
@@ -185,11 +131,20 @@ def _normalise_point(point: object) -> ContextualChunk | None:
     payload = {str(key): value for key, value in raw_payload.items()}
     item_id = _payload_text(payload, "item_id")
     chunk_id = _payload_text(payload, "chunk_id")
-    chunk_text = _payload_text(payload, "chunk_text")
-    contextual_text = _payload_text(payload, "contextual_text")
+    chunk_text = _payload_content(payload, "chunk_text")
+    contextual_text = _payload_content(payload, "contextual_text")
     provider_value = _payload_text(payload, "provider")
     external_id = _payload_text(payload, "external_id")
-    if not all((item_id, chunk_id, chunk_text, contextual_text, provider_value, external_id)):
+    if not all(
+        (
+            item_id,
+            chunk_id,
+            chunk_text,
+            contextual_text,
+            provider_value,
+            external_id,
+        )
+    ):
         return None
     try:
         provider = SourceProvider(provider_value)
@@ -241,6 +196,13 @@ def _payload_text(payload: Mapping[str, object], key: str) -> str | None:
         return None
     normalized_value = value.strip()
     return normalized_value or None
+
+
+def _payload_content(payload: Mapping[str, object], key: str) -> str | None:
+    """Validate evidence text without changing its bytes-as-text projection."""
+
+    value = payload.get(key)
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def _payload_strings(payload: Mapping[str, object], key: str) -> list[str]:
@@ -297,10 +259,4 @@ def _payload_spans(value: object) -> list[CitationSpan]:
     return spans
 
 
-__all__ = [
-    "KnowledgeRetriever",
-    "QdrantKeywordRetriever",
-    "QdrantSemanticRetriever",
-    "QueryEmbedder",
-    "ScopedKnowledgeRetriever",
-]
+__all__ = ["QdrantSearchIndex"]

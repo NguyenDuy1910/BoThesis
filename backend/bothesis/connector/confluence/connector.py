@@ -16,13 +16,13 @@ from ..base import GenerateSlimItemOutput
 from ..base import IndexingHeartbeatInterface
 from ..base import SecondsSinceUnixEpoch
 from ..base import SlimConnectorWithPermSync
-from ..contracts import StorageContract
-from ..models import ConnectorFailure
-from ..models import ItemFailure
-from ..models import SlimItem
-from bothesis.knowledge.protocol import (
+from ..protocol import ConnectorFailure
+from ..protocol import ItemFailure
+from ..protocol import SlimItem
+from bothesis.connector.protocol import (
     AccessPolicy,
     AnyItem,
+    Chunk,
     CollectionItem,
     CollectionKind,
     DocumentItem,
@@ -32,12 +32,13 @@ from bothesis.knowledge.protocol import (
     SourceIdentity,
     SourceProvider,
     StorageObject,
-    StorageProvider,
     TextPart,
 )
+from bothesis.connector.file import FileProcessor
+from bothesis.connector.protocol import RawObjectStore
 from ._confluence import FinxConfluence
 from .checkpoint import ConfluenceCheckpoint
-from .utils import build_confluence_document_id
+from .utils import AttachmentProcessingResult, build_confluence_document_id
 from .utils import convert_attachment_to_content
 from .utils import datetime_from_string
 
@@ -79,6 +80,34 @@ def _cql_string(value: str) -> str:
 def _http_status(exc: BaseException) -> int | None:
     response = getattr(exc, "response", None)
     return getattr(response, "status_code", None)
+
+
+def _attachment_storage_object(
+    content: AttachmentProcessingResult,
+) -> StorageObject | None:
+    if not content.raw_storage_key:
+        return None
+    return StorageObject(
+        provider=content.raw_storage_provider,
+        bucket=content.raw_storage_bucket,
+        region=content.raw_storage_region,
+        key=content.raw_storage_key,
+        file_name=content.file_name,
+        size_bytes=content.size_bytes,
+        content_type=content.mime_type,
+        checksum_sha256=content.checksum_sha256,
+    )
+
+
+def _attachment_document_kind(mime_type: str | None) -> DocumentKind:
+    normalized = (mime_type or "").casefold()
+    if normalized.startswith("image/"):
+        return DocumentKind.IMAGE
+    if normalized == "application/pdf":
+        return DocumentKind.PDF
+    if normalized in {"text/html", "application/xhtml+xml"}:
+        return DocumentKind.WEB_PAGE
+    return DocumentKind.DOCUMENT
 
 
 def _page_hierarchy(page: dict[str, Any]) -> Hierarchy:
@@ -133,14 +162,21 @@ class ConfluenceConnector(
         self._included_page_text_cache: dict[str, str | None] = {}
         self._user_display_name_cache: dict[str, str] = {}
         self._allow_images: bool = False
-        self._storage: StorageContract | None = None
+        self._storage: RawObjectStore | None = None
+        self._file_processor = FileProcessor()
+        self._processed_chunks: dict[str, tuple[Chunk, ...]] = {}
 
     def set_allow_images(self, is_enabled: bool) -> None:
         # Enable or disable image attachment processing.
         self._allow_images = is_enabled
 
-    def set_storage(self, storage: StorageContract) -> None:
+    def set_storage(self, storage: RawObjectStore) -> None:
         self._storage = storage
+
+    async def fetch_chunks(self, item: DocumentItem) -> tuple[Chunk, ...] | None:
+        """Return attachment chunks produced by the same Docling pass."""
+
+        return self._processed_chunks.pop(item.id, None)
 
     @property
     def confluence_client(self) -> FinxConfluence:
@@ -319,11 +355,11 @@ class ConfluenceConnector(
             else SourceProvider.CONFLUENCE.value
         )
 
-    def _extract_page_text(self, page: dict[str, Any]) -> str:
+    def _normalized_page_soup(self, page: dict[str, Any]) -> Any:
         body = page.get("body", {})
         html = body.get("storage", body.get("view", {})).get("value", "")
         if not html:
-            return ""
+            return None
 
         try:
             from bs4 import BeautifulSoup
@@ -335,7 +371,7 @@ class ConfluenceConnector(
         soup = BeautifulSoup(html, "html.parser")
         _remove_macro_stylings(soup)
 
-        for user_tag in soup.findAll("ri:user"):
+        for user_tag in soup.find_all("ri:user"):
             user_id = user_tag.attrs.get("ri:account-id") or user_tag.attrs.get(
                 "ri:userkey", ""
             )
@@ -350,9 +386,9 @@ class ConfluenceConnector(
                     except Exception:
                         display_name = user_id
                     self._user_display_name_cache[user_id] = display_name
-                user_tag.replaceWith(f"@{display_name}")
+                user_tag.replace_with(f"@{display_name}")
 
-        for macro in soup.findAll("ac:structured-macro"):
+        for macro in soup.find_all("ac:structured-macro"):
             if macro.attrs.get("ac:name") != "include":
                 continue
             page_data = macro.find("ri:page")
@@ -364,7 +400,7 @@ class ConfluenceConnector(
             if page_title in self._included_page_text_cache:
                 cached_text = self._included_page_text_cache[page_title]
                 if cached_text:
-                    macro.replaceWith(cached_text)
+                    macro.replace_with(cached_text)
                 continue
             # A sentinel prevents recursive include cycles.
             self._included_page_text_cache[page_title] = None
@@ -379,26 +415,36 @@ class ConfluenceConnector(
                 if included:
                     included_text = self._extract_page_text(included)
                     self._included_page_text_cache[page_title] = included_text
-                    macro.replaceWith(included_text)
+                    macro.replace_with(included_text)
             except Exception:
                 log.exception("Failed to expand included page '%s'", page_title)
 
-        for link_body in soup.findAll("ac:link-body"):
+        for link_body in soup.find_all("ac:link-body"):
             try:
-                link_body.replaceWith(f"(LINK TEXT: {link_body.text})")
+                link_body.replace_with(f"(LINK TEXT: {link_body.text})")
             except Exception:
                 log.exception("Failed to process link body")
 
-        for attachment_ref in soup.findAll("ri:attachment"):
+        for attachment_ref in soup.find_all("ri:attachment"):
             try:
                 filename = _sanitize_attachment_filename(
                     attachment_ref.attrs.get("ri:filename", "")
                 )
-                attachment_ref.replaceWith(f"<attachment>{filename}</attachment>")
+                attachment_ref.replace_with(f"<attachment>{filename}</attachment>")
             except Exception:
                 log.exception("Failed to process attachment reference")
 
-        return _format_soup_text(soup)
+        return soup
+
+    def _extract_page_text(self, page: dict[str, Any]) -> str:
+        soup = self._normalized_page_soup(page)
+        return _format_soup_text(soup) if soup is not None else ""
+
+    def _extract_page_html(self, page: dict[str, Any]) -> str:
+        """Retain normalized HTML structure for Docling conversion."""
+
+        soup = self._normalized_page_soup(page)
+        return str(soup) if soup is not None else ""
 
     def _fetch_page_restrictions(
         self, page_id: str, space_key: str
@@ -496,9 +542,7 @@ class ConfluenceConnector(
                 self.wiki_base, page["_links"]["webui"], self.is_cloud
             )
             stable_id = f"confluence::{page_id}"
-
-            page_text = self._extract_page_text(page)
-            content = [TextPart(text=page_text, link=page_url)]
+            self._processed_chunks.pop(stable_id, None)
 
             metadata: dict[str, str | list[str]] = {
                 "doc_type": "confluence_page"
@@ -533,28 +577,37 @@ class ConfluenceConnector(
                 metadata["primary_owners"] = primary_owners
             if secondary_owners:
                 metadata["secondary_owners"] = secondary_owners
-            return DocumentItem(
-                id=stable_id,
-                title=page_title,
-                source=SourceIdentity(
-                    connector_id=self._connector_id(),
-                    provider=SourceProvider.CONFLUENCE,
-                    external_id=stable_id,
-                    external_version=str(page.get("version", {}).get("number") or "") or None,
-                    etag=str(page.get("version", {}).get("when") or "") or None,
-                    url=page_url,
+            source = SourceIdentity(
+                connector_id=self._connector_id(),
+                provider=SourceProvider.CONFLUENCE,
+                external_id=stable_id,
+                external_version=(
+                    str(page.get("version", {}).get("number") or "") or None
                 ),
+                etag=str(page.get("version", {}).get("when") or "") or None,
+                url=page_url,
+            )
+            processed = self._file_processor.process_bytes(
+                self._extract_page_html(page).encode("utf-8"),
+                file_name=f"{page_id}.html",
+                item_id=stable_id,
+                title=page_title,
+                source=source,
+                document_kind=DocumentKind.PAGE,
                 hierarchy=_page_hierarchy(page),
                 access=page_access or AccessPolicy(),
                 metadata=metadata,
-                updated_at=datetime_from_string(page["version"]["when"]),
-                created_at=(
-                    datetime_from_string(page["history"]["createdDate"])
-                    if page.get("history", {}).get("createdDate")
-                    else None
-                ),
-                document_kind=DocumentKind.PAGE,
-                content=content,
+            )
+            self._processed_chunks[stable_id] = processed.chunks
+            return processed.item.model_copy(
+                update={
+                    "updated_at": datetime_from_string(page["version"]["when"]),
+                    "created_at": (
+                        datetime_from_string(page["history"]["createdDate"])
+                        if page.get("history", {}).get("createdDate")
+                        else None
+                    ),
+                }
             )
         except Exception:
             log.exception("Failed to convert page %s", page_id)
@@ -578,6 +631,7 @@ class ConfluenceConnector(
         attachment_title = attachment.get("title", attachment_id)
         stable_page_id = f"confluence::{page_id}"
         stable_att_id = f"{stable_page_id}::att::{attachment_id}"
+        self._processed_chunks.pop(stable_att_id, None)
         attachment_url = build_confluence_document_id(
             self.wiki_base,
             attachment.get("_links", {}).get(
@@ -593,6 +647,7 @@ class ConfluenceConnector(
             allow_images=self._allow_images,
             storage=self._storage,
             document_id=stable_att_id,
+            processor=self._file_processor,
         )
         if content is None:
             return None
@@ -609,13 +664,27 @@ class ConfluenceConnector(
             if "labels" in parent_doc.metadata:
                 metadata["labels"] = parent_doc.metadata["labels"]
             metadata["parent_page"] = parent_doc.title
+        metadata.update(
+            {
+                key: str(value)
+                for key, value in {
+                    "raw_storage_bucket": content.raw_storage_bucket,
+                    "raw_storage_provider": content.raw_storage_provider,
+                    "raw_storage_key": content.raw_storage_key,
+                    "raw_storage_region": content.raw_storage_region,
+                    "file_name": content.file_name,
+                    "mime_type": content.mime_type,
+                    "size_bytes": content.size_bytes,
+                }.items()
+                if value is not None
+            }
+        )
 
+        original = _attachment_storage_object(content)
         if not content.text:
             if not content.mime_type or not content.mime_type.startswith("image/"):
                 return None
-            if not content.raw_storage_key:
-                return None
-            return DocumentItem(
+            item = DocumentItem(
                 id=stable_att_id,
                 title=attachment_title,
                 source=SourceIdentity(
@@ -631,47 +700,59 @@ class ConfluenceConnector(
                 metadata=metadata,
                 updated_at=(datetime_from_string(version_when) if version_when else None),
                 document_kind=DocumentKind.IMAGE,
-                original=StorageObject(
-                    provider=StorageProvider.S3,
-                    bucket=content.raw_storage_bucket,
-                    key=content.raw_storage_key,
-                    region=content.raw_storage_region,
-                    file_name=content.file_name or attachment_title,
-                    mime_type=content.mime_type,
-                    size_bytes=content.size_bytes,
+                content=(
+                    content.content
+                    or [
+                        ImagePart(
+                            element_id=f"{stable_att_id}::image",
+                            url=attachment_url,
+                            storage=content.raw_storage_key,
+                            alt_text=attachment_title,
+                        )
+                    ]
                 ),
+                original=original,
+            )
+        else:
+            item = DocumentItem(
+                id=stable_att_id,
+                title=attachment_title,
+                source=SourceIdentity(
+                    connector_id=self._connector_id(),
+                    provider=SourceProvider.CONFLUENCE,
+                    external_id=stable_att_id,
+                    external_version=str(attachment.get("version", {}).get("number") or "") or None,
+                    etag=str(version_when or "") or None,
+                    url=attachment_url,
+                ),
+                hierarchy=Hierarchy(parent_id=stable_page_id, root_id=stable_page_id, depth=1),
+                access=parent_doc.access if parent_doc else AccessPolicy(),
+                metadata=metadata,
+                updated_at=(datetime_from_string(version_when) if version_when else None),
+                document_kind=_attachment_document_kind(content.mime_type),
+                content=(
+                    content.content
+                    or [TextPart(text=content.text, link=attachment_url)]
+                ),
+                original=original,
             )
 
-        original = None
-        if content.raw_storage_key:
-            original = StorageObject(
-                provider=StorageProvider.S3,
-                bucket=content.raw_storage_bucket,
-                key=content.raw_storage_key,
-                region=content.raw_storage_region,
-                file_name=content.file_name,
-                mime_type=content.mime_type,
-                size_bytes=content.size_bytes,
+        if content.chunks:
+            self._processed_chunks[stable_att_id] = tuple(
+                chunk
+                if (
+                    chunk.item_id == stable_att_id
+                    and chunk.id == f"{stable_att_id}:{chunk.chunk_index}"
+                )
+                else chunk.model_copy(
+                    update={
+                        "id": f"{stable_att_id}:{chunk.chunk_index}",
+                        "item_id": stable_att_id,
+                    }
+                )
+                for chunk in content.chunks
             )
-        return DocumentItem(
-            id=stable_att_id,
-            title=attachment_title,
-            source=SourceIdentity(
-                connector_id=self._connector_id(),
-                provider=SourceProvider.CONFLUENCE,
-                external_id=stable_att_id,
-                external_version=str(attachment.get("version", {}).get("number") or "") or None,
-                etag=str(version_when or "") or None,
-                url=attachment_url,
-            ),
-            hierarchy=Hierarchy(parent_id=stable_page_id, root_id=stable_page_id, depth=1),
-            access=parent_doc.access if parent_doc else AccessPolicy(),
-            metadata=metadata,
-            updated_at=(datetime_from_string(version_when) if version_when else None),
-            document_kind=DocumentKind.DOCUMENT,
-            original=original,
-            content=[TextPart(text=content.text, link=attachment_url)],
-        )
+        return item
 
     def _fetch_page_attachments(
         self,
@@ -908,6 +989,7 @@ class ConfluenceConnector(
         self._seen_hierarchy_node_ids = set()
         self._included_page_text_cache = {}
         self._user_display_name_cache = {}
+        self._processed_chunks.clear()
         return (yield from self._fetch_document_batches(checkpoint, start, end))
 
     def build_dummy_checkpoint(self) -> ConfluenceCheckpoint:

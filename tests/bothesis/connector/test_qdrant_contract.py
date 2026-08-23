@@ -1,30 +1,37 @@
 from __future__ import annotations
 
-from bothesis.knowledge.protocol import (
+import json
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+
+from bothesis.connector.protocol import (
     AccessPolicy,
-    CodePart,
+    BoundingBox,
+    Chunk,
+    CitationInfo,
+    CitationSpan,
     DocumentItem,
     DocumentKind,
     Hierarchy,
-    ImagePart,
-    LinkPart,
-    StructuredPart,
-    TablePart,
     SourceIdentity,
     SourceProvider,
-    BoundingBox,
-    CitationSpan,
+    StorageObject,
     TextPart,
 )
-from bothesis.connector.qdrant import (
-    ChunkingConfig,
+from bothesis.document_index.embedding import embedding_texts
+from bothesis.document_index.connector_sink import QdrantConnectorIndexSink
+from bothesis.document_index.models import ContextualChunk
+from bothesis.document_index.payload import (
     QdrantPayloadContext,
+    build_contextual_chunks,
     build_qdrant_records,
 )
 
 
-def test_qdrant_payload_contains_grounding_acl_and_filter_contract() -> None:
-    document = DocumentItem(
+def _document(*, source_url: str = "https://jira.example/browse/BANK-42") -> DocumentItem:
+    return DocumentItem(
         id="jira::BANK-42",
         title="Story: Lending policy",
         document_kind=DocumentKind.ISSUE,
@@ -34,7 +41,7 @@ def test_qdrant_payload_contains_grounding_acl_and_filter_contract() -> None:
             external_id="BANK-42",
             external_version="7",
             etag="etag-7",
-            url="https://jira.example/browse/BANK-42",
+            url=source_url,
         ),
         hierarchy=Hierarchy(
             parent_id="jira::BANK",
@@ -42,73 +49,180 @@ def test_qdrant_payload_contains_grounding_acl_and_filter_contract() -> None:
             ancestor_ids=["jira::root", "jira::BANK"],
         ),
         metadata={
-            "project_key": "BANK",
-            "issue_type": "Story",
-            "status": "Approved",
-            "domains": ["lending"],
-            "heading_path": ["Reliability", "Replication"],
             "summary": "Explains the approved lending policy.",
-            "page_number": "7",
+            "provider_private_metadata": "must-not-be-indexed",
         },
         access=AccessPolicy.from_reader_ids(
             ["email:Analyst@Example.com", "external_group:Risk-Team"]
         ),
-        content=[TextPart(text="A" * 260)],
+        # The index boundary must not derive chunks from raw content parts.
+        content=[TextPart(text="RAW-CONTENT-MUST-NOT-BE-INDEXED")],
     )
-    context = QdrantPayloadContext(
+
+
+def _chunk(
+    *,
+    chunk_id: str = "jira::BANK-42:4",
+    item_id: str = "jira::BANK-42",
+    chunk_index: int = 4,
+    chunk_text: str = "  connector evidence\n" + ("A" * 5_000),
+) -> Chunk:
+    return Chunk(
+        id=chunk_id,
+        item_id=item_id,
+        chunk_index=chunk_index,
+        chunk_text=chunk_text,
+        content_type="mixed",
+        section_path=["Reliability", "Replication"],
+        citation=CitationInfo(
+            section="Replication",
+            section_path=("Reliability", "Replication"),
+            anchor="replication",
+            spans=(
+                CitationSpan(
+                    page=120,
+                    element_id="p120_para18",
+                    start_offset=3,
+                    end_offset=22,
+                ),
+                CitationSpan(
+                    page=121,
+                    element_id="p121_image01",
+                    start_offset=0,
+                    end_offset=17,
+                    bounding_box=BoundingBox(x=0.1, y=0.2, width=0.5, height=0.4),
+                ),
+            ),
+        ),
+    )
+
+
+def _context() -> QdrantPayloadContext:
+    return QdrantPayloadContext(
         tenant_id="tenant-1",
         connector_id="connector-1",
         scope_id="scope-1",
         embedding_model="embed-v1",
     )
 
-    records = build_qdrant_records(
-        document,
-        context,
-        chunking=ChunkingConfig(max_characters=120, overlap_characters=20),
-    )
 
-    assert len(records) == 3
-    assert len({record.point_id for record in records}) == 3
+def test_index_projection_starts_from_connector_chunk_and_is_bounded() -> None:
+    document = _document()
+    source_chunk = _chunk()
+
+    contextual = build_contextual_chunks([source_chunk], document)
+
+    assert len(contextual) == 1
+    assert isinstance(contextual[0], ContextualChunk)
+    assert contextual[0].chunk_text == source_chunk.chunk_text
+    assert contextual[0].citation == source_chunk.citation
+    assert contextual[0].context.section_path == source_chunk.section_path
+    assert contextual[0].context.summary == "Explains the approved lending policy."
+    assert contextual[0].contextual_text.endswith(source_chunk.chunk_text)
+    assert "Document: Story: Lending policy" in contextual[0].contextual_text
+    assert "Section: Reliability > Replication" in contextual[0].contextual_text
+
+    # Embedding input is enriched retrieval text, never the evidence-only text.
+    assert embedding_texts(contextual) == [contextual[0].contextual_text]
+    assert embedding_texts(contextual) != [source_chunk.chunk_text]
+
+    records = build_qdrant_records([source_chunk], document, _context())
+
+    # A connector chunk remains one point even when it exceeds the former
+    # document-index character limit.
+    assert len(records) == 1
     payload = records[0].payload
-    assert payload.tenant_id == "tenant-1"
-    assert payload.item_id == "jira::BANK-42"
-    assert payload.chunk_id == "jira::BANK-42:0"
-    assert payload.provider == "jira"
-    assert payload.external_id == "BANK-42"
-    assert payload.source_url == "https://jira.example/browse/BANK-42"
-    assert payload.parent_id == "jira::BANK"
-    assert payload.root_id == "jira::root"
-    assert payload.ancestor_ids == ["jira::root", "jira::BANK"]
+    assert payload.chunk_id == source_chunk.id
+    assert payload.chunk_index == 4
+    assert payload.chunk_text == source_chunk.chunk_text
+    assert payload.contextual_text == contextual[0].contextual_text
     assert payload.reader_ids == [
         "email:analyst@example.com",
         "external_group:risk-team",
     ]
-    assert payload.chunk_text == "A" * 120
-    assert "Document: Story: Lending policy" in payload.contextual_text
-    assert payload.document_kind == "issue"
-    assert payload.content_type == "text"
-    assert payload.context_section_path == ["Reliability", "Replication"]
-    assert payload.context_summary == "Explains the approved lending policy."
-    assert payload.page_start == 7
-    assert payload.page_end == 7
+    assert payload.parent_id == "jira::BANK"
+    assert payload.root_id == "jira::root"
+    assert payload.ancestor_ids == ["jira::root", "jira::BANK"]
+    assert payload.citation_section == "Replication"
     assert payload.citation_section_path == ["Reliability", "Replication"]
-    assert payload.citation_spans == (
-        CitationSpan(page=7, element_id="element_001", start_offset=0, end_offset=120),
-    )
-    assert "Section: Reliability > Replication" in payload.contextual_text
-    assert payload.is_deleted is False
-    serialized = payload.for_qdrant()
-    assert serialized["item_id"] == "jira::BANK-42"
-    assert "access" not in serialized
-    assert "storage" not in serialized
+    assert payload.citation_anchor == "replication"
+    assert payload.citation_spans == source_chunk.citation.spans
+    assert payload.page_start == 120
+    assert payload.page_end == 121
+    assert payload.source_url == "https://jira.example/browse/BANK-42"
+    assert payload.embedding_model == "embed-v1"
 
-    repeated = build_qdrant_records(
-        document,
-        context,
-        chunking=ChunkingConfig(max_characters=120, overlap_characters=20),
+    serialized = payload.for_qdrant()
+    serialized_text = json.dumps(serialized)
+    assert "RAW-CONTENT-MUST-NOT-BE-INDEXED" not in serialized_text
+    assert "must-not-be-indexed" not in serialized_text
+    assert {"access", "content", "metadata", "storage"}.isdisjoint(serialized)
+    restored = type(payload).model_validate(serialized)
+    assert restored.citation_spans == source_chunk.citation.spans
+
+
+def test_qdrant_point_ids_are_deterministic_for_canonical_chunk_indexes() -> None:
+    document = _document()
+    chunks = [
+        _chunk(),
+        _chunk(
+            chunk_id="jira::BANK-42:9",
+            chunk_index=9,
+            chunk_text="second connector chunk",
+        ),
+    ]
+
+    first = build_qdrant_records(chunks, document, _context())
+    repeated = build_qdrant_records(list(reversed(chunks)), document, _context())
+
+    first_ids = {record.payload.chunk_id: record.point_id for record in first}
+    repeated_ids = {record.payload.chunk_id: record.point_id for record in repeated}
+    assert first_ids == repeated_ids
+    assert len(set(first_ids.values())) == 2
+
+
+@pytest.mark.parametrize(
+    ("chunks", "message"),
+    [
+        ([], "has no connector chunks"),
+        ([_chunk(item_id="another-item")], "belongs to item"),
+        (
+            [
+                _chunk(),
+                _chunk(chunk_id="jira::BANK-42:other", chunk_index=4),
+            ],
+            "Duplicate chunk index",
+        ),
+        (
+            [
+                _chunk(),
+                _chunk(chunk_id="jira::BANK-42:4", chunk_index=5),
+            ],
+            "Duplicate chunk id",
+        ),
+    ],
+)
+def test_index_boundary_rejects_invalid_chunk_identity(
+    chunks: list[Chunk],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        build_contextual_chunks(chunks, _document())
+
+
+def test_presigned_source_url_is_never_persisted() -> None:
+    document = _document(
+        source_url=(
+            "https://objects.example.test/raw.pdf"
+            "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=secret"
+        )
     )
-    assert [record.point_id for record in repeated] == [record.point_id for record in records]
+
+    payload = build_qdrant_records([_chunk()], document, _context())[0].payload
+
+    assert payload.source_url is None
+    assert "X-Amz-Signature" not in str(payload.for_qdrant())
+    assert "secret" not in str(payload.for_qdrant())
 
 
 def test_public_acl_is_explicit_not_implicit() -> None:
@@ -119,135 +233,204 @@ def test_public_acl_is_explicit_not_implicit() -> None:
     assert public.to_reader_ids() == ["public"]
 
 
-def test_content_parts_become_typed_textual_chunks() -> None:
-    item = DocumentItem(
-        id="item-1",
-        title="Mixed content",
-        document_kind=DocumentKind.DOCUMENT,
-        source=SourceIdentity(
-            connector_id="connector-1",
-            provider=SourceProvider.FILE,
-            external_id="item-1",
-        ),
-        content=[
-            ImagePart(description="Architecture diagram", ocr_text="Leader"),
-            TablePart(rows=[["Role", "Owner"], ["Leader", "Platform"]]),
-            StructuredPart(data={"status": "approved", "version": 2}),
-            LinkPart(title="Runbook", url="https://example.test/runbook"),
-            CodePart(language="python", code="print('ok')"),
-        ],
+class _RecordingEmbedder:
+    model = "embed-v1"
+
+    def __init__(self) -> None:
+        self.batches: list[list[str]] = []
+
+    async def embed_documents(self, documents: list[str]) -> list[list[float]]:
+        self.batches.append(list(documents))
+        return [[float(len(document))] for document in documents]
+
+
+class _RecordingStore:
+    def __init__(self) -> None:
+        self.points: list[object] = []
+        self.deleted_payload: dict[str, object] | None = None
+        self.deleted_filter: object | None = None
+        self.payload_calls: list[tuple[dict[str, object], object]] = []
+
+    async def upsert_points(self, points: list[object]) -> None:
+        self.points = list(points)
+
+    async def set_payload(self, *, payload: dict[str, object], points: object) -> None:
+        self.deleted_payload = payload
+        self.deleted_filter = points
+        self.payload_calls.append((dict(payload), points))
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_connector_sink_runs_the_canonical_vertical_index_flow() -> None:
+    store = _RecordingStore()
+    embedder = _RecordingEmbedder()
+    sink = QdrantConnectorIndexSink(
+        store,  # type: ignore[arg-type]
+        embedder,  # type: ignore[arg-type]
+        embedding_batch_size=1,
+    )
+    document = _document()
+    source_chunk = _chunk()
+
+    written = await sink.write(
+        document,
+        [source_chunk],
+        tenant_id="tenant-1",
+        connector_id="connector-1",
     )
 
-    records = build_qdrant_records(
-        item,
-        QdrantPayloadContext(tenant_id="tenant-1", connector_id="connector-1"),
-        chunking=ChunkingConfig(max_characters=100, overlap_characters=0),
-    )
-
-    assert [record.payload.content_type for record in records] == [
-        "image",
-        "table",
-        "structured",
-        "link",
-        "code",
+    assert written == 1
+    assert len(embedder.batches) == 1
+    assert embedder.batches[0][0].endswith(source_chunk.chunk_text)
+    point = store.points[0]
+    assert getattr(point, "vector") == {
+        "content": [float(len(embedder.batches[0][0]))]
+    }
+    payload = getattr(point, "payload")
+    assert payload["chunk_text"] == source_chunk.chunk_text
+    assert payload["citation_spans"][1]["element_id"] == "p121_image01"
+    assert payload["reader_ids"] == [
+        "email:analyst@example.com",
+        "external_group:risk-team",
     ]
-    assert "Architecture diagram" in records[0].payload.chunk_text
-    assert "Leader | Platform" in records[1].payload.chunk_text
-    assert '"status": "approved"' in records[2].payload.chunk_text
-    assert "Runbook: https://example.test/runbook" in records[3].payload.chunk_text
-    assert records[3].payload.source_url is None
-    assert "print('ok')" in records[4].payload.chunk_text
-    assert all(record.payload.contextual_text.startswith("Document: Mixed content") for record in records)
 
-
-def test_citation_locator_round_trips_for_pdf_and_normalized_elements() -> None:
-    item = DocumentItem(
-        id="item-pdf",
-        title="Kafka Design",
-        document_kind=DocumentKind.PDF,
-        source=SourceIdentity(
-            connector_id="connector-1",
-            provider=SourceProvider.CONFLUENCE,
-            external_id="page-42",
-            url="https://confluence.example/pages/42",
-        ),
-        content=[
-            TextPart(
-                element_id="paragraph_002",
-                page=7,
-                section="Replication",
-                section_path=("Reliability", "Replication"),
-                anchor="replication",
-                text="The partition leader handles all reads and writes for the partition.",
-            ),
-            ImagePart(
-                element_id="image_001",
-                page=7,
-                bounding_box=BoundingBox(x=0.1, y=0.2, width=0.5, height=0.4),
-                description="Replication topology",
-            ),
-        ],
+    await sink.soft_delete_item(
+        tenant_id="tenant-1",
+        connector_id="connector-1",
+        item_id=document.id,
     )
 
-    record = build_qdrant_records(
-        item,
-        QdrantPayloadContext(tenant_id="tenant-1", connector_id="connector-1"),
-    )[0]
-    payload = record.payload
-    assert payload.page_start == 7
-    assert payload.citation_section == "Replication"
-    assert payload.citation_section_path == ["Reliability", "Replication"]
-    assert payload.citation_anchor == "replication"
-    assert payload.citation_spans[0] == CitationSpan(
-        page=7,
-        element_id="paragraph_002",
-        start_offset=0,
-        end_offset=len(payload.chunk_text),
-    )
-
-    restored = type(payload).model_validate(payload.for_qdrant())
-    assert restored.citation_spans[0].bounding_box is None
-
-    image_payload = build_qdrant_records(
-        item,
-        QdrantPayloadContext(tenant_id="tenant-1", connector_id="connector-1"),
-    )[1].payload
-    assert image_payload.citation_spans[0].element_id == "image_001"
-    assert image_payload.citation_spans[0].bounding_box == BoundingBox(
-        x=0.1, y=0.2, width=0.5, height=0.4
-    )
-
-
-def test_multi_element_citation_and_signed_source_url_round_trip() -> None:
-    item = DocumentItem(
-        id="pdf-large",
-        title="Large report",
-        document_kind=DocumentKind.PDF,
-        source=SourceIdentity(
-            connector_id="connector-1",
-            provider=SourceProvider.FILE,
-            external_id="pdf-large",
-            url="https://objects.example.test/raw.pdf?X-Amz-Signature=secret",
-        ),
-        content=[
-            TextPart(element_id="p120_para18", page=120, text="first page evidence"),
-            TextPart(element_id="p121_para01", page=121, text="second page evidence"),
-        ],
-    )
-
-    payload = build_qdrant_records(
-        item,
-        QdrantPayloadContext(tenant_id="tenant-1", connector_id="connector-1"),
-        chunking=ChunkingConfig(max_characters=100, overlap_characters=0),
-    )[0].payload
-
-    assert [span.element_id for span in payload.citation_spans] == [
-        "p120_para18",
-        "p121_para01",
+    assert store.deleted_payload == {"is_deleted": True, "reader_ids": []}
+    conditions = getattr(store.deleted_filter, "must")
+    assert [condition.key for condition in conditions] == [
+        "tenant_id",
+        "connector_id",
+        "item_id",
     ]
-    assert [span.page for span in payload.citation_spans] == [120, 121]
-    assert payload.page_start == 120
-    assert payload.page_end == 121
-    assert payload.source_url is None
-    assert "citation_spans" in payload.for_qdrant()
-    assert "X-Amz-Signature" not in str(payload.for_qdrant())
+
+
+class _Transaction:
+    async def __aenter__(self) -> object:
+        return object()
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+class _SessionFactory:
+    def begin(self) -> _Transaction:
+        return _Transaction()
+
+
+class _RecordingDocumentService:
+    calls: list[tuple[str, object]] = []
+    document_id = uuid4()
+
+    def __init__(self, session: object) -> None:
+        del session
+
+    async def upsert_external_document(
+        self,
+        scope_id: int,
+        generation: int,
+        external_id: str,
+        **values: object,
+    ) -> object:
+        self.calls.append(
+            (
+                "upsert",
+                {
+                    "scope_id": scope_id,
+                    "generation": generation,
+                    "external_id": external_id,
+                    **values,
+                },
+            )
+        )
+        return SimpleNamespace(id=self.document_id, tenant_id="tenant-1")
+
+    async def replace_chunks(self, document_id: object, chunks: object) -> None:
+        self.calls.append(("chunks", (document_id, chunks)))
+
+    async def soft_delete_chunks(self, document_id: object) -> None:
+        self.calls.append(("empty", document_id))
+
+    async def mark_indexed(
+        self,
+        document_id: object,
+        *,
+        allow_empty: bool = False,
+    ) -> None:
+        self.calls.append(("indexed", (document_id, allow_empty)))
+
+    async def mark_index_failed(self, document_id: object) -> None:
+        self.calls.append(("failed", document_id))
+
+
+@pytest.mark.asyncio
+async def test_persistent_connector_sink_stages_canonical_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "bothesis.services.DocumentService",
+        _RecordingDocumentService,
+    )
+    _RecordingDocumentService.calls.clear()
+    store = _RecordingStore()
+    sink = QdrantConnectorIndexSink(
+        store,  # type: ignore[arg-type]
+        _RecordingEmbedder(),  # type: ignore[arg-type]
+        session_factory=_SessionFactory(),  # type: ignore[arg-type]
+        connector_scope_id=17,
+        generation=3,
+    )
+    document = _document().model_copy(
+        update={
+            "original": StorageObject(
+                provider="s3",
+                bucket="raw-documents",
+                key="tenant-1/source.pdf",
+                file_name="source.pdf",
+                size_bytes=2048,
+                content_type="application/pdf",
+                checksum_sha256="a" * 64,
+            )
+        }
+    )
+
+    assert await sink.write(
+        document,
+        [_chunk()],
+        tenant_id="tenant-1",
+        connector_id="connector-1",
+    ) == 1
+
+    upsert = dict(_RecordingDocumentService.calls[0][1])  # type: ignore[arg-type]
+    assert upsert["scope_id"] == 17
+    assert upsert["generation"] == 3
+    assert upsert["raw_storage_key"] == "tenant-1/source.pdf"
+    assert upsert["content_sha256"] == "a" * 64
+    canonical_item = upsert["metadata"]["canonical_item"]  # type: ignore[index]
+    assert canonical_item["original"]["bucket"] == "raw-documents"
+    assert "url" not in canonical_item["original"]
+    stored_chunks = _RecordingDocumentService.calls[1][1][1]  # type: ignore[index]
+    assert stored_chunks[0].chunk_id == "jira::BANK-42:4"
+    assert stored_chunks[0].citation_spans == _chunk().citation.spans
+    point_payload = getattr(store.points[0], "payload")
+    assert point_payload["generation"] == 3
+    assert point_payload["scope_id"] == 17
+    assert point_payload["is_deleted"] is True
+
+    await sink.activate_generation(
+        tenant_id="tenant-1",
+        connector_id="connector-1",
+    )
+
+    assert store.payload_calls[-2][0] == {
+        "is_deleted": True,
+        "reader_ids": [],
+    }
+    assert store.payload_calls[-1][0] == {"is_deleted": False}

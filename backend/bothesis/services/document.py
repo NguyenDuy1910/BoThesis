@@ -392,6 +392,7 @@ class DocumentService:
         size_bytes: int | None = None,
         metadata: Mapping[str, Any] | None = None,
         raw_storage_key: str | None = None,
+        content_sha256: str | None = None,
         parent_document_id: UUID | None = None,
         allowed_principal_tokens: Iterable[str] = (),
         denied_principal_tokens: Iterable[str] = (),
@@ -402,6 +403,7 @@ class DocumentService:
             raise ValueError("generation must be at least one")
         normalized_external_id = _required_text(external_id, "external id")
         _validate_size(size_bytes)
+        normalized_sha256 = _content_sha256(content_sha256)
         scope = await self._active_scope(connector_scope_id)
         runnable_sync = await self._session.scalar(
             select(SyncRun.id).where(
@@ -448,6 +450,7 @@ class DocumentService:
             "size_bytes": size_bytes,
             "metadata_": dict(metadata or {}),
             "raw_storage_key": _optional_text(raw_storage_key),
+            "content_sha256": normalized_sha256,
             "parent_document_id": parent_document_id,
             "allowed_principal_tokens": _normalize_tokens(allowed_principal_tokens),
             "denied_principal_tokens": _normalize_tokens(denied_principal_tokens),
@@ -519,6 +522,7 @@ class DocumentService:
         document_id: UUID,
         *,
         indexed_at: datetime | None = None,
+        allow_empty: bool = False,
     ) -> Document:
         document = await self._get_internal(document_id)
         if document.lifecycle_status == "deleted":
@@ -529,7 +533,7 @@ class DocumentService:
                 DocumentChunk.deleted_at.is_(None),
             )
         )
-        if has_chunk is None:
+        if has_chunk is None and not allow_empty:
             raise InvalidDocumentStateError("cannot index a document without chunks")
         document.indexing_status = "indexed"
         document.last_indexed_at = indexed_at or datetime.now(UTC)
@@ -560,9 +564,37 @@ class DocumentService:
         *,
         actor: AuthContext,
     ) -> ConnectorScope:
+        """Activate a completed source snapshot on an authorized admin path."""
+
+        return await self._activate_completed_generation(
+            connector_scope_id,
+            generation,
+            actor=actor,
+        )
+
+    async def activate_generation_from_worker(
+        self,
+        connector_scope_id: int,
+        generation: int,
+    ) -> ConnectorScope:
+        """Activate a completed snapshot from the trusted ingestion worker."""
+
+        return await self._activate_completed_generation(
+            connector_scope_id,
+            generation,
+            actor=None,
+        )
+
+    async def _activate_completed_generation(
+        self,
+        connector_scope_id: int,
+        generation: int,
+        *,
+        actor: AuthContext | None,
+    ) -> ConnectorScope:
         if generation < 1:
             raise ValueError("generation must be at least one")
-        if not actor.has_permissions(SOURCE_MANAGE_PERMISSION):
+        if actor is not None and not actor.has_permissions(SOURCE_MANAGE_PERMISSION):
             raise AuthorizationError("source.manage permission is required")
 
         scope = await self._session.scalar(
@@ -577,7 +609,7 @@ class DocumentService:
             )
         if scope.status != ACTIVE_STATUS or scope.connector.status != ACTIVE_STATUS:
             raise InvalidDocumentStateError("connector scope is not active")
-        if actor.tenant_id != scope.connector.tenant_id:
+        if actor is not None and actor.tenant_id != scope.connector.tenant_id:
             raise AuthorizationError("connector scope is outside the actor's tenant")
         completed_run = await self._session.scalar(
             select(SyncRun.id).where(
@@ -695,11 +727,13 @@ class DocumentService:
         if not normalized_chunk_id:
             return document, None
         chunk_index: int | None = None
-        prefix = f"{document.id}:"
-        if normalized_chunk_id.startswith(prefix):
+        for prefix in (f"{document.id}:", f"{item_id.strip()}:"):
+            if not normalized_chunk_id.startswith(prefix):
+                continue
             suffix = normalized_chunk_id.removeprefix(prefix)
             if suffix.isdigit():
                 chunk_index = int(suffix)
+                break
         statement = select(DocumentChunk).where(
             DocumentChunk.document_id == document.id,
             DocumentChunk.deleted_at.is_(None),
@@ -708,7 +742,11 @@ class DocumentService:
             statement = statement.where(DocumentChunk.chunk_index == chunk_index)
         else:
             statement = statement.where(
-                DocumentChunk.id.cast(String) == normalized_chunk_id
+                or_(
+                    DocumentChunk.id.cast(String) == normalized_chunk_id,
+                    DocumentChunk.metadata_["chunk_id"].astext
+                    == normalized_chunk_id,
+                )
             )
         record = await self._session.scalar(statement)
         return document, record
@@ -1002,6 +1040,8 @@ def _chunk_record(
         heading_path=headings,
         metadata_={
             **dict(value.metadata or {}),
+            **({"chunk_id": value.chunk_id} if value.chunk_id else {}),
+            "content_type": _required_text(value.content_type, "chunk content type"),
             **(
                 {
                     "citation_spans": [

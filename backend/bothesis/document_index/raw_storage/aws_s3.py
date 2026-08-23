@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -142,6 +144,77 @@ class S3DocumentStorage:
 
         return self._provider
 
+    def put_bytes(
+        self,
+        data: bytes,
+        key: str,
+        *,
+        content_type: str | None = None,
+    ) -> StoredObject:
+        """Write bytes to the configured S3-compatible object store."""
+
+        if not data:
+            raise ValueError("object storage bytes must not be empty")
+        normalized_key = _object_key(key)
+        parameters: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": normalized_key,
+            "Body": data,
+        }
+        if content_type:
+            parameters["ContentType"] = content_type
+        try:
+            result = self._client.put_object(**parameters)
+        except ClientError as exc:
+            _raise_client_error(exc, operation="write")
+        except BotoCoreError as exc:
+            raise ObjectStorageError("S3 object write failed") from exc
+        return StoredObject(
+            size_bytes=len(data),
+            content_type=content_type,
+            etag=_optional_string(result.get("ETag"), strip_quotes=True),
+            version_id=_optional_string(result.get("VersionId")),
+            checksum_sha256=hashlib.sha256(data).hexdigest(),
+        )
+
+    def put_path(
+        self,
+        path: Path,
+        key: str,
+        *,
+        content_type: str | None = None,
+    ) -> StoredObject:
+        """Upload a file without materializing another full byte buffer."""
+
+        size_bytes = path.stat().st_size
+        if size_bytes < 1:
+            raise ValueError("object storage file must not be empty")
+        normalized_key = _object_key(key)
+        checksum = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                checksum.update(block)
+        parameters: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": normalized_key,
+        }
+        if content_type:
+            parameters["ContentType"] = content_type
+        try:
+            with path.open("rb") as source:
+                result = self._client.put_object(Body=source, **parameters)
+        except ClientError as exc:
+            _raise_client_error(exc, operation="write")
+        except BotoCoreError as exc:
+            raise ObjectStorageError("S3 object write failed") from exc
+        return StoredObject(
+            size_bytes=size_bytes,
+            content_type=content_type,
+            etag=_optional_string(result.get("ETag"), strip_quotes=True),
+            version_id=_optional_string(result.get("VersionId")),
+            checksum_sha256=checksum.hexdigest(),
+        )
+
     def presign_upload(
         self,
         key: str,
@@ -225,6 +298,30 @@ class S3DocumentStorage:
         except BotoCoreError as exc:
             raise ObjectStorageError("S3 object read failed") from exc
 
+    async def download_to_path(
+        self,
+        key: str,
+        path: Path,
+        *,
+        max_bytes: int,
+    ) -> StoredObject:
+        """Stream one bounded object to a caller-owned temporary path."""
+
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be greater than zero")
+        normalized_key = _object_key(key)
+        try:
+            return await asyncio.to_thread(
+                self._download_to_path_sync,
+                normalized_key,
+                path,
+                max_bytes,
+            )
+        except ClientError as exc:
+            _raise_client_error(exc, operation="read")
+        except BotoCoreError as exc:
+            raise ObjectStorageError("S3 object read failed") from exc
+
     def _read_sync(self, key: str, max_bytes: int) -> bytes:
         metadata = self._client.head_object(Bucket=self._bucket, Key=key)
         size_bytes = int(metadata.get("ContentLength", -1))
@@ -245,6 +342,47 @@ class S3DocumentStorage:
                 f"raw document exceeds the {max_bytes} byte read limit"
             )
         return bytes(content)
+
+    def _download_to_path_sync(
+        self,
+        key: str,
+        path: Path,
+        max_bytes: int,
+    ) -> StoredObject:
+        metadata = self._client.head_object(Bucket=self._bucket, Key=key)
+        stored = _stored_object(metadata)
+        if stored.size_bytes > max_bytes:
+            raise ObjectStorageError(
+                f"raw document exceeds the {max_bytes} byte read limit"
+            )
+        response = self._client.get_object(Bucket=self._bucket, Key=key)
+        body = response["Body"]
+        written = 0
+        digest = hashlib.sha256()
+        try:
+            with path.open("wb") as destination:
+                while True:
+                    block = body.read(min(1024 * 1024, max_bytes - written + 1))
+                    if not block:
+                        break
+                    written += len(block)
+                    if written > max_bytes:
+                        raise ObjectStorageError(
+                            f"raw document exceeds the {max_bytes} byte read limit"
+                        )
+                    destination.write(block)
+                    digest.update(block)
+        finally:
+            body.close()
+        if written != stored.size_bytes:
+            raise ObjectStorageError("stored document size changed during download")
+        return StoredObject(
+            size_bytes=written,
+            content_type=stored.content_type,
+            etag=stored.etag,
+            version_id=stored.version_id,
+            checksum_sha256=digest.hexdigest(),
+        )
 
     async def aclose(self) -> None:
         close = getattr(self._client, "close", None)

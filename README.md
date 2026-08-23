@@ -208,16 +208,6 @@ Boolean environment settings use strict JSON boolean values.
 BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true
 ```
 
-For the single-tenant Phase 1 dataset only, development admins can query
-legacy Qdrant points that do not carry the current database tenant UUID:
-
-```dotenv
-BOTHESIS_PHASE1_UNSCOPED_RETRIEVAL=true
-```
-
-This setting requires insecure development identity mode, remains disabled by
-default, and must never be enabled in a shared or production environment.
-
 Then set database-backed user and tenant UUIDs in `web/.env.local`:
 
 ```dotenv

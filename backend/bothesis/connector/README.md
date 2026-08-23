@@ -1,16 +1,19 @@
 # BoThesis connector pipeline
 
-This package owns source extraction, normalized content handling, contextual
-chunking, embedding hand-off, and permission-aware synchronization. Low-level
-storage and Qdrant client operations remain in `bothesis.document_index`.
+This package owns source extraction, Docling conversion, normalized content,
+source-aware chunking, provenance, ACL mapping, and checkpoint synchronization.
+Contextualization, embedding, payload projection, and Qdrant operations belong
+to `bothesis.document_index`.
 
 ## Canonical flow
 
-Source adapters produce canonical `AnyItem` values (`DocumentItem`,
-`CollectionItem`, or `FileItem`). A semantic document follows this path:
+Source adapters produce canonical items and semantic documents cross the index
+boundary together with their connector-owned evidence chunks:
 
 ```text
-DocumentItem → ContentPart[] → Chunk → ContextualChunk → embedding → Qdrant
+raw source → Docling → DocumentItem + Chunk[]
+                              ↓
+                  ContextualChunk → embedding → Qdrant
 ```
 
 Standalone images use `DocumentItem(document_kind="image")`; they are indexed
@@ -28,14 +31,14 @@ contains chunk text, contextual embedding text, citation fields, provider and
 external identity, flattened hierarchy (`parent_id`, `root_id`, and
 `ancestor_ids`), tenant/tombstone governance, and resolved `reader_ids`.
 
-The canonical `Item` store remains the source of truth for `AccessPolicy`,
-`StorageObject`, and provider metadata. Qdrant never receives those complete
+The canonical `Item` store remains the source of truth for `AccessPolicy`, raw
+object references, and provider metadata. Qdrant never receives those complete
 objects or raw binary storage details. Retrieval applies tenant, tombstone,
 ACL, source, and hierarchy filters before evidence is returned.
 
 ## Uploads
 
-Request-owned uploads reuse the same `ChunkingConfig`, contextual text builder,
-and flat Qdrant payload as scheduled connectors. Direct-capable files can still
-use the direct model path; indexed files remain permission-filtered and
-source-grounded.
+Request-owned indexed uploads use the same Docling processor, canonical chunks,
+contextualization, and flat Qdrant projection as scheduled connectors.
+Direct-capable files can still use the direct model path; indexed files remain
+permission-filtered and source-grounded.

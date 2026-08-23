@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterable, Mapping, Sequence
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -15,10 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.connector.base import StaticCredentialsProvider
 from bothesis.connector.confluence.connector import ConfluenceConnector
-from bothesis.connector.file.file_connector import ManualFileUploadConnector
+from bothesis.connector.file.file_connector import FileConnector
+from bothesis.connector.file import DEFAULT_MAX_FILE_BYTES
 from bothesis.connector.file.processing import FileProcessor
 from bothesis.db.models import Connector, ConnectorScope, Document, SyncRun
 from bothesis.integrations import SecretResolver
+from bothesis.connector.protocol import SourceProvider
 from bothesis.services import (
     ACTIVE_STATUS,
     INACTIVE_STATUS,
@@ -37,7 +40,7 @@ from bothesis.services import (
     timestamp,
 )
 
-SUPPORTED_PROVIDERS = frozenset({"confluence", "file"})
+SUPPORTED_PROVIDERS = frozenset({"confluence", SourceProvider.FILE.value})
 CONNECTOR_STATUSES = frozenset({"draft", "active", "disabled", "error"})
 SYNC_RUN_STATUSES = frozenset(
     {"pending", "running", "completed", "failed", "cancelled"}
@@ -72,10 +75,10 @@ class DatasourceService:
                     "scope_type": "space",
                 },
                 {
-                    "provider": "file",
-                    "label": "Managed files",
+                    "provider": SourceProvider.FILE.value,
+                    "label": "Files",
                     "credential_reference_required": False,
-                    "scope_type": "folder",
+                    "scope_type": "source_provider",
                 },
             ]
         }
@@ -240,7 +243,10 @@ class DatasourceService:
         )
         self._session.add(connector)
         await self._session.flush()
-        if normalized_provider == "file" and not normalized_settings.get("base_dir"):
+        if (
+            normalized_provider == SourceProvider.FILE.value
+            and not normalized_settings.get("base_dir")
+        ):
             connector.settings = {
                 **normalized_settings,
                 "base_dir": str(_managed_file_directory(tenant_id, connector.id)),
@@ -268,13 +274,13 @@ class DatasourceService:
         connector_id: int,
         *,
         file_name: str,
-        content: bytes,
+        content: AsyncIterable[bytes],
     ) -> dict[str, Any]:
-        """Store one validated raw file for a tenant-scoped managed connection."""
+        """Stream and store one validated tenant-scoped managed file."""
 
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
         connector = await self._connector(tenant_id, connector_id)
-        if connector.provider != "file":
+        if connector.provider != SourceProvider.FILE.value:
             raise AdminValidationError("files can only be uploaded to a managed file connection")
 
         normalized_file_name = _upload_file_name(file_name)
@@ -283,16 +289,69 @@ class DatasourceService:
         if not isinstance(base_dir_value, str) or not base_dir_value.strip():
             raise AdminValidationError("managed file connection does not have a storage directory")
         base_dir = Path(base_dir_value).expanduser().resolve()
-        processor = FileProcessor(
-            max_file_bytes=int(settings.get("max_file_bytes") or 20 * 1024 * 1024)
-        )
         try:
-            processed = processor.process_bytes(content, file_name=normalized_file_name)
-        except ValueError as exc:
-            raise AdminValidationError(str(exc)) from exc
+            max_file_bytes = int(
+                settings.get("max_file_bytes") or DEFAULT_MAX_FILE_BYTES
+            )
+        except (TypeError, ValueError) as exc:
+            raise AdminValidationError(
+                "managed file max_file_bytes must be a positive integer"
+            ) from exc
+        if max_file_bytes < 1:
+            raise AdminValidationError(
+                "managed file max_file_bytes must be a positive integer"
+            )
 
+        await asyncio.to_thread(base_dir.mkdir, parents=True, exist_ok=True)
         external_id = uuid4().hex
         stored_name = f"{external_id}-{normalized_file_name}"
+        temporary = NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{external_id}-",
+            suffix=Path(normalized_file_name).suffix.casefold(),
+            dir=base_dir,
+            delete=False,
+        )
+        temporary_path = Path(temporary.name)
+        try:
+            received_bytes = 0
+            async for chunk in content:
+                if not isinstance(chunk, bytes):
+                    raise AdminValidationError(
+                        "managed file upload chunks must be bytes"
+                    )
+                next_size = received_bytes + len(chunk)
+                if next_size > max_file_bytes:
+                    raise AdminValidationError(
+                        f"File exceeds {max_file_bytes} byte limit: {next_size} bytes"
+                    )
+                if chunk:
+                    await asyncio.to_thread(temporary.write, chunk)
+                received_bytes = next_size
+            await asyncio.to_thread(temporary.close)
+
+            try:
+                processor = await asyncio.to_thread(
+                    FileProcessor,
+                    max_file_bytes=max_file_bytes,
+                )
+                processed = await asyncio.to_thread(
+                    processor.process_path,
+                    temporary_path,
+                    file_name=normalized_file_name,
+                )
+            except ValueError as exc:
+                raise AdminValidationError(str(exc)) from exc
+
+            await asyncio.to_thread(
+                temporary_path.replace,
+                base_dir / stored_name,
+            )
+        finally:
+            if not temporary.closed:
+                await asyncio.to_thread(temporary.close)
+            await asyncio.to_thread(temporary_path.unlink, missing_ok=True)
+
         record = {
             "external_id": external_id,
             "path": stored_name,
@@ -301,10 +360,8 @@ class DatasourceService:
             "size_bytes": processed.size_bytes,
             "mime_type": processed.mime_type,
             "uploaded_at": datetime.now(UTC).isoformat(),
-            "metadata": {"source_kind": "manual_upload"},
+            "metadata": {"source_kind": "file"},
         }
-        await asyncio.to_thread(base_dir.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread((base_dir / stored_name).write_bytes, processed.raw_bytes)
         await asyncio.to_thread(
             (base_dir / f"{external_id}.json").write_text,
             json.dumps(record, separators=(",", ":")),
@@ -395,8 +452,8 @@ class DatasourceService:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
         connector = await self._connector(tenant_id, connector_id)
         try:
-            if connector.provider == "file":
-                runtime = ManualFileUploadConnector(dict(connector.settings))
+            if connector.provider == SourceProvider.FILE.value:
+                runtime = FileConnector(dict(connector.settings))
                 connected = await runtime.test_connection()
             elif connector.provider == "confluence":
                 if self._secret_resolver is None or not connector.credential_secret_ref:
@@ -856,12 +913,12 @@ def _secret_reference(provider: str, value: str | None) -> str | None:
 def _default_scopes(
     provider: str, settings: Mapping[str, Any]
 ) -> list[Mapping[str, Any]]:
-    if provider == "file":
+    if provider == SourceProvider.FILE.value:
         return [
             {
-                "scope_value": "manual_uploads",
-                "display_name": "Managed files",
-                "scope_type": "folder",
+                "scope_value": SourceProvider.FILE.value,
+                "display_name": "Files",
+                "scope_type": "source_provider",
             }
         ]
     space = str(settings.get("space") or "all").strip()
@@ -900,7 +957,7 @@ def _confluence_runtime(
 
 
 def _managed_file_directory(tenant_id: UUID, connector_id: int) -> Path:
-    return Path("/tmp/bothesis-manual-uploads") / str(tenant_id) / str(connector_id)
+    return Path("/tmp/bothesis-files") / str(tenant_id) / str(connector_id)
 
 
 def _upload_file_name(value: str) -> str:

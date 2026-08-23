@@ -12,31 +12,29 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client import models as qmodels
 
-from bothesis.agent.models import Evidence
-from bothesis.connector.qdrant import (
+from bothesis.document_index.payload import (
     QdrantChunkPayload,
     QdrantPayloadContext,
-    make_contextual_text,
 )
-from bothesis.knowledge.protocol import (
+from bothesis.connector.protocol import (
     CitationInfo,
     CitationSpan,
-    ChunkContext,
-    ContextualChunk,
-    DocumentKind,
     EffectiveAccess,
     Hierarchy,
     SourceIdentity,
     SourceProvider,
 )
-from bothesis.db.models import Document, DocumentChunk
-from bothesis.services import AuthContext
+from bothesis.document_index.models import ChunkContext, ContextualChunk
+from bothesis.db.models import Document
+
+if TYPE_CHECKING:
+    from bothesis.services import AuthContext
 
 log = logging.getLogger(__name__)
 
@@ -955,7 +953,7 @@ class QdrantDocumentIndex:
     async def replace_document(
         self,
         document: Document,
-        chunks: Sequence[DocumentChunk],
+        chunks: Sequence[ContextualChunk],
         vectors: Sequence[Sequence[float]],
         *,
         access: AuthContext,
@@ -968,19 +966,30 @@ class QdrantDocumentIndex:
             raise ValueError("every canonical chunk requires one embedding")
 
         await self._store.soft_delete_document_points(str(document.id))
-        points = [
-            qmodels.PointStruct(
-                id=_document_point_id(document.id, chunk.chunk_index),
-                vector={"content": list(vector)},
-                payload=_document_payload(
-                    document,
-                    chunk,
-                    access=access,
+        points = []
+        for chunk, vector in zip(chunks, vectors, strict=True):
+            if chunk.item_id != str(document.id):
+                raise ValueError("contextual chunk belongs to a different document")
+            payload = QdrantChunkPayload.from_contextual_chunk(
+                chunk,
+                QdrantPayloadContext(
+                    tenant_id=str(access.tenant_id),
+                    connector_id="upload",
+                    scope_id=(
+                        str(document.connector_scope_id)
+                        if document.connector_scope_id
+                        else None
+                    ),
                     embedding_model=embedding_model,
                 ),
+            ).for_qdrant()
+            points.append(
+                qmodels.PointStruct(
+                    id=_document_point_id(document.id, chunk.chunk_index),
+                    vector={"content": list(vector)},
+                    payload=payload,
+                )
             )
-            for chunk, vector in zip(chunks, vectors, strict=True)
-        ]
         await self._store.upsert_points(points)
 
     async def search_document(
@@ -990,7 +999,7 @@ class QdrantDocumentIndex:
         *,
         access: AuthContext,
         limit: int,
-    ) -> tuple[Evidence, ...]:
+    ) -> tuple[ContextualChunk, ...]:
         if access.tenant_id is None:
             return ()
         base_filter = self._store.build_access_filter(
@@ -1013,7 +1022,7 @@ class QdrantDocumentIndex:
             title_vector_name=None,
             log_label="uploaded-document-search",
         )
-        evidence: list[Evidence] = []
+        chunks: list[ContextualChunk] = []
         for point in points:
             payload = getattr(point, "payload", None)
             if not isinstance(payload, dict):
@@ -1023,35 +1032,48 @@ class QdrantDocumentIndex:
                 continue
             raw_score = getattr(point, "score", None)
             score = float(raw_score) if isinstance(raw_score, (int, float)) else None
-            evidence.append(
-                Evidence(
-                    id=str(getattr(point, "id", ""))
-                    or _document_point_id(
-                        document.id,
-                        int(payload.get("chunk_index") or 0),
-                    ),
+            chunk_id = str(
+                payload.get("chunk_id")
+                or f"{document.id}:{int(payload.get('chunk_index') or 0)}"
+            )
+            source = SourceIdentity(
+                connector_id=str(payload.get("connector_id") or "upload"),
+                provider=SourceProvider.FILE,
+                external_id=str(payload.get("external_id") or document.id),
+                url=(
+                    str(payload["source_url"])
+                    if payload.get("source_url") is not None
+                    else None
+                ),
+            )
+            chunks.append(
+                ContextualChunk(
+                    id=chunk_id,
                     item_id=str(document.id),
-                    chunk_id=str(
-                        payload.get("chunk_id")
-                        or f"{document.id}:{int(payload.get('chunk_index') or 0)}"
+                    chunk_index=int(payload.get("chunk_index") or 0),
+                    content_type=str(payload.get("content_type") or "text"),
+                    chunk_text=content,
+                    contextual_text=str(payload.get("contextual_text") or content),
+                    context=ChunkContext(
+                        section_path=_payload_strings(payload, "context_section_path"),
+                        summary=_payload_text(payload, "context_summary"),
                     ),
                     title=str(payload.get("title") or document.title or document.id),
-                    content=content,
-                    source=SourceIdentity(
-                        connector_id=str(payload.get("connector_id") or "upload"),
-                        provider=SourceProvider.FILE,
-                        external_id=str(payload.get("external_id") or document.id),
-                        url=(
-                            str(payload["source_url"])
-                            if payload.get("source_url") is not None
-                            else None
-                        ),
+                    document_kind=str(payload.get("document_kind") or "document"),
+                    source=source,
+                    hierarchy=Hierarchy(
+                        parent_id=_payload_text(payload, "parent_id"),
+                        root_id=_payload_text(payload, "root_id"),
+                        ancestor_ids=_payload_strings(payload, "ancestor_ids"),
+                    ),
+                    access=EffectiveAccess(
+                        reader_ids=_payload_strings(payload, "reader_ids"),
                     ),
                     citation=_citation_from_payload(payload),
                     relevance_score=score,
                 )
             )
-        return tuple(evidence)
+        return tuple(chunks)
 
     async def update_document_access(
         self,
@@ -1078,83 +1100,6 @@ class QdrantDocumentIndex:
 
 def _document_point_id(document_id: UUID, chunk_index: int) -> str:
     return str(uuid5(NAMESPACE_URL, f"bothesis:document:{document_id}:{chunk_index}"))
-
-
-def _document_payload(
-    document: Document,
-    chunk: DocumentChunk,
-    *,
-    access: AuthContext,
-    embedding_model: str,
-) -> dict[str, Any]:
-    metadata = dict(chunk.metadata_)
-    title = document.title or str(document.id)
-    metadata_element_id = _metadata_text(chunk.metadata_, "element_id")
-    element_id = metadata_element_id or f"element_{chunk.chunk_index + 1:03d}"
-    start_offset = _metadata_int(chunk.metadata_, "start_offset")
-    end_offset = _metadata_int(chunk.metadata_, "end_offset")
-    section_path = list(chunk.heading_path or ())
-    citation_spans = _metadata_citation_spans(metadata)
-    if not citation_spans:
-        # Existing durable chunks may predate span storage.  Convert their
-        # bounded metadata once at projection time; newly written chunks use
-        # only ``citation_spans``.
-        citation_spans = (
-            CitationSpan(
-                page=chunk.start_page_number or chunk.end_page_number,
-                element_id=element_id,
-                start_offset=start_offset if start_offset is not None else 0,
-                end_offset=end_offset if end_offset is not None else len(chunk.content),
-                bounding_box=_metadata_bbox(metadata.get("bounding_box")),
-            ),
-        )
-    summary = metadata.get("summary")
-    summary_text = summary if isinstance(summary, str) else None
-    document_kind = (
-        DocumentKind.IMAGE
-        if (document.mime_type or "").startswith("image/")
-        else DocumentKind.PDF
-        if document.mime_type == "application/pdf"
-        else DocumentKind.DOCUMENT
-    )
-    contextual = ContextualChunk(
-        id=f"{document.id}:{chunk.chunk_index}",
-        item_id=str(document.id),
-        chunk_index=chunk.chunk_index,
-        content_type="text",
-        chunk_text=chunk.content,
-        contextual_text=make_contextual_text(
-            title=title,
-            context=ChunkContext(section_path=section_path, summary=summary_text),
-            chunk_text=chunk.content,
-        ),
-        context=ChunkContext(section_path=section_path, summary=summary_text),
-        title=title,
-        document_kind=document_kind.value,
-        source=SourceIdentity(
-            connector_id="upload",
-            provider=SourceProvider.FILE,
-            external_id=str(document.id),
-            url=document.source_url,
-        ),
-        hierarchy=Hierarchy(),
-        access=EffectiveAccess(reader_ids=[str(access.user_id)]),
-        citation=CitationInfo(
-            section=section_path[-1] if section_path else None,
-            section_path=tuple(section_path),
-            anchor=_metadata_text(chunk.metadata_, "anchor"),
-            spans=tuple(citation_spans),
-        ),
-    )
-    return QdrantChunkPayload.from_contextual_chunk(
-        contextual,
-        QdrantPayloadContext(
-            tenant_id=str(access.tenant_id),
-            connector_id="upload",
-            scope_id=str(document.connector_scope_id) if document.connector_scope_id else None,
-            embedding_model=embedding_model,
-        ),
-    ).for_qdrant()
 
 
 def _citation_from_payload(payload: dict[str, Any]) -> CitationInfo:
@@ -1189,24 +1134,8 @@ def _payload_int(payload: Mapping[str, Any], key: str) -> int | None:
     return None
 
 
-def _metadata_text(metadata: Mapping[str, Any], key: str) -> str | None:
-    value = metadata.get(key)
-    return value.strip() if isinstance(value, str) and value.strip() else None
-
-
-def _metadata_int(metadata: Mapping[str, Any], key: str) -> int | None:
-    value = metadata.get(key)
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value)
-    return None
-
-
-def _metadata_bbox(value: object) -> Any:
-    from bothesis.knowledge.protocol import BoundingBox
+def _payload_bbox(value: object) -> Any:
+    from bothesis.connector.protocol import BoundingBox
 
     if not isinstance(value, Mapping):
         return None
@@ -1214,10 +1143,6 @@ def _metadata_bbox(value: object) -> Any:
         return BoundingBox.model_validate(value)
     except ValueError:
         return None
-
-
-def _metadata_citation_spans(metadata: Mapping[str, Any]) -> tuple[CitationSpan, ...]:
-    return tuple(_payload_citation_spans(metadata.get("citation_spans")))
 
 
 def _payload_citation_spans(value: object) -> list[CitationSpan]:
@@ -1234,7 +1159,7 @@ def _payload_citation_spans(value: object) -> list[CitationSpan]:
                     element_id=_payload_text(raw, "element_id"),
                     start_offset=_payload_int(raw, "start_offset"),
                     end_offset=_payload_int(raw, "end_offset"),
-                    bounding_box=_metadata_bbox(raw.get("bounding_box")),
+                    bounding_box=_payload_bbox(raw.get("bounding_box")),
                 )
             )
         except ValueError:

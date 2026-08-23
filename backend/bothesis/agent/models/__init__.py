@@ -7,21 +7,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from bothesis.agent.protocol import FunctionCallItem
-from bothesis.knowledge.protocol import CitationInfo, SourceIdentity
-
-
-@dataclass(frozen=True, slots=True)
-class Evidence:
-    """A source fragment available to the agent and citation UI."""
-
-    id: str
-    item_id: str
-    chunk_id: str
-    title: str
-    content: str
-    source: SourceIdentity | None = None
-    citation: CitationInfo = field(default_factory=CitationInfo)
-    relevance_score: float | None = None
+from bothesis.knowledge.models import Evidence
 
 
 @dataclass(frozen=True, slots=True)

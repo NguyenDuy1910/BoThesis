@@ -4,50 +4,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bothesis.db.models import Document
+from bothesis.connector.protocol import ProviderCacheEntry, ProviderFileCache
 
 DEFAULT_MAX_PROVIDER_CACHE_BYTES = 4 * 1024 * 1024
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderCacheEntry:
-    provider: str
-    source_fingerprint: str
-    reference: Mapping[str, Any]
-    expires_at: datetime | None = None
-
-    @property
-    def is_expired(self) -> bool:
-        return self.expires_at is not None and self.expires_at <= datetime.now(UTC)
-
-
-@runtime_checkable
-class ProviderFileCache(Protocol):
-    async def get(
-        self,
-        document_id: UUID,
-        *,
-        provider: str,
-        source_fingerprint: str,
-    ) -> ProviderCacheEntry | None: ...
-
-    async def put(
-        self,
-        document_id: UUID,
-        entry: ProviderCacheEntry,
-    ) -> None: ...
-
-    async def invalidate(self, document_id: UUID, *, provider: str) -> None: ...
-
-    async def clear(self, document_id: UUID) -> None: ...
 
 
 class PostgresProviderFileCache:

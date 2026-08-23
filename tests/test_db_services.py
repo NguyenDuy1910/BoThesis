@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -20,8 +20,27 @@ from bothesis.db.models import (
     Connector,
     ConnectorScope,
     Conversation,
+    Document,
+    DocumentChunk,
     Message,
     SyncRun,
+)
+from bothesis.connector.base import BaseSourceConnector
+from bothesis.connector.protocol import (
+    AccessPolicy,
+    ChangeType,
+    Chunk,
+    CitationInfo,
+    CitationSpan,
+    ConnectorCheckpoint,
+    ConnectorScope as SourceScope,
+    DocumentItem,
+    DocumentKind,
+    ItemChange,
+    SourceIdentity,
+    SourceProvider,
+    StorageObject,
+    TextPart,
 )
 from bothesis.api import register_admin_error_handlers
 from bothesis.api.admin import admin_router
@@ -35,6 +54,7 @@ from bothesis.services import (
     AdminNotFoundError,
     AuthService,
     AuthorizationError,
+    ConnectorSyncService,
     DatasourceService,
     DocumentChunkInput,
     DocumentNotFoundError,
@@ -245,6 +265,187 @@ async def test_document_service_enforces_acl_and_generation_activation(
 
 
 @pytest.mark.asyncio
+async def test_connector_worker_persists_activates_and_projects_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        tenant = await auth.create_tenant("worker-acme", "Worker Acme")
+        owner = await auth.create_user("worker-admin@example.com")
+        role = await auth.create_role(
+            tenant.id,
+            "worker-admin",
+            "Worker Admin",
+            permission_codes=["source.manage", "knowledge.read"],
+        )
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        configured = Connector(
+            tenant_id=tenant.id,
+            provider="file",
+            display_name="Managed files",
+            created_by_user_id=owner.id,
+        )
+        session.add(configured)
+        await session.flush()
+        stored_scope = ConnectorScope(
+            connector_id=configured.id,
+            scope_value="file",
+            scope_type="source_provider",
+            display_name="Files",
+        )
+        session.add(stored_scope)
+        await session.flush()
+        run = SyncRun(
+            connector_scope_id=stored_scope.id,
+            generation=1,
+            trigger_type="manual",
+            status="pending",
+        )
+        session.add(run)
+        await session.flush()
+        run_id = run.id
+        connector_id = configured.id
+
+    item = DocumentItem(
+        id="file::report-1",
+        title="Annual report",
+        document_kind=DocumentKind.PDF,
+        source=SourceIdentity(
+            connector_id=str(connector_id),
+            provider=SourceProvider.FILE,
+            external_id="report-1",
+            external_version="v1",
+        ),
+        access=AccessPolicy.from_reader_ids(["public"]),
+        content=[TextPart(element_id="p1", page=1, text="Grounded report")],
+        original=StorageObject(
+            provider="s3",
+            bucket="documents",
+            key="worker-acme/report-1.pdf",
+            file_name="report-1.pdf",
+            size_bytes=100,
+            content_type="application/pdf",
+            checksum_sha256="b" * 64,
+        ),
+    )
+    chunk = Chunk(
+        id="file::report-1:0",
+        item_id=item.id,
+        chunk_index=0,
+        chunk_text="Grounded report",
+        content_type="text",
+        citation=CitationInfo(
+            spans=(
+                CitationSpan(
+                    page=1,
+                    element_id="p1",
+                    start_offset=0,
+                    end_offset=15,
+                ),
+            )
+        ),
+    )
+
+    class Source(BaseSourceConnector):
+        source = "file"
+
+        async def test_connection(self) -> bool:
+            return True
+
+        async def list_scopes(self) -> list[SourceScope]:
+            return []
+
+        async def discover_changes(
+            self,
+            checkpoint: ConnectorCheckpoint,
+            scope: SourceScope,
+        ) -> list[ItemChange]:
+            del checkpoint, scope
+            return [
+                ItemChange(
+                    type=ChangeType.UPSERT,
+                    item_id=item.id,
+                    item=item,
+                )
+            ]
+
+        async def fetch_item(self, item_id: str) -> DocumentItem:
+            assert item_id == item.id
+            return item
+
+        async def fetch_chunks(self, value: DocumentItem) -> tuple[Chunk, ...]:
+            assert value.id == item.id
+            return (chunk,)
+
+        def next_checkpoint(self) -> ConnectorCheckpoint:
+            return ConnectorCheckpoint()
+
+    class Embedder:
+        model = "embed-test"
+
+        async def embed_query(self, query: str) -> list[float]:
+            return [float(len(query))]
+
+        async def embed_documents(self, documents: list[str]) -> list[list[float]]:
+            return [[float(len(value))] for value in documents]
+
+    class Store:
+        def __init__(self) -> None:
+            self.points: list[object] = []
+            self.payload_updates: list[dict[str, object]] = []
+
+        async def upsert_points(self, points: list[object]) -> None:
+            self.points.extend(points)
+
+        async def set_payload(
+            self,
+            *,
+            payload: dict[str, object],
+            points: object,
+        ) -> None:
+            del points
+            self.payload_updates.append(dict(payload))
+
+    store = Store()
+    result = await ConnectorSyncService(
+        session_factory,
+        store,  # type: ignore[arg-type]
+        Embedder(),  # type: ignore[arg-type]
+    ).run(run_id, Source())
+
+    assert result.processed_items == 1
+    assert result.written_chunks == 1
+    async with session_factory() as session:
+        stored_run = await session.get(SyncRun, run_id)
+        stored_document = await session.scalar(
+            select(Document).where(Document.external_id == item.id)
+        )
+        assert stored_run is not None and stored_run.status == "completed"
+        assert stored_document is not None
+        assert stored_document.raw_storage_key == "worker-acme/report-1.pdf"
+        assert stored_document.content_sha256 == "b" * 64
+        assert (
+            stored_document.metadata_["canonical_item"]["original"]["bucket"]
+            == "documents"
+        )
+        assert stored_document.indexing_status == "indexed"
+        assert stored_document.generation == 1
+        assert stored_document.connector_scope.active_generation == 1
+        stored_chunk = await session.scalar(
+            select(DocumentChunk).where(
+                DocumentChunk.document_id == stored_document.id
+            )
+        )
+        assert stored_chunk is not None
+        assert stored_chunk.content == "Grounded report"
+        assert stored_chunk.metadata_["chunk_id"] == chunk.id
+        assert stored_chunk.metadata_["citation_spans"][0]["element_id"] == "p1"
+    assert len(store.points) == 1
+    assert getattr(store.points[0], "payload")["is_deleted"] is True
+    assert store.payload_updates[-1] == {"is_deleted": False}
+
+
+@pytest.mark.asyncio
 async def test_admin_services_enforce_tenant_isolation_and_group_permissions(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -324,15 +525,20 @@ async def test_datasource_service_persists_validation_and_sync_lifecycle(
         datasource = await service.create_datasource(
             actor,
             provider="file",
-            display_name="Managed files",
+            display_name="Files",
             settings={"base_dir": str(tmp_path)},
         )
         assert datasource["status"] == "draft"
+
+        async def upload_content() -> AsyncIterator[bytes]:
+            yield b"Enterprise "
+            yield b"policy"
+
         uploaded = await service.upload_file(
             actor,
             int(datasource["id"]),
             file_name="policy.txt",
-            content=b"Enterprise policy",
+            content=upload_content(),
         )
         assert uploaded["file_name"] == "policy.txt"
         assert uploaded["size_bytes"] == len(b"Enterprise policy")
