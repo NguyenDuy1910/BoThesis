@@ -6,7 +6,6 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import (
@@ -42,9 +41,7 @@ from bothesis.connector.protocol import (
     StorageObject,
     TextPart,
 )
-from bothesis.api import register_admin_error_handlers
-from bothesis.api.admin import admin_router
-from bothesis.db.engine import get_transactional_session
+import main
 from bothesis.document_index.raw_storage import PostgresBlobStorage
 from bothesis.services import (
     AccessRequestService,
@@ -642,26 +639,14 @@ async def test_admin_api_uses_database_identity_and_trusted_tenant_boundary(
         )
         await auth.assign_membership(admin.id, tenant.id, role.id)
 
-    async def test_session():
-        async with session_factory() as session:
-            try:
-                yield session
-                await session.commit()
-            except BaseException:
-                await session.rollback()
-                raise
-
-    app = FastAPI()
-    app.state.allow_insecure_development_identity = True
-    register_admin_error_handlers(app)
-    app.include_router(admin_router, prefix="/api/v1")
-    app.dependency_overrides[get_transactional_session] = test_session
+    main._admin_service._session_factory = session_factory
+    main._admin_service._allow_insecure_development_identity = True
     headers = {
         "X-Bothesis-User-Id": str(admin.id),
         "X-Bothesis-Tenant-Id": str(tenant.id),
     }
     async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
+        transport=ASGITransport(app=main.app), base_url="http://test"
     ) as client:
         response = await client.get("/api/v1/admin/overview", headers=headers)
         assert response.status_code == 200

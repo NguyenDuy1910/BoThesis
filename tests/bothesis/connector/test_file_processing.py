@@ -44,7 +44,8 @@ from bothesis.connector.protocol import (
     TablePart,
     TextPart,
 )
-from bothesis.api import admin as admin_module
+import main as admin_module
+from bothesis.services import RequestIdentity
 from bothesis.services import (
     AdminValidationError,
     AuthContext,
@@ -633,15 +634,14 @@ async def test_admin_managed_upload_uses_request_stream(
 ) -> None:
     received: dict[str, object] = {}
 
-    class Service:
-        async def upload_file(self, actor, connector_id, *, file_name, content):
-            received.update(
-                actor=actor,
-                connector_id=connector_id,
-                file_name=file_name,
-                content=b"".join([chunk async for chunk in content]),
-            )
-            return {"id": "upload-1"}
+    async def upload_file(identity, connector_id, *, file_name, content):
+        received.update(
+            actor=identity.auth_context,
+            connector_id=connector_id,
+            file_name=file_name,
+            content=b"".join([chunk async for chunk in content]),
+        )
+        return {"id": "upload-1"}
 
     class StreamingRequest:
         def stream(self):
@@ -654,13 +654,14 @@ async def test_admin_managed_upload_uses_request_stream(
         async def body(self) -> bytes:
             raise AssertionError("request.body() must not buffer managed uploads")
 
-    monkeypatch.setattr(admin_module, "_datasources", lambda _: Service())
+    monkeypatch.setattr(
+        admin_module._admin_service, "upload_datasource_file", upload_file
+    )
     actor = _source_manager()
-    result = await admin_module.upload_datasource_file(
+    result = await admin_module.admin_upload_datasource_file(
         7,
         StreamingRequest(),  # type: ignore[arg-type]
-        object(),  # type: ignore[arg-type]
-        actor,
+        RequestIdentity(auth_context=actor),
         "policy%20file.txt",
     )
 
@@ -668,6 +669,6 @@ async def test_admin_managed_upload_uses_request_stream(
     assert received == {
         "actor": actor,
         "connector_id": 7,
-        "file_name": "policy file.txt",
+        "file_name": "policy%20file.txt",
         "content": b"alphabeta",
     }

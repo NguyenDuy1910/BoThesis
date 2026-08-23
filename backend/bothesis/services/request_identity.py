@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.services import AuthContext, AuthService, AuthorizationError
+from bothesis.services import (
+    AuthContext,
+    AuthService,
+    AuthorizationError,
+    RequestIdentity,
+)
 
 
 async def resolve_auth_context(
-    request: Request,
+    identity: RequestIdentity,
     session: AsyncSession,
     *,
     claimed_user_id: str | UUID | None = None,
@@ -20,7 +24,7 @@ async def resolve_auth_context(
 ) -> AuthContext:
     """Use injected middleware identity, or an explicitly enabled dev identity."""
 
-    injected = getattr(request.state, "auth_context", None)
+    injected = identity.auth_context
     if injected is not None:
         if not isinstance(injected, AuthContext):
             raise AuthorizationError("request auth context has an invalid type")
@@ -30,8 +34,8 @@ async def resolve_auth_context(
     if not allow_insecure_development_identity:
         raise AuthorizationError("authenticated request context is required")
 
-    raw_user_id = request.headers.get("X-Bothesis-User-Id") or claimed_user_id
-    raw_tenant_id = request.headers.get("X-Bothesis-Tenant-Id") or claimed_tenant_id
+    raw_user_id = identity.user_id or claimed_user_id
+    raw_tenant_id = identity.tenant_id or claimed_tenant_id
     if raw_user_id is None:
         raise AuthorizationError("development user ID is required")
     try:

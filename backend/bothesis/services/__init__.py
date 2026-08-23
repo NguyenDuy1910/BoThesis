@@ -118,6 +118,15 @@ class AuthContext:
 
 
 @dataclass(frozen=True, slots=True)
+class RequestIdentity:
+    """HTTP-derived identity inputs passed into the service boundary."""
+
+    auth_context: AuthContext | None = None
+    user_id: str | UUID | None = None
+    tenant_id: str | UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CanonicalDocumentContent:
     """Canonical source item and chunks produced for one stored document."""
 
@@ -323,6 +332,8 @@ from bothesis.services.tenants import TenantService  # noqa: E402
 from bothesis.services.users import UserService  # noqa: E402
 from bothesis.services.admin import AdminService  # noqa: E402
 from bothesis.services.connector_sync import ConnectorSyncService  # noqa: E402
+from bothesis.services.admin_api import AdminApiService  # noqa: E402
+from bothesis.services.api import ApiService  # noqa: E402
 
 __all__ = [
     "ACTIVE_STATUS",
@@ -337,10 +348,13 @@ __all__ = [
     "AdminExternalUnavailableError",
     "AdminNotFoundError",
     "AdminService",
+    "AdminApiService",
     "AdminServiceError",
     "AdminValidationError",
     "AuditService",
+    "ApiService",
     "AuthContext",
+    "RequestIdentity",
     "AuthService",
     "AuthServiceError",
     "AuthorizationError",

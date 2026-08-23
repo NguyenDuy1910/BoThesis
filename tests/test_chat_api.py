@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 import native_responses as native
 
 import main
-import bothesis.db.engine as db_engine
+import bothesis.services.api as api_service_module
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext
 from bothesis.agent.tools import ToolRegistry
@@ -96,14 +96,11 @@ def test_default_agent_composes_the_openrouter_transport(
             if False:
                 yield None
 
-    monkeypatch.setattr(
-        openrouter_transport,
-        "OpenRouterTransport",
-        TestOpenRouterTransport,
-    )
-    monkeypatch.setattr(main, "_agent", None)
+    monkeypatch.setattr(openrouter_transport, "OpenRouterTransport", TestOpenRouterTransport)
+    monkeypatch.setattr(api_service_module, "OpenRouterTransport", TestOpenRouterTransport)
+    monkeypatch.setattr(main._api_service, "_agent", None)
 
-    assert isinstance(main._get_agent().model, TestOpenRouterTransport)
+    assert isinstance(main._api_service._get_agent().model, TestOpenRouterTransport)
 
 
 class PermissionDeniedTransport:
@@ -245,10 +242,16 @@ class ReasoningTransport(native.ScriptedResponsesTransport):
 
 
 class _SessionContext:
-    async def __aenter__(self) -> object:
-        return object()
+    async def __aenter__(self) -> _SessionContext:
+        return self
 
     async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
         return None
 
 
@@ -268,8 +271,8 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
             principal_tokens=("external_group:finance",),
         )
 
-    monkeypatch.setattr(main, "_resolve_access", resolve_access)
-    monkeypatch.setattr(db_engine, "get_session_factory", lambda: _SessionContext)
+    monkeypatch.setattr(main._api_service, "_resolve_access", resolve_access)
+    monkeypatch.setattr(main._api_service, "_session_factory", _SessionContext)
     return user_id, tenant_id
 
 
@@ -290,7 +293,7 @@ def test_db_citation_does_not_synthesize_legacy_element_ranges() -> None:
         },
     )
 
-    citation = main._record_citation(record)
+    citation = main._api_service._record_citation(record)
 
     assert citation.spans == ()
     assert citation.section == "Canonical section"
@@ -315,11 +318,13 @@ def test_db_viewer_does_not_split_multispan_chunk_projection() -> None:
     )
     document = SimpleNamespace(id="doc-1", chunks=[record])
 
-    elements, chunks_by_id = main._viewer_elements(document)
+    elements, chunks_by_id = main._api_service._viewer_elements(
+        document, document.chunks
+    )
 
     assert elements == []
     assert chunks_by_id["chunk-multi"] is record
-    assert main._record_citation(record).spans == (
+    assert main._api_service._record_citation(record).spans == (
         CitationSpan(page=1, element_id="p001_para_001"),
         CitationSpan(page=2, element_id="p002_para_001"),
     )
@@ -339,7 +344,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
             recent_history_messages=2,
         ),
     )
-    monkeypatch.setattr(main, "_agent", agent)
+    monkeypatch.setattr(main._api_service, "_agent", agent)
     async def allow_selected_connectors(
         _service: DatasourceService,
         _actor: AuthContext,
@@ -440,7 +445,7 @@ def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     registry = ToolRegistry()
     registry.register(KnowledgeSearch(StubRetriever()))
     agent = Agent(InterleavedTransport(), registry)
-    monkeypatch.setattr(main, "_agent", agent)
+    monkeypatch.setattr(main._api_service, "_agent", agent)
     user_id, tenant_id = _install_access(monkeypatch)
 
     with TestClient(main.app) as client:
