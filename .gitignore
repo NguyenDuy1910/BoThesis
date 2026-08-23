@@ -1,9 +1,69 @@
-# Ignore Python virtual environments and common artifacts
-backend/.venv/
-backend/.env
+# Environment files and local secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Python environments, bytecode, and tooling caches
 .venv/
+venv/
+env/
+ENV/
 __pycache__/
 *.py[cod]
 *.egg-info/
-deployment/.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.prof
+
+# Node.js dependencies, builds, and package-manager caches
+node_modules/
+.next/
+out/
+dist/
+build/
+.turbo/
+.cache/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local runtime state, generated artifacts, and logs
+*.log
+*.pid
+*.pid.lock
+*.seed
+*.sock
+/logs/
+/.artifacts/
 /deliverables/
+/postgres_data/
+/qdrant_storage/
+/minio_data/
+
+# Local agent skills and editor configuration
+/.agents/skills/
+/.claude/skills/
+/.idea/
+/.vscode/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
