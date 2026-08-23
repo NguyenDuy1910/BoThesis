@@ -4,10 +4,25 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import UUID
 
-from .contextualization import SemanticContextualizer, StructuralContextualizer
+INDEX_SCHEMA_VERSION = 6
+DENSE_VECTOR_NAME = "content"
+SPARSE_VECTOR_NAME = "content_bm25"
+BM25_MODEL = "qdrant/bm25"
+BM25_OPTIONS: dict[str, Any] = {
+    "tokenizer": "multilingual",
+    "stemmer": {"type": "none"},
+    "stopwords": {"custom": []},
+    "lowercase": True,
+    "ascii_folding": False,
+}
+DEFAULT_HYBRID_CANDIDATE_LIMIT = 20
+
+
+from .contextualization import StructuralContextualizer  # noqa: E402
+from .semantic_contextualizer import SemanticContextualizer  # noqa: E402
 from .embedding import EmbeddingService, EmbeddingTokenizer, embedding_texts
 from .models import ChunkContext, ContextualChunk, IndexQuery, PreparedDocument
 from .payload import (
@@ -20,7 +35,7 @@ from .payload import (
 )
 
 if TYPE_CHECKING:
-    from bothesis.db.models import Document
+    from bothesis.db.models import Item
     from bothesis.services import AuthContext
 
 
@@ -46,7 +61,7 @@ class VectorIndex(Protocol):
 
     async def replace_document(
         self,
-        document: Document,
+        document: Item,
         chunks: Sequence[ContextualChunk],
         vectors: Sequence[Sequence[float]],
         *,
@@ -57,7 +72,8 @@ class VectorIndex(Protocol):
 
     async def search_document(
         self,
-        document: Document,
+        document: Item,
+        query: str,
         query_vector: list[float],
         *,
         access: AuthContext,
@@ -99,14 +115,16 @@ class DocumentIndex(Protocol):
 
 
 __all__ = [
-    "CHUNKER_VERSION", "ChunkContext", "ContextualChunk",
+    "BM25_MODEL", "BM25_OPTIONS", "CHUNKER_VERSION", "ChunkContext",
+    "ContextualChunk", "DEFAULT_HYBRID_CANDIDATE_LIMIT", "DENSE_VECTOR_NAME",
     "DEFAULT_DIRECT_MAX_BYTES", "DIRECT_IMAGE_TYPES", "DocumentIndex",
     "DocumentProcessingError", "DocumentUnavailableError", "EmbeddingService",
     "EmbeddingTokenizer", "IndexPayload", "IndexQuery",
     "PARSER_VERSION", "PreparedDocument", "PreparedDocuments",
     "QdrantChunkPayload", "QdrantChunkRecord",
-    "QdrantPayloadContext",
-    "SemanticContextualizer", "StructuralContextualizer", "build_contextual_chunks",
+    "QdrantPayloadContext", "INDEX_SCHEMA_VERSION", "SPARSE_VECTOR_NAME",
+    "SemanticContextualizer", "StructuralContextualizer",
+    "build_contextual_chunks",
     "build_qdrant_records",
     "VectorIndex", "embedding_texts",
 ]

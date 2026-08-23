@@ -11,7 +11,7 @@ from bothesis.db.models import (
     AccessRequest,
     Connector,
     ConnectorScope,
-    Document,
+    Item,
     Group,
     Role,
     SyncRun,
@@ -78,11 +78,11 @@ class AdminService:
                     Connector.status == ACTIVE_STATUS,
                 )
             ),
-            "documents": await self._count(
-                select(func.count()).select_from(Document).where(
-                    Document.tenant_id == tenant_id,
-                    Document.lifecycle_status != "deleted",
-                    Document.deleted_at.is_(None),
+            "items": await self._count(
+                select(func.count()).select_from(Item).where(
+                    Item.tenant_id == tenant_id,
+                    Item.status != "deleted",
+                    Item.deleted_at.is_(None),
                 )
             ),
         }
@@ -94,12 +94,11 @@ class AdminService:
                     AccessRequest.deleted_at.is_(None),
                 )
             ),
-            "failed_documents": await self._count(
-                select(func.count()).select_from(Document).where(
-                    Document.tenant_id == tenant_id,
-                    Document.lifecycle_status != "deleted",
-                    Document.deleted_at.is_(None),
-                    Document.indexing_status == "failed",
+            "failed_items": await self._count(
+                select(func.count()).select_from(Item).where(
+                    Item.tenant_id == tenant_id,
+                    Item.status == "failed",
+                    Item.deleted_at.is_(None),
                 )
             ),
             "failed_ingestion_runs": await self._count(

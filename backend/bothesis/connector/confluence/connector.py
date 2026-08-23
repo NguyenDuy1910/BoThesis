@@ -85,13 +85,13 @@ def _http_status(exc: BaseException) -> int | None:
 def _attachment_storage_object(
     content: AttachmentProcessingResult,
 ) -> StorageObject | None:
-    if not content.raw_storage_key:
+    if not content.storage_key:
         return None
     return StorageObject(
-        provider=content.raw_storage_provider,
-        bucket=content.raw_storage_bucket,
-        region=content.raw_storage_region,
-        key=content.raw_storage_key,
+        provider=content.storage_provider,
+        bucket=content.storage_bucket,
+        region=content.storage_region,
+        key=content.storage_key,
         file_name=content.file_name,
         size_bytes=content.size_bytes,
         content_type=content.mime_type,
@@ -668,10 +668,6 @@ class ConfluenceConnector(
             {
                 key: str(value)
                 for key, value in {
-                    "raw_storage_bucket": content.raw_storage_bucket,
-                    "raw_storage_provider": content.raw_storage_provider,
-                    "raw_storage_key": content.raw_storage_key,
-                    "raw_storage_region": content.raw_storage_region,
                     "file_name": content.file_name,
                     "mime_type": content.mime_type,
                     "size_bytes": content.size_bytes,
@@ -706,7 +702,7 @@ class ConfluenceConnector(
                         ImagePart(
                             element_id=f"{stable_att_id}::image",
                             url=attachment_url,
-                            storage=content.raw_storage_key,
+                            storage=content.storage_key,
                             alt_text=attachment_title,
                         )
                     ]

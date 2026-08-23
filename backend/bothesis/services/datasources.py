@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterable, Mapping, Sequence
 from datetime import UTC, datetime
-import json
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
@@ -13,15 +12,16 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, selectinload
 
 from bothesis.connector.base import StaticCredentialsProvider
 from bothesis.connector.confluence.connector import ConfluenceConnector
 from bothesis.connector.file.file_connector import FileConnector
 from bothesis.connector.file import DEFAULT_MAX_FILE_BYTES
 from bothesis.connector.file.processing import FileProcessor
-from bothesis.db.models import Connector, ConnectorScope, Document, SyncRun
-from bothesis.integrations import SecretResolver
+from bothesis.db.models import Connector, ConnectorScope, Item, SyncRun
 from bothesis.connector.protocol import SourceProvider
+from bothesis.document_index.raw_storage import DocumentStorage
 from bothesis.services import (
     ACTIVE_STATUS,
     INACTIVE_STATUS,
@@ -34,6 +34,8 @@ from bothesis.services import (
     AuditService,
     AuthContext,
     AuthorizationError,
+    ConnectorCredentialService,
+    ItemService,
     normalize_page,
     normalize_required_text,
     require_tenant_permission,
@@ -51,17 +53,19 @@ _SECRET_KEY_TERMS = frozenset(
 
 
 class DatasourceService:
-    """Manage configured sources while keeping credentials behind references."""
+    """Manage configured connector connection instances and their scopes."""
 
     def __init__(
         self,
         session: AsyncSession,
         *,
-        secret_resolver: SecretResolver | None = None,
+        credential_encryption_key: str | None = None,
+        object_storage: DocumentStorage | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._session = session
-        self._secret_resolver = secret_resolver
+        self._credential_encryption_key = credential_encryption_key
+        self._object_storage = object_storage
         self._audit = audit or AuditService(session)
 
     async def capabilities(self, actor: AuthContext) -> dict[str, Any]:
@@ -71,13 +75,13 @@ class DatasourceService:
                 {
                     "provider": "confluence",
                     "label": "Confluence",
-                    "credential_reference_required": True,
+                    "credentials_required": True,
                     "scope_type": "space",
                 },
                 {
                     "provider": SourceProvider.FILE.value,
                     "label": "Files",
-                    "credential_reference_required": False,
+                    "credentials_required": False,
                     "scope_type": "source_provider",
                 },
             ]
@@ -115,6 +119,7 @@ class DatasourceService:
         connectors = list(
             await self._session.scalars(
                 select(Connector)
+                .options(selectinload(Connector.credential))
                 .where(*filters)
                 .order_by(Connector.display_name, Connector.id)
             )
@@ -177,6 +182,7 @@ class DatasourceService:
         connectors = list(
             await self._session.scalars(
                 select(Connector)
+                .options(selectinload(Connector.credential))
                 .where(*filters)
                 .order_by(Connector.display_name, Connector.id)
                 .limit(page_size)
@@ -209,7 +215,9 @@ class DatasourceService:
         provider: str,
         display_name: str,
         settings: Mapping[str, Any],
-        credential_secret_ref: str | None = None,
+        credentials: Mapping[str, Any] | None = None,
+        credential_type: str | None = None,
+        owner_type: str = "tenant",
         scopes: list[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
@@ -218,9 +226,8 @@ class DatasourceService:
             display_name, "datasource display name", 255
         )
         normalized_settings = _settings(normalized_provider, settings)
-        normalized_secret_ref = _secret_reference(
-            normalized_provider, credential_secret_ref
-        )
+        normalized_owner_type = _owner_type(owner_type)
+        _validate_credentials(normalized_provider, credentials)
         duplicate = await self._session.scalar(
             select(Connector.id).where(
                 Connector.tenant_id == tenant_id,
@@ -234,24 +241,29 @@ class DatasourceService:
             )
         connector = Connector(
             tenant_id=tenant_id,
+            owner_type=normalized_owner_type,
+            owner_user_id=(
+                actor.user_id if normalized_owner_type == "user" else None
+            ),
             provider=normalized_provider,
             display_name=normalized_name,
             settings=normalized_settings,
-            credential_secret_ref=normalized_secret_ref,
             status="draft",
             created_by_user_id=actor.user_id,
         )
         self._session.add(connector)
         await self._session.flush()
-        if (
-            normalized_provider == SourceProvider.FILE.value
-            and not normalized_settings.get("base_dir")
-        ):
-            connector.settings = {
-                **normalized_settings,
-                "base_dir": str(_managed_file_directory(tenant_id, connector.id)),
-            }
-            normalized_settings = dict(connector.settings)
+        connector.settings = {
+            **normalized_settings,
+            "connector_id": str(connector.id),
+        }
+        normalized_settings = dict(connector.settings)
+        if credentials is not None:
+            await self._credentials().store(
+                connector.id,
+                credential_type=credential_type or normalized_provider,
+                payload=credentials,
+            )
         source_scopes = scopes or _default_scopes(
             normalized_provider, normalized_settings
         )
@@ -282,13 +294,11 @@ class DatasourceService:
         connector = await self._connector(tenant_id, connector_id)
         if connector.provider != SourceProvider.FILE.value:
             raise AdminValidationError("files can only be uploaded to a managed file connection")
+        if self._object_storage is None:
+            raise AdminExternalUnavailableError("object storage is required for file uploads")
 
         normalized_file_name = _upload_file_name(file_name)
         settings = dict(connector.settings)
-        base_dir_value = settings.get("base_dir")
-        if not isinstance(base_dir_value, str) or not base_dir_value.strip():
-            raise AdminValidationError("managed file connection does not have a storage directory")
-        base_dir = Path(base_dir_value).expanduser().resolve()
         try:
             max_file_bytes = int(
                 settings.get("max_file_bytes") or DEFAULT_MAX_FILE_BYTES
@@ -302,14 +312,11 @@ class DatasourceService:
                 "managed file max_file_bytes must be a positive integer"
             )
 
-        await asyncio.to_thread(base_dir.mkdir, parents=True, exist_ok=True)
         external_id = uuid4().hex
-        stored_name = f"{external_id}-{normalized_file_name}"
         temporary = NamedTemporaryFile(
             mode="wb",
             prefix=f".{external_id}-",
             suffix=Path(normalized_file_name).suffix.casefold(),
-            dir=base_dir,
             delete=False,
         )
         temporary_path = Path(temporary.name)
@@ -343,29 +350,54 @@ class DatasourceService:
             except ValueError as exc:
                 raise AdminValidationError(str(exc)) from exc
 
+            storage_key = (
+                f"tenants/{tenant_id}/connectors/{connector.id}/items/"
+                f"{external_id}/{normalized_file_name}"
+            )
             await asyncio.to_thread(
-                temporary_path.replace,
-                base_dir / stored_name,
+                self._object_storage.put_path,
+                temporary_path,
+                storage_key,
+                content_type=processed.mime_type,
             )
         finally:
             if not temporary.closed:
                 await asyncio.to_thread(temporary.close)
             await asyncio.to_thread(temporary_path.unlink, missing_ok=True)
 
-        record = {
-            "external_id": external_id,
-            "path": stored_name,
-            "file_name": normalized_file_name,
-            "sha256": processed.sha256,
-            "size_bytes": processed.size_bytes,
-            "mime_type": processed.mime_type,
-            "uploaded_at": datetime.now(UTC).isoformat(),
-            "metadata": {"source_kind": "file"},
-        }
-        await asyncio.to_thread(
-            (base_dir / f"{external_id}.json").write_text,
-            json.dumps(record, separators=(",", ":")),
-            encoding="utf-8",
+        scope = await self._session.scalar(
+            select(ConnectorScope).where(
+                ConnectorScope.connector_id == connector.id,
+                ConnectorScope.status != "deleted",
+            )
+        )
+        if scope is None:
+            raise AdminValidationError("managed file connection has no active scope")
+        uploaded_at = datetime.now(UTC)
+        item = await ItemService(self._session).upsert_external_item(
+            scope.id,
+            external_id,
+            canonical_source_id=external_id,
+            item_type="document",
+            document_kind=_document_kind(processed.mime_type),
+            title=normalized_file_name,
+            mime_type=processed.mime_type,
+            size_bytes=processed.size_bytes,
+            storage_key=storage_key,
+            content_sha256=processed.sha256,
+            external_updated_at=uploaded_at,
+            metadata={
+                "source_kind": "file",
+                "file_name": normalized_file_name,
+                "uploaded_at": uploaded_at.isoformat(),
+            },
+            allowed_principal_tokens=[
+                str(actor.user_id),
+                f"email:{actor.email.casefold()}",
+                *actor.principal_tokens,
+            ],
+            status="pending",
+            require_active_scope=False,
         )
         await self._audit.record(
             actor,
@@ -375,7 +407,8 @@ class DatasourceService:
             details={"mime_type": processed.mime_type, "size_bytes": processed.size_bytes},
         )
         return {
-            "id": external_id,
+            "id": str(item.id),
+            "external_id": external_id,
             "file_name": normalized_file_name,
             "mime_type": processed.mime_type,
             "size_bytes": processed.size_bytes,
@@ -388,7 +421,8 @@ class DatasourceService:
         *,
         display_name: str | None = None,
         settings: Mapping[str, Any] | None = None,
-        credential_secret_ref: str | None = None,
+        credentials: Mapping[str, Any] | None = None,
+        credential_type: str | None = None,
         status: str | None = None,
         scopes: list[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -415,14 +449,20 @@ class DatasourceService:
             connector.display_name = normalized_name
             changed.append("display_name")
         if settings is not None:
-            connector.settings = _settings(connector.provider, settings)
+            connector.settings = {
+                **_settings(connector.provider, settings),
+                "connector_id": str(connector.id),
+            }
             changed.append("settings")
             configuration_changed = True
-        if credential_secret_ref is not None:
-            connector.credential_secret_ref = _secret_reference(
-                connector.provider, credential_secret_ref
+        if credentials is not None:
+            _validate_credentials(connector.provider, credentials)
+            await self._credentials().store(
+                connector.id,
+                credential_type=credential_type or connector.provider,
+                payload=credentials,
             )
-            changed.append("credential_secret_ref")
+            changed.append("credentials")
             configuration_changed = True
         if scopes is not None:
             await self._replace_scopes(connector, scopes)
@@ -456,13 +496,7 @@ class DatasourceService:
                 runtime = FileConnector(dict(connector.settings))
                 connected = await runtime.test_connection()
             elif connector.provider == "confluence":
-                if self._secret_resolver is None or not connector.credential_secret_ref:
-                    raise AdminExternalUnavailableError(
-                        "a credential resolver and credential reference are required"
-                    )
-                credentials = await self._secret_resolver.resolve(
-                    connector.credential_secret_ref
-                )
+                credentials = await self._credentials().resolve(connector.id)
                 runtime = _confluence_runtime(connector, credentials)
                 await asyncio.to_thread(runtime.validate_connector_settings)
                 connected = True
@@ -531,15 +565,8 @@ class DatasourceService:
                 raise AdminConflictError(
                     f"scope {scope.id} already has an active sync run"
                 )
-            latest_generation = await self._session.scalar(
-                select(func.max(SyncRun.generation)).where(
-                    SyncRun.connector_scope_id == scope.id
-                )
-            )
-            generation = max(scope.active_generation, int(latest_generation or 0)) + 1
             run = SyncRun(
                 connector_scope_id=scope.id,
-                generation=generation,
                 trigger_type="manual",
                 status="pending",
             )
@@ -699,11 +726,20 @@ class DatasourceService:
                 Connector.id == connector_id,
                 Connector.tenant_id == tenant_id,
                 Connector.status != "deleted",
-            )
+            ).options(joinedload(Connector.credential))
         )
         if connector is None:
             raise AdminNotFoundError(f"datasource not found: {connector_id}")
         return connector
+
+    def _credentials(self) -> ConnectorCredentialService:
+        if not self._credential_encryption_key:
+            raise AdminExternalUnavailableError(
+                "BOTHESIS_CONNECTOR_ENCRYPTION_KEY is not configured"
+            )
+        return ConnectorCredentialService(
+            self._session, self._credential_encryption_key
+        )
 
     async def _replace_scopes(
         self, connector: Connector, scopes: list[Mapping[str, Any]]
@@ -796,12 +832,12 @@ class DatasourceService:
         document_counts = dict(
             (
                 await self._session.execute(
-                    select(Document.connector_scope_id, func.count(Document.id))
+                    select(Item.connector_scope_id, func.count(Item.id))
                     .where(
-                        Document.connector_scope_id.in_(scope_ids),
-                        Document.lifecycle_status != "deleted",
+                        Item.connector_scope_id.in_(scope_ids),
+                        Item.status != "deleted",
                     )
-                    .group_by(Document.connector_scope_id)
+                    .group_by(Item.connector_scope_id)
                 )
             ).all()
         ) if scope_ids else {}
@@ -815,8 +851,7 @@ class DatasourceService:
                     "display_name": scope.display_name,
                     "scope_type": scope.scope_type,
                     "status": scope.status,
-                    "active_generation": scope.active_generation,
-                    "document_count": int(document_counts.get(scope.id, 0)),
+                    "item_count": int(document_counts.get(scope.id, 0)),
                     "sync_schedule": dict(scope.sync_schedule),
                     "last_synced_at": timestamp(scope.last_synced_at),
                     "last_indexed_at": timestamp(scope.last_indexed_at),
@@ -838,12 +873,12 @@ class DatasourceService:
     ) -> dict[str, Any]:
         return {
             "id": str(run.id),
-            "generation": run.generation,
             "trigger_type": run.trigger_type,
             "status": run.status,
-            "discovered_document_count": run.discovered_document_count,
-            "indexed_document_count": run.indexed_document_count,
-            "deleted_document_count": run.deleted_document_count,
+            "discovered_item_count": run.discovered_item_count,
+            "processed_item_count": run.processed_item_count,
+            "written_chunk_count": run.written_chunk_count,
+            "deleted_item_count": run.deleted_item_count,
             "error_code": run.error_code,
             "error_message": run.error_message,
             "started_at": timestamp(run.started_at),
@@ -891,23 +926,27 @@ def _non_secret_mapping(value: Any) -> dict[str, Any]:
         normalized_key = str(key).casefold()
         if any(term in normalized_key for term in _SECRET_KEY_TERMS):
             raise AdminValidationError(
-                "secret values must use credential_secret_ref, not datasource settings"
+                "secret values must use the credentials object, not datasource settings"
             )
         if isinstance(nested, Mapping):
             _non_secret_mapping(nested)
     return result
 
 
-def _secret_reference(provider: str, value: str | None) -> str | None:
-    if provider == "confluence":
-        if value is None:
-            raise AdminValidationError(
-                "Confluence credential_secret_ref is required"
-            )
-        return normalize_required_text(value, "credential secret reference", 512)
-    if value is None:
-        return None
-    return normalize_required_text(value, "credential secret reference", 512)
+def _validate_credentials(
+    provider: str, value: Mapping[str, Any] | None
+) -> None:
+    if provider == "confluence" and not value:
+        raise AdminValidationError("Confluence credentials are required")
+    if value is not None and not isinstance(value, Mapping):
+        raise AdminValidationError("credentials must be a JSON object")
+
+
+def _owner_type(value: str) -> str:
+    normalized = value.strip().casefold()
+    if normalized not in {"user", "tenant"}:
+        raise AdminValidationError("connector owner_type must be user or tenant")
+    return normalized
 
 
 def _default_scopes(
@@ -956,15 +995,20 @@ def _confluence_runtime(
     return runtime
 
 
-def _managed_file_directory(tenant_id: UUID, connector_id: int) -> Path:
-    return Path("/tmp/bothesis-files") / str(tenant_id) / str(connector_id)
-
-
 def _upload_file_name(value: str) -> str:
     normalized = normalize_required_text(value, "file name", 240)
     if normalized in {".", ".."} or "/" in normalized or "\\" in normalized or "\x00" in normalized:
         raise AdminValidationError("file name is invalid")
     return normalized
+
+
+def _document_kind(mime_type: str) -> str:
+    normalized = mime_type.casefold()
+    if normalized == "application/pdf":
+        return "pdf"
+    if normalized.startswith("image/"):
+        return "image"
+    return "document"
 
 
 def _connector_payload(
@@ -980,11 +1024,14 @@ def _connector_payload(
         "provider": connector.provider,
         "display_name": connector.display_name,
         "settings": dict(connector.settings),
-        "credential_configured": bool(connector.credential_secret_ref),
-        "credential_secret_ref": connector.credential_secret_ref,
+        "credential_configured": connector.credential is not None,
+        "owner_type": connector.owner_type,
+        "owner_user_id": (
+            str(connector.owner_user_id) if connector.owner_user_id else None
+        ),
         "status": connector.status,
         "scope_count": len(scopes),
-        "document_count": sum(scope["document_count"] for scope in scopes),
+        "item_count": sum(scope["item_count"] for scope in scopes),
         "last_synced_at": latest_synced_at,
         "scopes": scopes,
         "created_by_user_id": (

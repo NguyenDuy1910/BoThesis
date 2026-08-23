@@ -276,24 +276,16 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
     return user_id, tenant_id
 
 
-def test_db_citation_does_not_synthesize_legacy_element_ranges() -> None:
-    record = SimpleNamespace(
-        chunk_index=4,
-        content="Projected chunk evidence",
-        heading_path=("Legacy heading",),
-        start_page_number=7,
-        end_page_number=7,
-        metadata_={
-            "element_id": "legacy_element",
-            "start_offset": 0,
-            "end_offset": len("Projected chunk evidence"),
-            "citation_section": "Canonical section",
-            "citation_section_path": ["Policy", "Canonical section"],
-            "citation_anchor": "canonical-section",
-        },
-    )
+def test_qdrant_citation_does_not_synthesize_element_ranges() -> None:
+    payload = {
+        "chunk_index": 4,
+        "chunk_text": "Projected chunk evidence",
+        "citation_section": "Canonical section",
+        "citation_section_path": ["Policy", "Canonical section"],
+        "citation_anchor": "canonical-section",
+    }
 
-    citation = main._api_service._record_citation(record)
+    citation = main._api_service._payload_citation(payload)
 
     assert citation.spans == ()
     assert citation.section == "Canonical section"
@@ -301,30 +293,25 @@ def test_db_citation_does_not_synthesize_legacy_element_ranges() -> None:
     assert citation.anchor == "canonical-section"
 
 
-def test_db_viewer_does_not_split_multispan_chunk_projection() -> None:
-    record = SimpleNamespace(
-        id="record-1",
-        chunk_index=0,
-        content="First element\n\nSecond element",
-        heading_path=("Policy",),
-        metadata_={
-            "chunk_id": "chunk-multi",
-            "citation_section_path": ["Policy"],
-            "citation_spans": [
-                {"page": 1, "element_id": "p001_para_001"},
-                {"page": 2, "element_id": "p002_para_001"},
-            ],
-        },
-    )
-    document = SimpleNamespace(id="doc-1", chunks=[record])
+def test_qdrant_viewer_does_not_split_multispan_chunk_projection() -> None:
+    payload = {
+        "chunk_id": "chunk-multi",
+        "chunk_index": 0,
+        "chunk_text": "First element\n\nSecond element",
+        "citation_section_path": ["Policy"],
+        "citation_spans": [
+            {"page": 1, "element_id": "p001_para_001"},
+            {"page": 2, "element_id": "p002_para_001"},
+        ],
+    }
 
     elements, chunks_by_id = main._api_service._viewer_elements(
-        document, document.chunks
+        "doc-1", [payload]
     )
 
     assert elements == []
-    assert chunks_by_id["chunk-multi"] is record
-    assert main._api_service._record_citation(record).spans == (
+    assert chunks_by_id["chunk-multi"] is payload
+    assert main._api_service._payload_citation(payload).spans == (
         CitationSpan(page=1, element_id="p001_para_001"),
         CitationSpan(page=2, element_id="p002_para_001"),
     )

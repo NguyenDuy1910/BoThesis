@@ -59,10 +59,10 @@ class AttachmentProcessingResult(BaseModel):
     content: list[AnyContentPart] = Field(default_factory=list)
     chunks: tuple[Chunk, ...] = ()
     error: str | None = None
-    raw_storage_provider: str | None = None
-    raw_storage_bucket: str | None = None
-    raw_storage_key: str | None = None
-    raw_storage_region: str | None = None
+    storage_provider: str | None = None
+    storage_bucket: str | None = None
+    storage_key: str | None = None
+    storage_region: str | None = None
     mime_type: str | None = None
     size_bytes: int | None = None
     checksum_sha256: str | None = None
@@ -87,13 +87,13 @@ def _storage_metadata(
         return {"mime_type": mime_type, "size_bytes": size_bytes}
     object_key = getattr(storage, "object_key", lambda key: key)(storage_key)
     return {
-        "raw_storage_provider": getattr(storage, "provider", None),
-        "raw_storage_bucket": (
+        "storage_provider": getattr(storage, "provider", None),
+        "storage_bucket": (
             getattr(storage, "bucket", None)
             or getattr(storage, "bucket_name", None)
         ),
-        "raw_storage_key": object_key,
-        "raw_storage_region": (
+        "storage_key": object_key,
+        "storage_region": (
             getattr(storage, "region", None)
             or getattr(storage, "region_name", None)
         ),

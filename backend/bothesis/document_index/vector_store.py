@@ -18,6 +18,14 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from qdrant_client import AsyncQdrantClient
 from qdrant_client import models as qmodels
 
+from bothesis.document_index import (
+    BM25_MODEL,
+    BM25_OPTIONS,
+    DEFAULT_HYBRID_CANDIDATE_LIMIT,
+    DENSE_VECTOR_NAME,
+    INDEX_SCHEMA_VERSION,
+    SPARSE_VECTOR_NAME,
+)
 from bothesis.document_index.payload import (
     QdrantChunkPayload,
     QdrantPayloadContext,
@@ -31,7 +39,7 @@ from bothesis.connector.protocol import (
     SourceProvider,
 )
 from bothesis.document_index.models import ChunkContext, ContextualChunk
-from bothesis.db.models import Document
+from bothesis.db.models import Item
 
 if TYPE_CHECKING:
     from bothesis.services import AuthContext
@@ -39,6 +47,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 ACL_FIELD = "reader_ids"
+DENIED_ACL_FIELD = "denied_reader_ids"
 NO_READER_IDS = "__no_reader_ids__"
 _NO_TENANT_ID = "__no_tenant_id__"
 _SEARCH_RETRY_DELAYS = (0.5, 1.0)
@@ -211,15 +220,17 @@ class VectorStore:
         document_id: str,
         acl: Mapping[str, int] | Iterable[str],
         *,
+        denied_reader_ids: Iterable[str] = (),
         acl_field: str = ACL_FIELD,
         document_id_field: str = "item_id",
         collection_name: str | None = None,
     ) -> Any:
         raw_reader_ids = acl.keys() if isinstance(acl, Mapping) else acl
         reader_ids = self._normalise_reader_ids(raw_reader_ids)
+        denied = self._normalise_reader_ids(denied_reader_ids)
         return await self.set_document_payload(
             document_id,
-            {acl_field: reader_ids},
+            {acl_field: reader_ids, DENIED_ACL_FIELD: denied},
             document_id_field=document_id_field,
             collection_name=collection_name,
         )
@@ -235,7 +246,7 @@ class VectorStore:
     ) -> Any:
         return await self.set_document_payload(
             document_id,
-            {is_deleted_field: True, acl_field: []},
+            {is_deleted_field: True, acl_field: [], DENIED_ACL_FIELD: []},
             document_id_field=document_id_field,
             collection_name=collection_name,
         )
@@ -244,20 +255,21 @@ class VectorStore:
         self,
         query_vector: list[float],
         *,
+        query_text: str | None = None,
         query_filter: Any | None,
         limit: int,
-        dense_vector_name: str = "content",
-        title_vector_name: str | None = "title",
-        title_limit: int | None = None,
-        sparse_vector: dict[str, list] | None = None,
-        sparse_vector_name: str = "bm25",
-        sparse_limit: int | None = None,
+        candidate_limit: int = DEFAULT_HYBRID_CANDIDATE_LIMIT,
+        dense_vector_name: str = DENSE_VECTOR_NAME,
+        sparse_vector_name: str = SPARSE_VECTOR_NAME,
         collection_name: str | None = None,
         with_payload: bool = True,
         with_vectors: bool = False,
         log_label: str = "vector-search",
     ) -> list[Any]:
-        """Search dense vectors, using reciprocal-rank fusion when available."""
+        """Search dense and BM25 vectors through native reciprocal-rank fusion."""
+
+        if limit < 1 or candidate_limit < limit:
+            raise ValueError("candidate_limit must be at least the result limit")
 
         last_error: Exception | None = None
         resolved_collection = collection_name or self.collection_name
@@ -265,31 +277,22 @@ class VectorStore:
             try:
                 prefetches = self._build_prefetches(
                     query_vector=query_vector,
+                    query_text=query_text,
+                    query_filter=query_filter,
                     dense_vector_name=dense_vector_name,
-                    limit=limit,
-                    title_vector_name=title_vector_name,
-                    title_limit=title_limit,
-                    sparse_vector=sparse_vector,
+                    candidate_limit=candidate_limit,
                     sparse_vector_name=sparse_vector_name,
-                    sparse_limit=sparse_limit,
                 )
                 if len(prefetches) > 1:
-                    try:
-                        result = await self._query_fused_points(
-                            collection_name=resolved_collection,
-                            prefetches=prefetches,
-                            query_filter=query_filter,
-                            limit=limit,
-                            with_payload=with_payload,
-                            with_vectors=with_vectors,
-                        )
-                        return list(getattr(result, "points", []) or [])
-                    except Exception as fusion_error:
-                        log.warning(
-                            "[%s] RRF search failed; falling back to dense-only: %s",
-                            log_label,
-                            fusion_error,
-                        )
+                    result = await self._query_fused_points(
+                        collection_name=resolved_collection,
+                        prefetches=prefetches,
+                        query_filter=query_filter,
+                        limit=limit,
+                        with_payload=with_payload,
+                        with_vectors=with_vectors,
+                    )
+                    return list(getattr(result, "points", []) or [])
 
                 result = await self._query_dense_points(
                     collection_name=resolved_collection,
@@ -319,38 +322,31 @@ class VectorStore:
     def _build_prefetches(
         *,
         query_vector: list[float],
+        query_text: str | None,
+        query_filter: Any | None,
         dense_vector_name: str,
-        limit: int,
-        title_vector_name: str | None,
-        title_limit: int | None,
-        sparse_vector: dict[str, list] | None,
+        candidate_limit: int,
         sparse_vector_name: str,
-        sparse_limit: int | None,
     ) -> list[Any]:
         prefetches: list[Any] = [
             qmodels.Prefetch(
                 query=query_vector,
                 using=dense_vector_name,
-                limit=limit,
+                filter=query_filter,
+                limit=candidate_limit,
             )
         ]
-        if title_vector_name:
+        if query_text:
             prefetches.append(
                 qmodels.Prefetch(
-                    query=query_vector,
-                    using=title_vector_name,
-                    limit=title_limit or max(1, limit // 2),
-                )
-            )
-        if sparse_vector is not None:
-            prefetches.append(
-                qmodels.Prefetch(
-                    query=qmodels.SparseVector(
-                        indices=sparse_vector["indices"],
-                        values=sparse_vector["values"],
+                    query=qmodels.Document(
+                        text=query_text,
+                        model=BM25_MODEL,
+                        options=BM25_OPTIONS,
                     ),
                     using=sparse_vector_name,
-                    limit=sparse_limit or limit,
+                    filter=query_filter,
+                    limit=candidate_limit,
                 )
             )
         return prefetches
@@ -704,8 +700,9 @@ class VectorStore:
 
         return qmodels.Filter(must=conditions)
 
-    @staticmethod
+    @classmethod
     def build_lifecycle_filter(
+        cls,
         *,
         is_deleted_field: str = "is_deleted",
     ) -> qmodels.Filter:
@@ -716,7 +713,8 @@ class VectorStore:
                 qmodels.FieldCondition(
                     key=is_deleted_field,
                     match=qmodels.MatchValue(value=False),
-                )
+                ),
+                cls._schema_condition(),
             ]
         )
 
@@ -782,6 +780,7 @@ class VectorStore:
                 key=is_deleted_field,
                 match=qmodels.MatchValue(value=False),
             ),
+            cls._schema_condition(),
             qmodels.FieldCondition(
                 key=tenant_id_field,
                 match=qmodels.MatchValue(value=tenant_id),
@@ -820,7 +819,13 @@ class VectorStore:
                     key=ACL_FIELD,
                     match=qmodels.MatchAny(any=ids),
                 ),
-            ]
+            ],
+            must_not=[
+                qmodels.FieldCondition(
+                    key=DENIED_ACL_FIELD,
+                    match=qmodels.MatchAny(any=ids),
+                )
+            ],
         )
 
     @classmethod
@@ -881,12 +886,20 @@ class VectorStore:
                 key=is_deleted_field,
                 match=qmodels.MatchValue(value=False),
             ),
+            cls._schema_condition(),
             qmodels.FieldCondition(
                 key=tenant_id_field,
                 match=qmodels.MatchValue(value=_NO_TENANT_ID),
             ),
             cls.no_access_condition(),
         ]
+
+    @staticmethod
+    def _schema_condition() -> qmodels.FieldCondition:
+        return qmodels.FieldCondition(
+            key="schema_version",
+            match=qmodels.MatchValue(value=INDEX_SCHEMA_VERSION),
+        )
 
     @staticmethod
     def _normalise_reader_ids(reader_ids: Iterable[str]) -> list[str]:
@@ -945,14 +958,22 @@ class VectorStore:
 
 
 class QdrantDocumentIndex:
-    """Store canonical PostgreSQL chunks in the derived Qdrant index."""
+    """Store processing output directly in the derived Qdrant index."""
 
-    def __init__(self, store: VectorStore) -> None:
+    def __init__(
+        self,
+        store: VectorStore,
+        *,
+        candidate_limit: int = DEFAULT_HYBRID_CANDIDATE_LIMIT,
+    ) -> None:
+        if candidate_limit < 1:
+            raise ValueError("candidate_limit must be at least one")
         self._store = store
+        self._candidate_limit = candidate_limit
 
     async def replace_document(
         self,
-        document: Document,
+        document: Item,
         chunks: Sequence[ContextualChunk],
         vectors: Sequence[Sequence[float]],
         *,
@@ -986,7 +1007,14 @@ class QdrantDocumentIndex:
             points.append(
                 qmodels.PointStruct(
                     id=_document_point_id(document.id, chunk.chunk_index),
-                    vector={"content": list(vector)},
+                    vector={
+                        DENSE_VECTOR_NAME: list(vector),
+                        SPARSE_VECTOR_NAME: qmodels.Document(
+                            text=chunk.contextual_text,
+                            model=BM25_MODEL,
+                            options=BM25_OPTIONS,
+                        ),
+                    },
                     payload=payload,
                 )
             )
@@ -994,7 +1022,8 @@ class QdrantDocumentIndex:
 
     async def search_document(
         self,
-        document: Document,
+        document: Item,
+        query: str,
         query_vector: list[float],
         *,
         access: AuthContext,
@@ -1017,9 +1046,10 @@ class QdrantDocumentIndex:
         )
         points = await self._store.semantic_search(
             query_vector,
+            query_text=query.strip(),
             query_filter=query_filter,
             limit=limit,
-            title_vector_name=None,
+            candidate_limit=max(limit, self._candidate_limit),
             log_label="uploaded-document-search",
         )
         chunks: list[ContextualChunk] = []

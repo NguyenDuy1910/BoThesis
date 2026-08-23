@@ -95,14 +95,12 @@ class DocumentStorage(Protocol):
 
 
 from .aws_s3 import S3DocumentStorage  # noqa: E402
-from .postgres import PostgresBlobStorage  # noqa: E402
 
 __all__ = [
     "DocumentStorage",
     "ObjectNotFoundError",
     "ObjectStorageError",
     "PresignedRequest",
-    "PostgresBlobStorage",
     "S3DocumentStorage",
     "StoredObject",
 ]

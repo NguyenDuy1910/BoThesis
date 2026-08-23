@@ -227,7 +227,7 @@ class StubEmbedder:
 
 class StubSemanticVectorStore:
     def __init__(self) -> None:
-        self.calls: list[tuple[list[float], object, int]] = []
+        self.calls: list[tuple[list[float], str, object, int, int]] = []
         self.access_contexts: list[object] = []
         self.payload_filters: list[object] = []
 
@@ -246,10 +246,14 @@ class StubSemanticVectorStore:
         self,
         query_vector: list[float],
         *,
+        query_text: str,
         query_filter: object,
         limit: int,
+        candidate_limit: int,
     ) -> list[object]:
-        self.calls.append((query_vector, query_filter, limit))
+        self.calls.append(
+            (query_vector, query_text, query_filter, limit, candidate_limit)
+        )
         return [
             SimpleNamespace(
                 id="chunk-1",
@@ -292,7 +296,9 @@ async def test_qdrant_search_index_embeds_and_rebuilds_contextual_chunks() -> No
     )
 
     assert embedder.queries == ["annual leave"]
-    assert store.calls == [([0.1, 0.2], "scoped-filter", 3)]
+    assert store.calls == [
+        ([0.1, 0.2], "annual leave", "scoped-filter", 3, 20)
+    ]
     access = store.access_contexts[0]
     assert getattr(access, "tenant_id") == "tenant-1"
     assert getattr(access, "reader_ids") == ("public", "user-1")

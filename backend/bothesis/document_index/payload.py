@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -10,11 +11,16 @@ from uuid import NAMESPACE_URL, uuid5
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from bothesis.connector.protocol import Chunk, CitationInfo, CitationSpan, DocumentItem
-from bothesis.document_index.contextualization import (
-    SemanticContextualizer,
-    StructuralContextualizer,
-)
+from bothesis.document_index import INDEX_SCHEMA_VERSION
+from bothesis.document_index.contextualization import StructuralContextualizer
 from bothesis.document_index.models import ContextualChunk
+from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
+
+log = logging.getLogger(__name__)
+
+_DOCUMENT_CONTEXT_MAX_CHARACTERS = 12_000
+_DOCUMENT_CONTEXT_METADATA_MAX_CHARACTERS = 3_000
+_DOCUMENT_CONTEXT_CHUNK_MAX_CHARACTERS = 2_000
 
 
 class QdrantPayloadContext(BaseModel):
@@ -25,9 +31,9 @@ class QdrantPayloadContext(BaseModel):
     tenant_id: str = Field(min_length=1)
     connector_id: str | int
     scope_id: str | int | None = None
-    generation: int | None = Field(default=None, ge=1)
     is_deleted: bool = False
     embedding_model: str | None = None
+    denied_reader_ids: list[str] = Field(default_factory=list)
 
     @field_validator("tenant_id")
     @classmethod
@@ -47,10 +53,9 @@ class IndexPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: int = 4
+    schema_version: int = INDEX_SCHEMA_VERSION
     tenant_id: str = Field(min_length=1)
     scope_id: str | int | None = None
-    generation: int | None = Field(default=None, ge=1)
     is_deleted: bool = False
 
     item_id: str = Field(min_length=1)
@@ -71,6 +76,7 @@ class IndexPayload(BaseModel):
     root_id: str | None = None
     ancestor_ids: list[str] = Field(default_factory=list)
     reader_ids: list[str] = Field(default_factory=list)
+    denied_reader_ids: list[str] = Field(default_factory=list)
 
     source_url: str | None = None
     citation_section: str | None = None
@@ -81,7 +87,7 @@ class IndexPayload(BaseModel):
     page_end: int | None = Field(default=None, ge=1)
     embedding_model: str | None = None
 
-    @field_validator("reader_ids")
+    @field_validator("reader_ids", "denied_reader_ids")
     @classmethod
     def _normalise_reader_ids(cls, value: list[str]) -> list[str]:
         return sorted({item.strip().lower() for item in value if item.strip()})
@@ -110,7 +116,6 @@ class IndexPayload(BaseModel):
         return cls(
             tenant_id=context.tenant_id,
             scope_id=context.scope_id,
-            generation=context.generation,
             is_deleted=context.is_deleted,
             item_id=chunk.item_id,
             chunk_id=chunk.id,
@@ -129,6 +134,7 @@ class IndexPayload(BaseModel):
             root_id=chunk.hierarchy.root_id,
             ancestor_ids=chunk.hierarchy.ancestor_ids,
             reader_ids=chunk.access.reader_ids,
+            denied_reader_ids=context.denied_reader_ids,
             source_url=_persisted_source_url(chunk.source.url),
             citation_section=chunk.citation.section,
             citation_section_path=list(chunk.citation.section_path),
@@ -157,15 +163,10 @@ class QdrantChunkRecord(BaseModel):
         chunk: ContextualChunk,
         context: QdrantPayloadContext,
     ) -> "QdrantChunkRecord":
-        generation_identity = (
-            f":{context.scope_id}:{context.generation}"
-            if context.generation is not None
-            else ""
-        )
         point_id = str(
             uuid5(
                 NAMESPACE_URL,
-                f"{context.tenant_id}:{context.connector_id}{generation_identity}:"
+                f"{context.tenant_id}:{context.connector_id}:"
                 f"{chunk.item_id}:{chunk.chunk_index}",
             )
         )
@@ -178,7 +179,7 @@ class QdrantChunkRecord(BaseModel):
 QdrantChunkPayload = IndexPayload
 
 
-def build_contextual_chunks(
+async def build_contextual_chunks(
     chunks: Sequence[Chunk],
     item: DocumentItem,
     *,
@@ -193,26 +194,44 @@ def build_contextual_chunks(
     validated = _validate_chunks(chunks, item)
     structural = StructuralContextualizer()
     summary = _metadata_scalar(item.metadata, "summary")
-    return [
-        structural.contextualize(
-            chunk,
-            title=item.title,
-            source=item.source,
-            hierarchy=item.hierarchy,
-            access=item.access,
-            document_kind=item.document_kind,
-            summary=summary,
-            semantic_context=(
-                semantic_contextualizer.describe(chunk)
-                if semantic_contextualizer is not None
-                else None
-            ),
+    contextual: list[ContextualChunk] = []
+    for chunk in validated:
+        semantic_context: str | None = None
+        if semantic_contextualizer is not None:
+            try:
+                semantic_context = await semantic_contextualizer.describe(
+                    chunk,
+                    document_context=_document_context(
+                        item,
+                        validated,
+                        target=chunk,
+                        summary=summary,
+                    ),
+                    title=item.title,
+                    section_path=chunk.section_path,
+                )
+            except Exception as exc:
+                log.warning(
+                    "semantic contextualization failed for chunk %s; using summary: %s",
+                    chunk.id,
+                    type(exc).__name__,
+                )
+        contextual.append(
+            structural.contextualize(
+                chunk,
+                title=item.title,
+                source=item.source,
+                hierarchy=item.hierarchy,
+                access=item.access,
+                document_kind=item.document_kind,
+                document_summary=summary,
+                semantic_context=semantic_context,
+            )
         )
-        for chunk in validated
-    ]
+    return contextual
 
 
-def build_qdrant_records(
+async def build_qdrant_records(
     chunks: Sequence[Chunk],
     item: DocumentItem,
     context: QdrantPayloadContext,
@@ -221,7 +240,7 @@ def build_qdrant_records(
 ) -> list[QdrantChunkRecord]:
     """Contextualize canonical chunks and project deterministic Qdrant points."""
 
-    contextual_chunks = build_contextual_chunks(
+    contextual_chunks = await build_contextual_chunks(
         chunks,
         item,
         semantic_contextualizer=semantic_contextualizer,
@@ -230,6 +249,79 @@ def build_qdrant_records(
         QdrantChunkRecord.from_contextual_chunk(chunk, context)
         for chunk in contextual_chunks
     ]
+
+
+def _document_context(
+    item: DocumentItem,
+    chunks: Sequence[Chunk],
+    *,
+    target: Chunk,
+    summary: str | None,
+) -> str:
+    """Build bounded metadata and target-relevant canonical chunk context."""
+
+    metadata = [f"Document: {item.title or item.id}"]
+    kind = (
+        item.document_kind.value
+        if hasattr(item.document_kind, "value")
+        else str(item.document_kind)
+    )
+    metadata.append(f"Document kind: {kind}")
+    if summary:
+        metadata.append(f"Summary: {summary}")
+    sections = list(
+        dict.fromkeys(
+            " > ".join(chunk.section_path)
+            for chunk in chunks
+            if chunk.section_path
+        )
+    )
+    if sections:
+        metadata.append(f"Sections: {'; '.join(sections)}")
+    metadata_text = _prompt_text_prefix(
+        "\n".join(metadata),
+        _DOCUMENT_CONTEXT_METADATA_MAX_CHARACTERS,
+    )
+    lines = [metadata_text, "Relevant canonical chunk excerpts (target excluded):"]
+    remaining = _DOCUMENT_CONTEXT_MAX_CHARACTERS - sum(
+        _prompt_text_length(line) + 1 for line in lines
+    )
+    candidates = sorted(
+        (chunk for chunk in chunks if chunk.id != target.id),
+        key=lambda chunk: (
+            chunk.section_path != target.section_path,
+            abs(chunk.chunk_index - target.chunk_index),
+            chunk.chunk_index,
+        ),
+    )
+    for chunk in candidates:
+        if remaining <= 0:
+            break
+        section = " > ".join(chunk.section_path)
+        label = f"[{chunk.chunk_index}{f' | {section}' if section else ''}] "
+        excerpt = label + chunk.chunk_text[:_DOCUMENT_CONTEXT_CHUNK_MAX_CHARACTERS]
+        bounded = _prompt_text_prefix(excerpt, remaining)
+        lines.append(bounded)
+        remaining -= _prompt_text_length(bounded) + 1
+    return "\n".join(lines)
+
+
+def _prompt_text_length(value: str) -> int:
+    """Measure text after the prompt renderer escapes XML tag delimiters."""
+
+    return sum(5 if char == "&" else 4 if char in "<>" else 1 for char in value)
+
+
+def _prompt_text_prefix(value: str, budget: int) -> str:
+    if budget <= 0:
+        return ""
+    consumed = 0
+    end = 0
+    for end, char in enumerate(value, start=1):
+        consumed += 5 if char == "&" else 4 if char in "<>" else 1
+        if consumed > budget:
+            return value[: end - 1]
+    return value
 
 
 def _validate_chunks(chunks: Sequence[Chunk], item: DocumentItem) -> tuple[Chunk, ...]:

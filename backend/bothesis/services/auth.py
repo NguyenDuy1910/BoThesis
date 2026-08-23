@@ -15,7 +15,7 @@ from uuid import UUID
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import selectinload
 
 from bothesis.db.models import (
     Connector,
@@ -267,7 +267,9 @@ class AuthService:
         await self.get_tenant(tenant_id)
         await self.get_role(tenant_id, role_id)
 
-        membership = await self._session.get(TenantMembership, user_id)
+        membership = await self._session.get(
+            TenantMembership, {"user_id": user_id, "tenant_id": tenant_id}
+        )
         if membership is None:
             membership = TenantMembership(
                 user_id=user_id,
@@ -277,9 +279,6 @@ class AuthService:
             )
             self._session.add(membership)
         else:
-            if membership.tenant_id != tenant_id:
-                await self._soft_delete_principal_tokens(user_id)
-            membership.tenant_id = tenant_id
             membership.role_id = role_id
             membership.status = ACTIVE_STATUS
             membership.joined_at = membership.joined_at or datetime.now(UTC)
@@ -287,15 +286,17 @@ class AuthService:
         await self._session.flush()
         return membership
 
-    async def remove_membership(self, user_id: UUID) -> None:
-        membership = await self._session.get(TenantMembership, user_id)
+    async def remove_membership(
+        self, user_id: UUID, tenant_id: UUID | None = None
+    ) -> None:
+        membership = await self._membership(user_id, tenant_id)
         if membership is None:
             raise IdentityNotFoundError(f"membership not found for user: {user_id}")
         if membership.deleted_at is not None:
             return
         membership.status = INACTIVE_STATUS
         membership.deleted_at = datetime.now(UTC)
-        await self._soft_delete_principal_tokens(user_id)
+        await self._soft_delete_principal_tokens(user_id, membership.tenant_id)
         await self._session.flush()
 
     async def replace_principal_tokens(
@@ -303,9 +304,12 @@ class AuthService:
         user_id: UUID,
         principal_tokens: Iterable[str],
         *,
+        tenant_id: UUID | None = None,
         connector_id: int | None = None,
     ) -> tuple[str, ...]:
-        context = await self.get_context(user_id)
+        context = await self.get_context(user_id, tenant_id=tenant_id)
+        if context.tenant_id is None:
+            raise AuthorizationError("an active tenant membership is required")
         if connector_id is not None:
             connector = await self._session.get(Connector, connector_id)
             if connector is None:
@@ -317,6 +321,7 @@ class AuthService:
         if tokens:
             conflict_statement = select(UserPrincipalToken.principal_token).where(
                 UserPrincipalToken.user_id == user_id,
+                UserPrincipalToken.tenant_id == context.tenant_id,
                 UserPrincipalToken.principal_token.in_(tokens),
                 UserPrincipalToken.deleted_at.is_(None),
             )
@@ -339,7 +344,8 @@ class AuthService:
                 )
 
         scope_statement = select(UserPrincipalToken).where(
-            UserPrincipalToken.user_id == user_id
+            UserPrincipalToken.user_id == user_id,
+            UserPrincipalToken.tenant_id == context.tenant_id,
         )
         if connector_id is None:
             scope_statement = scope_statement.where(
@@ -364,6 +370,7 @@ class AuthService:
                 select(UserPrincipalToken)
                 .where(
                     UserPrincipalToken.user_id == user_id,
+                    UserPrincipalToken.tenant_id == context.tenant_id,
                     UserPrincipalToken.principal_token.in_(tokens),
                 )
                 .with_for_update()
@@ -374,6 +381,7 @@ class AuthService:
             if record is None:
                 self._session.add(
                     UserPrincipalToken(
+                        tenant_id=context.tenant_id,
                         user_id=user_id,
                         principal_token=token,
                         connector_id=connector_id,
@@ -385,12 +393,14 @@ class AuthService:
         await self._session.flush()
         return tokens
 
-    async def get_context(self, user_id: UUID) -> AuthContext:
+    async def get_context(
+        self, user_id: UUID, *, tenant_id: UUID | None = None
+    ) -> AuthContext:
         user = await self._session.scalar(
             select(User)
             .options(
-                joinedload(User.tenant_membership).joinedload(TenantMembership.tenant),
-                joinedload(User.tenant_membership).joinedload(TenantMembership.role),
+                selectinload(User.tenant_memberships).joinedload(TenantMembership.tenant),
+                selectinload(User.tenant_memberships).joinedload(TenantMembership.role),
             )
             .where(User.id == user_id)
             .execution_options(populate_existing=True)
@@ -400,8 +410,18 @@ class AuthService:
         if user.status != ACTIVE_STATUS:
             raise IdentityInactiveError(f"user is not active: {user_id}")
 
-        membership = user.tenant_membership
+        memberships = [
+            value
+            for value in user.tenant_memberships
+            if value.deleted_at is None
+            and (tenant_id is None or value.tenant_id == tenant_id)
+        ]
+        if tenant_id is None and len(memberships) > 1:
+            raise AuthorizationError("tenant ID is required for a multi-tenant user")
+        membership = memberships[0] if memberships else None
         if membership is None or membership.deleted_at is not None:
+            if tenant_id is not None:
+                raise AuthorizationError("user is not a member of the requested tenant")
             return AuthContext(
                 user_id=user.id,
                 email=user.email,
@@ -425,6 +445,7 @@ class AuthService:
         principal_tokens = await self._session.scalars(
             select(UserPrincipalToken.principal_token).where(
                 UserPrincipalToken.user_id == user_id,
+                UserPrincipalToken.tenant_id == membership.tenant_id,
                 UserPrincipalToken.deleted_at.is_(None),
             )
         )
@@ -469,11 +490,14 @@ class AuthService:
             ),
         )
 
-    async def _soft_delete_principal_tokens(self, user_id: UUID) -> None:
+    async def _soft_delete_principal_tokens(
+        self, user_id: UUID, tenant_id: UUID
+    ) -> None:
         await self._session.execute(
             update(UserPrincipalToken)
             .where(
                 UserPrincipalToken.user_id == user_id,
+                UserPrincipalToken.tenant_id == tenant_id,
                 UserPrincipalToken.deleted_at.is_(None),
             )
             .values(deleted_at=datetime.now(UTC))
@@ -483,12 +507,32 @@ class AuthService:
         self,
         user_id: UUID,
         *permission_codes: str,
+        tenant_id: UUID | None = None,
     ) -> AuthContext:
-        context = await self.get_context(user_id)
+        context = await self.get_context(user_id, tenant_id=tenant_id)
         if not context.has_permissions(*permission_codes):
             required = ", ".join(sorted(permission_codes))
             raise AuthorizationError(f"missing required permissions: {required}")
         return context
+
+    async def _membership(
+        self, user_id: UUID, tenant_id: UUID | None
+    ) -> TenantMembership | None:
+        if tenant_id is not None:
+            return await self._session.get(
+                TenantMembership, {"user_id": user_id, "tenant_id": tenant_id}
+            )
+        memberships = list(
+            await self._session.scalars(
+                select(TenantMembership).where(
+                    TenantMembership.user_id == user_id,
+                    TenantMembership.deleted_at.is_(None),
+                )
+            )
+        )
+        if len(memberships) > 1:
+            raise AuthorizationError("tenant ID is required for a multi-tenant user")
+        return memberships[0] if memberships else None
 
 
 def _normalize_email(value: str) -> str:

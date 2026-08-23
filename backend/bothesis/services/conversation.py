@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bothesis.db.models import Conversation, Message
-from bothesis.services import AuthContext, DocumentNotFoundError, DocumentService
+from bothesis.services import AuthContext, DocumentNotFoundError, ItemService
 
 
 class ConversationService:
@@ -71,9 +71,9 @@ class ConversationService:
             session.add(message)
             conversation.last_message_at = now
             await session.flush()
-            documents = DocumentService(session)
+            items = ItemService(session)
             for position, document_id in enumerate(document_ids):
-                await documents.link_message(
+                await items.link_message(
                     message.id,
                     document_id,
                     "attachment",
@@ -120,9 +120,9 @@ class ConversationService:
             session.add(message)
             conversation.last_message_at = datetime.now(UTC)
             await session.flush()
-            documents = DocumentService(session)
+            items = ItemService(session)
             for position, document_id in enumerate(unique_references):
-                await documents.link_message(
+                await items.link_message(
                     message.id,
                     document_id,
                     "reference",

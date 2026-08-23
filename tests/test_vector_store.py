@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 import bothesis.document_index.vector_store as vector_store_module
 from bothesis.document_index.vector_store import (
     ACL_FIELD,
+    DENIED_ACL_FIELD,
     NO_READER_IDS,
     VectorStore,
     VectorStoreFilterBuilder,
@@ -99,6 +100,7 @@ def test_filters_are_deterministic_and_keep_zero_ancestor_ids() -> None:
         if isinstance(condition, qmodels.FieldCondition)
     ] == [
         "is_deleted",
+        "schema_version",
         "tenant_id",
         "provider",
         "item_id",
@@ -111,6 +113,12 @@ def test_filters_are_deterministic_and_keep_zero_ancestor_ids() -> None:
     acl_list_condition = acl_filter.should[0]
     assert isinstance(acl_list_condition, qmodels.FieldCondition)
     assert acl_list_condition.match == qmodels.MatchAny(any=["reader-1", "reader-2"])
+    assert acl_filter.must_not == [
+        qmodels.FieldCondition(
+            key=DENIED_ACL_FIELD,
+            match=qmodels.MatchAny(any=["reader-1", "reader-2"]),
+        )
+    ]
 
 
 def test_connector_selection_is_applied_inside_the_tenant_acl_filter() -> None:
@@ -150,7 +158,7 @@ def test_admin_filter_keeps_tenant_and_tombstone_boundaries() -> None:
         condition.key
         for condition in query_filter.must
         if isinstance(condition, qmodels.FieldCondition)
-    ] == ["is_deleted", "tenant_id"]
+    ] == ["is_deleted", "schema_version", "tenant_id"]
     assert not any(
         isinstance(condition, qmodels.Filter)
         for condition in query_filter.must
@@ -164,7 +172,11 @@ def test_lifecycle_filter_excludes_tombstones_without_access_conditions() -> Non
         qmodels.FieldCondition(
             key="is_deleted",
             match=qmodels.MatchValue(value=False),
-        )
+        ),
+        qmodels.FieldCondition(
+            key="schema_version",
+            match=qmodels.MatchValue(value=6),
+        ),
     ]
 
 
@@ -179,27 +191,52 @@ async def test_acl_sync_removes_reserved_reader_id() -> None:
     )
 
     assert client.set_payload_calls[0]["payload"] == {
-        ACL_FIELD: ["reader-1", "reader-2"]
+        ACL_FIELD: ["reader-1", "reader-2"],
+        DENIED_ACL_FIELD: [],
     }
 
 
 @pytest.mark.asyncio
-async def test_sparse_search_uses_fusion_without_a_title_vector() -> None:
+async def test_contextual_hybrid_search_uses_filtered_bm25_and_rrf() -> None:
     client = RecordingClient()
     store = VectorStore(client=client, collection_name="chunks")
+    query_filter = qmodels.Filter(
+        must=[
+            qmodels.FieldCondition(
+                key="tenant_id",
+                match=qmodels.MatchValue(value="tenant-1"),
+            )
+        ]
+    )
 
     results = await store.semantic_search(
         [0.1, 0.2],
-        query_filter=None,
+        query_text="doanh thu quý II",
+        query_filter=query_filter,
         limit=3,
-        title_vector_name=None,
-        sparse_vector={"indices": [1, 3], "values": [0.4, 0.8]},
     )
 
     assert results == ["point-1"]
     request = client.query_points_calls[0]
     assert len(request["prefetch"]) == 2
     assert request["query"] == qmodels.FusionQuery(fusion=qmodels.Fusion.RRF)
+    dense, sparse = request["prefetch"]
+    assert dense.using == "content"
+    assert sparse.using == "content_bm25"
+    assert dense.filter is query_filter
+    assert sparse.filter is query_filter
+    assert request["query_filter"] is query_filter
+    assert sparse.query == qmodels.Document(
+        text="doanh thu quý II",
+        model="qdrant/bm25",
+        options={
+            "tokenizer": "multilingual",
+            "stemmer": {"type": "none"},
+            "stopwords": {"custom": []},
+            "lowercase": True,
+            "ascii_folding": False,
+        },
+    )
 
 
 def test_request_filter_fails_closed_when_the_request_lacks_access() -> None:

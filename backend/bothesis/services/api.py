@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
+from qdrant_client import models as qmodels
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext, ConversationMessage
 from bothesis.agent.tools import ToolRegistry
@@ -31,12 +32,12 @@ from bothesis.document_index.indexer import (
 from bothesis.document_index.openrouter_embedding import OpenRouterEmbeddingService
 from bothesis.document_index.raw_storage import S3DocumentStorage
 from bothesis.document_index.search import QdrantSearchIndex
+from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
 from bothesis.document_index.vector_store import QdrantDocumentIndex, VectorStore
 from bothesis.knowledge import CitationResolver
 from bothesis.knowledge.retriever import DocumentIndexRetriever
 from bothesis.observability import create_langfuse_tracing
 from bothesis.services import (
-    DEFAULT_MAX_DATABASE_BLOB_BYTES,
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
     KNOWLEDGE_READ_PERMISSION,
@@ -44,11 +45,9 @@ from bothesis.services import (
     ChatDocumentSourceService,
     DatasourceService,
     DocumentNotFoundError,
-    DocumentService,
+    ItemService,
     RequestIdentity,
     UploadService,
-    UploadTooLargeError,
-    UploadValidationError,
     require_tenant_permission,
 )
 from bothesis.services.request_identity import resolve_auth_context
@@ -64,89 +63,26 @@ class ApiService:
         *,
         allow_insecure_development_identity: bool,
         qdrant_prefer_grpc: bool,
+        contextualization_enabled: bool = False,
+        contextualization_model: str | None = None,
+        hybrid_candidate_limit: int = 20,
     ) -> None:
+        if hybrid_candidate_limit < 1:
+            raise ValueError("hybrid_candidate_limit must be at least one")
         self._allow_insecure_development_identity = (
             allow_insecure_development_identity
         )
         self._qdrant_prefer_grpc = qdrant_prefer_grpc
+        self._contextualization_enabled = contextualization_enabled
+        self._contextualization_model = contextualization_model
+        self._hybrid_candidate_limit = hybrid_candidate_limit
         self._session_factory: Any | None = None
         self._storage: Any | None = None
         self._storage_initialized = False
         self._uploads: UploadService | None = None
         self._pipeline: DocumentPipeline | None = None
         self._agent: Agent | None = None
-
-    async def start_attachment_upload(
-        self,
-        identity: RequestIdentity,
-        *,
-        tenant_id: UUID,
-        user_id: UUID,
-        idempotency_key: str,
-        file_name: str,
-        content_type: str,
-        size_bytes: int,
-        base_url: str,
-    ) -> dict[str, Any]:
-        access = await self._resolve_access(
-            identity,
-            user_id=user_id,
-            tenant_id=tenant_id,
-        )
-        result = await self._upload_service().start_upload(
-            access,
-            idempotency_key=idempotency_key,
-            file_name=file_name,
-            content_type=content_type,
-            size_bytes=size_bytes,
-        )
-        target = self._target_payload(result.target)
-        if target and target["mode"] == "api" and str(target["url"]).startswith("/"):
-            target["url"] = (
-                f"{base_url.rstrip('/')}{target['url']}"
-                f"?tenant_id={tenant_id}&user_id={user_id}"
-            )
-        metadata = self._document_metadata(result.document)
-        return {
-            "upload_id": str(result.document.id),
-            "upload_required": result.upload_required,
-            "upload": target,
-            "attachment": self._legacy_document_metadata(metadata),
-        }
-
-    async def complete_attachment_upload(
-        self,
-        identity: RequestIdentity,
-        *,
-        upload_id: UUID,
-        tenant_id: UUID,
-        user_id: UUID,
-    ) -> dict[str, Any]:
-        access = await self._resolve_access(
-            identity,
-            user_id=user_id,
-            tenant_id=tenant_id,
-        )
-        document = await self._upload_service().complete_upload(access, upload_id)
-        return self._legacy_document_metadata(self._document_metadata(document))
-
-    async def release_attachment(
-        self,
-        identity: RequestIdentity,
-        *,
-        attachment_id: UUID,
-        tenant_id: str,
-        user_id: str,
-    ) -> None:
-        access = await self._resolve_access(
-            identity,
-            user_id=user_id,
-            tenant_id=tenant_id,
-        )
-        await self._document_pipeline().soft_delete_document(
-            attachment_id,
-            access=access,
-        )
+        self._contextualization_transport: OpenRouterTransport | None = None
 
     async def chat_events(
         self,
@@ -266,44 +202,8 @@ class ApiService:
         return {
             "upload_required": result.upload_required,
             "target": self._target_payload(result.target),
-            "document": self._document_metadata(result.document),
+            "document": self._document_metadata(result.item),
         }
-
-    async def store_document_content(
-        self,
-        identity: RequestIdentity,
-        *,
-        document_id: UUID,
-        content_type: str,
-        content: AsyncIterable[bytes],
-        tenant_id: str | None = None,
-        user_id: str | None = None,
-    ) -> dict[str, Any]:
-        access = await self._resolve_access(
-            identity,
-            user_id=user_id,
-            tenant_id=tenant_id,
-        )
-        uploads = self._upload_service()
-        document = await uploads.get_document(access, document_id)
-        request_type = content_type.split(";", 1)[0].casefold()
-        if request_type and request_type != (document.mime_type or "").casefold():
-            raise UploadValidationError(
-                "uploaded content type does not match document metadata"
-            )
-        stored_content = bytearray()
-        async for chunk in content:
-            if len(stored_content) + len(chunk) > uploads.max_database_blob_bytes:
-                raise UploadTooLargeError(
-                    "API upload exceeds the PostgreSQL fallback limit"
-                )
-            stored_content.extend(chunk)
-        stored = await uploads.store_fallback_content(
-            access,
-            document_id,
-            bytes(stored_content),
-        )
-        return self._document_metadata(stored)
 
     async def complete_document_upload(
         self,
@@ -349,24 +249,24 @@ class ApiService:
                     self._allow_insecure_development_identity
                 ),
             )
-            document, record = await DocumentService(
-                session
-            ).get_document_and_chunk_by_item_id(
-                item_id,
-                chunk_id,
-                access=access,
+            item = await ItemService(session).get_item_by_canonical_id(
+                item_id, access=access
             )
-            if record is None:
+            payloads = await self._qdrant_item_payloads(
+                item_id=str(item.id), access=access, chunk_id=chunk_id, limit=1
+            )
+            if not payloads:
                 raise DocumentNotFoundError("citation not found")
-            citation = self._record_citation(record)
+            payload = payloads[0]
+            citation = self._payload_citation(payload)
             return {
-                "item_id": item_id,
-                "chunk_id": chunk_id,
-                "title": document.title or str(document.id),
-                "content_type": document.mime_type or "text/plain",
-                "document_url": self._presigned_document_url(document),
+                "item_id": str(item.id),
+                "chunk_id": str(payload.get("chunk_id") or chunk_id),
+                "title": item.title,
+                "content_type": item.mime_type or "text/plain",
+                "document_url": self._presigned_document_url(item),
                 "external_url": CitationResolver.original_url(
-                    self._file_source(document), citation
+                    self._file_source(item), citation
                 ),
                 "citation": citation,
             }
@@ -386,65 +286,106 @@ class ApiService:
                     self._allow_insecure_development_identity
                 ),
             )
-            documents = DocumentService(session)
-            if chunk_id:
-                document, targeted_chunk = (
-                    await documents.get_document_and_chunk_by_item_id(
-                        item_id,
-                        chunk_id,
-                        access=access,
-                    )
-                )
-            else:
-                document = await documents.get_document_by_item_id(
-                    item_id,
-                    access=access,
-                )
-                targeted_chunk = None
-            if targeted_chunk is not None:
-                records = [targeted_chunk]
-            elif chunk_id is None:
-                records = await documents.get_chunks(
-                    document.id,
-                    access=access,
-                    limit=100,
-                )
-            else:
-                records = []
-            elements, chunks_by_id = self._viewer_elements(document, records)
+            item = await ItemService(session).get_item_by_canonical_id(
+                item_id, access=access
+            )
+            payloads = await self._qdrant_item_payloads(
+                item_id=str(item.id),
+                access=access,
+                chunk_id=chunk_id,
+                limit=1 if chunk_id else 100,
+            )
+            elements, chunks_by_id = self._viewer_elements(str(item.id), payloads)
             focus = None
             if chunk_id:
-                record = chunks_by_id.get(chunk_id)
-                if record is None:
+                payload = chunks_by_id.get(chunk_id)
+                if payload is None:
                     raise DocumentNotFoundError("citation not found")
                 focus = {
                     "chunk_id": chunk_id,
-                    "chunk_text": record.content,
-                    "citation": self._record_citation(record),
+                    "chunk_text": str(payload.get("chunk_text") or ""),
+                    "citation": self._payload_citation(payload),
                 }
             focus_citation = (
-                self._record_citation(chunks_by_id[chunk_id])
+                self._payload_citation(chunks_by_id[chunk_id])
                 if chunk_id in chunks_by_id
                 else CitationInfo()
             )
             return {
-                "item_id": item_id,
-                "title": document.title or str(document.id),
-                "content_type": document.mime_type or "text/plain",
+                "item_id": str(item.id),
+                "title": item.title,
+                "content_type": item.mime_type or "text/plain",
                 "external_url": CitationResolver.original_url(
-                    self._file_source(document),
+                    self._file_source(item),
                     focus_citation,
                 ),
                 "document_url": (
-                    self._presigned_document_url(document) if chunk_id else None
+                    self._presigned_document_url(item) if chunk_id else None
                 ),
                 "elements": elements,
                 "focus": focus,
             }
 
+    async def _qdrant_item_payloads(
+        self,
+        *,
+        item_id: str,
+        access: AuthContext,
+        chunk_id: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if access.tenant_id is None:
+            return []
+        store = VectorStore(
+            collection_name=os.getenv("QDRANT_COLLECTION"),
+            url=os.getenv("QDRANT_URL"),
+            api_key=os.getenv("QDRANT_API_KEY") or None,
+            prefer_grpc=self._qdrant_prefer_grpc,
+            timeout=20,
+        )
+        access_filter = store.build_access_filter(
+            tenant_id=str(access.tenant_id),
+            reader_ids={
+                "public",
+                f"email:{access.email.strip().casefold()}",
+                *access.principal_tokens,
+                str(access.user_id),
+            },
+            is_admin=access.is_admin,
+        )
+        must = [
+            *(access_filter.must or []),
+            qmodels.FieldCondition(
+                key="item_id", match=qmodels.MatchValue(value=item_id)
+            ),
+        ]
+        if chunk_id:
+            must.append(
+                qmodels.FieldCondition(
+                    key="chunk_id", match=qmodels.MatchValue(value=chunk_id)
+                )
+            )
+        try:
+            points, _ = await store.scroll_points(
+                scroll_filter=qmodels.Filter(must=must),
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            )
+        finally:
+            await store.aclose()
+        payloads = [
+            dict(point.payload)
+            for point in points
+            if isinstance(getattr(point, "payload", None), Mapping)
+        ]
+        return sorted(payloads, key=lambda value: int(value.get("chunk_index") or 0))
+
     async def aclose(self) -> None:
         if self._pipeline is not None:
             await self._pipeline.aclose()
+        if self._contextualization_transport is not None:
+            await self._contextualization_transport.aclose()
         if self._storage is not None:
             await self._storage.aclose()
 
@@ -482,12 +423,6 @@ class ApiService:
                         str(DEFAULT_MAX_UPLOAD_BYTES),
                     )
                 ),
-                max_database_blob_bytes=int(
-                    os.getenv(
-                        "BOTHESIS_DOCUMENT_MAX_DATABASE_BLOB_BYTES",
-                        str(DEFAULT_MAX_DATABASE_BLOB_BYTES),
-                    )
-                ),
                 upload_url_seconds=int(
                     os.getenv(
                         "BOTHESIS_DOCUMENT_UPLOAD_URL_SECONDS",
@@ -497,7 +432,7 @@ class ApiService:
             )
         return self._uploads
 
-    def _object_storage(self) -> Any | None:
+    def _object_storage(self) -> Any:
         if self._storage_initialized:
             return self._storage
         provider = (os.getenv("BOTHESIS_OBJECT_STORAGE_PROVIDER") or "aws_s3").strip().lower()
@@ -516,8 +451,9 @@ class ApiService:
                 raise RuntimeError(
                     "BOTHESIS_S3_BUCKET is required when AWS S3 is configured"
                 )
-            self._storage = (
-                S3DocumentStorage(
+            if not bucket:
+                raise RuntimeError("BOTHESIS_OBJECT_STORAGE_BUCKET is required")
+            self._storage = S3DocumentStorage(
                     bucket=bucket,
                     region=(
                         os.getenv("BOTHESIS_S3_REGION")
@@ -536,9 +472,6 @@ class ApiService:
                         os.getenv("BOTHESIS_S3_MAX_POOL_CONNECTIONS", "20")
                     ),
                 )
-                if bucket
-                else None
-            )
         elif provider == "cloudflare_r2":
             bucket = (
                 os.getenv("BOTHESIS_R2_BUCKET")
@@ -563,8 +496,9 @@ class ApiService:
                 raise RuntimeError(
                     "BOTHESIS_R2_ACCESS_KEY_ID and BOTHESIS_R2_SECRET_ACCESS_KEY are required"
                 )
-            self._storage = (
-                S3DocumentStorage.for_cloudflare_r2(
+            if not bucket:
+                raise RuntimeError("BOTHESIS_OBJECT_STORAGE_BUCKET is required")
+            self._storage = S3DocumentStorage.for_cloudflare_r2(
                     bucket=bucket,
                     account_id=account_id or None,
                     endpoint_url=endpoint_url or None,
@@ -577,9 +511,6 @@ class ApiService:
                         os.getenv("BOTHESIS_R2_MAX_POOL_CONNECTIONS", "20")
                     ),
                 )
-                if bucket
-                else None
-            )
         else:
             raise RuntimeError(
                 "BOTHESIS_OBJECT_STORAGE_PROVIDER must be aws_s3 or cloudflare_r2"
@@ -594,6 +525,16 @@ class ApiService:
                 OpenRouterTransport.DEFAULT_BASE_URL,
             )
             embedder = OpenRouterEmbeddingService(base_url=base_url)
+            semantic_contextualizer = None
+            if self._contextualization_enabled:
+                self._contextualization_transport = OpenRouterTransport(
+                    base_url=base_url,
+                    model=self._contextualization_model,
+                )
+                semantic_contextualizer = SemanticContextualizer(
+                    self._contextualization_transport,
+                    model_name=self._contextualization_model,
+                )
             processing_max_bytes = int(
                 os.getenv(
                     "BOTHESIS_DOCUMENT_MAX_PROCESSING_BYTES",
@@ -603,7 +544,6 @@ class ApiService:
             self._pipeline = DocumentPipeline(
                 self._sessions(),
                 document_source=ChatDocumentSourceService(
-                    self._sessions(),
                     object_storage=self._object_storage(),
                     processor=FileProcessor(max_file_bytes=processing_max_bytes),
                     max_processing_bytes=processing_max_bytes,
@@ -616,7 +556,8 @@ class ApiService:
                         api_key=os.getenv("QDRANT_API_KEY") or None,
                         prefer_grpc=self._qdrant_prefer_grpc,
                         timeout=20,
-                    )
+                    ),
+                    candidate_limit=self._hybrid_candidate_limit,
                 ),
                 provider_cache=PostgresProviderFileCache(self._sessions()),
                 direct_max_bytes=int(
@@ -634,6 +575,7 @@ class ApiService:
                 download_url_seconds=int(
                     os.getenv("BOTHESIS_DOCUMENT_DOWNLOAD_URL_SECONDS", "300")
                 ),
+                semantic_contextualizer=semantic_contextualizer,
             )
         return self._pipeline
 
@@ -654,6 +596,7 @@ class ApiService:
                         timeout=8,
                     ),
                     OpenRouterEmbeddingService(base_url=base_url),
+                    candidate_limit=self._hybrid_candidate_limit,
                 )
             )
             tracing = create_langfuse_tracing()
@@ -683,14 +626,12 @@ class ApiService:
         return self._agent
 
     def _presigned_document_url(self, document: Any) -> str | None:
-        if not document.raw_storage_key:
+        if not document.storage_key:
             return None
         try:
             storage = self._object_storage()
-            if storage is None:
-                return None
             return storage.presign_download(
-                document.raw_storage_key,
+                document.storage_key,
                 expires_seconds=max(
                     1,
                     min(
@@ -709,6 +650,7 @@ class ApiService:
 
     @staticmethod
     def _document_metadata(document: Any) -> dict[str, Any]:
+        upload = document.upload
         return {
             "id": str(document.id),
             "file_name": str(
@@ -718,11 +660,13 @@ class ApiService:
             ),
             "content_type": document.mime_type or "application/octet-stream",
             "size_bytes": document.size_bytes or 0,
-            "upload_status": document.upload_status,
-            "indexing_status": document.indexing_status,
+            "status": document.status,
+            "upload_status": upload.status if upload is not None else None,
             "created_at": document.created_at.isoformat(),
             "uploaded_at": (
-                document.uploaded_at.isoformat() if document.uploaded_at else None
+                upload.uploaded_at.isoformat()
+                if upload is not None and upload.uploaded_at
+                else None
             ),
         }
 
@@ -739,46 +683,23 @@ class ApiService:
             "expires_at": request.expires_at.isoformat(),
         }
 
-    @staticmethod
-    def _legacy_document_metadata(document: Mapping[str, Any]) -> dict[str, Any]:
-        direct = document["content_type"] in {
-            "image/png",
-            "image/jpeg",
-            "image/webp",
-            "image/gif",
-            "application/pdf",
-        }
-        return {
-            "id": document["id"],
-            "file_name": document["file_name"],
-            "content_type": document["content_type"],
-            "size_bytes": document["size_bytes"],
-            "mode": "direct" if direct else "indexed",
-            "status": document["upload_status"],
-            "created_at": document["created_at"],
-        }
-
     @classmethod
     def _viewer_elements(
         cls,
-        document: Any,
-        records: list[Any],
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        item_id: str,
+        payloads: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         groups: dict[str, dict[str, Any] | None] = {}
-        chunks_by_id: dict[str, Any] = {}
-        item_id = str(document.id)
-        for record in sorted(records, key=lambda value: value.chunk_index):
-            chunk_id = (
-                cls._viewer_text(record.metadata_, "chunk_id")
-                or f"{item_id}:{record.chunk_index}"
-            )
-            chunks_by_id[chunk_id] = record
-            chunks_by_id[f"{item_id}:{record.chunk_index}"] = record
-            chunks_by_id[str(record.id)] = record
+        chunks_by_id: dict[str, dict[str, Any]] = {}
+        for payload in payloads:
+            chunk_index = int(payload.get("chunk_index") or 0)
+            chunk_id = str(payload.get("chunk_id") or f"{item_id}:{chunk_index}")
+            chunks_by_id[chunk_id] = payload
+            chunks_by_id[f"{item_id}:{chunk_index}"] = payload
             cls._add_citation_content(
                 groups,
-                record.content,
-                cls._record_citation(record),
+                str(payload.get("chunk_text") or ""),
+                cls._payload_citation(payload),
             )
         return [value for value in groups.values() if value is not None], chunks_by_id
 
@@ -813,25 +734,21 @@ class ApiService:
         return None
 
     @classmethod
-    def _record_citation(cls, record: Any) -> CitationInfo:
-        metadata = dict(record.metadata_)
-        spans = cls._citation_spans(metadata.get("citation_spans"))
-        raw_section_path = metadata.get("citation_section_path")
-        if isinstance(raw_section_path, (list, tuple)):
-            section_path = tuple(
-                value.strip()
-                for value in raw_section_path
-                if isinstance(value, str) and value.strip()
-            )
-        else:
-            section_path = tuple(record.heading_path or ())
+    def _payload_citation(cls, payload: Mapping[str, Any]) -> CitationInfo:
+        spans = cls._citation_spans(payload.get("citation_spans"))
+        raw_section_path = payload.get("citation_section_path")
+        section_path = tuple(
+            value.strip()
+            for value in raw_section_path or ()
+            if isinstance(value, str) and value.strip()
+        )
         return CitationInfo(
             section=(
-                cls._viewer_text(metadata, "citation_section")
+                cls._viewer_text(payload, "citation_section")
                 or (section_path[-1] if section_path else None)
             ),
             section_path=section_path,
-            anchor=cls._viewer_text(metadata, "citation_anchor"),
+            anchor=cls._viewer_text(payload, "citation_anchor"),
             spans=tuple(spans),
         )
 

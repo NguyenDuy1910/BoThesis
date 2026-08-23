@@ -14,6 +14,7 @@ from bothesis.connector.protocol import (
     SourceIdentity,
     SourceProvider,
 )
+from bothesis.document_index import DEFAULT_HYBRID_CANDIDATE_LIMIT
 from bothesis.document_index.models import ChunkContext, ContextualChunk
 
 
@@ -31,8 +32,10 @@ class _VectorStore(Protocol):
         self,
         query_vector: list[float],
         *,
+        query_text: str,
         query_filter: object,
         limit: int,
+        candidate_limit: int,
     ) -> list[object]:
         """Search the configured vector collection."""
 
@@ -45,9 +48,18 @@ class _QueryEmbedder(Protocol):
 class QdrantSearchIndex:
     """Embed queries, search Qdrant, and rebuild canonical indexed chunks."""
 
-    def __init__(self, store: _VectorStore, embedder: _QueryEmbedder) -> None:
+    def __init__(
+        self,
+        store: _VectorStore,
+        embedder: _QueryEmbedder,
+        *,
+        candidate_limit: int = DEFAULT_HYBRID_CANDIDATE_LIMIT,
+    ) -> None:
+        if candidate_limit < 1:
+            raise ValueError("candidate_limit must be at least one")
         self._store = store
         self._embedder = embedder
+        self._candidate_limit = candidate_limit
 
     async def search(
         self,
@@ -87,8 +99,10 @@ class QdrantSearchIndex:
         query_vector = await self._embedder.embed_query(normalized_query)
         points = await self._store.semantic_search(
             query_vector,
+            query_text=normalized_query,
             query_filter=query_filter,
             limit=limit,
+            candidate_limit=max(limit, self._candidate_limit),
         )
         return _normalise_points(points)
 

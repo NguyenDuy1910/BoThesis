@@ -9,6 +9,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from qdrant_client import models as qmodels
 
 from bothesis.connector.file import FileProcessingError
 from bothesis.connector.protocol import (
@@ -25,10 +26,9 @@ from bothesis.connector.protocol import (
     SourceProvider,
 )
 from bothesis.document_index.raw_storage import aws_s3
-from bothesis.db.models import Document
+from bothesis.db.models import Item, ItemUpload
 from bothesis.services import (
     AuthContext,
-    DocumentChunkInput,
     UploadService,
     UploadTooLargeError,
 )
@@ -36,10 +36,12 @@ from bothesis.services.chat_document_source import ChatDocumentSourceService
 from bothesis.document_index.indexer import (
     DocumentProcessingError,
     DocumentPipeline,
+    INDEX_SCHEMA_VERSION,
     PARSER_VERSION,
     CHUNKER_VERSION,
 )
 from bothesis.document_index.models import ChunkContext, ContextualChunk
+from bothesis.document_index import BM25_MODEL, BM25_OPTIONS, SPARSE_VECTOR_NAME
 from bothesis.document_index.raw_storage import (
     ObjectStorageError,
     PresignedRequest,
@@ -159,23 +161,30 @@ def _document(
     content_type: str,
     *,
     size_bytes: int = 1024,
-    indexing_status: str = "none",
+    status: str = "ready",
     processing: dict[str, str] | None = None,
-) -> Document:
-    document = Document(
+) -> Item:
+    owner_id = uuid4()
+    document = Item(
         id=uuid4(),
-        owner_user_id=uuid4(),
-        tenant_id=None,
-        origin="upload",
+        item_type="document",
+        document_kind="document",
+        owner_user_id=owner_id,
+        tenant_id=uuid4(),
         title="sample",
         mime_type=content_type,
         size_bytes=size_bytes,
-        upload_status="available",
-        indexing_status=indexing_status,
-        lifecycle_status="active",
+        status=status,
         metadata_={"file_name": "sample", "processing": processing}
         if processing
         else {"file_name": "sample"},
+    )
+    document.upload = ItemUpload(
+        item_id=document.id,
+        tenant_id=document.tenant_id,
+        owner_user_id=owner_id,
+        idempotency_key="test",
+        status="available",
     )
     document.content_sha256 = "a" * 64
     return document
@@ -185,14 +194,15 @@ def test_routing_precedence_prefers_images_then_current_index_then_small_pdf() -
     processor = _processor()
     tenant_id = uuid4()
 
-    def route(document: Document, *, current: bool = False) -> str:
+    def route(document: Item, *, current: bool = False) -> str:
         if current:
-            document.indexing_status = "indexed"
+            document.status = "ready"
             document.metadata_["processing"] = {
                 "source_fingerprint": "a" * 64,
                 "parser_version": PARSER_VERSION,
                 "chunker_version": CHUNKER_VERSION,
                 "embedding_model": _Embedder.model,
+                "index_schema_version": INDEX_SCHEMA_VERSION,
                 "tenant_id": str(tenant_id),
                 "owner_user_id": str(document.owner_user_id),
             }
@@ -212,45 +222,6 @@ def test_routing_precedence_prefers_images_then_current_index_then_small_pdf() -
     )
 
 
-def test_canonical_chunk_persistence_preserves_exact_multi_span_provenance() -> None:
-    chunk = Chunk(
-        id="report:4",
-        item_id="report",
-        chunk_index=4,
-        chunk_text="Page one evidence\nPage two evidence",
-        content_type="mixed",
-        section_path=["Financials", "Revenue"],
-        citation=CitationInfo(
-            section="Revenue",
-            section_path=("Financials", "Revenue"),
-            spans=(
-                CitationSpan(
-                    page=4,
-                    element_id="p004_table_002",
-                    start_offset=0,
-                    end_offset=17,
-                ),
-                CitationSpan(
-                    page=5,
-                    element_id="p005_para_001",
-                    start_offset=0,
-                    end_offset=17,
-                ),
-            ),
-        ),
-    )
-
-    stored = DocumentChunkInput.from_chunk(chunk)
-
-    assert stored.chunk_id == "report:4"
-    assert stored.content == chunk.chunk_text
-    assert stored.content_type == "mixed"
-    assert stored.start_page_number == 4
-    assert stored.end_page_number == 5
-    assert stored.heading_path == ("Financials", "Revenue")
-    assert stored.citation_spans == chunk.citation.spans
-
-
 @pytest.mark.asyncio
 async def test_direct_inputs_use_signed_urls_and_replay_cached_pdf_annotations() -> (
     None
@@ -260,7 +231,6 @@ async def test_direct_inputs_use_signed_urls_and_replay_cached_pdf_annotations()
     processor = DocumentPipeline(
         cast(Any, None),
         document_source=ChatDocumentSourceService(
-            cast(Any, None),
             object_storage=cast(Any, storage),
             processor=cast(Any, _EmptyProcessor()),
         ),
@@ -269,7 +239,7 @@ async def test_direct_inputs_use_signed_urls_and_replay_cached_pdf_annotations()
         provider_cache=cache,
     )
     image = _document("image/png")
-    image.raw_storage_key = "users/u/documents/image/raw"
+    image.storage_key = "users/u/documents/image/raw"
 
     context, _ = await processor._prepare_direct(image)
 
@@ -294,7 +264,7 @@ async def test_direct_inputs_use_signed_urls_and_replay_cached_pdf_annotations()
         reference={"annotations": [annotation]},
     )
     pdf = _document("application/pdf")
-    pdf.raw_storage_key = "users/u/documents/pdf/raw"
+    pdf.storage_key = "users/u/documents/pdf/raw"
 
     context, _ = await processor._prepare_direct(pdf)
 
@@ -303,20 +273,16 @@ async def test_direct_inputs_use_signed_urls_and_replay_cached_pdf_annotations()
     assert storage.downloads == 1
 
 
-def test_upload_limits_keep_large_content_out_of_database_fallback() -> None:
+def test_upload_limits_reject_oversize_objects() -> None:
     uploads = UploadService(
         cast(Any, None),
-        object_storage=None,
+        object_storage=cast(Any, _SignedStorage()),
         max_upload_bytes=100,
-        max_database_blob_bytes=20,
     )
 
     uploads._validate_upload_size(100)
-    uploads._validate_database_size(20)
     with pytest.raises(UploadTooLargeError):
         uploads._validate_upload_size(101)
-    with pytest.raises(UploadTooLargeError):
-        uploads._validate_database_size(21)
 
 
 class _StreamingStorage:
@@ -386,12 +352,11 @@ async def test_index_processing_streams_object_storage_to_a_temporary_path() -> 
     storage = _StreamingStorage(raw)
     source_processor = _PathProcessor()
     service = ChatDocumentSourceService(
-        cast(Any, None),
         object_storage=cast(Any, storage),
         processor=cast(Any, source_processor),
     )
     document = _document("text/plain", size_bytes=len(raw))
-    document.raw_storage_key = "tenant/document/raw"
+    document.storage_key = "tenant/document/raw"
 
     processed = await service.canonicalize(
         document,
@@ -409,13 +374,12 @@ async def test_index_processing_streams_object_storage_to_a_temporary_path() -> 
 async def test_index_processing_rejects_oversize_source_before_download() -> None:
     storage = _StreamingStorage(b"oversize")
     service = ChatDocumentSourceService(
-        cast(Any, None),
         object_storage=cast(Any, storage),
         processor=cast(Any, _PathProcessor()),
         max_processing_bytes=4,
     )
     document = _document("text/plain", size_bytes=8)
-    document.raw_storage_key = "tenant/document/raw"
+    document.storage_key = "tenant/document/raw"
 
     with pytest.raises(DocumentProcessingError, match="processing limit"):
         await service.canonicalize(
@@ -439,12 +403,11 @@ async def test_index_processing_rejects_a_processor_checksum_mismatch() -> None:
             return processed
 
     service = ChatDocumentSourceService(
-        cast(Any, None),
         object_storage=cast(Any, storage),
         processor=cast(Any, _MismatchedProcessor()),
     )
     document = _document("text/plain", size_bytes=len(raw))
-    document.raw_storage_key = "tenant/document/raw"
+    document.storage_key = "tenant/document/raw"
 
     with pytest.raises(DocumentProcessingError, match="checksum"):
         await service.canonicalize(
@@ -802,6 +765,13 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
     assert store.deleted == [str(document.id), str(document.id)]
     assert store.batches[0][0].id == store.batches[1][0].id
     payload = store.batches[0][0].payload
+    vectors = store.batches[0][0].vector
+    assert vectors["content"] == [0.1, 0.2]
+    assert vectors[SPARSE_VECTOR_NAME] == qmodels.Document(
+        text=chunks[0].contextual_text,
+        model=BM25_MODEL,
+        options=BM25_OPTIONS,
+    )
     assert payload["tenant_id"] == str(tenant_id)
     assert payload["reader_ids"] == [str(user_id)]
     assert payload["item_id"] == str(document.id)

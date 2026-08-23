@@ -171,10 +171,10 @@ def test_confluence_attachment_preserves_docling_content_and_storage(
             mime_type="application/pdf",
             size_bytes=100,
             checksum_sha256="a" * 64,
-            raw_storage_provider="cloudflare_r2",
-            raw_storage_bucket="documents",
-            raw_storage_region="auto",
-            raw_storage_key="confluence/risk.pdf",
+            storage_provider="cloudflare_r2",
+            storage_bucket="documents",
+            storage_region="auto",
+            storage_key="confluence/risk.pdf",
         ),
     )
 

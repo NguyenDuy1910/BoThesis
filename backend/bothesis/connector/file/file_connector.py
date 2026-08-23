@@ -9,11 +9,14 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from ..base import BaseSourceConnector, GenerateDocumentsOutput, LoadConnector
 from bothesis.connector.protocol import (
+    AccessEffect,
     AccessPolicy,
+    AccessRule,
     AnyItem,
     ChangeType,
     Chunk,
@@ -23,8 +26,11 @@ from bothesis.connector.protocol import (
     ConnectorScope,
     DocumentItem,
     DocumentKind,
+    DirectAccess,
+    EffectiveAccess,
     Hierarchy,
     ItemChange,
+    Principal,
     SourceIdentity,
     SourceCheckpoint,
     SourceProvider,
@@ -46,7 +52,8 @@ FILE_HIERARCHY_NODE_ID = "file::files"
 class FileRecord:
     external_id: str
     file_name: str
-    path: Path
+    path: Path | None
+    storage_key: str | None
     size_bytes: int
     mime_type: str | None
     sha256: str
@@ -76,6 +83,7 @@ class FileConnector(BaseSourceConnector):
             max_file_bytes=int(config.get("max_file_bytes") or 20 * 1024 * 1024)
         )
         self._records: dict[str, FileRecord] = {}
+        self._records_configured = False
         self._processed_chunks: dict[str, tuple[Chunk, ...]] = {}
         self._next_checkpoint = SourceCheckpoint()
         self._storage: RawObjectStore | None = None
@@ -83,6 +91,55 @@ class FileConnector(BaseSourceConnector):
 
     def set_storage(self, storage: RawObjectStore) -> None:
         self._storage = storage
+
+    def set_records(self, records: list[Mapping[str, Any]]) -> None:
+        """Load canonical PostgreSQL Item metadata without a sidecar manifest."""
+
+        resolved: dict[str, FileRecord] = {}
+        for raw in records:
+            external_id = str(raw.get("external_id") or "").strip()
+            file_name = str(raw.get("file_name") or "").strip()
+            storage_key = str(raw.get("storage_key") or "").strip()
+            sha256 = str(raw.get("sha256") or "").strip().casefold()
+            size_bytes = int(raw.get("size_bytes") or 0)
+            if not external_id or not file_name or not storage_key:
+                raise ValueError("stored file Item metadata is incomplete")
+            if size_bytes < 1 or len(sha256) != 64:
+                raise ValueError(f"stored file Item is invalid: {external_id}")
+            uploaded_at = _parse_datetime(
+                raw.get("uploaded_at"),
+                fallback=datetime.min.replace(tzinfo=timezone.utc),
+            )
+            modified_at = _parse_datetime(
+                raw.get("modified_at"), fallback=uploaded_at
+            )
+            metadata = raw.get("metadata") or {}
+            if not isinstance(metadata, Mapping):
+                raise ValueError(f"stored file Item metadata is invalid: {external_id}")
+            resolved[external_id] = FileRecord(
+                external_id=external_id,
+                file_name=file_name,
+                path=None,
+                storage_key=storage_key,
+                size_bytes=size_bytes,
+                mime_type=str(raw.get("mime_type") or "").strip() or None,
+                sha256=sha256,
+                uploaded_at=uploaded_at,
+                modified_at=modified_at,
+                access=_access_from_mapping(
+                    raw.get("acl") or {}, default=self._default_access
+                ),
+                metadata={
+                    str(key): (
+                        [str(item) for item in value]
+                        if isinstance(value, list)
+                        else str(value)
+                    )
+                    for key, value in metadata.items()
+                },
+            )
+        self._records = resolved
+        self._records_configured = True
 
     async def test_connection(self) -> bool:
         await asyncio.to_thread(self.base_dir.mkdir, parents=True, exist_ok=True)
@@ -152,9 +209,24 @@ class FileConnector(BaseSourceConnector):
             external_version=record.sha256,
             etag=record.sha256,
         )
+        source_path = record.path
+        temporary: tempfile.TemporaryDirectory[str] | None = None
+        if source_path is None:
+            if self._storage is None or not record.storage_key:
+                raise RuntimeError("file Item object storage is unavailable")
+            downloader = getattr(self._storage, "download_to_path", None)
+            if downloader is None:
+                raise RuntimeError("configured object storage cannot download files")
+            temporary = tempfile.TemporaryDirectory(prefix="bothesis-file-connector-")
+            source_path = Path(temporary.name) / record.file_name
+            await downloader(
+                record.storage_key,
+                source_path,
+                max_bytes=self._processor.max_file_bytes,
+            )
         processed = await asyncio.to_thread(
             self._processor.process_path,
-            record.path,
+            source_path,
             file_name=record.file_name,
             item_id=record.external_id,
             title=record.file_name,
@@ -166,39 +238,49 @@ class FileConnector(BaseSourceConnector):
                 record.mime_type or mimetypes.guess_type(record.file_name)[0]
             ),
         )
-        if processed.sha256 != record.sha256:
-            raise RuntimeError(f"File changed after discovery: {record.external_id}")
+        try:
+            if processed.sha256 != record.sha256:
+                raise RuntimeError(f"File changed after discovery: {record.external_id}")
 
-        item = processed.item
-        if self._storage is not None:
-            key = (
-                f"files/{_safe_storage_part(record.external_id)}/"
-                f"{_safe_storage_part(record.file_name)}"
-            )
-            stored = await asyncio.to_thread(
-                self._storage.put_path,
-                record.path,
-                key,
-                content_type=record.mime_type or processed.mime_type,
-            )
-            item = item.model_copy(
-                update={
-                    "original": _storage_object(
-                        self._storage,
-                        stored,
-                        key=key,
-                        file_name=record.file_name,
-                        content_type=record.mime_type or processed.mime_type,
-                        checksum=record.sha256,
-                        size_bytes=record.size_bytes,
-                    )
-                }
-            )
+            item = processed.item
+            key = record.storage_key
+            stored = None
+            if key is None and self._storage is not None:
+                assert record.path is not None
+                key = (
+                    f"files/{_safe_storage_part(record.external_id)}/"
+                    f"{_safe_storage_part(record.file_name)}"
+                )
+                stored = await asyncio.to_thread(
+                    self._storage.put_path,
+                    record.path,
+                    key,
+                    content_type=record.mime_type or processed.mime_type,
+                )
+            if key is not None and self._storage is not None:
+                if stored is None:
+                    stored = await self._storage.head(key)  # type: ignore[attr-defined]
+                item = item.model_copy(
+                    update={
+                        "original": _storage_object(
+                            self._storage,
+                            stored,
+                            key=key,
+                            file_name=record.file_name,
+                            content_type=record.mime_type or processed.mime_type,
+                            checksum=record.sha256,
+                            size_bytes=record.size_bytes,
+                        )
+                    }
+                )
 
-        self._processed_chunks[item.id] = processed.chunks
-        return item.model_copy(
-            update={"created_at": record.uploaded_at, "updated_at": record.modified_at}
-        )
+            self._processed_chunks[item.id] = processed.chunks
+            return item.model_copy(
+                update={"created_at": record.uploaded_at, "updated_at": record.modified_at}
+            )
+        finally:
+            if temporary is not None:
+                temporary.cleanup()
 
     async def fetch_chunks(self, item: DocumentItem) -> tuple[Chunk, ...] | None:
         """Return chunks produced in the same Docling pass as ``fetch_item``."""
@@ -224,6 +306,14 @@ class FileConnector(BaseSourceConnector):
         return self._next_checkpoint.model_copy(deep=True)
 
     def _records_for_scope(self, scope: ConnectorScope) -> Iterator[FileRecord]:
+        if self._records_configured:
+            if scope.scope_value == FILE_SCOPE_VALUE:
+                yield from self._records.values()
+                return
+            record = self._records.get(scope.scope_value)
+            if record is not None:
+                yield record
+            return
         if scope.scope_value != FILE_SCOPE_VALUE:
             yield self._load_record(scope.scope_value)
             return
@@ -244,23 +334,27 @@ class FileConnector(BaseSourceConnector):
         if not isinstance(data, dict):
             raise ValueError(f"File record must be an object: {record_path.name}")
 
-        raw_path = Path(str(data.get("path") or ""))
-        file_path = raw_path if raw_path.is_absolute() else self.base_dir / raw_path
-        file_path = _confined_path(self.base_dir, file_path)
-        if not file_path.is_file():
-            raise FileNotFoundError(f"File not found: {file_path}")
-
-        stat = file_path.stat()
-        file_name = str(data.get("file_name") or file_path.name).strip()
+        storage_key = str(data.get("storage_key") or "").strip() or None
+        raw_path = str(data.get("path") or "").strip()
+        file_path: Path | None = None
+        if raw_path:
+            candidate = Path(raw_path)
+            file_path = candidate if candidate.is_absolute() else self.base_dir / candidate
+            file_path = _confined_path(self.base_dir, file_path)
+            if not file_path.is_file():
+                raise FileNotFoundError(f"File not found: {file_path}")
+        if file_path is None and storage_key is None:
+            raise ValueError(f"File record has no storage key: {external_id}")
+        file_name = str(data.get("file_name") or (file_path.name if file_path else "")).strip()
         if not file_name:
             raise ValueError(f"File name is empty: {external_id}")
-        actual_size = stat.st_size
-        declared_size = data.get("size_bytes")
-        if declared_size is not None and int(declared_size) != actual_size:
+        declared_size = int(data.get("size_bytes") or 0)
+        actual_size = file_path.stat().st_size if file_path is not None else declared_size
+        if actual_size < 1 or (declared_size and declared_size != actual_size):
             raise ValueError(f"File size mismatch: {external_id}")
-        actual_sha256 = _sha256_path(file_path)
         declared_sha256 = str(data.get("sha256") or "").strip().lower()
-        if declared_sha256 and declared_sha256 != actual_sha256:
+        actual_sha256 = _sha256_path(file_path) if file_path is not None else declared_sha256
+        if not actual_sha256 or (declared_sha256 and declared_sha256 != actual_sha256):
             raise ValueError(f"File checksum mismatch: {external_id}")
 
         uploaded_at = _parse_datetime(
@@ -270,7 +364,11 @@ class FileConnector(BaseSourceConnector):
         modified_at = max(
             uploaded_at,
             datetime.fromtimestamp(record_path.stat().st_mtime, tz=timezone.utc),
-            datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+            *(
+                [datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)]
+                if file_path is not None
+                else []
+            ),
         )
         raw_metadata = data.get("metadata") or {}
         if not isinstance(raw_metadata, Mapping):
@@ -286,6 +384,7 @@ class FileConnector(BaseSourceConnector):
             external_id=resolved_external_id,
             file_name=file_name,
             path=file_path,
+            storage_key=storage_key,
             size_bytes=actual_size,
             mime_type=str(data.get("mime_type") or mimetypes.guess_type(file_name)[0] or "") or None,
             sha256=actual_sha256,
@@ -397,6 +496,7 @@ def _access_from_mapping(
             "user_emails",
             "user_group_ids",
             "source_reader_ids",
+            "source_denied_reader_ids",
             "is_public",
             "public",
         )
@@ -410,7 +510,26 @@ def _access_from_mapping(
     ]
     if bool(value.get("is_public", value.get("public", False))):
         readers.append("public")
-    return AccessPolicy.from_reader_ids(readers)
+    denied = [str(reader) for reader in value.get("source_denied_reader_ids") or []]
+    allowed_policy = AccessPolicy.from_reader_ids(readers)
+    deny_rules = [
+        AccessRule(
+            effect=AccessEffect.DENY,
+            principal=Principal(
+                type=reader.split(":", 1)[0] if ":" in reader else "source",
+                id=reader.split(":", 1)[1] if ":" in reader else reader,
+            ),
+        )
+        for reader in denied
+        if reader.strip()
+    ]
+    return AccessPolicy(
+        direct=DirectAccess(
+            inherit=allowed_policy.direct.inherit,
+            rules=[*allowed_policy.direct.rules, *deny_rules],
+        ),
+        effective=EffectiveAccess(reader_ids=allowed_policy.effective.reader_ids),
+    )
 
 
 def _confined_path(base_dir: Path, candidate: Path) -> Path:

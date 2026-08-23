@@ -1,8 +1,6 @@
-"""Provider-independent structural and optional semantic contextualization."""
+"""Provider-independent structural contextualization."""
 
 from __future__ import annotations
-
-from collections.abc import Callable
 
 from bothesis.connector.protocol import (
     AccessPolicy,
@@ -27,19 +25,25 @@ class StructuralContextualizer:
         hierarchy: Hierarchy,
         access: AccessPolicy | EffectiveAccess,
         document_kind: DocumentKind | str,
-        summary: str | None = None,
+        document_summary: str | None = None,
         semantic_context: str | None = None,
     ) -> ContextualChunk:
-        context = ChunkContext(section_path=list(chunk.section_path), summary=summary)
+        context = ChunkContext(
+            section_path=list(chunk.section_path),
+            summary=document_summary,
+        )
         prefix = []
         if title:
             prefix.append(f"Document: {title}")
         if chunk.section_path:
             prefix.append(f"Section: {' > '.join(chunk.section_path)}")
-        if summary:
-            prefix.append(f"Context: {summary}")
-        if semantic_context and semantic_context.strip():
-            prefix.append(f"Description: {semantic_context.strip()}")
+        retrieval_context = (
+            semantic_context.strip()
+            if semantic_context and semantic_context.strip()
+            else document_summary
+        )
+        if retrieval_context:
+            prefix.append(f"Context: {retrieval_context}")
         contextual_text = "\n".join(prefix)
         contextual_text = f"{contextual_text}\n\n{chunk.chunk_text}" if contextual_text else chunk.chunk_text
         kind = document_kind.value if isinstance(document_kind, DocumentKind) else document_kind
@@ -59,19 +63,4 @@ class StructuralContextualizer:
             access=effective_access,
             citation=chunk.citation,
         )
-
-
-class SemanticContextualizer:
-    """Optional generated context provider kept separate from structure."""
-
-    def __init__(self, generator: Callable[[Chunk], str] | None = None) -> None:
-        self._generator = generator
-
-    def describe(self, chunk: Chunk) -> str | None:
-        if self._generator is None:
-            return None
-        value = self._generator(chunk)
-        return value.strip() or None
-
-
-__all__ = ["SemanticContextualizer", "StructuralContextualizer"]
+__all__ = ["StructuralContextualizer"]

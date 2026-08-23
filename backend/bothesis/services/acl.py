@@ -1,4 +1,4 @@
-"""Materialized document ACL policy administration."""
+"""Materialized Item ACL policy administration."""
 
 from __future__ import annotations
 
@@ -9,12 +9,14 @@ from uuid import UUID
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.db.models import AclPolicy, Document
+from bothesis.db.models import AclPolicy, Item
+from bothesis.document_index.vector_store import VectorStore
 from bothesis.services import (
     ACCESS_MANAGE_PERMISSION,
     ACTIVE_STATUS,
     INACTIVE_STATUS,
     AdminConflictError,
+    AdminExternalUnavailableError,
     AdminNotFoundError,
     AdminValidationError,
     AuditService,
@@ -28,15 +30,17 @@ from bothesis.services import (
 
 
 class AclService:
-    """Persist policies and materialize active document principal tokens."""
+    """Persist policies and materialize active Item principal tokens."""
 
     def __init__(
         self,
         session: AsyncSession,
         *,
+        vector_store: VectorStore | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._session = session
+        self._vector_store = vector_store
         self._audit = audit or AuditService(session)
 
     async def list_policies(
@@ -60,7 +64,7 @@ class AclService:
                 or_(
                     AclPolicy.name.ilike(term),
                     AclPolicy.resource_id.ilike(term),
-                    Document.title.ilike(term),
+                    Item.title.ilike(term),
                 )
             )
         if status:
@@ -69,11 +73,11 @@ class AclService:
                 raise AdminValidationError("ACL policy status must be active or inactive")
             filters.append(AclPolicy.status == normalized)
         base = (
-            select(AclPolicy, Document.title)
+            select(AclPolicy, Item.title)
             .outerjoin(
-                Document,
-                (AclPolicy.resource_type == "document")
-                & (AclPolicy.resource_id == cast(Document.id, String)),
+                Item,
+                (AclPolicy.resource_type == "item")
+                & (AclPolicy.resource_id == cast(Item.id, String)),
             )
             .where(*filters)
         )
@@ -102,8 +106,8 @@ class AclService:
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
         policy = await self._policy(tenant_id, policy_id)
-        document = await self._document(tenant_id, policy.resource_id)
-        return _policy_payload(policy, resource_title=document.title)
+        item = await self._item(tenant_id, policy.resource_id)
+        return _policy_payload(policy, resource_title=item.title)
 
     async def create_policy(
         self,
@@ -127,11 +131,9 @@ class AclService:
                 f"ACL policy name already exists in tenant: {normalized_name}"
             )
         normalized_type = resource_type.strip().casefold()
-        if normalized_type != "document":
-            raise AdminValidationError(
-                "document is the only materialized ACL resource type"
-            )
-        document = await self._document(tenant_id, resource_id)
+        if normalized_type != "item":
+            raise AdminValidationError("item is the only materialized ACL resource type")
+        item = await self._item(tenant_id, resource_id)
         allowed, denied = _principal_sets(
             allowed_principal_tokens, denied_principal_tokens
         )
@@ -139,22 +141,23 @@ class AclService:
             tenant_id=tenant_id,
             name=normalized_name,
             resource_type=normalized_type,
-            resource_id=str(document.id),
+            resource_id=str(item.id),
             allowed_principal_tokens=allowed,
             denied_principal_tokens=denied,
             created_by_user_id=actor.user_id,
         )
         self._session.add(policy)
-        _materialize(document, policy)
+        _materialize(item, policy)
         await self._session.flush()
+        await self._project_item_acl(item)
         await self._audit.record(
             actor,
             action="acl_policy.created",
             resource_type="acl_policy",
             resource_id=str(policy.id),
-            details={"document_id": str(document.id)},
+            details={"item_id": str(item.id)},
         )
-        return _policy_payload(policy, resource_title=document.title)
+        return _policy_payload(policy, resource_title=item.title)
 
     async def update_policy(
         self,
@@ -168,7 +171,7 @@ class AclService:
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
         policy = await self._policy(tenant_id, policy_id)
-        document = await self._document(tenant_id, policy.resource_id)
+        item = await self._item(tenant_id, policy.resource_id)
         changed: list[str] = []
         if name is not None:
             normalized_name = normalize_required_text(name, "ACL policy name", 255)
@@ -204,35 +207,37 @@ class AclService:
             policy.status = normalized
             changed.append("status")
         if policy.status == ACTIVE_STATUS:
-            _materialize(document, policy)
+            _materialize(item, policy)
         else:
-            document.allowed_principal_tokens = []
-            document.denied_principal_tokens = []
+            item.allowed_principal_tokens = []
+            item.denied_principal_tokens = []
         await self._session.flush()
+        await self._project_item_acl(item)
         await self._audit.record(
             actor,
             action="acl_policy.updated",
             resource_type="acl_policy",
             resource_id=str(policy.id),
-            details={"changed_fields": changed, "document_id": str(document.id)},
+            details={"changed_fields": changed, "item_id": str(item.id)},
         )
-        return _policy_payload(policy, resource_title=document.title)
+        return _policy_payload(policy, resource_title=item.title)
 
     async def delete_policy(self, actor: AuthContext, policy_id: UUID) -> None:
         tenant_id = require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
         policy = await self._policy(tenant_id, policy_id)
-        document = await self._document(tenant_id, policy.resource_id)
+        item = await self._item(tenant_id, policy.resource_id)
         policy.status = INACTIVE_STATUS
         policy.deleted_at = datetime.now(UTC)
-        document.allowed_principal_tokens = []
-        document.denied_principal_tokens = []
+        item.allowed_principal_tokens = []
+        item.denied_principal_tokens = []
         await self._session.flush()
+        await self._project_item_acl(item)
         await self._audit.record(
             actor,
             action="acl_policy.deleted",
             resource_type="acl_policy",
             resource_id=str(policy.id),
-            details={"document_id": str(document.id)},
+            details={"item_id": str(item.id)},
         )
 
     async def _policy(self, tenant_id: UUID, policy_id: UUID) -> AclPolicy:
@@ -247,22 +252,33 @@ class AclService:
             raise AdminNotFoundError(f"ACL policy not found: {policy_id}")
         return policy
 
-    async def _document(self, tenant_id: UUID, resource_id: str) -> Document:
+    async def _item(self, tenant_id: UUID, resource_id: str) -> Item:
         try:
-            document_id = UUID(resource_id)
+            item_id = UUID(resource_id)
         except ValueError as exc:
-            raise AdminValidationError("document resource ID must be a UUID") from exc
-        document = await self._session.scalar(
-            select(Document).where(
-                Document.id == document_id,
-                Document.tenant_id == tenant_id,
-                Document.lifecycle_status != "deleted",
-                Document.deleted_at.is_(None),
+            raise AdminValidationError("item resource ID must be a UUID") from exc
+        item = await self._session.scalar(
+            select(Item).where(
+                Item.id == item_id,
+                Item.tenant_id == tenant_id,
+                Item.status != "deleted",
+                Item.deleted_at.is_(None),
             )
         )
-        if document is None:
-            raise AdminNotFoundError(f"document not found: {resource_id}")
-        return document
+        if item is None:
+            raise AdminNotFoundError(f"item not found: {resource_id}")
+        return item
+
+    async def _project_item_acl(self, item: Item) -> None:
+        if self._vector_store is None:
+            raise AdminExternalUnavailableError(
+                "Qdrant is required to update an indexed Item ACL"
+            )
+        await self._vector_store.sync_document_acl(
+            str(item.id),
+            item.allowed_principal_tokens,
+            denied_reader_ids=item.denied_principal_tokens,
+        )
 
 
 def _principal_sets(
@@ -280,9 +296,9 @@ def _principal_sets(
     return allowed, denied
 
 
-def _materialize(document: Document, policy: AclPolicy) -> None:
-    document.allowed_principal_tokens = list(policy.allowed_principal_tokens)
-    document.denied_principal_tokens = list(policy.denied_principal_tokens)
+def _materialize(item: Item, policy: AclPolicy) -> None:
+    item.allowed_principal_tokens = list(policy.allowed_principal_tokens)
+    item.denied_principal_tokens = list(policy.denied_principal_tokens)
 
 
 def _policy_payload(

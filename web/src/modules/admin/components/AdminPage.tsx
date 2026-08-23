@@ -68,16 +68,16 @@ const sections: Record<string, SectionDefinition> = {
   "ingestion/jobs": {
     endpoint: "/ingestion/jobs",
     title: "Ingestion",
-    description: "Track durable source generations from discovery through indexing and activation.",
+    description: "Track checkpoint-driven discovery, Item processing, and Qdrant writes.",
     emptyTitle: "No ingestion runs recorded",
     statusOptions: statusOptions("pending", "running", "completed", "failed", "cancelled"),
   },
-  documents: {
-    endpoint: "/documents",
-    title: "Documents",
-    description: "Inspect tenant document lineage, processing state, source association, and lifecycle.",
-    emptyTitle: "No enterprise documents indexed",
-    statusOptions: statusOptions("active", "hidden", "retired", "failed", "unsupported"),
+  items: {
+    endpoint: "/items",
+    title: "Items",
+    description: "Inspect canonical source hierarchy, processing state, and connector lineage.",
+    emptyTitle: "No source Items persisted",
+    statusOptions: statusOptions("pending", "processing", "ready", "failed", "unsupported"),
   },
   users: {
     endpoint: "/users",
@@ -90,7 +90,7 @@ const sections: Record<string, SectionDefinition> = {
   groups: {
     endpoint: "/groups",
     title: "Groups",
-    description: "Combine permission grants with reusable document ACL principal tokens.",
+    description: "Combine permission grants with reusable Item ACL principal tokens.",
     emptyTitle: "No groups configured",
     createLabel: "Create group",
     statusOptions: statusOptions("active", "inactive"),
@@ -114,7 +114,7 @@ const sections: Record<string, SectionDefinition> = {
   acl: {
     endpoint: "/acl-policies",
     title: "ACL Policies",
-    description: "Materialize allowed and denied principal tokens onto governed documents.",
+    description: "Materialize allowed and denied principal tokens onto governed Items and Qdrant.",
     emptyTitle: "No ACL policies configured",
     createLabel: "Create policy",
     statusOptions: statusOptions("active", "inactive"),
@@ -154,7 +154,7 @@ function OverviewPage() {
   const evidence = [
     { label: "Active users", value: metrics.active_users, icon: Users },
     { label: "Data sources", value: metrics.active_datasources, icon: Database },
-    { label: "Documents", value: metrics.documents, icon: FileText },
+    { label: "Items", value: metrics.items, icon: FileText },
     { label: "Open attention", value: Object.values(attention).reduce((sum, value) => sum + value, 0), icon: CircleAlert },
   ];
   return (
@@ -223,7 +223,7 @@ function SpacesPage() {
   }
   return (
     <div className="mx-auto min-w-0 w-full max-w-5xl">
-      <PageHeader title="Spaces" description="The current identity model permits one governed tenant membership per user." actions={<Button icon={<RefreshCw aria-hidden="true" className="h-4 w-4" />} variant="secondary" onClick={query.reload}>Refresh</Button>} />
+      <PageHeader title="Spaces" description="Users may hold independent governed memberships in multiple tenant workspaces." actions={<Button icon={<RefreshCw aria-hidden="true" className="h-4 w-4" />} variant="secondary" onClick={query.reload}>Refresh</Button>} />
       <Card>
         <CardHeader className="flex items-center justify-between gap-3"><div><h2 className="text-base font-semibold text-[var(--text)]">{space.name}</h2><p className="mt-0.5 font-mono text-xs text-[var(--text-muted)]">{space.code} · {space.id}</p></div><Button variant="secondary" onClick={() => setEditing(true)}>Edit profile</Button></CardHeader>
         <CardBody className="grid gap-4 sm:grid-cols-3">
@@ -298,8 +298,8 @@ function ResourceActions({ reload, row, section }: { reload: () => void; row: Ad
   if (section === "ingestion/jobs") {
     return <div className="flex justify-end gap-1">{["pending", "running"].includes(row.status) && action("Cancel", `/ingestion/jobs/${row.id}/cancel`, "POST", undefined, "danger")}{["failed", "cancelled"].includes(row.status) && action("Retry", `/ingestion/jobs/${row.id}/retry`)}</div>;
   }
-  if (section === "documents") {
-    return <div className="flex justify-end gap-1">{(row.indexing_status === "failed" || row.lifecycle_status === "failed") && action("Retry", `/documents/${row.id}/retry`)}{row.lifecycle_status === "active" && action("Hide", `/documents/${row.id}`, "PATCH", { lifecycle_status: "hidden" })}{row.lifecycle_status === "hidden" && action("Restore", `/documents/${row.id}`, "PATCH", { lifecycle_status: "active" })}</div>;
+  if (section === "items") {
+    return <div className="flex justify-end gap-1">{row.status === "failed" && action("Retry", `/items/${row.id}/retry`)}{action("Delete", `/items/${row.id}`, "DELETE", undefined, "danger")}</div>;
   }
   if (["users", "groups", "roles"].includes(section)) {
     const next = row.status === "active" ? "inactive" : "active";
@@ -352,8 +352,8 @@ function CreateFields({ dependencies, section }: { dependencies: Record<string, 
   if (section === "users") return <><Field name="email" label="Email" type="email" /><Field name="display_name" label="Display name" /><FormField label="Role" htmlFor="new-user-role" required><Select id="new-user-role" name="role_id" required placeholder="Select a role" options={(dependencies.roles ?? []).map((role) => ({ value: role.id, label: `${role.display_name} (${role.code})` }))} /></FormField><Field name="group_ids" label="Group IDs" helper="Optional comma-separated group UUIDs." /></>;
   if (section === "roles") return <><Field name="code" label="Role code" /><Field name="display_name" label="Display name" /><Field name="permission_codes" label="Permission codes" helper="Comma-separated application capabilities, for example knowledge.read, source.manage." /></>;
   if (section === "groups") return <><Field name="code" label="Group code" /><Field name="display_name" label="Display name" /><Field name="description" label="Description" required={false} /><Field name="permission_codes" label="Permission codes" helper="Optional comma-separated capabilities contributed by this group." required={false} /></>;
-  if (section === "access-requests") return <><FormField label="Requester" htmlFor="new-request-user" required><Select id="new-request-user" name="requester_user_id" required placeholder="Select a user" options={(dependencies.users ?? []).map((user) => ({ value: user.id, label: user.display_name ? `${user.display_name} · ${user.email}` : user.email }))} /></FormField><FormField label="Resource type" htmlFor="new-request-type" required><Select id="new-request-type" name="resource_type" options={[{ value: "document", label: "Document" }, { value: "group", label: "Group" }, { value: "role", label: "Role" }]} /></FormField><Field name="resource_id" label="Resource UUID" /><Field name="access_type" label="Access type" defaultValue="read" /><Field name="reason" label="Reason" required={false} /></>;
-  if (section === "acl") return <><Field name="name" label="Policy name" /><FormField label="Document" htmlFor="new-policy-document" required><Select id="new-policy-document" name="resource_id" required placeholder="Select a document" options={(dependencies.documents ?? []).map((document) => ({ value: document.id, label: document.title ?? document.id }))} /></FormField><Field name="allowed_principal_tokens" label="Allowed principals" helper="Comma-separated tokens such as group:finance or email:user@example.com." /><Field name="denied_principal_tokens" label="Denied principals" helper="Optional comma-separated deny tokens." required={false} /></>;
+  if (section === "access-requests") return <><FormField label="Requester" htmlFor="new-request-user" required><Select id="new-request-user" name="requester_user_id" required placeholder="Select a user" options={(dependencies.users ?? []).map((user) => ({ value: user.id, label: user.display_name ? `${user.display_name} · ${user.email}` : user.email }))} /></FormField><FormField label="Resource type" htmlFor="new-request-type" required><Select id="new-request-type" name="resource_type" options={[{ value: "item", label: "Item" }, { value: "group", label: "Group" }, { value: "role", label: "Role" }]} /></FormField><Field name="resource_id" label="Resource UUID" /><Field name="access_type" label="Access type" defaultValue="read" /><Field name="reason" label="Reason" required={false} /></>;
+  if (section === "acl") return <><Field name="name" label="Policy name" /><FormField label="Item" htmlFor="new-policy-item" required><Select id="new-policy-item" name="resource_id" required placeholder="Select an Item" options={(dependencies.items ?? []).map((item) => ({ value: item.id, label: item.title ?? item.id }))} /></FormField><Field name="allowed_principal_tokens" label="Allowed principals" helper="Comma-separated tokens such as group:finance or email:user@example.com." /><Field name="denied_principal_tokens" label="Denied principals" helper="Optional comma-separated deny tokens." required={false} /></>;
   return null;
 }
 
@@ -368,7 +368,7 @@ function useCreateDependencies(open: boolean, section: string) {
     const requests: [string, string][] = [];
     if (section === "users") requests.push(["roles", "/roles?page_size=100&status=active"]);
     if (section === "access-requests") requests.push(["users", "/users?page_size=100&status=active"]);
-    if (section === "acl") requests.push(["documents", "/documents?page_size=100&lifecycle_status=active"]);
+    if (section === "acl") requests.push(["items", "/items?page_size=100&status=ready"]);
     let active = true;
     Promise.all(requests.map(async ([key, path]) => [key, (await adminRequest<PaginatedResult>(path)).items] as const)).then((entries) => { if (active) setDependencies(Object.fromEntries(entries)); }).catch(() => { if (active) setDependencies({}); });
     return () => { active = false; };
@@ -383,14 +383,14 @@ function createPayload(section: string, form: FormData): { endpoint: string; pay
   if (section === "roles") return { endpoint: "/roles", payload: { code: value("code"), display_name: value("display_name"), permission_codes: list("permission_codes") } };
   if (section === "groups") return { endpoint: "/groups", payload: { code: value("code"), display_name: value("display_name"), description: value("description") || undefined, permission_codes: list("permission_codes") } };
   if (section === "access-requests") return { endpoint: "/access-requests", payload: { requester_user_id: value("requester_user_id"), resource_type: value("resource_type"), resource_id: value("resource_id"), access_type: value("access_type"), reason: value("reason") || undefined } };
-  if (section === "acl") return { endpoint: "/acl-policies", payload: { name: value("name"), resource_type: "document", resource_id: value("resource_id"), allowed_principal_tokens: list("allowed_principal_tokens"), denied_principal_tokens: list("denied_principal_tokens") } };
+  if (section === "acl") return { endpoint: "/acl-policies", payload: { name: value("name"), resource_type: "item", resource_id: value("resource_id"), allowed_principal_tokens: list("allowed_principal_tokens"), denied_principal_tokens: list("denied_principal_tokens") } };
   throw new Error("This resource cannot be created from the current Admin screen.");
 }
 
 function columnsFor(section: string): Column<AdminRow>[] {
   const id = { key: "id", label: "ID", width: 112, render: (row: AdminRow) => <code className="font-mono text-[0.6875rem] text-[var(--text-muted)]" title={row.id}>{shortId(row.id)}</code> };
-  if (section === "ingestion/jobs") return [{ key: "datasource", label: "Data source", render: (row) => <Identity primary={row.datasource?.display_name ?? "Unknown source"} secondary={row.scope?.display_name ?? "Unknown scope"} /> }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "progress", label: "Indexed", render: (row) => `${row.indexed_document_count}/${row.discovered_document_count}` }, { key: "generation", label: "Generation", align: "right" }, { key: "created_at", label: "Created", render: (row) => formatDate(row.created_at) }, id];
-  if (section === "documents") return [{ key: "title", label: "Document", sortable: true, render: (row) => <Identity primary={row.title ?? "Untitled document"} secondary={`${titleCase(row.origin)} · ${formatBytes(row.size_bytes)}`} /> }, { key: "datasource", label: "Source", render: (row) => row.datasource?.display_name ?? "Tenant created" }, { key: "indexing_status", label: "Indexing", render: (row) => <StatusBadge status={row.indexing_status} /> }, { key: "lifecycle_status", label: "Lifecycle", render: (row) => <StatusBadge status={row.lifecycle_status} /> }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
+  if (section === "ingestion/jobs") return [{ key: "datasource", label: "Data source", render: (row) => <Identity primary={row.datasource?.display_name ?? "Unknown source"} secondary={row.scope?.display_name ?? "Unknown scope"} /> }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "progress", label: "Processed", render: (row) => `${row.processed_item_count}/${row.discovered_item_count}` }, { key: "written_chunk_count", label: "Chunks", align: "right" }, { key: "created_at", label: "Created", render: (row) => formatDate(row.created_at) }, id];
+  if (section === "items") return [{ key: "title", label: "Item", sortable: true, render: (row) => <Identity primary={row.title ?? "Untitled Item"} secondary={`${titleCase(row.item_type)}${row.document_kind ? ` · ${titleCase(row.document_kind)}` : ""} · ${formatBytes(row.size_bytes)}`} /> }, { key: "datasource", label: "Source", render: (row) => row.datasource?.display_name ?? "Tenant upload" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "indexed", label: "Indexed", render: (row) => row.indexed ? "Yes" : "No" }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
   if (section === "users") return [{ key: "display_name", label: "User", sortable: true, render: (row) => <Identity primary={row.display_name ?? row.email} secondary={row.display_name ? row.email : "No display name"} /> }, { key: "role", label: "Role", render: (row) => row.membership?.role?.display_name ?? "No role" }, { key: "groups", label: "Groups", render: (row) => row.groups?.length ? row.groups.map((group: AdminRow) => group.display_name).join(", ") : "None" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "last_login_at", label: "Last login", render: (row) => formatDate(row.last_login_at) }, id];
   if (section === "groups") return [{ key: "display_name", label: "Group", sortable: true, render: (row) => <Identity primary={row.display_name} secondary={row.principal_token} /> }, { key: "member_count", label: "Members", align: "right" }, { key: "permission_codes", label: "Permissions", render: (row) => row.permission_codes?.length ?? 0 }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
   if (section === "access-requests") return [{ key: "requester", label: "Requester", render: (row) => <Identity primary={row.requester?.display_name ?? row.requester?.email} secondary={row.requester?.email} /> }, { key: "resource_type", label: "Resource", render: (row) => <Identity primary={titleCase(row.resource_type)} secondary={shortId(row.resource_id)} /> }, { key: "access_type", label: "Access" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "created_at", label: "Requested", render: (row) => formatDate(row.created_at) }, id];

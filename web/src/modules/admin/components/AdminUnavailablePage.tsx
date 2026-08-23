@@ -30,9 +30,9 @@ const sectionContent = {
     description: "Ingestion jobs and indexing progress require administration APIs that are not available in this deployment.",
     icon: DatabaseZap,
   },
-  documents: {
-    title: "Document management is not connected",
-    description: "Document inventory, processing status, retry actions, and source associations require administration APIs that are not available in this deployment.",
+  items: {
+    title: "Item management is not connected",
+    description: "Source Item inventory, processing status, retry actions, and connector lineage require administration APIs that are not available in this deployment.",
     icon: FileText,
   },
   spaces: {

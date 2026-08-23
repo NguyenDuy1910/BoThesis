@@ -12,17 +12,14 @@ from datetime import datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from bothesis.db.models import Document
+from bothesis.db.models import Item, ItemUpload
 from bothesis.document_index.raw_storage import PresignedRequest
-from bothesis.connector.protocol import Chunk, CitationSpan, DocumentItem
+from bothesis.connector.protocol import Chunk, DocumentItem
 
 ACTIVE_STATUS = "active"
 INACTIVE_STATUS = "inactive"
 ADMIN_PERMISSION = "admin"
-LOCAL_DOCUMENT_ORIGINS = frozenset({"upload", "generated"})
-MESSAGE_DOCUMENT_RELATIONS = frozenset({"attachment", "reference", "output"})
+MESSAGE_ITEM_RELATIONS = frozenset({"attachment", "reference", "output"})
 KNOWLEDGE_READ_PERMISSION = "knowledge.read"
 SOURCE_MANAGE_PERMISSION = "source.manage"
 USER_MANAGE_PERMISSION = "user.manage"
@@ -31,12 +28,12 @@ GROUP_MANAGE_PERMISSION = "group.manage"
 TENANT_MANAGE_PERMISSION = "tenant.manage"
 ACCESS_MANAGE_PERMISSION = "access.manage"
 AUDIT_READ_PERMISSION = "audit.read"
-DOCUMENT_MANAGE_PERMISSION = "document.manage"
+ITEM_MANAGE_PERMISSION = "item.manage"
 ADMIN_PERMISSION_CATALOG = (
     (ADMIN_PERMISSION, "Full administration access"),
     (ACCESS_MANAGE_PERMISSION, "Review access requests and manage resource access"),
     (AUDIT_READ_PERMISSION, "Read tenant administration audit events"),
-    (DOCUMENT_MANAGE_PERMISSION, "Manage tenant document lifecycle and indexing"),
+    (ITEM_MANAGE_PERMISSION, "Manage canonical Item lifecycle and indexing"),
     (GROUP_MANAGE_PERMISSION, "Manage groups and group membership"),
     (KNOWLEDGE_READ_PERMISSION, "Read tenant knowledge through permission filters"),
     (ROLE_MANAGE_PERMISSION, "Manage roles and permission assignments"),
@@ -44,9 +41,7 @@ ADMIN_PERMISSION_CATALOG = (
     (TENANT_MANAGE_PERMISSION, "Manage tenant profile and settings"),
     (USER_MANAGE_PERMISSION, "Manage users and tenant membership"),
 )
-UPLOAD_STATUSES = frozenset({"not_applicable", "pending", "available", "failed"})
 DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
-DEFAULT_MAX_DATABASE_BLOB_BYTES = 20 * 1024 * 1024
 DEFAULT_UPLOAD_URL_SECONDS = 600
 DEFAULT_PROCESSING_MAX_BYTES = 100 * 1024 * 1024
 
@@ -141,25 +136,17 @@ class ChatDocumentSource(Protocol):
 
     async def canonicalize(
         self,
-        document: Document,
+        document: Item,
         *,
         access: AuthContext,
     ) -> CanonicalDocumentContent: ...
 
     async def direct_file_data(
         self,
-        document: Document,
+        document: Item,
         *,
         expires_seconds: int,
     ) -> str: ...
-
-    async def soft_delete_raw(
-        self,
-        document_id: UUID,
-        *,
-        session: AsyncSession,
-    ) -> None: ...
-
 
 class DocumentServiceError(Exception):
     """Base exception for durable document service failures."""
@@ -171,58 +158,6 @@ class DocumentNotFoundError(DocumentServiceError):
 
 class InvalidDocumentStateError(DocumentServiceError):
     """Raised when a lifecycle or lineage transition is invalid."""
-
-
-@dataclass(frozen=True, slots=True)
-class DocumentChunkInput:
-    """Canonical chunk content written to PostgreSQL before vector indexing."""
-
-    content: str
-    chunk_id: str | None = None
-    content_type: str = "text"
-    element_id: str | None = None
-    start_offset: int | None = None
-    end_offset: int | None = None
-    token_count: int | None = None
-    start_page_number: int | None = None
-    end_page_number: int | None = None
-    heading_path: tuple[str, ...] | None = None
-    citation_spans: tuple[CitationSpan, ...] = ()
-    metadata: Mapping[str, Any] | None = None
-
-    @classmethod
-    def from_chunk(cls, chunk: Chunk) -> "DocumentChunkInput":
-        """Persist one connector-owned chunk without changing its evidence."""
-
-        spans = chunk.citation.spans
-        pages = [span.page for span in spans if span.page is not None]
-        first_span = spans[0] if spans else None
-        return cls(
-            content=chunk.chunk_text,
-            chunk_id=chunk.id,
-            content_type=chunk.content_type,
-            element_id=first_span.element_id if first_span else None,
-            start_offset=first_span.start_offset if first_span else None,
-            end_offset=first_span.end_offset if first_span else None,
-            token_count=max(1, (len(chunk.chunk_text) + 3) // 4),
-            start_page_number=min(pages) if pages else None,
-            end_page_number=max(pages) if pages else None,
-            heading_path=tuple(chunk.section_path),
-            citation_spans=spans,
-            metadata={
-                **(
-                    {"citation_section": chunk.citation.section}
-                    if chunk.citation.section
-                    else {}
-                ),
-                "citation_section_path": list(chunk.citation.section_path),
-                **(
-                    {"citation_anchor": chunk.citation.anchor}
-                    if chunk.citation.anchor
-                    else {}
-                ),
-            },
-        )
 
 
 class UploadServiceError(RuntimeError):
@@ -243,13 +178,14 @@ class UploadValidationError(UploadServiceError):
 
 @dataclass(frozen=True, slots=True)
 class UploadTarget:
-    mode: Literal["presigned", "api"]
+    mode: Literal["presigned"]
     request: PresignedRequest
 
 
 @dataclass(frozen=True, slots=True)
 class UploadStart:
-    document: Document
+    item: Item
+    upload: ItemUpload
     upload_required: bool
     target: UploadTarget | None
 
@@ -317,14 +253,15 @@ def timestamp(value: datetime | None) -> str | None:
 # Import primary service classes only after their contracts are defined. The
 # service modules import these contracts from this package during initialization.
 from bothesis.services.auth import AuthService  # noqa: E402
-from bothesis.services.document import DocumentService  # noqa: E402
+from bothesis.services.item import ItemService  # noqa: E402
 from bothesis.services.conversation import ConversationService  # noqa: E402
 from bothesis.services.upload import UploadService  # noqa: E402
 from bothesis.services.audit import AuditService  # noqa: E402
+from bothesis.services.connector_credential import ConnectorCredentialService  # noqa: E402
 from bothesis.services.datasources import DatasourceService  # noqa: E402
 from bothesis.services.access_requests import AccessRequestService  # noqa: E402
 from bothesis.services.acl import AclService  # noqa: E402
-from bothesis.services.admin_documents import AdminDocumentService  # noqa: E402
+from bothesis.services.admin_items import AdminItemService  # noqa: E402
 from bothesis.services.chat_document_source import ChatDocumentSourceService  # noqa: E402
 from bothesis.services.groups import GroupService  # noqa: E402
 from bothesis.services.roles import RoleService  # noqa: E402
@@ -344,7 +281,7 @@ __all__ = [
     "AccessRequestService",
     "AclService",
     "AdminConflictError",
-    "AdminDocumentService",
+    "AdminItemService",
     "AdminExternalUnavailableError",
     "AdminNotFoundError",
     "AdminService",
@@ -363,15 +300,13 @@ __all__ = [
     "ChatDocumentSourceService",
     "ConversationService",
     "ConnectorSyncService",
-    "DEFAULT_MAX_DATABASE_BLOB_BYTES",
+    "ConnectorCredentialService",
     "DEFAULT_MAX_UPLOAD_BYTES",
     "DEFAULT_PROCESSING_MAX_BYTES",
     "DEFAULT_UPLOAD_URL_SECONDS",
-    "DocumentChunkInput",
     "DocumentNotFoundError",
-    "DocumentService",
     "DocumentServiceError",
-    "DOCUMENT_MANAGE_PERMISSION",
+    "ITEM_MANAGE_PERMISSION",
     "DatasourceService",
     "GROUP_MANAGE_PERMISSION",
     "GroupService",
@@ -380,15 +315,14 @@ __all__ = [
     "IdentityNotFoundError",
     "INACTIVE_STATUS",
     "InvalidDocumentStateError",
+    "ItemService",
     "KNOWLEDGE_READ_PERMISSION",
-    "LOCAL_DOCUMENT_ORIGINS",
-    "MESSAGE_DOCUMENT_RELATIONS",
+    "MESSAGE_ITEM_RELATIONS",
     "ROLE_MANAGE_PERMISSION",
     "RoleService",
     "SOURCE_MANAGE_PERMISSION",
     "TENANT_MANAGE_PERMISSION",
     "TenantService",
-    "UPLOAD_STATUSES",
     "UploadConflictError",
     "UploadService",
     "UploadServiceError",

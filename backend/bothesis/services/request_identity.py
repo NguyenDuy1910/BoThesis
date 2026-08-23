@@ -43,7 +43,17 @@ async def resolve_auth_context(
     except (TypeError, ValueError) as exc:
         raise AuthorizationError("development user ID must be a UUID") from exc
 
-    context = await AuthService(session).get_context(user_id)
+    tenant_id: UUID | None = None
+    if raw_tenant_id is not None:
+        try:
+            tenant_id = (
+                raw_tenant_id
+                if isinstance(raw_tenant_id, UUID)
+                else UUID(raw_tenant_id)
+            )
+        except (TypeError, ValueError) as exc:
+            raise AuthorizationError("tenant ID must be a UUID") from exc
+    context = await AuthService(session).get_context(user_id, tenant_id=tenant_id)
     _validate_tenant_claim(context, raw_tenant_id)
     return context
 

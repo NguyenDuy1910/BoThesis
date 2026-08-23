@@ -11,17 +11,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import (
     AccessRequest,
-    Document,
+    Item,
     Group,
     GroupMembership,
     Role,
     TenantMembership,
     User,
 )
+from bothesis.document_index.vector_store import VectorStore
 from bothesis.services import (
     ACCESS_MANAGE_PERMISSION,
     ACTIVE_STATUS,
     AdminConflictError,
+    AdminExternalUnavailableError,
     AdminNotFoundError,
     AdminValidationError,
     AuditService,
@@ -33,7 +35,7 @@ from bothesis.services import (
     timestamp,
 )
 
-_RESOURCE_TYPES = frozenset({"document", "group", "role"})
+_RESOURCE_TYPES = frozenset({"item", "group", "role"})
 
 
 class AccessRequestService:
@@ -44,10 +46,12 @@ class AccessRequestService:
         session: AsyncSession,
         *,
         auth: AuthService | None = None,
+        vector_store: VectorStore | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._session = session
         self._auth = auth or AuthService(session)
+        self._vector_store = vector_store
         self._audit = audit or AuditService(session)
 
     async def list_requests(
@@ -272,25 +276,34 @@ class AccessRequestService:
         self, tenant_id: UUID, requester: User, request: AccessRequest
     ) -> None:
         resource_uuid = _uuid_resource(request.resource_id)
-        if request.resource_type == "document":
-            document = await self._session.scalar(
-                select(Document)
+        if request.resource_type == "item":
+            item = await self._session.scalar(
+                select(Item)
                 .where(
-                    Document.id == resource_uuid,
-                    Document.tenant_id == tenant_id,
-                    Document.lifecycle_status != "deleted",
-                    Document.deleted_at.is_(None),
+                    Item.id == resource_uuid,
+                    Item.tenant_id == tenant_id,
+                    Item.status != "deleted",
+                    Item.deleted_at.is_(None),
                 )
                 .with_for_update()
             )
-            if document is None:
-                raise AdminNotFoundError("requested document was not found")
+            if item is None:
+                raise AdminNotFoundError("requested item was not found")
             token = f"email:{requester.email.casefold()}"
-            document.allowed_principal_tokens = sorted(
-                {*document.allowed_principal_tokens, token}
+            item.allowed_principal_tokens = sorted(
+                {*item.allowed_principal_tokens, token}
             )
-            document.denied_principal_tokens = sorted(
-                set(document.denied_principal_tokens) - {token}
+            item.denied_principal_tokens = sorted(
+                set(item.denied_principal_tokens) - {token}
+            )
+            if self._vector_store is None:
+                raise AdminExternalUnavailableError(
+                    "Qdrant is required to grant access to an indexed Item"
+                )
+            await self._vector_store.sync_document_acl(
+                str(item.id),
+                item.allowed_principal_tokens,
+                denied_reader_ids=item.denied_principal_tokens,
             )
             return
         if request.resource_type == "group":
@@ -370,13 +383,13 @@ class AccessRequestService:
         self, tenant_id: UUID, resource_type: str, resource_id: str
     ) -> None:
         resource_uuid = _uuid_resource(resource_id)
-        model = {"document": Document, "group": Group, "role": Role}[resource_type]
+        model = {"item": Item, "group": Group, "role": Role}[resource_type]
         statement = select(model.id).where(model.id == resource_uuid)
-        if model is Document:
+        if model is Item:
             statement = statement.where(
-                Document.tenant_id == tenant_id,
-                Document.lifecycle_status != "deleted",
-                Document.deleted_at.is_(None),
+                Item.tenant_id == tenant_id,
+                Item.status != "deleted",
+                Item.deleted_at.is_(None),
             )
         elif model is Group:
             statement = statement.where(

@@ -33,6 +33,15 @@ class ConnectorIndexSink(Protocol):
     this boundary.
     """
 
+    async def write_item(
+        self,
+        item: AnyItem,
+        *,
+        tenant_id: str,
+        connector_id: str | int,
+    ) -> object:
+        """Persist one canonical Item that does not require indexing."""
+
     async def write(
         self,
         item: DocumentItem,
@@ -133,6 +142,21 @@ class ConnectorPipeline:
             await self._connector.discover_changes(checkpoint, scope)
         )
         failures: list[PipelineFailure] = []
+        hierarchy: tuple[AnyItem, ...] = ()
+        if self._config.fetch_hierarchy:
+            try:
+                hierarchy = tuple(await self._connector.fetch_hierarchy(scope))
+                for item in sorted(
+                    hierarchy,
+                    key=lambda value: (value.hierarchy.depth, value.id),
+                ):
+                    await self._sink.write_item(
+                        item,
+                        tenant_id=self._tenant_id,
+                        connector_id=self._connector_id,
+                    )
+            except Exception as exc:
+                failures.append(_failure("<scope>", "hierarchy", exc))
         deleted_items = 0
         replaced_items = 0
         processed_items = 0
@@ -170,13 +194,6 @@ class ConnectorPipeline:
                     processed_items += 1
                 except Exception as exc:
                     failures.append(_failure(change.item_id, "process", exc))
-
-        hierarchy: tuple[AnyItem, ...] = ()
-        if self._config.fetch_hierarchy:
-            try:
-                hierarchy = tuple(await self._connector.fetch_hierarchy(scope))
-            except Exception as exc:
-                failures.append(_failure("<scope>", "hierarchy", exc))
 
         advanced = not failures
         result = PipelineResult(

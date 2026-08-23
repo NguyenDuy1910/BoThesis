@@ -6,6 +6,7 @@ import pytest
 
 from bothesis.connector.base import BaseSourceConnector
 from bothesis.connector.protocol import (
+    AnyItem,
     Chunk,
     CitationInfo,
     CitationSpan,
@@ -31,8 +32,20 @@ from bothesis.connector.protocol import (
 
 class RecordingSink:
     def __init__(self) -> None:
+        self.items: list[AnyItem] = []
         self.writes: list[tuple[DocumentItem, tuple[Chunk, ...]]] = []
         self.deletes: list[tuple[str, str | int, str]] = []
+
+    async def write_item(
+        self,
+        item: AnyItem,
+        *,
+        tenant_id: str,
+        connector_id: str | int,
+    ) -> object:
+        del tenant_id, connector_id
+        self.items.append(item)
+        return item.id
 
     async def write(
         self,
@@ -169,6 +182,7 @@ async def test_pipeline_batches_payloads_bounds_fetches_and_advances_checkpoint(
     assert result.checkpoint_advanced is True
     assert result.checkpoint == SourceCheckpoint(cursor="complete")
     assert connector.max_active_fetches == 2
+    assert [item.id for item in sink.items] == ["root"]
     assert [len(chunks) for _, chunks in sink.writes] == [1, 1]
     assert sink.deletes == [
         ("tenant-1", "connector-1", "doc-old"),

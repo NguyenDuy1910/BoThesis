@@ -1,8 +1,7 @@
-"""PostgreSQL ORM models for the BoThesis durable data model.
+"""PostgreSQL ORM models for BoThesis durable business state.
 
-The table definitions in this module mirror ``design.dbml``. PostgreSQL stores
-durable business state and canonical processed chunks; raw objects, vectors,
-ephemeral state, and telemetry remain in their dedicated systems.
+Raw objects belong to S3-compatible storage and retrieval chunks belong to
+Qdrant. This module intentionally contains neither binary nor chunk content.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
-    LargeBinary,
     MetaData,
     String,
     Text,
@@ -105,9 +103,8 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     preferences: Mapped[JsonObject] = _json_object_column()
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    tenant_membership: Mapped[TenantMembership | None] = relationship(
+    tenant_memberships: Mapped[list[TenantMembership]] = relationship(
         back_populates="user",
-        uselist=False,
     )
     conversations: Mapped[list[Conversation]] = relationship(back_populates="user")
     memories: Mapped[list[Memory]] = relationship(back_populates="user")
@@ -115,13 +112,13 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="created_by_user",
         foreign_keys="Connector.created_by_user_id",
     )
-    owned_documents: Mapped[list[Document]] = relationship(
+    owned_items: Mapped[list[Item]] = relationship(
         back_populates="owner_user",
-        foreign_keys="Document.owner_user_id",
+        foreign_keys="Item.owner_user_id",
     )
-    created_documents: Mapped[list[Document]] = relationship(
+    created_items: Mapped[list[Item]] = relationship(
         back_populates="created_by_user",
-        foreign_keys="Document.created_by_user_id",
+        foreign_keys="Item.created_by_user_id",
     )
     principal_tokens: Mapped[list[UserPrincipalToken]] = relationship(
         back_populates="user"
@@ -158,7 +155,7 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     roles: Mapped[list[Role]] = relationship(back_populates="tenant")
     memberships: Mapped[list[TenantMembership]] = relationship(back_populates="tenant")
     connectors: Mapped[list[Connector]] = relationship(back_populates="tenant")
-    documents: Mapped[list[Document]] = relationship(back_populates="tenant")
+    items: Mapped[list[Item]] = relationship(back_populates="tenant")
     groups: Mapped[list[Group]] = relationship(back_populates="tenant")
     access_requests: Mapped[list[AccessRequest]] = relationship(
         back_populates="tenant"
@@ -202,7 +199,7 @@ class TenantMembership(TimestampMixin, Base):
     tenant_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("tenants.id"),
-        nullable=False,
+        primary_key=True,
     )
     role_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -215,7 +212,7 @@ class TenantMembership(TimestampMixin, Base):
     joined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    user: Mapped[User] = relationship(back_populates="tenant_membership")
+    user: Mapped[User] = relationship(back_populates="tenant_memberships")
     tenant: Mapped[Tenant] = relationship(back_populates="memberships")
     role: Mapped[Role] = relationship(back_populates="memberships")
 
@@ -431,7 +428,7 @@ class Message(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     sourced_memories: Mapped[list[Memory]] = relationship(
         back_populates="source_message"
     )
-    document_links: Mapped[list[MessageDocument]] = relationship(
+    item_links: Mapped[list[MessageItem]] = relationship(
         back_populates="message"
     )
 
@@ -487,6 +484,11 @@ class Connector(TimestampMixin, Base):
     __table_args__ = (
         Index(None, "tenant_id", "provider", "status"),
         UniqueConstraint("tenant_id", "display_name"),
+        CheckConstraint(
+            "(owner_type = 'tenant' AND owner_user_id IS NULL) OR "
+            "(owner_type = 'user' AND owner_user_id IS NOT NULL)",
+            name="connector_owner_matches_type",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
@@ -495,10 +497,15 @@ class Connector(TimestampMixin, Base):
         ForeignKey("tenants.id"),
         nullable=False,
     )
+    owner_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="tenant", server_default="tenant"
+    )
+    owner_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id")
+    )
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     settings: Mapped[JsonObject] = _json_object_column()
-    credential_secret_ref: Mapped[str | None] = mapped_column(String(512))
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
     )
@@ -513,9 +520,27 @@ class Connector(TimestampMixin, Base):
         foreign_keys=[created_by_user_id],
     )
     scopes: Mapped[list[ConnectorScope]] = relationship(back_populates="connector")
+    credential: Mapped[ConnectorCredential | None] = relationship(
+        back_populates="connector", uselist=False
+    )
+    items: Mapped[list[Item]] = relationship(back_populates="connector")
     principal_tokens: Mapped[list[UserPrincipalToken]] = relationship(
         back_populates="connector"
     )
+
+
+class ConnectorCredential(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "connector_credentials"
+
+    connector_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("connectors.id"), nullable=False, unique=True
+    )
+    credential_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    encrypted_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    key_version: Mapped[str | None] = mapped_column(String(64))
+
+    connector: Mapped[Connector] = relationship(back_populates="credential")
 
 
 class ConnectorScope(TimestampMixin, Base):
@@ -537,12 +562,6 @@ class ConnectorScope(TimestampMixin, Base):
     settings: Mapped[JsonObject] = _json_object_column()
     sync_checkpoint: Mapped[JsonObject] = _json_object_column()
     sync_schedule: Mapped[JsonObject] = _json_object_column()
-    active_generation: Mapped[int] = mapped_column(
-        BigInteger,
-        nullable=False,
-        default=0,
-        server_default="0",
-    )
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
     )
@@ -551,14 +570,13 @@ class ConnectorScope(TimestampMixin, Base):
 
     connector: Mapped[Connector] = relationship(back_populates="scopes")
     sync_runs: Mapped[list[SyncRun]] = relationship(back_populates="connector_scope")
-    documents: Mapped[list[Document]] = relationship(back_populates="connector_scope")
+    items: Mapped[list[Item]] = relationship(back_populates="connector_scope")
 
 
 class SyncRun(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "sync_runs"
     __table_args__ = (
         Index(None, "connector_scope_id", "created_at"),
-        Index(None, "connector_scope_id", "generation"),
         Index(None, "status", "created_at"),
     )
 
@@ -567,18 +585,20 @@ class SyncRun(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         ForeignKey("connector_scopes.id"),
         nullable=False,
     )
-    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     trigger_type: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending", server_default="pending"
     )
-    discovered_document_count: Mapped[int] = mapped_column(
+    discovered_item_count: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
     )
-    indexed_document_count: Mapped[int] = mapped_column(
+    processed_item_count: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
     )
-    deleted_document_count: Mapped[int] = mapped_column(
+    written_chunk_count: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    deleted_item_count: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
     )
     error_code: Mapped[str | None] = mapped_column(String(128))
@@ -589,212 +609,158 @@ class SyncRun(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     connector_scope: Mapped[ConnectorScope] = relationship(back_populates="sync_runs")
 
 
-class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    __tablename__ = "documents"
+class Item(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "items"
     __table_args__ = (
-        UniqueConstraint("connector_scope_id", "generation", "external_id"),
-        Index(None, "owner_user_id", "lifecycle_status"),
-        Index(None, "tenant_id", "lifecycle_status"),
-        Index(
-            None,
-            "connector_scope_id",
-            "generation",
-            "lifecycle_status",
-        ),
-        Index(None, "connector_scope_id", "generation", "indexing_status"),
-        Index(None, "owner_user_id", "upload_status"),
-        Index(None, "parent_document_id"),
-        UniqueConstraint("owner_user_id", "upload_idempotency_key"),
+        UniqueConstraint("connector_id", "external_id"),
+        Index(None, "tenant_id", "status"),
+        Index(None, "owner_user_id", "status"),
+        Index(None, "connector_scope_id", "status"),
+        Index(None, "parent_item_id"),
         CheckConstraint(
-            "(owner_user_id IS NOT NULL AND tenant_id IS NULL) OR "
-            "(owner_user_id IS NULL AND tenant_id IS NOT NULL)",
-            name="document_has_exactly_one_owner_scope",
+            "item_type IN ('collection', 'document', 'file')",
+            name="item_type_is_valid",
         ),
         CheckConstraint(
-            "connector_scope_id IS NULL OR "
-            "(tenant_id IS NOT NULL AND owner_user_id IS NULL "
-            "AND origin = 'external' AND external_id IS NOT NULL "
-            "AND generation IS NOT NULL)",
-            name="external_document_has_source_identity",
+            "(item_type = 'document' AND document_kind IS NOT NULL AND collection_kind IS NULL) OR "
+            "(item_type = 'collection' AND collection_kind IS NOT NULL AND document_kind IS NULL) OR "
+            "(item_type = 'file' AND document_kind IS NULL AND collection_kind IS NULL)",
+            name="item_kind_matches_type",
         ),
         CheckConstraint(
-            "connector_scope_id IS NOT NULL OR generation IS NULL",
-            name="local_document_has_no_generation",
-        ),
-        CheckConstraint(
-            "upload_status IN ('not_applicable', 'pending', 'available', 'failed')",
-            name="document_upload_status_is_valid",
+            "status IN ('pending', 'processing', 'ready', 'failed', 'unsupported', 'deleted')",
+            name="item_status_is_valid",
         ),
         CheckConstraint(
             "content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'",
-            name="document_content_sha256_is_valid",
+            name="item_content_sha256_is_valid",
         ),
     )
 
-    owner_user_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("users.id"),
+    item_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    document_kind: Mapped[str | None] = mapped_column(String(32))
+    collection_kind: Mapped[str | None] = mapped_column(String(32))
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
     )
-    tenant_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("tenants.id"),
+    owner_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id")
+    )
+    connector_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("connectors.id")
     )
     connector_scope_id: Mapped[int | None] = mapped_column(
-        BigInteger,
-        ForeignKey("connector_scopes.id"),
+        BigInteger, ForeignKey("connector_scopes.id")
     )
-    generation: Mapped[int | None] = mapped_column(BigInteger)
     external_id: Mapped[str | None] = mapped_column(Text)
-    origin: Mapped[str] = mapped_column(String(16), nullable=False)
-    source_url: Mapped[str | None] = mapped_column(Text)
     external_version: Mapped[str | None] = mapped_column(Text)
     etag: Mapped[str | None] = mapped_column(Text)
-    external_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True)
+    external_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    parent_item_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("items.id")
     )
-    title: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text)
     mime_type: Mapped[str | None] = mapped_column(String(255))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
-    metadata_: Mapped[JsonObject] = mapped_column(
-        "metadata",
-        JSONB,
-        nullable=False,
-        default=dict,
-        server_default=text("'{}'::jsonb"),
-    )
-    raw_storage_key: Mapped[str | None] = mapped_column(Text)
-    upload_status: Mapped[str] = mapped_column(
-        String(16),
-        nullable=False,
-        default="not_applicable",
-        server_default="not_applicable",
-    )
+    storage_key: Mapped[str | None] = mapped_column(Text)
     content_sha256: Mapped[str | None] = mapped_column(String(64))
-    upload_idempotency_key: Mapped[str | None] = mapped_column(String(128))
-    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    parent_document_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("documents.id"),
-    )
     allowed_principal_tokens: Mapped[list[str]] = _text_array_column()
     denied_principal_tokens: Mapped[list[str]] = _text_array_column()
-    indexing_status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="none", server_default="none"
-    )
-    last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    lifecycle_status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="active", server_default="active"
-    )
-    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_by_user_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("users.id"),
-    )
-
-    owner_user: Mapped[User | None] = relationship(
-        back_populates="owned_documents",
-        foreign_keys=[owner_user_id],
-    )
-    tenant: Mapped[Tenant | None] = relationship(back_populates="documents")
-    connector_scope: Mapped[ConnectorScope | None] = relationship(
-        back_populates="documents"
-    )
-    parent_document: Mapped[Document | None] = relationship(
-        back_populates="child_documents",
-        foreign_keys=[parent_document_id],
-        remote_side="Document.id",
-    )
-    child_documents: Mapped[list[Document]] = relationship(
-        back_populates="parent_document",
-        foreign_keys=[parent_document_id],
-    )
-    created_by_user: Mapped[User | None] = relationship(
-        back_populates="created_documents",
-        foreign_keys=[created_by_user_id],
-    )
-    chunks: Mapped[list[DocumentChunk]] = relationship(back_populates="document")
-    message_links: Mapped[list[MessageDocument]] = relationship(
-        back_populates="document"
-    )
-    blob: Mapped[DocumentBlob | None] = relationship(
-        back_populates="document",
-        uselist=False,
-    )
-
-
-class DocumentChunk(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
-    __tablename__ = "document_chunks"
-    __table_args__ = (
-        UniqueConstraint("document_id", "chunk_index"),
-        Index(None, "document_id"),
-        Index(None, "document_id", "deleted_at"),
-    )
-
-    document_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("documents.id"),
-        nullable=False,
-    )
-    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    token_count: Mapped[int | None] = mapped_column(Integer)
-    start_page_number: Mapped[int | None] = mapped_column(Integer)
-    end_page_number: Mapped[int | None] = mapped_column(Integer)
-    heading_path: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
     metadata_: Mapped[JsonObject] = mapped_column(
-        "metadata",
-        JSONB,
-        nullable=False,
-        default=dict,
+        "metadata", JSONB, nullable=False, default=dict,
         server_default=text("'{}'::jsonb"),
     )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id")
+    )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    document: Mapped[Document] = relationship(back_populates="chunks")
+    owner_user: Mapped[User | None] = relationship(
+        back_populates="owned_items", foreign_keys=[owner_user_id]
+    )
+    created_by_user: Mapped[User | None] = relationship(
+        back_populates="created_items", foreign_keys=[created_by_user_id]
+    )
+    tenant: Mapped[Tenant] = relationship(back_populates="items")
+    connector: Mapped[Connector | None] = relationship(back_populates="items")
+    connector_scope: Mapped[ConnectorScope | None] = relationship(back_populates="items")
+    parent_item: Mapped[Item | None] = relationship(
+        back_populates="child_items", foreign_keys=[parent_item_id], remote_side="Item.id"
+    )
+    child_items: Mapped[list[Item]] = relationship(
+        back_populates="parent_item", foreign_keys=[parent_item_id]
+    )
+    upload: Mapped[ItemUpload | None] = relationship(back_populates="item", uselist=False)
+    message_links: Mapped[list[MessageItem]] = relationship(back_populates="item")
 
 
-class MessageDocument(CreatedAtMixin, Base):
-    __tablename__ = "message_documents"
+class ItemUpload(TimestampMixin, Base):
+    __tablename__ = "item_uploads"
     __table_args__ = (
-        Index(None, "document_id"),
+        UniqueConstraint("tenant_id", "owner_user_id", "idempotency_key"),
+        CheckConstraint(
+            "status IN ('pending', 'available', 'failed')",
+            name="item_upload_status_is_valid",
+        ),
+    )
+
+    item_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("items.id"), primary_key=True
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
+    )
+    owner_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    item: Mapped[Item] = relationship(back_populates="upload")
+
+
+class MessageItem(CreatedAtMixin, Base):
+    __tablename__ = "message_items"
+    __table_args__ = (
+        Index(None, "item_id"),
         Index(None, "message_id", "deleted_at"),
     )
 
     message_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("messages.id"),
-        primary_key=True,
+        PG_UUID(as_uuid=True), ForeignKey("messages.id"), primary_key=True
     )
-    document_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("documents.id"),
-        primary_key=True,
+    item_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("items.id"), primary_key=True
     )
-    relation_type: Mapped[str] = mapped_column(
-        String(16),
-        primary_key=True,
-    )
+    relation_type: Mapped[str] = mapped_column(String(16), primary_key=True)
     position: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=0,
-        server_default="0",
+        Integer, nullable=False, default=0, server_default="0"
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    message: Mapped[Message] = relationship(back_populates="document_links")
-    document: Mapped[Document] = relationship(back_populates="message_links")
+    message: Mapped[Message] = relationship(back_populates="item_links")
+    item: Mapped[Item] = relationship(back_populates="message_links")
 
 
 class UserPrincipalToken(CreatedAtMixin, Base):
     __tablename__ = "user_principal_tokens"
     __table_args__ = (
-        Index(None, "user_id"),
+        Index(None, "tenant_id", "user_id"),
         Index(None, "connector_id"),
         Index(None, "user_id", "deleted_at"),
     )
 
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tenants.id"), primary_key=True
+    )
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id"),
@@ -814,38 +780,22 @@ class UserPrincipalToken(CreatedAtMixin, Base):
     connector: Mapped[Connector | None] = relationship(
         back_populates="principal_tokens"
     )
-
-
-class DocumentBlob(CreatedAtMixin, Base):
-    __tablename__ = "document_blobs"
-
-    document_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("documents.id"),
-        primary_key=True,
-    )
-    raw_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    document: Mapped[Document] = relationship(back_populates="blob")
-
-
 __all__ = [
     "AccessRequest",
     "AclPolicy",
     "AuditLog",
     "Base",
     "Connector",
+    "ConnectorCredential",
     "ConnectorScope",
     "Conversation",
-    "Document",
-    "DocumentBlob",
-    "DocumentChunk",
     "Group",
     "GroupMembership",
+    "Item",
+    "ItemUpload",
     "Memory",
     "Message",
-    "MessageDocument",
+    "MessageItem",
     "Role",
     "SyncRun",
     "Tenant",

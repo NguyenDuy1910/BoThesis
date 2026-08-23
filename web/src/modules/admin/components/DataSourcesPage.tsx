@@ -545,7 +545,8 @@ function ConfluenceConnectionSetup({
   const { toast } = useToast();
   const [connectionName, setConnectionName] = useState("Company Confluence");
   const [siteUrl, setSiteUrl] = useState("");
-  const [credentialRef, setCredentialRef] = useState("");
+  const [credentialUsername, setCredentialUsername] = useState("");
+  const [credentialToken, setCredentialToken] = useState("");
   const [space, setSpace] = useState("");
   const [includeDescendants, setIncludeDescendants] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -557,12 +558,13 @@ function ConfluenceConnectionSetup({
     onDirtyChange(Boolean(
       createdId
       || siteUrl
-      || credentialRef
+      || credentialUsername
+      || credentialToken
       || space
       || connectionName !== "Company Confluence"
       || !includeDescendants,
     ));
-  }, [connectionName, createdId, credentialRef, includeDescendants, onDirtyChange, siteUrl, space]);
+  }, [connectionName, createdId, credentialToken, credentialUsername, includeDescendants, onDirtyChange, siteUrl, space]);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -580,7 +582,11 @@ function ConfluenceConnectionSetup({
             space: space.trim(),
             index_recursively: includeDescendants,
           },
-          credential_secret_ref: credentialRef.trim(),
+          credentials: {
+            confluence_username: credentialUsername.trim(),
+            confluence_access_token: credentialToken,
+          },
+          credential_type: "api_token",
         }),
       })).id);
       setCreatedId(connectorId);
@@ -599,7 +605,7 @@ function ConfluenceConnectionSetup({
 
   return (
     <>
-      <SetupIntro description="Add a governed Confluence connection without putting credentials into BoThesis." />
+      <SetupIntro description="Add a governed Confluence connection. Credentials are encrypted before they are stored." />
       <SetupSteps labels={["Configure", "Authenticate", "Choose content", "Test connection", "Start ingestion"]} />
       <form className="mt-6 space-y-5" id={formId} onSubmit={submit}>
         {error && <InlineError description={error} />}
@@ -609,8 +615,11 @@ function ConfluenceConnectionSetup({
         <FormField helperText="For example, https://company.atlassian.net/wiki." htmlFor="confluence-site-url" label="Confluence site URL" required>
           <Input autoComplete="url" id="confluence-site-url" name="wiki_base" onChange={(event) => setSiteUrl(event.target.value)} placeholder="https://company.atlassian.net/wiki" required type="url" value={siteUrl} />
         </FormField>
-        <FormField helperText="Use an env:// reference managed by the deployment. Do not paste a token or password." htmlFor="confluence-credential-ref" label="Credential reference" required>
-          <Input autoComplete="off" id="confluence-credential-ref" name="credential_secret_ref" onChange={(event) => setCredentialRef(event.target.value)} placeholder="env://CONFLUENCE_CREDENTIALS" required value={credentialRef} />
+        <FormField helperText="The account email used to access this Confluence site." htmlFor="confluence-credential-username" label="Account email" required>
+          <Input autoComplete="username" id="confluence-credential-username" name="credential_username" onChange={(event) => setCredentialUsername(event.target.value)} placeholder="person@company.com" required type="email" value={credentialUsername} />
+        </FormField>
+        <FormField helperText="Stored only as an authenticated-encryption payload." htmlFor="confluence-credential-token" label="API token" required>
+          <Input autoComplete="new-password" id="confluence-credential-token" name="credential_token" onChange={(event) => setCredentialToken(event.target.value)} required type="password" value={credentialToken} />
         </FormField>
         <FormField helperText="Leave blank to include all spaces visible to the configured service account." htmlFor="confluence-space" label="Space key">
           <Input autoComplete="off" id="confluence-space" name="space" onChange={(event) => setSpace(event.target.value)} placeholder="ENG" value={space} />

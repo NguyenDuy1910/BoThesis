@@ -520,6 +520,14 @@ class _AuditRecorder:
         self.events.append(kwargs)
 
 
+class _ObjectStorageRecorder:
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[bytes, str]] = {}
+
+    def put_path(self, path: Path, key: str, *, content_type: str) -> None:
+        self.objects[key] = (path.read_bytes(), content_type)
+
+
 @pytest.mark.asyncio
 async def test_managed_upload_streams_through_a_validated_temporary_path(
     tmp_path: Path,
@@ -545,8 +553,32 @@ async def test_managed_upload_streams_through_a_validated_temporary_path(
             )
 
     monkeypatch.setattr(datasources_module, "FileProcessor", Processor)
+
+    class Session:
+        async def scalar(self, statement: object) -> object:
+            del statement
+            return SimpleNamespace(id=11)
+
+    class Items:
+        def __init__(self, session: object) -> None:
+            assert isinstance(session, Session)
+
+        async def upsert_external_item(
+            self, scope_id: int, external_id: str, **values: object
+        ) -> object:
+            observed["item"] = {
+                "scope_id": scope_id,
+                "external_id": external_id,
+                **values,
+            }
+            return SimpleNamespace(id="canonical-item-id")
+
+    monkeypatch.setattr(datasources_module, "ItemService", Items)
     audit = _AuditRecorder()
-    service = DatasourceService(object(), audit=audit)  # type: ignore[arg-type]
+    storage = _ObjectStorageRecorder()
+    service = DatasourceService(  # type: ignore[arg-type]
+        Session(), object_storage=storage, audit=audit
+    )
     connector = SimpleNamespace(
         id=7,
         provider=SourceProvider.FILE.value,
@@ -561,26 +593,37 @@ async def test_managed_upload_streams_through_a_validated_temporary_path(
         yield b"policy"
 
     monkeypatch.setattr(service, "_connector", resolve_connector)
+    actor = _source_manager()
     uploaded = await service.upload_file(
-        _source_manager(),
+        actor,
         connector.id,
         file_name="policy.txt",
         content=content(),
     )
 
-    stored_path = tmp_path / f"{uploaded['id']}-policy.txt"
     temporary_path = observed["path"]
     assert isinstance(temporary_path, Path)
-    assert observed == {
-        "max_file_bytes": 32,
-        "path": temporary_path,
-        "file_name": "policy.txt",
-        "content": b"Enterprise policy",
-    }
+    assert observed["max_file_bytes"] == 32
+    assert observed["path"] == temporary_path
+    assert observed["file_name"] == "policy.txt"
+    assert observed["content"] == b"Enterprise policy"
     assert temporary_path.suffix == ".txt"
     assert not temporary_path.exists()
-    assert stored_path.read_bytes() == b"Enterprise policy"
-    assert json.loads((tmp_path / f"{uploaded['id']}.json").read_text())["path"] == stored_path.name
+    stored_item = observed["item"]
+    assert isinstance(stored_item, dict)
+    storage_key = stored_item["storage_key"]
+    assert isinstance(storage_key, str)
+    assert storage_key.startswith(
+        f"tenants/{actor.tenant_id}/connectors/7/items/"
+    )
+    assert storage_key.endswith("/policy.txt")
+    assert storage.objects[storage_key] == (
+        b"Enterprise policy",
+        "text/plain",
+    )
+    assert uploaded["id"] == "canonical-item-id"
+    assert stored_item["status"] == "pending"
+    assert list(tmp_path.iterdir()) == []
     assert audit.events[0]["action"] == "datasource.file_uploaded"
 
 
@@ -597,6 +640,7 @@ async def test_managed_upload_stops_at_limit_and_cleans_temporary_file(
     monkeypatch.setattr(datasources_module, "FileProcessor", UnexpectedProcessor)
     service = DatasourceService(  # type: ignore[arg-type]
         object(),
+        object_storage=_ObjectStorageRecorder(),
         audit=_AuditRecorder(),
     )
     connector = SimpleNamespace(

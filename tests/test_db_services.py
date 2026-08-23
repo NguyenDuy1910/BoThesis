@@ -1,64 +1,36 @@
 from __future__ import annotations
 
+import base64
 import os
 from collections.abc import AsyncIterator
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from bothesis.db.models import (
     Base,
     Connector,
+    ConnectorCredential,
     ConnectorScope,
     Conversation,
-    Document,
-    DocumentChunk,
+    Item,
+    ItemUpload,
     Message,
+    MessageItem,
     SyncRun,
 )
-from bothesis.connector.base import BaseSourceConnector
-from bothesis.connector.protocol import (
-    AccessPolicy,
-    ChangeType,
-    Chunk,
-    CitationInfo,
-    CitationSpan,
-    ConnectorCheckpoint,
-    ConnectorScope as SourceScope,
-    DocumentItem,
-    DocumentKind,
-    ItemChange,
-    SourceIdentity,
-    SourceProvider,
-    StorageObject,
-    TextPart,
-)
-import main
-from bothesis.document_index.raw_storage import PostgresBlobStorage
 from bothesis.services import (
-    AccessRequestService,
-    AclService,
-    AdminConflictError,
-    AdminDocumentService,
-    AdminNotFoundError,
     AuthService,
     AuthorizationError,
-    ConnectorSyncService,
+    ConnectorCredentialService,
     DatasourceService,
-    DocumentChunkInput,
     DocumentNotFoundError,
-    DocumentService,
-    GroupService,
-    UserService,
+    ItemService,
 )
+
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -92,568 +64,309 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 
 @pytest.mark.asyncio
-async def test_auth_service_resolves_tenant_permissions_and_principals(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with session_factory.begin() as session:
-        service = AuthService(session)
-        tenant = await service.create_tenant("Acme", "Acme Corporation")
-        user = await service.create_user("USER@EXAMPLE.COM", display_name="User")
-        role = await service.create_role(
-            tenant.id,
-            "analyst",
-            "Analyst",
-            permission_codes=["knowledge.read", "source.manage"],
-        )
-        await service.assign_membership(user.id, tenant.id, role.id)
-        await service.replace_principal_tokens(
-            user.id,
-            ["DOMAIN:EXAMPLE.COM", "GROUP:FINANCE", "group:finance"],
-        )
-
-        context = await service.require_permissions(user.id, "knowledge.read")
-
-        assert user.email == "user@example.com"
-        assert context.tenant_id == tenant.id
-        assert context.role_code == "analyst"
-        assert context.permission_codes == ("knowledge.read", "source.manage")
-        assert context.principal_tokens == (
-            "domain:example.com",
-            "group:finance",
-        )
-        with pytest.raises(AuthorizationError, match="missing required permissions"):
-            await service.require_permissions(user.id, "user.manage")
-
-        await service.remove_membership(user.id)
-        standalone_context = await service.get_context(user.id)
-        assert standalone_context.tenant_id is None
-        assert standalone_context.principal_tokens == ()
-
-
-@pytest.mark.asyncio
-async def test_document_service_enforces_acl_and_generation_activation(
+async def test_identity_supports_multiple_tenant_memberships(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
         auth = AuthService(session)
-        documents = DocumentService(session)
-        tenant = await auth.create_tenant("acme", "Acme")
-        user = await auth.create_user("reader@example.com")
-        outsider = await auth.create_user("outsider@example.com")
-        role = await auth.create_role(
-            tenant.id,
+        first_tenant = await auth.create_tenant("acme", "Acme")
+        second_tenant = await auth.create_tenant("labs", "Labs")
+        user = await auth.create_user("USER@EXAMPLE.COM")
+        first_role = await auth.create_role(
+            first_tenant.id,
+            "reader",
+            "Reader",
+            permission_codes=["knowledge.read"],
+        )
+        second_role = await auth.create_role(
+            second_tenant.id,
             "manager",
             "Manager",
             permission_codes=["knowledge.read", "source.manage"],
         )
-        reader_role = await auth.create_role(
+        await auth.assign_membership(user.id, first_tenant.id, first_role.id)
+        await auth.assign_membership(user.id, second_tenant.id, second_role.id)
+
+        with pytest.raises(AuthorizationError, match="tenant ID is required"):
+            await auth.get_context(user.id)
+
+        await auth.replace_principal_tokens(
+            user.id,
+            ["GROUP:FINANCE", "group:finance"],
+            tenant_id=first_tenant.id,
+        )
+        first_context = await auth.get_context(user.id, tenant_id=first_tenant.id)
+        second_context = await auth.get_context(user.id, tenant_id=second_tenant.id)
+
+        assert user.email == "user@example.com"
+        assert first_context.principal_tokens == ("group:finance",)
+        assert first_context.permission_codes == ("knowledge.read",)
+        assert second_context.principal_tokens == ()
+        assert second_context.permission_codes == ("knowledge.read", "source.manage")
+
+
+@pytest.mark.asyncio
+async def test_items_are_canonical_tenant_scoped_sources(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        tenant = await auth.create_tenant("acme", "Acme")
+        owner = await auth.create_user("owner@example.com")
+        outsider = await auth.create_user("outsider@example.com")
+        role = await auth.create_role(
             tenant.id,
             "reader",
             "Reader",
             permission_codes=["knowledge.read"],
         )
-        await auth.assign_membership(user.id, tenant.id, role.id)
-        await auth.assign_membership(outsider.id, tenant.id, reader_role.id)
-        await auth.replace_principal_tokens(user.id, ["group:finance"])
-        actor = await auth.get_context(user.id)
-        outsider_access = await auth.get_context(outsider.id)
-
-        personal = await documents.create_personal_document(
-            user.id,
-            origin="upload",
-            title="Private plan",
-            mime_type="text/plain",
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        await auth.assign_membership(outsider.id, tenant.id, role.id)
+        await auth.replace_principal_tokens(
+            owner.id, ["group:finance"], tenant_id=tenant.id
         )
-        await documents.replace_chunks(
-            personal.id,
-            [DocumentChunkInput(content="private content", token_count=2)],
-        )
-        await PostgresBlobStorage(session).write(personal.id, b"private content")
-        assert await documents.get_document_text(personal.id, access=actor) == (
-            "private content"
-        )
-        assert await PostgresBlobStorage(session).read(personal.id) == b"private content"
-        with pytest.raises(DocumentNotFoundError):
-            await documents.get_document(personal.id, access=outsider_access)
-
-        conversation = Conversation(user_id=user.id, title="Document chat")
-        session.add(conversation)
-        await session.flush()
-        message = Message(
-            conversation_id=conversation.id,
-            role="user",
-            content="Review this plan",
-            sequence_number=1,
-        )
-        session.add(message)
-        await session.flush()
-        link = await documents.link_message(
-            message.id,
-            personal.id,
-            "attachment",
-            access=actor,
-        )
-        assert link.document_id == personal.id
-        with pytest.raises(DocumentNotFoundError):
-            await documents.link_message(
-                message.id,
-                personal.id,
-                "reference",
-                access=outsider_access,
-            )
-
-        enterprise = await documents.create_enterprise_document(
-            tenant.id,
-            origin="generated",
-            created_by_user_id=user.id,
-            title="Finance brief",
-            allowed_principal_tokens=["group:finance"],
-        )
-        assert await documents.get_document(enterprise.id, access=actor) is enterprise
-        with pytest.raises(DocumentNotFoundError):
-            await documents.get_document(enterprise.id, access=outsider_access)
+        owner_context = await auth.get_context(owner.id, tenant_id=tenant.id)
+        outsider_context = await auth.get_context(outsider.id, tenant_id=tenant.id)
 
         connector = Connector(
             tenant_id=tenant.id,
-            provider="confluence",
-            display_name="Finance Confluence",
+            owner_type="tenant",
+            provider="google_drive",
+            display_name="Company Drive",
+            created_by_user_id=owner.id,
         )
         session.add(connector)
         await session.flush()
         scope = ConnectorScope(
             connector_id=connector.id,
-            scope_value="FIN",
-            display_name="Finance",
+            scope_type="folder",
+            scope_value="root",
+            display_name="Root",
+            sync_checkpoint={"page_token": "next"},
         )
         session.add(scope)
         await session.flush()
+
+        items = ItemService(session)
+        collection = await items.upsert_external_item(
+            scope.id,
+            "folder-1",
+            item_type="collection",
+            collection_kind="folder",
+            title="Finance",
+            allowed_principal_tokens=["group:finance"],
+        )
+        document = await items.upsert_external_item(
+            scope.id,
+            "report-1",
+            item_type="document",
+            document_kind="pdf",
+            parent_source_id="folder-1",
+            title="Quarterly report",
+            mime_type="application/pdf",
+            size_bytes=12,
+            storage_key="tenants/acme/items/report-1/raw",
+            content_sha256="a" * 64,
+            allowed_principal_tokens=["group:finance"],
+        )
+        opaque_file = await items.upsert_external_item(
+            scope.id,
+            "archive-1",
+            item_type="file",
+            parent_source_id="report-1",
+            title="Archive",
+            mime_type="application/zip",
+            storage_key="tenants/acme/items/archive-1/raw",
+            allowed_principal_tokens=["group:finance"],
+            status="unsupported",
+        )
+
+        assert collection.item_type == "collection"
+        assert collection.collection_kind == "folder"
+        assert document.parent_item_id == collection.id
+        assert opaque_file.parent_item_id == document.id
+        assert document.id == ItemService.connector_item_id(connector.id, "report-1")
+        assert await items.get_item(document.id, access=owner_context) is document
+        with pytest.raises(DocumentNotFoundError):
+            await items.get_item(document.id, access=outsider_context)
+
         sync_run = SyncRun(
             connector_scope_id=scope.id,
-            generation=1,
             trigger_type="manual",
-            status="running",
+            status="completed",
+            discovered_item_count=3,
+            processed_item_count=3,
+            written_chunk_count=5,
         )
         session.add(sync_run)
         await session.flush()
-
-        external = await documents.upsert_external_document(
-            scope.id,
-            1,
-            "page-42",
-            title="Quarterly plan",
-            allowed_principal_tokens=["group:finance"],
-        )
-        await documents.replace_chunks(
-            external.id,
-            [DocumentChunkInput(content="grounded enterprise content")],
-        )
-        await documents.mark_indexed(external.id)
-        with pytest.raises(DocumentNotFoundError):
-            await documents.get_document(external.id, access=actor)
-
-        sync_run.status = "completed"
-        await session.flush()
-        await documents.activate_generation(scope.id, 1, actor=actor)
-        assert await documents.get_document(external.id, access=actor) is external
-
-        await documents.soft_delete_document(external.id, actor=actor)
-        with pytest.raises(DocumentNotFoundError):
-            await documents.get_document(external.id, access=actor)
+        assert scope.sync_checkpoint == {"page_token": "next"}
+        assert sync_run.written_chunk_count == 5
 
 
 @pytest.mark.asyncio
-async def test_connector_worker_persists_activates_and_projects_snapshot(
+async def test_personal_upload_and_message_relation_store_metadata_only(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
         auth = AuthService(session)
-        tenant = await auth.create_tenant("worker-acme", "Worker Acme")
-        owner = await auth.create_user("worker-admin@example.com")
-        role = await auth.create_role(
-            tenant.id,
-            "worker-admin",
-            "Worker Admin",
-            permission_codes=["source.manage", "knowledge.read"],
-        )
+        tenant = await auth.create_tenant("acme", "Acme")
+        owner = await auth.create_user("owner@example.com")
+        role = await auth.create_role(tenant.id, "member", "Member")
         await auth.assign_membership(owner.id, tenant.id, role.id)
-        configured = Connector(
+        context = await auth.get_context(owner.id, tenant_id=tenant.id)
+
+        items = ItemService(session)
+        item, created = await items.create_or_get_personal_upload(
+            owner.id,
+            tenant.id,
+            idempotency_key="upload-1",
+            file_name="report.pdf",
+            mime_type="application/pdf",
+            size_bytes=100,
+            document_kind="pdf",
+        )
+        repeated, repeated_created = await items.create_or_get_personal_upload(
+            owner.id,
+            tenant.id,
+            idempotency_key="upload-1",
+            file_name="report.pdf",
+            mime_type="application/pdf",
+            size_bytes=100,
+            document_kind="pdf",
+        )
+        assert created is True
+        assert repeated_created is False
+        assert repeated.id == item.id
+        assert item.storage_key == f"tenants/{tenant.id}/items/{item.id}/raw"
+        assert item.upload is not None and item.upload.status == "pending"
+
+        conversation = Conversation(user_id=owner.id, title="Review")
+        session.add(conversation)
+        await session.flush()
+        message = Message(
+            conversation_id=conversation.id,
+            role="user",
+            content="Review the attachment",
+            sequence_number=1,
+        )
+        session.add(message)
+        await session.flush()
+        link = await items.link_message(
+            message.id,
+            item.id,
+            "attachment",
+            access=context,
+        )
+        assert link.item_id == item.id
+        assert link.relation_type == "attachment"
+
+        await items.soft_delete_item(item.id, actor=context)
+        assert item.status == "deleted"
+        assert item.deleted_at is not None
+        assert await session.scalar(
+            select(ItemUpload).where(ItemUpload.item_id == item.id)
+        )
+        assert await session.scalar(
+            select(MessageItem).where(MessageItem.item_id == item.id)
+        )
+
+
+@pytest.mark.asyncio
+async def test_connector_credentials_are_encrypted_and_owner_models_are_explicit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        tenant = await auth.create_tenant("acme", "Acme")
+        owner = await auth.create_user("owner@example.com")
+        role = await auth.create_role(tenant.id, "member", "Member")
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+
+        personal = Connector(
             tenant_id=tenant.id,
-            provider="file",
-            display_name="Managed files",
+            owner_type="user",
+            owner_user_id=owner.id,
+            provider="confluence",
+            display_name="Owner Confluence",
             created_by_user_id=owner.id,
         )
-        session.add(configured)
-        await session.flush()
-        stored_scope = ConnectorScope(
-            connector_id=configured.id,
-            scope_value="file",
-            scope_type="source_provider",
-            display_name="Files",
+        tenant_owned = Connector(
+            tenant_id=tenant.id,
+            owner_type="tenant",
+            provider="google_drive",
+            display_name="Company Drive",
+            created_by_user_id=owner.id,
         )
-        session.add(stored_scope)
+        session.add_all([personal, tenant_owned])
         await session.flush()
-        run = SyncRun(
-            connector_scope_id=stored_scope.id,
-            generation=1,
-            trigger_type="manual",
-            status="pending",
-        )
-        session.add(run)
-        await session.flush()
-        run_id = run.id
-        connector_id = configured.id
 
-    item = DocumentItem(
-        id="file::report-1",
-        title="Annual report",
-        document_kind=DocumentKind.PDF,
-        source=SourceIdentity(
-            connector_id=str(connector_id),
-            provider=SourceProvider.FILE,
-            external_id="report-1",
-            external_version="v1",
-        ),
-        access=AccessPolicy.from_reader_ids(["public"]),
-        content=[TextPart(element_id="p1", page=1, text="Grounded report")],
-        original=StorageObject(
-            provider="s3",
-            bucket="documents",
-            key="worker-acme/report-1.pdf",
-            file_name="report-1.pdf",
-            size_bytes=100,
-            content_type="application/pdf",
-            checksum_sha256="b" * 64,
-        ),
-    )
-    chunk = Chunk(
-        id="file::report-1:0",
-        item_id=item.id,
-        chunk_index=0,
-        chunk_text="Grounded report",
-        content_type="text",
-        citation=CitationInfo(
-            spans=(
-                CitationSpan(
-                    page=1,
-                    element_id="p1",
-                    start_offset=0,
-                    end_offset=15,
-                ),
+        encryption_key = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii")
+        credentials = ConnectorCredentialService(session, encryption_key)
+        record = await credentials.store(
+            personal.id,
+            credential_type="oauth2",
+            payload={"access_token": "top-secret", "refresh_token": "refresh-secret"},
+            key_version="local-v1",
+        )
+
+        assert personal.owner_user_id == owner.id
+        assert tenant_owned.owner_user_id is None
+        assert "top-secret" not in record.encrypted_payload
+        assert "refresh-secret" not in record.encrypted_payload
+        assert await credentials.resolve(personal.id) == {
+            "access_token": "top-secret",
+            "refresh_token": "refresh-secret",
+        }
+        assert await session.scalar(
+            select(ConnectorCredential).where(
+                ConnectorCredential.connector_id == personal.id
             )
-        ),
-    )
-
-    class Source(BaseSourceConnector):
-        source = "file"
-
-        async def test_connection(self) -> bool:
-            return True
-
-        async def list_scopes(self) -> list[SourceScope]:
-            return []
-
-        async def discover_changes(
-            self,
-            checkpoint: ConnectorCheckpoint,
-            scope: SourceScope,
-        ) -> list[ItemChange]:
-            del checkpoint, scope
-            return [
-                ItemChange(
-                    type=ChangeType.UPSERT,
-                    item_id=item.id,
-                    item=item,
-                )
-            ]
-
-        async def fetch_item(self, item_id: str) -> DocumentItem:
-            assert item_id == item.id
-            return item
-
-        async def fetch_chunks(self, value: DocumentItem) -> tuple[Chunk, ...]:
-            assert value.id == item.id
-            return (chunk,)
-
-        def next_checkpoint(self) -> ConnectorCheckpoint:
-            return ConnectorCheckpoint()
-
-    class Embedder:
-        model = "embed-test"
-
-        async def embed_query(self, query: str) -> list[float]:
-            return [float(len(query))]
-
-        async def embed_documents(self, documents: list[str]) -> list[list[float]]:
-            return [[float(len(value))] for value in documents]
-
-    class Store:
-        def __init__(self) -> None:
-            self.points: list[object] = []
-            self.payload_updates: list[dict[str, object]] = []
-
-        async def upsert_points(self, points: list[object]) -> None:
-            self.points.extend(points)
-
-        async def set_payload(
-            self,
-            *,
-            payload: dict[str, object],
-            points: object,
-        ) -> None:
-            del points
-            self.payload_updates.append(dict(payload))
-
-    store = Store()
-    result = await ConnectorSyncService(
-        session_factory,
-        store,  # type: ignore[arg-type]
-        Embedder(),  # type: ignore[arg-type]
-    ).run(run_id, Source())
-
-    assert result.processed_items == 1
-    assert result.written_chunks == 1
-    async with session_factory() as session:
-        stored_run = await session.get(SyncRun, run_id)
-        stored_document = await session.scalar(
-            select(Document).where(Document.external_id == item.id)
-        )
-        assert stored_run is not None and stored_run.status == "completed"
-        assert stored_document is not None
-        assert stored_document.raw_storage_key == "worker-acme/report-1.pdf"
-        assert stored_document.content_sha256 == "b" * 64
-        assert (
-            stored_document.metadata_["canonical_item"]["original"]["bucket"]
-            == "documents"
-        )
-        assert stored_document.indexing_status == "indexed"
-        assert stored_document.generation == 1
-        assert stored_document.connector_scope.active_generation == 1
-        stored_chunk = await session.scalar(
-            select(DocumentChunk).where(
-                DocumentChunk.document_id == stored_document.id
-            )
-        )
-        assert stored_chunk is not None
-        assert stored_chunk.content == "Grounded report"
-        assert stored_chunk.metadata_["chunk_id"] == chunk.id
-        assert stored_chunk.metadata_["citation_spans"][0]["element_id"] == "p1"
-    assert len(store.points) == 1
-    assert getattr(store.points[0], "payload")["is_deleted"] is True
-    assert store.payload_updates[-1] == {"is_deleted": False}
+        ) is record
 
 
 @pytest.mark.asyncio
-async def test_admin_services_enforce_tenant_isolation_and_group_permissions(
+async def test_datasource_list_eager_loads_optional_credentials(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
         auth = AuthService(session)
-        tenant = await auth.create_tenant("admin-acme", "Admin Acme")
-        other_tenant = await auth.create_tenant("admin-other", "Admin Other")
-        admin = await auth.create_user("admin@acme.example")
-        other_admin = await auth.create_user("admin@other.example")
-        admin_role = await auth.create_role(
-            tenant.id,
-            "admin",
-            "Administrator",
-            permission_codes=["admin"],
-        )
-        other_admin_role = await auth.create_role(
-            other_tenant.id,
-            "admin",
-            "Administrator",
-            permission_codes=["admin"],
-        )
-        analyst_role = await auth.create_role(
-            tenant.id,
-            "analyst",
-            "Analyst",
-            permission_codes=["knowledge.read"],
-        )
-        await auth.assign_membership(admin.id, tenant.id, admin_role.id)
-        await auth.assign_membership(
-            other_admin.id, other_tenant.id, other_admin_role.id
-        )
-        actor = await auth.get_context(admin.id)
-        outsider_actor = await auth.get_context(other_admin.id)
-
-        group = await GroupService(session).create_group(
-            actor,
-            code="finance",
-            display_name="Finance",
-            permission_codes=["document.manage"],
-        )
-        created = await UserService(session).create_user(
-            actor,
-            email="analyst@acme.example",
-            display_name="Analyst",
-            role_id=analyst_role.id,
-            group_ids=[UUID(group["id"])],
-        )
-        context = await auth.get_context(UUID(created["id"]))
-
-        assert context.permission_codes == ("document.manage", "knowledge.read")
-        assert context.principal_tokens == ("group:finance",)
-        with pytest.raises(AdminNotFoundError, match="user not found"):
-            await UserService(session).get_user(
-                outsider_actor, UUID(created["id"])
-            )
-
-
-@pytest.mark.asyncio
-async def test_datasource_service_persists_validation_and_sync_lifecycle(
-    session_factory: async_sessionmaker[AsyncSession],
-    tmp_path,
-) -> None:
-    async with session_factory.begin() as session:
-        auth = AuthService(session)
-        tenant = await auth.create_tenant("sources", "Sources")
-        admin = await auth.create_user("sources-admin@example.com")
+        tenant = await auth.create_tenant("acme", "Acme")
+        owner = await auth.create_user("owner@example.com")
         role = await auth.create_role(
             tenant.id,
-            "admin",
-            "Administrator",
-            permission_codes=["admin"],
+            "source-manager",
+            "Source Manager",
+            permission_codes=["source.manage"],
         )
-        await auth.assign_membership(admin.id, tenant.id, role.id)
-        actor = await auth.get_context(admin.id)
-        service = DatasourceService(session)
-
-        datasource = await service.create_datasource(
-            actor,
-            provider="file",
-            display_name="Files",
-            settings={"base_dir": str(tmp_path)},
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
+        session.add(
+            Connector(
+                tenant_id=tenant.id,
+                owner_type="tenant",
+                provider="file",
+                display_name="Uploaded files",
+                status="draft",
+                created_by_user_id=owner.id,
+            )
         )
-        assert datasource["status"] == "draft"
 
-        async def upload_content() -> AsyncIterator[bytes]:
-            yield b"Enterprise "
-            yield b"policy"
-
-        uploaded = await service.upload_file(
-            actor,
-            int(datasource["id"]),
-            file_name="policy.txt",
-            content=upload_content(),
-        )
-        assert uploaded["file_name"] == "policy.txt"
-        assert uploaded["size_bytes"] == len(b"Enterprise policy")
-        assert (tmp_path / f"{uploaded['id']}.json").is_file()
-        assert (await service.validate_datasource(actor, int(datasource["id"])))[
-            "valid"
-        ] is True
-        chat_connectors = await service.list_chat_connectors(actor)
-        assert chat_connectors["total"] == 1
-        assert chat_connectors["items"][0]["id"] == datasource["id"]
-        assert chat_connectors["items"][0]["capabilities"] == [
-            "knowledge_search"
-        ]
-
-        queued = await service.trigger_sync(actor, int(datasource["id"]))
-        run_id = UUID(queued["items"][0]["id"])
-        assert queued["items"][0]["status"] == "pending"
-        with pytest.raises(AdminConflictError, match="active ingestion"):
-            await service.delete_datasource(actor, int(datasource["id"]))
-        cancelled = await service.cancel_sync(actor, run_id)
-        assert cancelled["status"] == "cancelled"
-        retried = await service.retry_sync(actor, run_id)
-        assert retried["status"] == "pending"
-
-
-@pytest.mark.asyncio
-async def test_access_decision_and_acl_policy_materialize_document_access(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
-        documents = DocumentService(session)
-        tenant = await auth.create_tenant("access", "Access")
-        admin = await auth.create_user("access-admin@example.com")
-        reader = await auth.create_user("reader@access.example")
-        admin_role = await auth.create_role(
-            tenant.id,
-            "admin",
-            "Administrator",
-            permission_codes=["admin"],
-        )
-        reader_role = await auth.create_role(
-            tenant.id,
-            "reader",
-            "Reader",
-            permission_codes=["knowledge.read"],
-        )
-        await auth.assign_membership(admin.id, tenant.id, admin_role.id)
-        await auth.assign_membership(reader.id, tenant.id, reader_role.id)
-        actor = await auth.get_context(admin.id)
-        document = await documents.create_enterprise_document(
-            tenant.id,
-            origin="generated",
-            created_by_user_id=admin.id,
-            title="Governed plan",
-            allowed_principal_tokens=["group:leaders"],
-        )
-
-        requests = AccessRequestService(session)
-        request = await requests.create_request(
+        result = await DatasourceService(session).list_datasources(
             actor,
-            requester_user_id=reader.id,
-            resource_type="document",
-            resource_id=str(document.id),
-            access_type="read",
+            page_size=100,
         )
-        approved = await requests.decide_request(
-            actor, UUID(request["id"]), decision="approved"
-        )
-        await session.refresh(document)
-        assert approved["status"] == "approved"
-        assert "email:reader@access.example" in document.allowed_principal_tokens
 
-        policy = await AclService(session).create_policy(
-            actor,
-            name="Leadership plan",
-            resource_type="document",
-            resource_id=str(document.id),
-            allowed_principal_tokens=["group:leaders"],
-            denied_principal_tokens=["group:contractors"],
-        )
-        detail = await AdminDocumentService(session).get_document(actor, document.id)
-        assert detail["allowed_principal_tokens"] == ["group:leaders"]
-        assert detail["denied_principal_tokens"] == ["group:contractors"]
-        assert policy["resource_id"] == str(document.id)
+    assert result["total"] == 1
+    assert result["items"][0]["credential_configured"] is False
 
 
-@pytest.mark.asyncio
-async def test_admin_api_uses_database_identity_and_trusted_tenant_boundary(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    async with session_factory.begin() as session:
-        auth = AuthService(session)
-        tenant = await auth.create_tenant("api-admin", "API Admin")
-        admin = await auth.create_user("api-admin@example.com")
-        role = await auth.create_role(
-            tenant.id,
-            "admin",
-            "Administrator",
-            permission_codes=["admin"],
-        )
-        await auth.assign_membership(admin.id, tenant.id, role.id)
-
-    main._admin_service._session_factory = session_factory
-    main._admin_service._allow_insecure_development_identity = True
-    headers = {
-        "X-Bothesis-User-Id": str(admin.id),
-        "X-Bothesis-Tenant-Id": str(tenant.id),
-    }
-    async with AsyncClient(
-        transport=ASGITransport(app=main.app), base_url="http://test"
-    ) as client:
-        response = await client.get("/api/v1/admin/overview", headers=headers)
-        assert response.status_code == 200
-        assert response.json()["tenant"]["id"] == str(tenant.id)
-
-        denied = await client.get(
-            "/api/v1/admin/users",
-            headers={**headers, "X-Bothesis-Tenant-Id": str(uuid4())},
-        )
-        assert denied.status_code == 403
+def test_postgresql_models_have_no_raw_byte_or_chunk_columns() -> None:
+    forbidden_tables = {"documents", "document_blobs", "document_chunks"}
+    assert forbidden_tables.isdisjoint(Base.metadata.tables)
+    assert all(
+        column.type.__class__.__name__.casefold() not in {"largebinary", "bytea"}
+        for table in Base.metadata.tables.values()
+        for column in table.columns
+    )

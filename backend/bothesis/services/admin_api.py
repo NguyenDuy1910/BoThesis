@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterable, AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -11,12 +12,13 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 
 from bothesis.db.engine import get_session_factory, session_scope
-from bothesis.integrations import EnvironmentSecretResolver
+from bothesis.document_index.vector_store import VectorStore
+from bothesis.document_index.raw_storage import S3DocumentStorage
 from bothesis.services import (
     AccessRequestService,
     AclService,
     AdminConflictError,
-    AdminDocumentService,
+    AdminItemService,
     AdminService,
     AuditService,
     AuthContext,
@@ -206,12 +208,22 @@ class AdminApiService:
         content: AsyncIterable[bytes],
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await self._datasources(session).upload_file(
-                actor,
-                connector_id,
-                file_name=unquote(file_name),
-                content=content,
-            )
+            storage = self._object_storage()
+            try:
+                return await DatasourceService(
+                    session,
+                    credential_encryption_key=os.getenv(
+                        "BOTHESIS_CONNECTOR_ENCRYPTION_KEY"
+                    ),
+                    object_storage=storage,
+                ).upload_file(
+                    actor,
+                    connector_id,
+                    file_name=unquote(file_name),
+                    content=content,
+                )
+            finally:
+                await storage.aclose()
 
     async def get_datasource(
         self, identity: RequestIdentity, connector_id: int
@@ -283,48 +295,43 @@ class AdminApiService:
         async with self._request(identity) as (session, actor):
             return await self._datasources(session).cancel_sync(actor, run_id)
 
-    async def list_documents(
+    async def list_items(
         self, identity: RequestIdentity, **filters: Any
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await AdminDocumentService(session).list_documents(
-                actor, **filters
-            )
+            async with self._item_service(session) as service:
+                return await service.list_items(actor, **filters)
 
-    async def get_document(
-        self, identity: RequestIdentity, document_id: UUID
+    async def get_item(
+        self, identity: RequestIdentity, item_id: UUID
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await AdminDocumentService(session).get_document(
-                actor, document_id
-            )
+            async with self._item_service(session) as service:
+                return await service.get_item(actor, item_id)
 
-    async def update_document(
+    async def update_item(
         self,
         identity: RequestIdentity,
-        document_id: UUID,
-        lifecycle_status: str,
+        item_id: UUID,
+        status: str,
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await AdminDocumentService(session).update_lifecycle(
-                actor,
-                document_id,
-                lifecycle_status=lifecycle_status,
-            )
+            async with self._item_service(session) as service:
+                return await service.update_status(actor, item_id, status=status)
 
-    async def retry_document(
-        self, identity: RequestIdentity, document_id: UUID
+    async def retry_item(
+        self, identity: RequestIdentity, item_id: UUID
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await AdminDocumentService(session).retry_document(
-                actor, document_id
-            )
+            async with self._item_service(session) as service:
+                return await service.retry_item(actor, item_id)
 
-    async def delete_document(
-        self, identity: RequestIdentity, document_id: UUID
+    async def delete_item(
+        self, identity: RequestIdentity, item_id: UUID
     ) -> None:
         async with self._request(identity) as (session, actor):
-            await AdminDocumentService(session).delete_document(actor, document_id)
+            async with self._item_service(session) as service:
+                await service.delete_item(actor, item_id)
 
     async def list_access_requests(
         self, identity: RequestIdentity, **filters: Any
@@ -357,9 +364,10 @@ class AdminApiService:
         values: dict[str, Any],
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await AccessRequestService(session).decide_request(
-                actor, request_id, **values
-            )
+            async with self._vector_index() as vector_store:
+                return await AccessRequestService(
+                    session, vector_store=vector_store
+                ).decide_request(actor, request_id, **values)
 
     async def list_acl_policies(
         self, identity: RequestIdentity, **filters: Any
@@ -371,7 +379,10 @@ class AdminApiService:
         self, identity: RequestIdentity, values: dict[str, Any]
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await AclService(session).create_policy(actor, **values)
+            async with self._vector_index() as vector_store:
+                return await AclService(
+                    session, vector_store=vector_store
+                ).create_policy(actor, **values)
 
     async def get_acl_policy(
         self, identity: RequestIdentity, policy_id: UUID
@@ -386,15 +397,19 @@ class AdminApiService:
         changes: dict[str, Any],
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await AclService(session).update_policy(
-                actor, policy_id, **changes
-            )
+            async with self._vector_index() as vector_store:
+                return await AclService(
+                    session, vector_store=vector_store
+                ).update_policy(actor, policy_id, **changes)
 
     async def delete_acl_policy(
         self, identity: RequestIdentity, policy_id: UUID
     ) -> None:
         async with self._request(identity) as (session, actor):
-            await AclService(session).delete_policy(actor, policy_id)
+            async with self._vector_index() as vector_store:
+                await AclService(
+                    session, vector_store=vector_store
+                ).delete_policy(actor, policy_id)
 
     async def list_audit_logs(
         self, identity: RequestIdentity, **filters: Any
@@ -427,8 +442,74 @@ class AdminApiService:
     def _datasources(session: Any) -> DatasourceService:
         return DatasourceService(
             session,
-            secret_resolver=EnvironmentSecretResolver(),
+            credential_encryption_key=os.getenv(
+                "BOTHESIS_CONNECTOR_ENCRYPTION_KEY"
+            ),
         )
+
+    @staticmethod
+    def _object_storage() -> S3DocumentStorage:
+        provider = (os.getenv("BOTHESIS_OBJECT_STORAGE_PROVIDER") or "aws_s3").strip().casefold()
+        bucket = (
+            os.getenv("BOTHESIS_OBJECT_STORAGE_BUCKET")
+            or os.getenv("BOTHESIS_S3_BUCKET")
+            or os.getenv("BOTHESIS_R2_BUCKET")
+            or ""
+        ).strip()
+        if not bucket:
+            raise RuntimeError("BOTHESIS_OBJECT_STORAGE_BUCKET is required")
+        if provider == "cloudflare_r2":
+            return S3DocumentStorage.for_cloudflare_r2(
+                bucket=bucket,
+                account_id=os.getenv("BOTHESIS_R2_ACCOUNT_ID") or None,
+                endpoint_url=os.getenv("BOTHESIS_R2_ENDPOINT_URL") or None,
+                access_key_id=os.getenv("BOTHESIS_R2_ACCESS_KEY_ID") or None,
+                secret_access_key=os.getenv("BOTHESIS_R2_SECRET_ACCESS_KEY") or None,
+            )
+        if provider != "aws_s3":
+            raise RuntimeError(
+                "BOTHESIS_OBJECT_STORAGE_PROVIDER must be aws_s3 or cloudflare_r2"
+            )
+        return S3DocumentStorage(
+            bucket=bucket,
+            region=os.getenv("BOTHESIS_S3_REGION") or None,
+            endpoint_url=os.getenv("BOTHESIS_S3_ENDPOINT_URL") or None,
+            addressing_style=(os.getenv("BOTHESIS_S3_ADDRESSING_STYLE") or "auto"),
+        )
+
+    @staticmethod
+    @asynccontextmanager
+    async def _item_service(session: Any) -> AsyncIterator[AdminItemService]:
+        store = VectorStore(
+            collection_name=os.getenv("QDRANT_COLLECTION"),
+            url=os.getenv("QDRANT_URL"),
+            api_key=os.getenv("QDRANT_API_KEY") or None,
+            timeout=20,
+        )
+        try:
+            yield AdminItemService(
+                session,
+                credential_encryption_key=os.getenv(
+                    "BOTHESIS_CONNECTOR_ENCRYPTION_KEY"
+                ),
+                vector_store=store,
+            )
+        finally:
+            await store.aclose()
+
+    @staticmethod
+    @asynccontextmanager
+    async def _vector_index() -> AsyncIterator[VectorStore]:
+        store = VectorStore(
+            collection_name=os.getenv("QDRANT_COLLECTION"),
+            url=os.getenv("QDRANT_URL"),
+            api_key=os.getenv("QDRANT_API_KEY") or None,
+            timeout=20,
+        )
+        try:
+            yield store
+        finally:
+            await store.aclose()
 
 
 __all__ = ["AdminApiService"]

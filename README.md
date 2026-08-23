@@ -7,15 +7,14 @@ agent activity and final responses to a web chat interface.
 ## Architecture
 
 ```text
-Next.js chat UI
-    ↓ Server-Sent Events (SSE)
-FastAPI agent API
-    ↓
-Adaptive agent loop ──→ OpenRouter chat model
-    ↓
-Knowledge tools ──────→ OpenRouter embeddings ──→ Qdrant
-    ↓
-Grounded answer + citations
+HTTP → FastAPI (`backend/main.py`) → services
+                                  ↓
+PostgreSQL ── durable identity, Item, connector, ACL, and chat state
+R2 / S3 ──── original document bytes
+Docling ──── document understanding and canonical chunks
+Qdrant ───── contextual embeddings, retrieval payload, and ACL projection
+Knowledge ── permission filtering, retrieval, reranking, and evidence
+Agent ────── reasoning and grounded answers with citations
 
 Agent, model, retrieval, and tool traces ───────→ Langfuse (optional)
 ```
@@ -50,8 +49,19 @@ docs/                               Project documentation
 
 ## Quick start
 
-Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js, npm,
-an OpenRouter API key, and a reachable Qdrant collection.
+Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker,
+Node.js, npm, and an OpenRouter API key.
+
+Initialize PostgreSQL, Qdrant, local S3-compatible object storage, the database
+schema, the raw-object bucket, and a development admin identity with one
+command:
+
+```bash
+make init
+```
+
+This command intentionally rebuilds the early-development PostgreSQL schema and
+the derived Qdrant collection. It does not preserve local data.
 
 ### Backend
 
@@ -69,31 +79,44 @@ OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-5-mini
 OPENROUTER_API_KEY=...  # document embeddings
 EMBEDDING_MODEL=openai/text-embedding-3-small
+BOTHESIS_CONTEXTUALIZATION_ENABLED=false
+BOTHESIS_CONTEXTUALIZATION_MODEL=
+BOTHESIS_HYBRID_CANDIDATE_LIMIT=20
 DATABASE_URL=postgresql+asyncpg://bothesis:bothesis@127.0.0.1:5432/bothesis
 QDRANT_URL=http://localhost:6333
-QDRANT_COLLECTION=bothesis
+QDRANT_COLLECTION=bothesis_v6
 QDRANT_API_KEY=  # set a key only when authentication is enabled
+BOTHESIS_OBJECT_STORAGE_PROVIDER=aws_s3
+BOTHESIS_OBJECT_STORAGE_BUCKET=bothesis-raw
+BOTHESIS_CONNECTOR_ENCRYPTION_KEY=  # URL-safe base64 for exactly 32 bytes
 ```
 
-Chat document uploads can use AWS S3 or Cloudflare R2 through the same boto3
-S3-compatible adapter.
+The v6 document index stores `contextual_text` in both the dense `content`
+vector and Qdrant's native BM25 `content_bm25` sparse vector, then combines
+both filtered candidate sets with reciprocal-rank fusion. Semantic chunk
+context is optional; when disabled or unavailable, indexing falls back to the
+document summary without changing canonical `chunk_text` evidence.
+
+Qdrant is derived state. `make init` recreates the local collection; connector
+checkpoints and deterministic per-Item point IDs make normal retries safe.
+
+Raw object storage is mandatory. Chat uploads and provider-downloaded binary
+files use AWS S3 or Cloudflare R2 through the same boto3 S3-compatible adapter.
 The browser uploads bytes directly to its presigned URL; configure the bucket's
 CORS policy to allow `PUT` from the WebUI origin with the `Content-Type` header.
-Without object storage, the API permits a PostgreSQL blob fallback up to 20 MiB.
 Set `BOTHESIS_OBJECT_STORAGE_PROVIDER` to select the provider. AWS credentials
 are resolved through boto3's standard credential chain. For local development,
-use `aws configure`, `AWS_PROFILE`, or the normal `AWS_ACCESS_KEY_ID` /
-`AWS_SECRET_ACCESS_KEY` environment variables. In AWS, prefer a container or
-instance role.
+`make init` configures MinIO and local credentials. In AWS, prefer a container
+or instance role.
 
 ```dotenv
-BOTHESIS_S3_BUCKET=bothesis-documents
+BOTHESIS_OBJECT_STORAGE_BUCKET=bothesis-documents
+BOTHESIS_S3_BUCKET=bothesis-documents  # optional provider-specific override
 BOTHESIS_S3_REGION=us-east-1
 # Optional for local S3-compatible development endpoints only:
 BOTHESIS_S3_ENDPOINT_URL=
 BOTHESIS_S3_ADDRESSING_STYLE=auto
 BOTHESIS_DOCUMENT_MAX_UPLOAD_BYTES=104857600
-BOTHESIS_DOCUMENT_MAX_DATABASE_BLOB_BYTES=20971520
 BOTHESIS_DOCUMENT_DIRECT_MAX_BYTES=20971520
 ```
 
@@ -114,59 +137,30 @@ BOTHESIS_R2_ENDPOINT_URL=
 
 The API starts at `http://127.0.0.1:8000`.
 
-### Database migrations
+### Initial database schema
 
-BoThesis uses numbered SQL migrations in `backend/migrations/` rather than
-Alembic. Start the local PostgreSQL service from the repository root:
-
-```bash
-docker compose -f deployment/compose.yml up -d postgres
-```
-
-For a completely fresh database, create the base tables once from the SQLAlchemy
-models. Run this from `backend/` so the local `.env` file is loaded:
+The project is in initial development and has no migration compatibility
+layer. The SQLAlchemy models define the complete intended schema directly.
+Rebuild all local dependencies, schema, and seed data from the repository root:
 
 ```bash
-cd backend
-
-uv run python - <<'PY'
-import asyncio
-from dotenv import load_dotenv
-from bothesis.db.engine import get_engine
-from bothesis.db.models import Base
-
-load_dotenv()
-
-async def main():
-    engine = get_engine()
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    await engine.dispose()
-
-asyncio.run(main())
-PY
-
-cd ..
+make init
 ```
 
-Apply all numbered migrations in order:
+The individual targets remain available for diagnostics:
 
 ```bash
-set -e
-
-for migration in backend/migrations/*.sql; do
-  docker compose -f deployment/compose.yml exec -T postgres \
-    sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
-    < "$migration"
-done
+make services
+make db-init
+make db-seed
+make qdrant-init
+make status
 ```
 
-If a migration reports that a core table such as `documents` or `tenants` does
-not exist, run the fresh-database initialization above first, then rerun this
-migration loop.
-
-The migration scripts are idempotent and can be run again safely against the
-same database.
+`make db-init` drops and recreates the local `public` schema. `make qdrant-init`
+recreates the configured derived collection. Raw binary content is never stored
+in PostgreSQL; the `items` table stores only durable object metadata such as
+`storage_key`, MIME type, size, and SHA-256.
 
 - Health: `http://127.0.0.1:8000/health`
 - OpenAPI: `http://127.0.0.1:8000/docs`

@@ -11,12 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bothesis.connector.protocol import (
-    AccessPolicy,
-    Chunk,
     CitationInfo,
-    CitationSpan,
-    DocumentItem,
-    DocumentKind,
     EffectiveAccess,
     Hierarchy,
     ProviderCacheEntry,
@@ -28,22 +23,23 @@ from bothesis.document_index import (
     CHUNKER_VERSION,
     DEFAULT_DIRECT_MAX_BYTES,
     DIRECT_IMAGE_TYPES,
+    INDEX_SCHEMA_VERSION,
     PARSER_VERSION,
     DocumentProcessingError,
     DocumentUnavailableError,
     PreparedDocuments,
     VectorIndex,
 )
-from bothesis.document_index.contextualization import StructuralContextualizer
 from bothesis.document_index.embedding import EmbeddingService, embedding_texts
 from bothesis.document_index.models import ContextualChunk, PreparedDocument
-from bothesis.db.models import Document, DocumentChunk
+from bothesis.document_index.payload import build_contextual_chunks
+from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
+from bothesis.db.models import Item
 from bothesis.services import (
     AuthContext,
     ChatDocumentSource,
     DEFAULT_PROCESSING_MAX_BYTES,
-    DocumentChunkInput,
-    DocumentService,
+    ItemService,
 )
 
 log = logging.getLogger(__name__)
@@ -67,6 +63,7 @@ class DocumentPipeline:
         retrieval_limit: int = 6,
         embedding_batch_size: int = 32,
         download_url_seconds: int = 300,
+        semantic_contextualizer: SemanticContextualizer | None = None,
     ) -> None:
         if (
             min(
@@ -87,6 +84,7 @@ class DocumentPipeline:
         self._retrieval_limit = retrieval_limit
         self._embedding_batch_size = embedding_batch_size
         self._download_url_seconds = download_url_seconds
+        self._semantic_contextualizer = semantic_contextualizer
 
     async def prepare_for_message(
         self,
@@ -212,49 +210,55 @@ class DocumentPipeline:
     ) -> None:
         has_derived_index = False
         async with self._session_factory.begin() as session:
-            document = await DocumentService(session).get_owned_upload(
+            if access.tenant_id is None:
+                raise DocumentUnavailableError("an active tenant is required")
+            document = await ItemService(session).get_owned_upload(
                 document_id,
                 access.user_id,
-                include_hidden=True,
+                access.tenant_id,
+                include_deleted=True,
             )
-            if document.lifecycle_status == "deleted":
+            if document.status == "deleted":
                 return
-            document.lifecycle_status = "hidden"
-            has_derived_index = document.indexing_status != "none"
+            has_derived_index = isinstance(document.metadata_.get("processing"), Mapping)
+            document.status = "processing"
 
         if has_derived_index:
             await self._vector_index.soft_delete_document(document_id)
         await self._provider_cache.clear(document_id)
 
         async with self._session_factory.begin() as session:
-            documents = DocumentService(session)
-            await documents.get_owned_upload(
+            if access.tenant_id is None:
+                raise DocumentUnavailableError("an active tenant is required")
+            items = ItemService(session)
+            await items.get_owned_upload(
                 document_id,
                 access.user_id,
-                include_hidden=True,
+                access.tenant_id,
+                include_deleted=True,
             )
-            await self._document_source.soft_delete_raw(
-                document_id,
-                session=session,
-            )
-            await documents.soft_delete_document(document_id, actor=access)
+            await items.soft_delete_item(document_id, actor=access)
 
     async def _load_visible_document(
         self,
         document_id: UUID,
         *,
         access: AuthContext,
-    ) -> Document:
+    ) -> Item:
+        if access.tenant_id is None:
+            raise DocumentUnavailableError("an active tenant is required")
         async with self._session_factory() as session:
-            document = await DocumentService(session).get_document(
+            document = await ItemService(session).get_owned_upload(
                 document_id,
-                access=access,
+                access.user_id,
+                access.tenant_id,
             )
-            if document.origin != "upload" or document.upload_status != "available":
+            assert document.upload is not None
+            if document.upload.status != "available":
                 raise DocumentUnavailableError("document content is not available")
             return document
 
-    def _route(self, document: Document) -> str:
+    def _route(self, document: Item) -> str:
         content_type = (document.mime_type or "").casefold()
         within_direct_limit = (document.size_bytes or 0) <= self._direct_max_bytes
         if content_type in DIRECT_IMAGE_TYPES and within_direct_limit:
@@ -265,7 +269,7 @@ class DocumentPipeline:
             return "direct"
         return "indexed"
 
-    def _index_is_current(self, document: Document, *, access: AuthContext) -> bool:
+    def _index_is_current(self, document: Item, *, access: AuthContext) -> bool:
         processing = document.metadata_.get("processing")
         return (
             self._index_content_is_current(document)
@@ -274,21 +278,22 @@ class DocumentPipeline:
             and processing.get("owner_user_id") == str(access.user_id)
         )
 
-    def _index_content_is_current(self, document: Document) -> bool:
+    def _index_content_is_current(self, document: Item) -> bool:
         processing = document.metadata_.get("processing")
         if not isinstance(processing, Mapping):
             return False
         return (
-            document.indexing_status == "indexed"
+            document.status == "ready"
             and processing.get("source_fingerprint") == _source_fingerprint(document)
             and processing.get("parser_version") == PARSER_VERSION
             and processing.get("chunker_version") == CHUNKER_VERSION
             and processing.get("embedding_model") == self._embedder.model
+            and processing.get("index_schema_version") == INDEX_SCHEMA_VERSION
         )
 
     async def _prepare_direct(
         self,
-        document: Document,
+        document: Item,
     ) -> tuple[PreparedDocument, str]:
         fingerprint = _source_fingerprint(document)
         cached = await self._provider_cache.get(
@@ -368,7 +373,7 @@ class DocumentPipeline:
 
     async def _prepare_indexed(
         self,
-        document: Document,
+        document: Item,
         *,
         access: AuthContext,
         message: str,
@@ -377,6 +382,7 @@ class DocumentPipeline:
         query_vector = await self._embedder.embed_query(message)
         chunks = await self._vector_index.search_document(
             document,
+            message,
             query_vector,
             access=access,
             limit=self._retrieval_limit,
@@ -398,7 +404,7 @@ class DocumentPipeline:
         document_id: UUID,
         *,
         access: AuthContext,
-    ) -> Document:
+    ) -> Item:
         engine = self._session_factory.kw.get("bind")
         if not isinstance(engine, AsyncEngine):
             raise RuntimeError(
@@ -423,13 +429,13 @@ class DocumentPipeline:
         document_id: UUID,
         *,
         access: AuthContext,
-    ) -> Document:
+    ) -> Item:
         async with self._session_factory() as session:
-            documents = DocumentService(session)
-            document = await documents.get_document(
-                document_id,
-                access=access,
-                include_chunks=True,
+            if access.tenant_id is None:
+                raise DocumentUnavailableError("an active tenant is required")
+            items = ItemService(session)
+            document = await items.get_owned_upload(
+                document_id, access.user_id, access.tenant_id
             )
             if self._index_is_current(document, access=access):
                 return document
@@ -439,7 +445,7 @@ class DocumentPipeline:
                     access=access,
                 )
                 async with self._session_factory.begin() as update_session:
-                    documents = DocumentService(update_session)
+                    items = ItemService(update_session)
                     processing = dict(document.metadata_.get("processing") or {})
                     processing.update(
                         {
@@ -447,78 +453,32 @@ class DocumentPipeline:
                             "owner_user_id": str(access.user_id),
                         }
                     )
-                    return await documents.merge_metadata(
+                    return await items.merge_metadata(
                         document.id,
                         {"processing": processing},
                     )
             source_fingerprint = _source_fingerprint(document)
-            processing = document.metadata_.get("processing")
-            chunks_reusable = (
-                bool(document.chunks)
-                and isinstance(processing, Mapping)
-                and processing.get("source_fingerprint") == source_fingerprint
-                and processing.get("parser_version") == PARSER_VERSION
-                and processing.get("chunker_version") == CHUNKER_VERSION
-            )
-            chunks = tuple(sorted(document.chunks, key=lambda item: item.chunk_index))
 
         try:
-            if not chunks_reusable:
-                canonical = await self._document_source.canonicalize(
-                    document,
-                    access=access,
+            async with self._session_factory.begin() as session:
+                await ItemService(session).mark_processing(document.id)
+            canonical = await self._document_source.canonicalize(
+                document, access=access
+            )
+            canonical_item = canonical.item
+            source_fingerprint = canonical.source_fingerprint
+            canonical_chunks = canonical.chunks
+            async with self._session_factory.begin() as session:
+                await ItemService(session).set_content_sha256(
+                    document.id, source_fingerprint
                 )
-                canonical_item = canonical.item
-                source_fingerprint = canonical.source_fingerprint
-                canonical_chunks = canonical.chunks
-                chunk_inputs = [
-                    DocumentChunkInput.from_chunk(chunk) for chunk in canonical_chunks
-                ]
-                async with self._session_factory.begin() as session:
-                    documents = DocumentService(session)
-                    await documents.set_content_sha256(
-                        document.id,
-                        source_fingerprint,
-                    )
-                    chunks = tuple(
-                        await documents.replace_chunks(document.id, chunk_inputs)
-                    )
-                    await documents.merge_metadata(
-                        document.id,
-                        {
-                            "processing": {
-                                "source_fingerprint": source_fingerprint,
-                                "parser_version": PARSER_VERSION,
-                                "chunker_version": CHUNKER_VERSION,
-                            }
-                        },
-                    )
-                document.content_sha256 = source_fingerprint
-            else:
-                canonical_chunks = tuple(
-                    _canonical_chunk(document, chunk) for chunk in chunks
-                )
-                canonical_item = _canonical_item(
-                    document,
-                    access=access,
-                    source_fingerprint=source_fingerprint,
-                )
-                async with self._session_factory.begin() as session:
-                    await DocumentService(session).mark_index_pending(document.id)
+            document.content_sha256 = source_fingerprint
 
-            contextualizer = StructuralContextualizer()
-            contextual_chunks = [
-                contextualizer.contextualize(
-                    chunk,
-                    title=canonical_item.title,
-                    source=canonical_item.source,
-                    hierarchy=canonical_item.hierarchy,
-                    access=canonical_item.access,
-                    document_kind=canonical_item.document_kind,
-                    summary=_metadata_text(canonical_item.metadata, "summary"),
-                )
-                for chunk in canonical_chunks
-            ]
+            contextual_chunks = await build_contextual_chunks(
+                canonical_chunks,
+                canonical_item,
+                semantic_contextualizer=self._semantic_contextualizer,
+            )
             vectors: list[list[float]] = []
             for start in range(0, len(contextual_chunks), self._embedding_batch_size):
                 batch = contextual_chunks[start : start + self._embedding_batch_size]
@@ -534,8 +494,8 @@ class DocumentPipeline:
                 source_fingerprint=source_fingerprint,
             )
             async with self._session_factory.begin() as session:
-                documents = DocumentService(session)
-                await documents.merge_metadata(
+                items = ItemService(session)
+                await items.merge_metadata(
                     document.id,
                     {
                         "processing": {
@@ -543,21 +503,22 @@ class DocumentPipeline:
                             "parser_version": PARSER_VERSION,
                             "chunker_version": CHUNKER_VERSION,
                             "embedding_model": self._embedder.model,
+                            "index_schema_version": INDEX_SCHEMA_VERSION,
                             "tenant_id": str(access.tenant_id),
                             "owner_user_id": str(access.user_id),
                         }
                     },
                 )
-                return await documents.mark_indexed(document.id)
+                return await items.mark_ready(document.id)
         except Exception as exc:
             async with self._session_factory.begin() as session:
-                await DocumentService(session).mark_index_failed(document.id)
+                await ItemService(session).mark_failed(document.id)
             if isinstance(exc, DocumentProcessingError):
                 raise
             raise DocumentProcessingError("document indexing failed") from exc
 
 
-def _source_fingerprint(document: Document) -> str:
+def _source_fingerprint(document: Item) -> str:
     if document.content_sha256:
         return document.content_sha256
     storage = document.metadata_.get("storage")
@@ -565,128 +526,16 @@ def _source_fingerprint(document: Document) -> str:
         value = storage.get("source_fingerprint")
         if isinstance(value, str) and value:
             return value
-    return f"{document.raw_storage_key or 'blob'}:{document.size_bytes or 0}"
+    return f"{document.storage_key or 'missing'}:{document.size_bytes or 0}"
 
 
 def _advisory_lock_key(document_id: UUID) -> int:
     return int.from_bytes(document_id.bytes[:8], byteorder="big", signed=True)
 
 
-def _file_name(document: Document) -> str:
+def _file_name(document: Item) -> str:
     value = document.metadata_.get("file_name") or document.title or str(document.id)
     return str(value)
-
-
-def _metadata_text(metadata: Mapping[str, Any], key: str) -> str | None:
-    value = metadata.get(key)
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-def _canonical_item(
-    document: Document,
-    *,
-    access: AuthContext,
-    source_fingerprint: str,
-) -> DocumentItem:
-    return DocumentItem(
-        id=str(document.id),
-        title=_file_name(document),
-        source=SourceIdentity(
-            connector_id="upload",
-            provider=SourceProvider.FILE,
-            external_id=str(document.id),
-            external_version=source_fingerprint,
-            etag=source_fingerprint,
-            url=document.source_url,
-        ),
-        document_kind=_document_kind(document.mime_type),
-        access=AccessPolicy.from_reader_ids([str(access.user_id)]),
-        hierarchy=Hierarchy(),
-        metadata={
-            str(key): value if isinstance(value, str) else list(value)
-            for key, value in document.metadata_.items()
-            if isinstance(value, str)
-            or (
-                isinstance(value, (list, tuple))
-                and all(isinstance(item, str) for item in value)
-            )
-        },
-    )
-
-
-def _document_kind(content_type: str | None) -> DocumentKind:
-    normalized = (content_type or "").casefold()
-    if normalized.startswith("image/"):
-        return DocumentKind.IMAGE
-    if normalized == "application/pdf":
-        return DocumentKind.PDF
-    if normalized in {"text/html", "application/xhtml+xml"}:
-        return DocumentKind.WEB_PAGE
-    return DocumentKind.DOCUMENT
-
-
-def _canonical_chunk(document: Document, record: DocumentChunk) -> Chunk:
-    metadata = record.metadata_
-    raw_spans = metadata.get("citation_spans")
-    spans: list[CitationSpan] = []
-    if isinstance(raw_spans, list):
-        for value in raw_spans:
-            try:
-                spans.append(CitationSpan.model_validate(value))
-            except (TypeError, ValueError):
-                continue
-    if not spans:
-        element_id = _metadata_text(metadata, "element_id")
-        start_offset = _metadata_int(metadata, "start_offset")
-        end_offset = _metadata_int(metadata, "end_offset")
-        if (start_offset is None) != (end_offset is None):
-            start_offset = None
-            end_offset = None
-        spans.append(
-            CitationSpan(
-                page=record.start_page_number or record.end_page_number,
-                element_id=element_id,
-                start_offset=start_offset,
-                end_offset=end_offset,
-            )
-        )
-    raw_section_path = metadata.get("citation_section_path")
-    if not isinstance(raw_section_path, (list, tuple)):
-        raw_section_path = record.heading_path or ()
-    section_path = tuple(
-        value
-        for value in raw_section_path
-        if isinstance(value, str) and value.strip()
-    )
-    return Chunk(
-        id=_metadata_text(metadata, "chunk_id")
-        or f"{document.id}:{record.chunk_index}",
-        item_id=str(document.id),
-        chunk_index=record.chunk_index,
-        chunk_text=record.content,
-        content_type=_metadata_text(metadata, "content_type") or "text",
-        section_path=list(section_path),
-        citation=CitationInfo(
-            section=_metadata_text(metadata, "citation_section")
-            or (section_path[-1] if section_path else None),
-            section_path=section_path,
-            anchor=_metadata_text(metadata, "citation_anchor"),
-            spans=tuple(spans),
-        ),
-    )
-
-
-def _metadata_int(metadata: Mapping[str, Any], key: str) -> int | None:
-    value = metadata.get(key)
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value)
-    return None
 
 
 def _annotation_name(annotation: Mapping[str, Any]) -> str | None:

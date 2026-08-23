@@ -8,7 +8,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import (
     Depends,
@@ -184,21 +184,8 @@ class DocumentUploadStartRequest(BaseModel):
     size_bytes: int = Field(ge=1)
 
 
-class LegacyAttachmentUploadStart(DocumentUploadStartRequest):
-    sha256: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{64}$")
-    tenant_id: UUID
-    user_id: UUID
-    conversation_id: str | None = Field(default=None, min_length=1, max_length=256)
-
-
-class LegacyAttachmentScope(BaseModel):
-    tenant_id: UUID
-    user_id: UUID
-    conversation_id: str = Field(min_length=1, max_length=256)
-
-
 class DocumentUploadTarget(BaseModel):
-    mode: Literal["presigned", "api"]
+    mode: Literal["presigned"]
     url: str
     method: str
     headers: dict[str, str]
@@ -210,8 +197,8 @@ class DocumentMetadata(BaseModel):
     file_name: str
     content_type: str
     size_bytes: int
-    upload_status: Literal["not_applicable", "pending", "available", "failed"]
-    indexing_status: str
+    status: Literal["pending", "processing", "ready", "failed", "unsupported"]
+    upload_status: Literal["pending", "available", "failed"] | None = None
     created_at: str
     uploaded_at: str | None = None
 
@@ -481,14 +468,17 @@ class DatasourceCreate(AdminRequest):
     provider: str = Field(min_length=1, max_length=32)
     display_name: str = Field(min_length=1, max_length=255)
     settings: dict[str, Any] = Field(default_factory=dict)
-    credential_secret_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    credentials: dict[str, Any] | None = Field(default=None, repr=False)
+    credential_type: str | None = Field(default=None, min_length=1, max_length=64)
+    owner_type: Literal["user", "tenant"] = "tenant"
     scopes: list[DatasourceScopeInput] | None = None
 
 
 class DatasourceUpdate(AdminRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     settings: dict[str, Any] | None = None
-    credential_secret_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    credentials: dict[str, Any] | None = Field(default=None, repr=False)
+    credential_type: str | None = Field(default=None, min_length=1, max_length=64)
     status: Literal["draft", "active", "disabled", "error"] | None = None
     scopes: list[DatasourceScopeInput] | None = None
 
@@ -497,15 +487,13 @@ class DatasourceSyncRequest(AdminRequest):
     scope_id: int | None = Field(default=None, ge=1)
 
 
-class DocumentLifecycleUpdate(AdminRequest):
-    lifecycle_status: Literal[
-        "active", "retired", "hidden", "unsupported", "failed"
-    ]
+class ItemStatusUpdate(AdminRequest):
+    status: Literal["pending", "processing", "ready", "failed", "unsupported"]
 
 
 class AccessRequestCreate(AdminRequest):
     requester_user_id: UUID
-    resource_type: Literal["document", "group", "role"]
+    resource_type: Literal["item", "group", "role"]
     resource_id: str = Field(min_length=1, max_length=512)
     access_type: str = Field(min_length=1, max_length=32)
     reason: str | None = Field(default=None, min_length=1, max_length=4_000)
@@ -518,7 +506,7 @@ class AccessRequestDecision(AdminRequest):
 
 class AclPolicyCreate(AdminRequest):
     name: str = Field(min_length=1, max_length=255)
-    resource_type: Literal["document"] = "document"
+    resource_type: Literal["item"] = "item"
     resource_id: str = Field(min_length=1, max_length=512)
     allowed_principal_tokens: list[str] = Field(min_length=1)
     denied_principal_tokens: list[str] = Field(default_factory=list)
@@ -650,7 +638,6 @@ async def patch_user_permissions(
 # ---------------------------------------------------------------------------
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
-attachments_router = APIRouter(prefix="/attachments", tags=["attachments"])
 
 _INSECURE_DEVELOPMENT_IDENTITY_ENV = "BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY"
 
@@ -676,6 +663,13 @@ _allow_insecure_development_identity = _environment_boolean(
 _api_service = ApiService(
     allow_insecure_development_identity=_allow_insecure_development_identity,
     qdrant_prefer_grpc=_environment_boolean("QDRANT_PREFER_GRPC"),
+    contextualization_enabled=_environment_boolean(
+        "BOTHESIS_CONTEXTUALIZATION_ENABLED"
+    ),
+    contextualization_model=os.getenv("BOTHESIS_CONTEXTUALIZATION_MODEL") or None,
+    hybrid_candidate_limit=int(
+        os.getenv("BOTHESIS_HYBRID_CANDIDATE_LIMIT", "20")
+    ),
 )
 _admin_service = AdminApiService(
     allow_insecure_development_identity=_allow_insecure_development_identity
@@ -688,65 +682,6 @@ def _request_identity(request: Request) -> RequestIdentity:
         auth_context=auth_context,
         user_id=request.headers.get("X-Bothesis-User-Id"),
         tenant_id=request.headers.get("X-Bothesis-Tenant-Id"),
-    )
-
-
-@attachments_router.post(
-    "/uploads",
-    status_code=status.HTTP_201_CREATED,
-    deprecated=True,
-)
-async def start_attachment_upload(
-    body: LegacyAttachmentUploadStart,
-    request: Request,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> dict[str, Any]:
-    return await _api_service.start_attachment_upload(
-        _request_identity(request),
-        tenant_id=body.tenant_id,
-        user_id=body.user_id,
-        idempotency_key=idempotency_key or body.sha256 or uuid4().hex,
-        file_name=body.file_name,
-        content_type=body.content_type,
-        size_bytes=body.size_bytes,
-        base_url=str(request.base_url),
-    )
-
-
-@attachments_router.post(
-    "/uploads/{upload_id}/complete",
-    deprecated=True,
-)
-async def complete_attachment_upload(
-    upload_id: UUID,
-    body: LegacyAttachmentScope,
-    request: Request,
-) -> dict[str, Any]:
-    return await _api_service.complete_attachment_upload(
-        _request_identity(request),
-        upload_id=upload_id,
-        tenant_id=body.tenant_id,
-        user_id=body.user_id,
-    )
-
-
-@attachments_router.delete(
-    "/{attachment_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    deprecated=True,
-)
-async def release_attachment(
-    attachment_id: UUID,
-    request: Request,
-    tenant_id: str = Query(min_length=1, max_length=256),
-    user_id: str = Query(min_length=1, max_length=256),
-    conversation_id: str | None = Query(default=None, min_length=1, max_length=256),
-) -> None:
-    await _api_service.release_attachment(
-        _request_identity(request),
-        attachment_id=attachment_id,
-        tenant_id=tenant_id,
-        user_id=user_id,
     )
 
 
@@ -978,28 +913,6 @@ async def start_document_upload(
             file_name=body.file_name,
             content_type=body.content_type,
             size_bytes=body.size_bytes,
-        )
-    )
-
-
-@documents_router.put(
-    "/{document_id}/content",
-    response_model=DocumentMetadata,
-)
-async def store_document_content(
-    document_id: UUID,
-    request: Request,
-    tenant_id: str | None = Query(default=None, min_length=1, max_length=256),
-    user_id: str | None = Query(default=None, min_length=1, max_length=256),
-) -> DocumentMetadata:
-    return DocumentMetadata.model_validate(
-        await _api_service.store_document_content(
-            _request_identity(request),
-            document_id=document_id,
-            content_type=request.headers.get("content-type", ""),
-            content=request.stream(),
-            tenant_id=tenant_id,
-            user_id=user_id,
         )
     )
 
@@ -1491,67 +1404,67 @@ async def admin_cancel_ingestion_job(
     return await _admin_service.cancel_ingestion_job(identity, run_id)
 
 
-@admin_router.get("/documents")
-async def admin_list_documents(
+@admin_router.get("/items")
+async def admin_list_items(
     identity: AdminIdentity,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     search: str | None = None,
-    lifecycle_status: str | None = None,
-    indexing_status: str | None = None,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    item_type: str | None = None,
     connector_id: int | None = None,
     sort: str = "updated_at",
     direction: str = "desc",
 ) -> dict[str, Any]:
-    return await _admin_service.list_documents(
+    return await _admin_service.list_items(
         identity,
         page=page,
         page_size=page_size,
         search=search,
-        lifecycle_status=lifecycle_status,
-        indexing_status=indexing_status,
+        status=status_filter,
+        item_type=item_type,
         connector_id=connector_id,
         sort=sort,
         direction=direction,
     )
 
 
-@admin_router.get("/documents/{document_id}")
-async def admin_get_document(
-    document_id: UUID, identity: AdminIdentity
+@admin_router.get("/items/{item_id}")
+async def admin_get_item(
+    item_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.get_document(identity, document_id)
+    return await _admin_service.get_item(identity, item_id)
 
 
-@admin_router.patch("/documents/{document_id}")
-async def admin_update_document(
-    document_id: UUID,
-    body: DocumentLifecycleUpdate,
+@admin_router.patch("/items/{item_id}")
+async def admin_update_item(
+    item_id: UUID,
+    body: ItemStatusUpdate,
     identity: AdminIdentity,
 ) -> dict[str, Any]:
-    return await _admin_service.update_document(
-        identity, document_id, body.lifecycle_status
+    return await _admin_service.update_item(
+        identity, item_id, body.status
     )
 
 
 @admin_router.post(
-    "/documents/{document_id}/retry",
+    "/items/{item_id}/retry",
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def admin_retry_document(
-    document_id: UUID, identity: AdminIdentity
+async def admin_retry_item(
+    item_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.retry_document(identity, document_id)
+    return await _admin_service.retry_item(identity, item_id)
 
 
 @admin_router.delete(
-    "/documents/{document_id}",
+    "/items/{item_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def admin_delete_document(
-    document_id: UUID, identity: AdminIdentity
+async def admin_delete_item(
+    item_id: UUID, identity: AdminIdentity
 ) -> Response:
-    await _admin_service.delete_document(identity, document_id)
+    await _admin_service.delete_item(identity, item_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1768,7 +1681,6 @@ _PREFIX = "/api/v1"
 app.include_router(auth_router, prefix=_PREFIX)
 app.include_router(access_router, prefix=_PREFIX)
 app.include_router(agent_router, prefix=_PREFIX)
-app.include_router(attachments_router, prefix=_PREFIX)
 app.include_router(connectors_router, prefix=_PREFIX)
 app.include_router(knowledge_router, prefix=_PREFIX)
 app.include_router(documents_router, prefix=_PREFIX)
