@@ -52,7 +52,7 @@ config: ## Create missing local environment files and enforce local dependency e
 	update_env backend/.env BOTHESIS_S3_ENDPOINT_URL "$(LOCAL_S3_ENDPOINT)"; \
 	update_env backend/.env BOTHESIS_S3_ADDRESSING_STYLE path; \
 	update_env backend/.env AWS_ACCESS_KEY_ID bothesis; \
-	update_env backend/.env AWS_SECRET_ACCESS_KEY bothesis-local-storage; \
+	update_env backend/.env AWS_SECRET_ACCESS_KEY bothesis; \
 	if ! grep -q '^BOTHESIS_CONNECTOR_ENCRYPTION_KEY=.' backend/.env; then \
 		update_env backend/.env BOTHESIS_CONNECTOR_ENCRYPTION_KEY "$$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')"; \
 	fi; \

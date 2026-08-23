@@ -1,246 +1,195 @@
-# BoThesis
+<p align="center">
+  <img src="web/public/bothesis-logo.png" alt="BoThesis" width="88" />
+</p>
 
-BoThesis is an enterprise knowledge and BI assistant. It retrieves information
-from permission-scoped company sources, answers with citations, and streams
-agent activity and final responses to a web chat interface.
+<h1 align="center">BoThesis</h1>
+
+<p align="center">
+  <strong>A grounded enterprise knowledge assistant for trusted, permission-aware answers.</strong>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="#development">Development</a>
+</p>
+
+BoThesis connects company knowledge to conversations without losing the things
+that make enterprise answers trustworthy: tenant isolation, access control,
+source lineage, and citations. It is an early-stage project designed around a
+simple rule: the model reasons over evidence; it does not invent a source of
+truth.
+
+## What it provides
+
+| Capability | How BoThesis approaches it |
+| --- | --- |
+| Grounded answers | Retrieves tenant-scoped evidence and returns citations back to canonical source Items. |
+| Contextual hybrid retrieval | Uses contextual chunk text with dense embeddings and Qdrant BM25, fused for retrieval and filtered before evidence is exposed. |
+| Governed ingestion | Ingests managed files and Confluence content through connector-owned normalization, ACL mapping, checkpoints, and retry-safe replacement. |
+| Clear storage ownership | PostgreSQL holds business state; S3-compatible storage holds original bytes; Qdrant is a rebuildable retrieval projection. |
+| Practical operations | Starts local PostgreSQL, Qdrant, and MinIO with one command and exposes readiness through `/health`. |
 
 ## Architecture
 
 ```text
-HTTP → FastAPI (`backend/main.py`) → services
-                                  ↓
-PostgreSQL ── durable identity, Item, connector, ACL, and chat state
-R2 / S3 ──── original document bytes
-Docling ──── document understanding and canonical chunks
-Qdrant ───── contextual embeddings, retrieval payload, and ACL projection
-Knowledge ── permission filtering, retrieval, reranking, and evidence
-Agent ────── reasoning and grounded answers with citations
-
-Agent, model, retrieval, and tool traces ───────→ Langfuse (optional)
+HTTP / Web / Mobile
+        │
+        ▼
+FastAPI · backend/main.py
+        │
+        ▼
+Application services
+        │
+ ┌──────┼─────────────────────────┐
+ ▼      ▼                         ▼
+PostgreSQL   Connector + Docling   Document index
+business     source understanding  contextualization + embeddings
+state        ACL + chunks                    │
+ │                                           ▼
+ └─────────────── S3 / R2 ◀────────────── Qdrant
+                 original bytes          retrieval projection
+                                              │
+                                              ▼
+                                      Knowledge → evidence → agent
 ```
 
-Simple questions use the direct-answer path. Complex or tool-dependent requests
-can create a small plan, execute independent steps concurrently, refine one weak
-step once, and then stream the final answer.
+The HTTP boundary stays in `backend/main.py`. Route handlers resolve request
+context, call a service, and return a response. Services own application flow;
+connectors, storage adapters, Docling, Qdrant, and PostgreSQL stay behind that
+boundary.
 
-## Project structure
+| System | Owns |
+| --- | --- |
+| PostgreSQL | identities, tenants, connectors, encrypted credentials, Items, ACL state, chat state, sync history, and audit records |
+| S3 / Cloudflare R2 / MinIO | original document bytes |
+| Docling | conversion, normalization, provenance, and chunking |
+| Qdrant | searchable contextual chunks, vectors, and retrieval filter payload |
+| `knowledge` | permission filtering, retrieval, reranking, and evidence |
+| `agent` | tool-aware reasoning and cited answers |
+
+Read the full design in [Architecture](docs/architecture.md) and
+[Storage ownership and data model](docs/data.schema.md).
+
+## Repository guide
 
 ```text
 backend/
-├── main.py                         FastAPI application and API routes
+├── main.py                    FastAPI routes and HTTP dependencies
 └── bothesis/
-    ├── agent/                      Models, prompts, tools, and LLM transports
-    ├── chat/                       Agent loop, state, SSE, and citations
-    ├── connector/                  Source adapters and ingestion pipeline
-    ├── document_index/             Qdrant vector-store integration
-    ├── knowledge/                  Permission-aware semantic retrieval
-    ├── access/ and auth/           Access-control boundaries
-    └── observability.py            Langfuse tracing
-web/
-└── src/
-    ├── app/                        Next.js routes
-    ├── modules/chat/               Stream parser and chat activity UI
-    └── modules/admin/              Administration UI
-tests/                              Backend agent and API tests
-benchmark/                          Benchmark utilities
-deployment/                         Deployment assets
-docs/                               Project documentation
+    ├── services/              Application use cases and transactions
+    ├── connector/             Confluence/file adapters, Docling, sync pipeline
+    ├── document_index/        Contextualization, embeddings, Qdrant projection
+    ├── knowledge/             Retrieval, ACL filtering, evidence, reranking
+    ├── agent/                 Conversation loop, tools, model transports
+    ├── db/                    SQLAlchemy models and database engine
+    └── tui/                   Terminal chat client
+web/                           Next.js workspace for chat and administration
+app/bothesis/                  Flutter client scaffold
+deployment/                    Local PostgreSQL, Qdrant, and MinIO Compose stack
+docs/                          Architecture, setup, operations, and reference docs
+tests/                         Backend and integration tests
 ```
 
 ## Quick start
 
-Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker,
-Node.js, npm, and an OpenRouter API key.
+### Prerequisites
 
-Initialize PostgreSQL, Qdrant, local S3-compatible object storage, the database
-schema, the raw-object bucket, and a development admin identity with one
-command:
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/)
+- Docker with Docker Compose
+- Node.js 20+ and npm
+- An OpenAI API key for chat and an OpenRouter API key for embeddings
+
+### 1. Install and initialize local dependencies
 
 ```bash
+git clone <your-fork-or-repository-url>
+cd BoThesis
+
+uv sync --project backend
+npm --prefix web ci
 make init
 ```
 
-This command intentionally rebuilds the early-development PostgreSQL schema and
-the derived Qdrant collection. It does not preserve local data.
+`make init` creates missing local environment files, starts PostgreSQL, Qdrant,
+and MinIO, creates the raw-object bucket, rebuilds the local database schema,
+seeds a development administrator, and recreates the derived Qdrant collection.
 
-### Backend
+> **Local-development reset:** `make init` intentionally resets the PostgreSQL
+> schema and Qdrant collection. Do not use it against an environment with data
+> you need to retain.
 
-```bash
-cd backend
-cp .env.example .env
-uv sync
-uv run python main.py
-```
+### 2. Configure model access
 
-Edit `backend/.env` before starting. At minimum, configure:
+Set the required provider keys in `backend/.env`:
 
 ```dotenv
 OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-5-mini
-OPENROUTER_API_KEY=...  # document embeddings
-EMBEDDING_MODEL=openai/text-embedding-3-small
-BOTHESIS_CONTEXTUALIZATION_ENABLED=false
-BOTHESIS_CONTEXTUALIZATION_MODEL=
-BOTHESIS_HYBRID_CANDIDATE_LIMIT=20
-DATABASE_URL=postgresql+asyncpg://bothesis:bothesis@127.0.0.1:5432/bothesis
-QDRANT_URL=http://localhost:6333
-QDRANT_COLLECTION=bothesis_v6
-QDRANT_API_KEY=  # set a key only when authentication is enabled
-BOTHESIS_OBJECT_STORAGE_PROVIDER=aws_s3
-BOTHESIS_OBJECT_STORAGE_BUCKET=bothesis-raw
-BOTHESIS_CONNECTOR_ENCRYPTION_KEY=  # URL-safe base64 for exactly 32 bytes
+OPENROUTER_API_KEY=...
 ```
 
-The v6 document index stores `contextual_text` in both the dense `content`
-vector and Qdrant's native BM25 `content_bm25` sparse vector, then combines
-both filtered candidate sets with reciprocal-rank fusion. Semantic chunk
-context is optional; when disabled or unavailable, indexing falls back to the
-document summary without changing canonical `chunk_text` evidence.
+The local dependency endpoints, object-storage settings, development identity,
+and generated connector-encryption key are configured by `make init`. See
+[Configuration and operations](docs/operations.md) for every setting and for
+S3 or Cloudflare R2 deployments.
 
-Qdrant is derived state. `make init` recreates the local collection; connector
-checkpoints and deterministic per-Item point IDs make normal retries safe.
+### 3. Start the API and WebUI
 
-Raw object storage is mandatory. Chat uploads and provider-downloaded binary
-files use AWS S3 or Cloudflare R2 through the same boto3 S3-compatible adapter.
-The browser uploads bytes directly to its presigned URL; configure the bucket's
-CORS policy to allow `PUT` from the WebUI origin with the `Content-Type` header.
-Set `BOTHESIS_OBJECT_STORAGE_PROVIDER` to select the provider. AWS credentials
-are resolved through boto3's standard credential chain. For local development,
-`make init` configures MinIO and local credentials. In AWS, prefer a container
-or instance role.
-
-```dotenv
-BOTHESIS_OBJECT_STORAGE_BUCKET=bothesis-documents
-BOTHESIS_S3_BUCKET=bothesis-documents  # optional provider-specific override
-BOTHESIS_S3_REGION=us-east-1
-# Optional for local S3-compatible development endpoints only:
-BOTHESIS_S3_ENDPOINT_URL=
-BOTHESIS_S3_ADDRESSING_STYLE=auto
-BOTHESIS_DOCUMENT_MAX_UPLOAD_BYTES=104857600
-BOTHESIS_DOCUMENT_DIRECT_MAX_BYTES=20971520
-```
-
-For Cloudflare R2, create an R2 API token with S3 credentials and configure its
-access key and secret through your deployment secret manager. R2 is configured
-with its account endpoint, `auto` signing region, and path-style addresses by
-the adapter; no Cloudflare SDK is used.
-
-```dotenv
-BOTHESIS_OBJECT_STORAGE_PROVIDER=cloudflare_r2
-BOTHESIS_R2_BUCKET=bothesis-documents
-BOTHESIS_R2_ACCOUNT_ID=your-cloudflare-account-id
-BOTHESIS_R2_ACCESS_KEY_ID=...
-BOTHESIS_R2_SECRET_ACCESS_KEY=...
-# Optional: override the endpoint derived from the account ID.
-BOTHESIS_R2_ENDPOINT_URL=
-```
-
-The API starts at `http://127.0.0.1:8000`.
-
-### Initial database schema
-
-The project is in initial development and has no migration compatibility
-layer. The SQLAlchemy models define the complete intended schema directly.
-Rebuild all local dependencies, schema, and seed data from the repository root:
+In one terminal:
 
 ```bash
-make init
+cd backend
+uv run python main.py
 ```
 
-The individual targets remain available for diagnostics:
+In another:
 
 ```bash
-make services
-make db-init
-make db-seed
-make qdrant-init
-make status
+npm --prefix web run dev
 ```
 
-`make db-init` drops and recreates the local `public` schema. `make qdrant-init`
-recreates the configured derived collection. Raw binary content is never stored
-in PostgreSQL; the `items` table stores only durable object metadata such as
-`storage_key`, MIME type, size, and SHA-256.
+Open:
 
-- Health: `http://127.0.0.1:8000/health`
-- OpenAPI: `http://127.0.0.1:8000/docs`
-- Chat stream: `POST http://127.0.0.1:8000/api/v1/agent/chat`
+| Service | Address |
+| --- | --- |
+| WebUI | [http://127.0.0.1:3000](http://127.0.0.1:3000) |
+| API | [http://127.0.0.1:8000](http://127.0.0.1:8000) |
+| OpenAPI | [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) |
+| Health | [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health) |
+| Qdrant dashboard | [http://127.0.0.1:6333/dashboard](http://127.0.0.1:6333/dashboard) |
+| MinIO console | [http://127.0.0.1:9001](http://127.0.0.1:9001) |
 
-### Terminal chat client
+## Documentation
 
-After `uv sync`, run the lightweight Textual client from `backend/`:
+| Guide | Use it for |
+| --- | --- |
+| [Documentation index](docs/README.md) | Finding the right guide by responsibility. |
+| [Getting started](docs/getting-started.md) | Local setup, reset behavior, and development identity. |
+| [Architecture](docs/architecture.md) | Package ownership, request flow, and infrastructure boundaries. |
+| [Connectors and indexing](docs/connectors-and-indexing.md) | Connector scopes, Docling, contextual hybrid retrieval, ACL projection, and retries. |
+| [Operations and configuration](docs/operations.md) | Environment variables, health checks, object storage, observability, and troubleshooting. |
+| [Data schema](docs/data.schema.md) | Canonical `Item` model and durable storage ownership. |
+| [Agent architecture](docs/references/agent-loop.md) | OpenResponses stream, tools, response lifecycle, and citation projection. |
+
+The interactive API contract is generated by FastAPI at `/docs`; it is the
+authoritative reference for request and response schemas.
+
+## Development
+
+Useful local targets:
 
 ```bash
-uv run python -m bothesis.tui
+make help        # list all targets
+make services    # start PostgreSQL, Qdrant, and MinIO
+make status      # inspect dependency state and API health
+make db-init     # reset only the local PostgreSQL schema
+make db-seed     # seed the development administrator
+make qdrant-init # recreate only the derived Qdrant collection
 ```
 
-It talks only to the running API at `BOTHESIS_API_URL` (default
-`http://127.0.0.1:8000`) and defaults to the local streaming-test user UUID
-used by the WebUI. Set `BOTHESIS_USER_ID` (and optionally
-`BOTHESIS_TENANT_ID`) to use a different development identity. Use Ctrl+Enter
-to send a multiline message. `/clear` starts a new conversation, `/raw`
-toggles the receive-order SSE log, and `/exit` or `/quit` closes the client.
-An authenticated deployment can instead use `BOTHESIS_ACCESS_TOKEN` or the
-matching command-line options.
-
-### Frontend
-
-In another terminal:
-
-```bash
-cd web
-cp .env.example .env.local
-npm ci
-npm run dev
-```
-
-For local development only, enable UUID identity resolution in `backend/.env`:
-
-Boolean environment settings use strict JSON boolean values.
-
-```dotenv
-BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true
-```
-
-Then set database-backed user and tenant UUIDs in `web/.env.local`:
-
-```dotenv
-NEXT_PUBLIC_BOTHESIS_API_URL=http://127.0.0.1:8000
-NEXT_PUBLIC_BOTHESIS_TENANT_ID=00000000-0000-0000-0000-000000000001
-NEXT_PUBLIC_BOTHESIS_USER_ID=00000000-0000-0000-0000-000000000002
-```
-
-Open `http://localhost:3000`.
-
-## Langfuse tracing
-
-Tracing is optional. Create or select a project in the
-[Langfuse Cloud dashboard](https://cloud.langfuse.com), then add its credentials
-to `backend/.env`:
-
-```dotenv
-LANGFUSE_SECRET_KEY=sk-lf-...
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_BASE_URL=https://cloud.langfuse.com
-LANGFUSE_TRACING_ENVIRONMENT=development
-OTEL_SERVICE_NAME=bothesis-api
-```
-
-Both keys are required. Tracing stays disabled when neither is configured; a
-partial configuration logs a warning and also leaves tracing disabled. For
-self-hosted Langfuse, replace
-`LANGFUSE_BASE_URL` with the approved instance URL. See the official
-[Langfuse tracing setup](https://langfuse.com/docs/observability/get-started)
-and [environment documentation](https://langfuse.com/docs/observability/features/environments).
-
-BoThesis records agent runs, model generations, structured capabilities,
-retrieval, tool execution, latency, and token usage. Traces can include user
-requests, model responses, and retrieved enterprise content. Use an approved
-project with suitable retention and access controls; never commit Langfuse keys.
-
-## Tests
-
-From the repository root:
+Run the verification suite from the repository root:
 
 ```bash
 uv run --project backend pytest -q tests
@@ -249,18 +198,31 @@ npm --prefix web run typecheck
 npm --prefix web run build
 ```
 
-Connector tests are colocated with the connector package:
+The terminal client is available after the API is running:
 
 ```bash
 cd backend
-uv run python -m pytest -q
+uv run python -m bothesis.tui
 ```
 
-## Security notes
+## Security and deployment notes
 
-- Tenant, user, role, lineage, permission, and citation data must remain intact
-  through retrieval and agent execution.
-- The frontend identity values are temporary development configuration, not a
-  production authentication mechanism.
-- Keep all API keys in local environment files or a secret manager. Do not
-  commit `.env` files.
+- Never commit `.env` files, provider credentials, encryption keys, or signed
+  object URLs.
+- `BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true` is strictly for local development.
+  Production must inject authenticated identity from trusted middleware.
+- Connector credentials are encrypted at rest; retrieval authorization is based
+  on Item ACLs, not on the connector's provider credential.
+- S3/R2 object storage is mandatory for raw bytes. PostgreSQL does not store
+  document blobs; Qdrant does not hold canonical business state.
+
+For deployment and operational detail, start with
+[Operations and configuration](docs/operations.md).
+
+## Project status
+
+BoThesis is in active early development. The schema is initialized directly
+from the current ORM models and is intentionally optimized for the present
+architecture rather than backwards compatibility. Expect APIs and connectors to
+evolve; preserve the core invariants of tenant isolation, ACL enforcement,
+source lineage, and grounded citations when extending the project.
