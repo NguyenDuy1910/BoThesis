@@ -227,9 +227,11 @@ def _retrieved_evidence_context(evidence: Sequence[Evidence]) -> str:
             (
                 "<evidence>",
                 f"<evidence_id>{escape(item.id)}</evidence_id>",
-                f"<document_id>{escape(item.document_id)}</document_id>",
+                f"<item_id>{escape(item.item_id)}</item_id>",
+                f"<chunk_id>{escape(item.chunk_id)}</chunk_id>",
                 f"<title>{escape(item.title)}</title>",
                 f"<content>{escape(item.content)}</content>",
+                f"<citation>{escape(item.citation.model_dump_json(exclude_none=True))}</citation>",
                 "</evidence>",
             )
         )

@@ -26,9 +26,9 @@ export function useToast() {
 }
 
 const VARIANT_STYLES: Record<ToastVariant, { icon: React.ReactNode; border: string }> = {
-  success: { icon: <CheckCircle2 className="h-4 w-4 text-green-500" />, border: "border-l-green-500" },
-  error: { icon: <XCircle className="h-4 w-4 text-red-500" />, border: "border-l-red-500" },
-  info: { icon: <Info className="h-4 w-4 text-slate-500" />, border: "border-l-slate-400" },
+  success: { icon: <CheckCircle2 aria-hidden="true" className="h-4 w-4 text-[var(--success)]" />, border: "border-l-[var(--success)]" },
+  error: { icon: <XCircle aria-hidden="true" className="h-4 w-4 text-[var(--danger)]" />, border: "border-l-[var(--danger)]" },
+  info: { icon: <Info aria-hidden="true" className="h-4 w-4 text-[var(--brand-accent)]" />, border: "border-l-[var(--brand-accent)]" },
 };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
@@ -52,30 +52,36 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={{ toast }}>
       {children}
-      <div className="fixed bottom-4 right-4 z-[100] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2">
+      <div
+        aria-label="Notifications"
+        className="fixed bottom-4 right-4 z-[100] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"
+      >
         {toasts.map((t) => {
           const style = VARIANT_STYLES[t.variant];
           return (
             <div
               key={t.id}
+              role={t.variant === "error" ? "alert" : "status"}
               className={cn(
-                "flex items-start gap-3 rounded-lg border border-l-4 border-slate-200 bg-white p-3 shadow-lg shadow-slate-950/10",
+                "flex items-start gap-3 rounded-lg border border-l-4 border-[var(--border)] bg-[var(--surface)] p-3 text-[var(--text)] shadow-[var(--shadow-lg)]",
                 "animate-in slide-in-from-right-full fade-in-0 duration-200",
                 style.border
               )}
             >
               <div className="mt-0.5 shrink-0">{style.icon}</div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-slate-950">{t.title}</p>
+                <p className="text-sm font-medium text-[var(--text)]">{t.title}</p>
                 {t.description && (
-                  <p className="mt-0.5 text-sm leading-5 text-slate-600">{t.description}</p>
+                  <p className="mt-0.5 text-sm leading-5 text-[var(--text-muted)]">{t.description}</p>
                 )}
               </div>
               <button
+                aria-label={`Dismiss ${t.title} notification`}
                 onClick={() => dismiss(t.id)}
-                className="shrink-0 rounded p-0.5 text-slate-500 hover:text-slate-800"
+                className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                type="button"
               >
-                <X className="h-3.5 w-3.5" />
+                <X aria-hidden="true" className="h-3.5 w-3.5" />
               </button>
             </div>
           );

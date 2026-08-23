@@ -561,13 +561,16 @@ def _safe_update(observation: _Observation, **kwargs: Any) -> None:
 def _evidence_result(evidence: Evidence) -> dict[str, Any]:
     return {
         "id": evidence.id,
-        "document_id": evidence.document_id,
+        "item_id": evidence.item_id,
+        "chunk_id": evidence.chunk_id,
         "title": evidence.title,
         "content": evidence.content,
-        "page": evidence.page,
-        "section": evidence.section,
-        "uri": evidence.uri,
-        "source": evidence.source,
+        "citation": evidence.citation.model_dump(mode="json", exclude_none=True),
+        "source": (
+            evidence.source.model_dump(mode="json", exclude_none=True)
+            if evidence.source is not None
+            else None
+        ),
         "relevance_score": evidence.relevance_score,
     }
 

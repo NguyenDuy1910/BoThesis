@@ -9,13 +9,14 @@ interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
 }
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(
-  ({ className, error, ...props }, ref) => {
+  ({ className, error, "aria-invalid": ariaInvalid, ...props }, ref) => {
     return (
       <input
+        aria-invalid={error || ariaInvalid || undefined}
         ref={ref}
         className={cn(
           ui.control,
-          error && "border-red-300 focus:border-red-300 focus:ring-red-200",
+          error && "border-[var(--danger-border)] focus:border-[var(--danger)] focus:ring-[var(--danger-soft)]",
           className
         )}
         {...props}

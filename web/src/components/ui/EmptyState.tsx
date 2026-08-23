@@ -23,9 +23,9 @@ export function EmptyState({ icon, title, description, action, size = "lg", clas
   const s = sizeClasses[size];
   return (
     <div className={cn("flex flex-col items-center justify-center text-center", s.wrapper, className)}>
-      {icon && <div className={cn("rounded-md bg-slate-100 p-2.5 text-slate-500 ring-1 ring-inset ring-slate-200", s.icon)}>{icon}</div>}
-      <h3 className={cn("font-semibold text-slate-950", s.title)}>{title}</h3>
-      {description && <p className="mt-1 max-w-sm text-sm leading-5 text-slate-600">{description}</p>}
+      {icon && <div aria-hidden="true" className={cn("rounded-md bg-[var(--primary-soft)] p-2.5 text-[var(--brand-accent)] ring-1 ring-inset ring-[var(--border)]", s.icon)}>{icon}</div>}
+      <h3 className={cn("font-semibold text-[var(--text)] text-balance", s.title)}>{title}</h3>
+      {description && <p className="mt-1 max-w-sm text-pretty text-sm leading-5 text-[var(--text-muted)]">{description}</p>}
       {action && <div className="mt-3">{action}</div>}
     </div>
   );

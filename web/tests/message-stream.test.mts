@@ -43,7 +43,13 @@ test("materializes text deltas and annotations into one stable message item", ()
       type: DOCUMENT_CITATION_TYPE,
       start_index: 9,
       end_index: 9,
-      citation: { id: "source-1", title: "Access Policy", uri: "https://kb/source-1" },
+      citation: {
+        id: "source-1",
+        item_id: "item-1",
+        chunk_id: "source-1",
+        title: "Access Policy",
+        original_url: "https://kb/source-1",
+      },
     },
   });
   messages = applyResponseStreamEvent(messages, assistantId, {

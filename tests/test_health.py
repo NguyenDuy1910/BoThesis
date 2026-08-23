@@ -46,13 +46,27 @@ def _get_health(service: HealthService) -> httpx.Response:
         main.app.dependency_overrides.pop(main._get_health_service, None)
 
 
+def _qdrant_collection() -> dict[str, object]:
+    return {
+        "result": {
+            "status": "green",
+            "config": {
+                "params": {
+                    "vectors": {"content": {"size": 1536}},
+                    "sparse_vectors": {"content_bm25": {"modifier": "idf"}},
+                }
+            },
+        }
+    }
+
+
 def test_health_reports_all_configured_services_as_healthy() -> None:
     openrouter_paths: set[str] = set()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "qdrant.example":
             assert request.headers["api-key"] == "qdrant-secret"
-            return httpx.Response(200, json={"result": {"status": "green"}})
+            return httpx.Response(200, json=_qdrant_collection())
         if request.url.host == "api.openai.example":
             assert request.url.path == "/v1/models/gpt-5-mini"
             assert request.headers["authorization"] == "Bearer openai-secret"
@@ -122,10 +136,44 @@ def test_health_returns_503_when_required_services_are_unhealthy() -> None:
     assert "https://" not in serialized
 
 
+def test_health_rejects_a_dense_only_qdrant_collection() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "qdrant.example":
+            return httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "config": {
+                            "params": {
+                                "vectors": {"content": {"size": 1536}},
+                            }
+                        }
+                    }
+                },
+            )
+        if request.url.host == "api.openai.example":
+            return httpx.Response(200, json={"id": SETTINGS.chat_model})
+        if request.url.host == "openrouter.example":
+            return httpx.Response(
+                200,
+                json={"data": [{"id": SETTINGS.embedding_model}]},
+            )
+        return httpx.Response(200, json={"data": [{"id": "project-1"}]})
+
+    response = _get_health(_service(handler))
+
+    assert response.status_code == 503
+    qdrant = next(
+        service for service in response.json()["services"]
+        if service["name"] == "qdrant"
+    )
+    assert qdrant["error_category"] == "incompatible_schema"
+
+
 def test_health_is_degraded_when_optional_langfuse_is_unavailable() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "qdrant.example":
-            return httpx.Response(200, json={"result": {}})
+            return httpx.Response(200, json=_qdrant_collection())
         if request.url.host == "api.openai.example":
             return httpx.Response(200, json={"id": SETTINGS.chat_model})
         if request.url.host == "openrouter.example":
@@ -160,7 +208,7 @@ def test_unconfigured_optional_langfuse_does_not_fail_readiness() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "qdrant.example":
-            return httpx.Response(200, json={"result": {}})
+            return httpx.Response(200, json=_qdrant_collection())
         if request.url.host == "api.openai.example":
             return httpx.Response(200, json={"id": SETTINGS.chat_model})
         assert request.url.host == "openrouter.example"

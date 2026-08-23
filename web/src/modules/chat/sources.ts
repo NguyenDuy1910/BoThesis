@@ -1,19 +1,21 @@
 import { isMessageItem, isOutputTextPart, orderedTurnItems } from "./message-stream.ts";
 import { DOCUMENT_CITATION_TYPE } from "./types.ts";
-import type { CitationReference, TurnState } from "./types";
+import type { CitationReference, CitationSpan, TurnState } from "./types";
 
 export interface AnswerSource {
   id: string;
   title: string;
-  /** Absent when the source carries no openable location, or is restricted. */
-  url?: string;
-  /** Page / section locator, shown next to the title. */
+  itemId: string;
+  chunkId: string;
+  /** Primary internal viewer target. */
+  internalUrl: string;
+  /** Native source target, when the provider supplied one. */
+  originalUrl?: string;
   locator?: string;
   origin?: string;
   /** Citations are annotations on answer content, so every entry is used. */
   used: true;
-  /** Citations outside the reader's access are never linked. */
-  restricted: boolean;
+  spans: CitationSpan[];
 }
 
 /** Collect citations from output-text annotations, never from stream events. */
@@ -44,40 +46,52 @@ export function answerSources(turn: TurnState | undefined): AnswerSource[] {
 }
 
 function toAnswerSource(citation: CitationReference): AnswerSource | null {
-  const id = citation.id?.trim() || citation.document_id?.trim();
-  if (!id) return null;
-  const restricted = citation.restricted === true;
-  const url = citation.uri?.trim();
+  const itemId = citation.item_id?.trim();
+  const chunkId = citation.chunk_id?.trim();
+  if (!itemId || !chunkId) return null;
+  const id = citation.id?.trim() || chunkId;
+  const internalUrl = citation.internal_url?.trim()
+    || `/knowledge/items/${encodeURIComponent(itemId)}?chunk=${encodeURIComponent(chunkId)}`;
+  const originalUrl = citation.original_url?.trim() || citation.source?.url?.trim() || undefined;
   return {
     id,
-    title: citation.title?.trim() || citation.source?.trim() || "Untitled source",
-    url: restricted || !url ? undefined : url,
-    locator: locatorLabel(citation.page, citation.section),
-    origin: citation.source?.trim() || undefined,
+    itemId,
+    chunkId,
+    title: citation.title?.trim() || citation.source?.provider?.trim() || "Untitled source",
+    internalUrl,
+    originalUrl,
+    locator: locatorLabel(citation.spans ?? [], citation.section),
+    origin: citation.source?.provider?.trim() || undefined,
     used: true,
-    restricted,
+    spans: citation.spans ?? [],
   };
 }
 
 function mergeSource(existing: AnswerSource, next: AnswerSource): AnswerSource {
-  const restricted = existing.restricted || next.restricted;
   return {
     id: existing.id,
+    itemId: existing.itemId,
+    chunkId: existing.chunkId,
     title: next.title || existing.title,
-    url: restricted ? undefined : next.url ?? existing.url,
+    internalUrl: next.internalUrl || existing.internalUrl,
+    originalUrl: next.originalUrl ?? existing.originalUrl,
     locator: next.locator ?? existing.locator,
     origin: next.origin ?? existing.origin,
     used: true,
-    restricted,
+    spans: next.spans.length ? next.spans : existing.spans,
   };
 }
 
-function locatorLabel(page?: string | number | null, section?: string | null): string | undefined {
+function locatorLabel(spans: CitationSpan[], section?: string | null): string | undefined {
+  const pages = spans
+    .map((span) => span.page)
+    .filter((page): page is number => typeof page === "number");
+  const page = pages.length ? (pages.length === 1 ? String(pages[0]) : `${pages[0]}–${pages[pages.length - 1]}`) : undefined;
   const values = [
-    section?.trim() || undefined,
-    page === undefined || page === null || String(page).trim() === ""
+    page === undefined
       ? undefined
-      : `p. ${String(page).trim()}`,
+      : `p. ${page}`,
+    section?.trim() || undefined,
   ].filter((value): value is string => Boolean(value));
   return values.length ? values.join(" · ") : undefined;
 }

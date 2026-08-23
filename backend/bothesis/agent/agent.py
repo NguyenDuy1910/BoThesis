@@ -1,12 +1,3 @@
-"""Thin public façade for the BoThesis agent runtime.
-
-:class:`Agent` validates the request, wraps the native transport in the adapter
-that canonicalizes it, and streams one conversation turn. It is the only place
-a stream-wide ``sequence_number`` is assigned: one SSE stream carries the
-several responses of a turn, and the specification requires the number to
-increase monotonically across the whole stream.
-"""
-
 from __future__ import annotations
 
 import logging

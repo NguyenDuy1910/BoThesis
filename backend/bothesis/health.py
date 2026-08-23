@@ -12,6 +12,8 @@ from urllib.parse import quote
 import httpx
 from pydantic import BaseModel, ConfigDict
 
+from bothesis.document_index import DENSE_VECTOR_NAME, SPARSE_VECTOR_NAME
+
 ServiceStatus = Literal["healthy", "unhealthy", "not_configured"]
 AggregateStatus = Literal["healthy", "degraded", "unhealthy"]
 
@@ -186,6 +188,26 @@ class HealthService:
                 required,
                 started_at,
                 "invalid_response",
+                collection=collection,
+            )
+        result = payload["result"]
+        config = result.get("config")
+        params = config.get("params") if isinstance(config, dict) else None
+        vectors = params.get("vectors") if isinstance(params, dict) else None
+        sparse_vectors = (
+            params.get("sparse_vectors") if isinstance(params, dict) else None
+        )
+        if (
+            not isinstance(vectors, dict)
+            or DENSE_VECTOR_NAME not in vectors
+            or not isinstance(sparse_vectors, dict)
+            or SPARSE_VECTOR_NAME not in sparse_vectors
+        ):
+            return _unhealthy(
+                name,
+                required,
+                started_at,
+                "incompatible_schema",
                 collection=collection,
             )
         return _healthy(name, required, started_at, collection=collection)

@@ -4,50 +4,67 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import deque
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Protocol
 
 from .base import BaseSourceConnector
-from .models import (
+from bothesis.connector.processing import DoclingChunker
+from bothesis.connector.protocol import (
+    AnyItem,
+    ChangeType,
+    Chunk,
     ConnectorCheckpoint,
     ConnectorScope,
-    HierarchyNode,
-    SourceChange,
-    SourceChangeType,
-    SourceDocument,
-)
-from .qdrant import (
-    ChunkingConfig,
-    QdrantChunkRecord,
-    QdrantPayloadContext,
-    build_qdrant_records,
+    DocumentItem,
+    DocumentKind,
+    ItemChange,
 )
 
 log = logging.getLogger(__name__)
 
 
-class QdrantPayloadSink(Protocol):
-    """Index boundary implemented by the embedding/Qdrant worker."""
+class ConnectorIndexSink(Protocol):
+    """Index boundary supplied by ``document_index``.
 
-    async def write(self, records: Sequence[QdrantChunkRecord]) -> int:
-        """Embed and upsert every supplied record, returning the written count."""
+    Connector orchestration supplies the final canonical document and evidence
+    chunks. Contextualization, embedding, and payload projection happen behind
+    this boundary.
+    """
 
-    async def soft_delete_document(
+    async def write_item(
+        self,
+        item: AnyItem,
+        *,
+        tenant_id: str,
+        connector_id: str | int,
+    ) -> object:
+        """Persist one canonical Item that does not require indexing."""
+
+    async def write(
+        self,
+        item: DocumentItem,
+        chunks: Sequence[Chunk],
+        *,
+        tenant_id: str,
+        connector_id: str | int,
+    ) -> int:
+        """Replace one canonical item and return the number of chunks written."""
+
+    async def soft_delete_item(
         self,
         *,
         tenant_id: str,
         connector_id: str | int,
-        document_id: str,
+        item_id: str,
     ) -> None:
-        """Soft-delete all points for one tenant-owned document."""
+        """Soft-delete all points for one tenant-owned item."""
 
 
 @dataclass(frozen=True, slots=True)
 class PipelineFailure:
-    external_id: str
+    item_id: str
     operation: str
     error_type: str
     message: str
@@ -58,11 +75,11 @@ class PipelineResult:
     checkpoint: ConnectorCheckpoint
     checkpoint_advanced: bool
     discovered_changes: int
-    processed_documents: int
+    processed_items: int
     written_chunks: int
-    deleted_documents: int
-    replaced_documents: int
-    hierarchy: tuple[HierarchyNode, ...] = ()
+    deleted_items: int
+    replaced_items: int
+    hierarchy: tuple[AnyItem, ...] = ()
     failures: tuple[PipelineFailure, ...] = ()
     duration_ms: int = 0
 
@@ -70,22 +87,18 @@ class PipelineResult:
 class ConnectorPipelineError(RuntimeError):
     def __init__(self, result: PipelineResult) -> None:
         self.result = result
-        super().__init__(f"Connector pipeline failed for {len(result.failures)} document(s)")
+        super().__init__(f"Connector pipeline failed for {len(result.failures)} item(s)")
 
 
 @dataclass(frozen=True, slots=True)
 class ConnectorPipelineConfig:
     fetch_concurrency: int = 8
-    payload_batch_size: int = 64
-    chunking: ChunkingConfig = field(default_factory=ChunkingConfig)
     continue_on_error: bool = False
     fetch_hierarchy: bool = True
 
     def __post_init__(self) -> None:
         if self.fetch_concurrency < 1:
             raise ValueError("fetch_concurrency must be at least one")
-        if self.payload_batch_size < 1:
-            raise ValueError("payload_batch_size must be at least one")
 
 
 class ConnectorPipeline:
@@ -98,15 +111,19 @@ class ConnectorPipeline:
     def __init__(
         self,
         connector: BaseSourceConnector,
-        sink: QdrantPayloadSink,
+        sink: ConnectorIndexSink,
         *,
-        context: QdrantPayloadContext,
+        tenant_id: str,
+        connector_id: str | int,
         config: ConnectorPipelineConfig | None = None,
+        chunker: DoclingChunker | None = None,
     ) -> None:
         self._connector = connector
         self._sink = sink
-        self._context = context
+        self._tenant_id = tenant_id
+        self._connector_id = connector_id
         self._config = config or ConnectorPipelineConfig()
+        self._chunker = chunker or DoclingChunker()
 
     async def run_scope(
         self,
@@ -125,85 +142,68 @@ class ConnectorPipeline:
             await self._connector.discover_changes(checkpoint, scope)
         )
         failures: list[PipelineFailure] = []
-        deleted_documents = 0
-        replaced_documents = 0
-        processed_documents = 0
+        hierarchy: tuple[AnyItem, ...] = ()
+        if self._config.fetch_hierarchy:
+            try:
+                hierarchy = tuple(await self._connector.fetch_hierarchy(scope))
+                for item in sorted(
+                    hierarchy,
+                    key=lambda value: (value.hierarchy.depth, value.id),
+                ):
+                    await self._sink.write_item(
+                        item,
+                        tenant_id=self._tenant_id,
+                        connector_id=self._connector_id,
+                    )
+            except Exception as exc:
+                failures.append(_failure("<scope>", "hierarchy", exc))
+        deleted_items = 0
+        replaced_items = 0
+        processed_items = 0
         written_chunks = 0
-        payload_buffer: deque[QdrantChunkRecord] = deque()
-
         for change in changes:
-            if change.change_type != SourceChangeType.DELETE:
+            if change.type != ChangeType.DELETE:
                 continue
             try:
-                await self._sink.soft_delete_document(
-                    tenant_id=self._context.tenant_id,
-                    connector_id=self._context.connector_id,
-                    document_id=change.external_id,
+                await self._sink.soft_delete_item(
+                    tenant_id=self._tenant_id,
+                    connector_id=self._connector_id,
+                    item_id=change.item_id,
                 )
-                deleted_documents += 1
+                deleted_items += 1
             except Exception as exc:
-                failures.append(_failure(change.external_id, "delete", exc))
+                failures.append(_failure(change.item_id, "delete", exc))
 
         upserts = [
-            change for change in changes if change.change_type == SourceChangeType.UPSERT
+            change for change in changes if change.type != ChangeType.DELETE
         ]
         for start in range(0, len(upserts), self._config.fetch_concurrency):
             change_batch = upserts[start : start + self._config.fetch_concurrency]
             loaded = await asyncio.gather(
-                *(self._load_document(change) for change in change_batch),
+                *(self._load_item(change) for change in change_batch),
                 return_exceptions=True,
             )
             for change, outcome in zip(change_batch, loaded, strict=True):
                 if isinstance(outcome, BaseException):
-                    failures.append(_failure(change.external_id, "fetch", outcome))
+                    failures.append(_failure(change.item_id, "fetch", outcome))
                     continue
                 try:
-                    records = build_qdrant_records(
-                        outcome,
-                        self._context,
-                        chunking=self._config.chunking,
-                    )
-                    # Replace semantics remove stale trailing chunks when a
-                    # newer document version produces fewer chunks.
-                    await self._sink.soft_delete_document(
-                        tenant_id=self._context.tenant_id,
-                        connector_id=self._context.connector_id,
-                        document_id=outcome.external_id,
-                    )
-                    replaced_documents += 1
-                    processed_documents += 1
-                    payload_buffer.extend(records)
-                    while len(payload_buffer) >= self._config.payload_batch_size:
-                        write_batch = [
-                            payload_buffer.popleft()
-                            for _ in range(self._config.payload_batch_size)
-                        ]
-                        written_chunks += await self._write_batch(write_batch)
+                    chunks = await self._chunks_for(outcome)
+                    written_chunks += await self._write(outcome, chunks)
+                    replaced_items += 1
+                    processed_items += 1
                 except Exception as exc:
-                    failures.append(_failure(change.external_id, "process", exc))
-
-        if payload_buffer:
-            try:
-                written_chunks += await self._write_batch(list(payload_buffer))
-            except Exception as exc:
-                failures.append(_failure("<batch>", "write", exc))
-
-        hierarchy: tuple[HierarchyNode, ...] = ()
-        if self._config.fetch_hierarchy:
-            try:
-                hierarchy = tuple(await self._connector.fetch_hierarchy(scope))
-            except Exception as exc:
-                failures.append(_failure("<scope>", "hierarchy", exc))
+                    failures.append(_failure(change.item_id, "process", exc))
 
         advanced = not failures
         result = PipelineResult(
             checkpoint=(self._connector.next_checkpoint() if advanced else checkpoint),
             checkpoint_advanced=advanced,
             discovered_changes=len(changes),
-            processed_documents=processed_documents,
+            processed_items=processed_items,
             written_chunks=written_chunks,
-            deleted_documents=deleted_documents,
-            replaced_documents=replaced_documents,
+            deleted_items=deleted_items,
+            replaced_items=replaced_items,
             hierarchy=hierarchy,
             failures=tuple(failures),
             duration_ms=round((perf_counter() - started_at) * 1000),
@@ -214,10 +214,10 @@ class ConnectorPipeline:
             self._connector.source,
             scope.scope_value,
             result.discovered_changes,
-            result.processed_documents,
+            result.processed_items,
             result.written_chunks,
-            result.deleted_documents,
-            result.replaced_documents,
+            result.deleted_items,
+            result.replaced_items,
             len(result.failures),
             result.duration_ms,
         )
@@ -225,53 +225,80 @@ class ConnectorPipeline:
             raise ConnectorPipelineError(result)
         return result
 
-    async def _load_document(self, change: SourceChange) -> SourceDocument:
-        document, acl = await asyncio.gather(
-            self._connector.fetch_document(change.external_id),
-            self._connector.fetch_acl(change.external_id),
-        )
-        if document.external_id != change.external_id:
+    async def _load_item(self, change: ItemChange) -> DocumentItem:
+        item_id = change.item_id
+        item = change.item
+        if item is None:
+            item = await self._connector.fetch_item(item_id)
+        if item.id != item_id:
             raise ValueError(
-                f"Connector returned document {document.external_id!r} for change {change.external_id!r}"
+                f"Connector returned item {item.id!r} for change {item_id!r}"
             )
-        if document.source.value != self._connector.source:
+        if item.source.provider.value != self._connector.source:
             raise ValueError(
-                f"Connector source {self._connector.source!r} returned {document.source.value!r}"
+                f"Connector source {self._connector.source!r} returned {item.source.provider.value!r}"
             )
-        return document.model_copy(
-            update={
-                "acl": acl,
-                "external_version": document.external_version or change.external_version,
-                "etag": document.etag or change.etag,
-                "doc_updated_at": document.doc_updated_at or change.last_modified_at,
-            },
-            deep=True,
-        )
+        if not isinstance(item, DocumentItem):
+            raise ValueError(
+                f"Connector change {item_id!r} did not produce a DocumentItem"
+            )
+        return item
 
-    async def _write_batch(self, records: Sequence[QdrantChunkRecord]) -> int:
-        written = await self._sink.write(records)
-        if written != len(records):
-            raise RuntimeError(
-                f"Payload sink acknowledged {written} of {len(records)} records"
-            )
+    async def _chunks_for(self, item: DocumentItem) -> tuple[Chunk, ...]:
+        chunks = await self._connector.fetch_chunks(item)
+        resolved = (
+            tuple(chunks)
+            if chunks is not None
+            else tuple(self._chunker.chunk_item(item))
+        )
+        if not resolved:
+            if item.document_kind == DocumentKind.IMAGE:
+                return ()
+            raise ValueError(f"Document item {item.id!r} has no chunks")
+        seen_ids: set[str] = set()
+        seen_indexes: set[int] = set()
+        for chunk in resolved:
+            if chunk.item_id != item.id:
+                raise ValueError(
+                    f"Chunk {chunk.id!r} belongs to {chunk.item_id!r}, not {item.id!r}"
+                )
+            if chunk.id in seen_ids or chunk.chunk_index in seen_indexes:
+                raise ValueError(f"Document item {item.id!r} has duplicate chunks")
+            seen_ids.add(chunk.id)
+            seen_indexes.add(chunk.chunk_index)
+        return resolved
+
+    async def _write(
+        self,
+        item: DocumentItem,
+        chunks: Sequence[Chunk],
+    ) -> int:
+        written = await self._sink.write(
+            item,
+            chunks,
+            tenant_id=self._tenant_id,
+            connector_id=self._connector_id,
+        )
+        if written < 0:
+            raise RuntimeError("Index sink returned a negative write count")
         return written
 
 
-def _deduplicate_changes(changes: list[SourceChange]) -> list[SourceChange]:
-    by_external_id: dict[str, SourceChange] = {}
+def _deduplicate_changes(changes: list[ItemChange]) -> list[ItemChange]:
+    by_item_id: dict[str, ItemChange] = {}
     for change in changes:
         # Moving a duplicate to the end preserves the source's latest ordering.
-        by_external_id.pop(change.external_id, None)
-        by_external_id[change.external_id] = change
-    return list(by_external_id.values())
+        by_item_id.pop(change.item_id, None)
+        by_item_id[change.item_id] = change
+    return list(by_item_id.values())
 
 
-def _failure(external_id: str, operation: str, exc: BaseException) -> PipelineFailure:
+def _failure(item_id: str, operation: str, exc: BaseException) -> PipelineFailure:
     message = str(exc).strip()
     if len(message) > 500:
         message = f"{message[:497]}..."
     return PipelineFailure(
-        external_id=external_id,
+        item_id=item_id,
         operation=operation,
         error_type=type(exc).__name__,
         message=message or type(exc).__name__,
@@ -284,5 +311,5 @@ __all__ = [
     "ConnectorPipelineError",
     "PipelineFailure",
     "PipelineResult",
-    "QdrantPayloadSink",
+    "ConnectorIndexSink",
 ]

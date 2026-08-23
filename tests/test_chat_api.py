@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -18,13 +20,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 import native_responses as native
 
 import main
-import bothesis.db.engine as db_engine
+import bothesis.services.api as api_service_module
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext
 from bothesis.agent.tools import ToolRegistry
-from bothesis.agent.tools.knowledge_search import KnowledgeSearchTool
-from bothesis.knowledge.document_index import RetrievedDocument
-from bothesis.services import AuthContext
+from bothesis.agent.tools.knowledge_search import KnowledgeSearch
+from bothesis.connector.protocol import (
+    CitationInfo,
+    CitationSpan,
+    SourceIdentity,
+    SourceProvider,
+)
+from bothesis.knowledge import Evidence
+from bothesis.services import AuthContext, DatasourceService
 
 
 def search_call(output_index: int = 0) -> list[Any]:
@@ -67,19 +75,32 @@ class ScriptedTransport(native.ScriptedResponsesTransport):
         return [request["input"] for request in self.requests]
 
 
-def test_default_agent_composes_the_openai_transport(
+def test_default_agent_composes_the_openrouter_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from bothesis.agent.transports import openai as openai_transport
+    from bothesis.agent.transports import openrouter as openrouter_transport
 
-    class TestOpenAITransport:
-        provider = "openai"
+    class TestOpenRouterTransport:
+        DEFAULT_BASE_URL = "https://openrouter.test/v1"
+        provider = "openrouter"
         model = "gpt-test"
 
-    monkeypatch.setattr(openai_transport, "OpenAITransport", TestOpenAITransport)
-    monkeypatch.setattr(main, "_agent", None)
+        def __init__(self, **_: Any) -> None:
+            pass
 
-    assert isinstance(main._get_agent().model, TestOpenAITransport)
+        async def stream_response(
+            self,
+            *_: Any,
+            **__: Any,
+        ) -> AsyncIterator[Any]:
+            if False:
+                yield None
+
+    monkeypatch.setattr(openrouter_transport, "OpenRouterTransport", TestOpenRouterTransport)
+    monkeypatch.setattr(api_service_module, "OpenRouterTransport", TestOpenRouterTransport)
+    monkeypatch.setattr(main._api_service, "_agent", None)
+
+    assert isinstance(main._api_service._get_agent().model, TestOpenRouterTransport)
 
 
 class PermissionDeniedTransport:
@@ -116,34 +137,42 @@ class StubRetriever:
     def __init__(self) -> None:
         self.contexts: list[Any] = []
 
-    async def search(self, query: str, *, limit: int) -> list[RetrievedDocument]:
-        assert query == "leave policy"
-        assert limit == 5
-        return self._documents()
-
-    async def search_scoped(
+    async def search(
         self,
         query: str,
         *,
         limit: int,
         ctx: Any,
-    ) -> list[RetrievedDocument]:
+    ) -> list[Evidence]:
         assert query == "leave policy"
         assert limit == 5
         self.contexts.append(ctx)
-        return self._documents()
+        return self._evidence()
 
     @staticmethod
-    def _documents() -> list[RetrievedDocument]:
+    def _evidence() -> list[Evidence]:
         return [
-            RetrievedDocument(
+            Evidence(
                 id="chunk-1",
-                document_id="doc-1",
+                item_id="doc-1",
+                chunk_id="chunk-1",
                 title="Leave policy",
                 content="Employees receive 20 days of annual leave.",
-                source="confluence",
-                uri="https://knowledge.example/leave-policy",
-                metadata={"section_title": "Annual leave"},
+                source=SourceIdentity(
+                    connector_id="connector-1",
+                    provider=SourceProvider.CONFLUENCE,
+                    external_id="doc-1",
+                    url="https://knowledge.example/leave-policy",
+                ),
+                citation=CitationInfo(
+                    section="Annual leave",
+                    section_path=("Annual leave",),
+                    spans=(CitationSpan(
+                        element_id="paragraph_001",
+                        start_offset=0,
+                        end_offset=len("Employees receive 20 days of annual leave."),
+                    ),),
+                ),
                 relevance_score=0.9,
             )
         ]
@@ -213,10 +242,16 @@ class ReasoningTransport(native.ScriptedResponsesTransport):
 
 
 class _SessionContext:
-    async def __aenter__(self) -> object:
-        return object()
+    async def __aenter__(self) -> _SessionContext:
+        return self
 
     async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
         return None
 
 
@@ -236,15 +271,56 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
             principal_tokens=("external_group:finance",),
         )
 
-    monkeypatch.setattr(main, "_resolve_access", resolve_access)
-    monkeypatch.setattr(db_engine, "get_session_factory", lambda: _SessionContext)
+    monkeypatch.setattr(main._api_service, "_resolve_access", resolve_access)
+    monkeypatch.setattr(main._api_service, "_session_factory", _SessionContext)
     return user_id, tenant_id
+
+
+def test_qdrant_citation_does_not_synthesize_element_ranges() -> None:
+    payload = {
+        "chunk_index": 4,
+        "chunk_text": "Projected chunk evidence",
+        "citation_section": "Canonical section",
+        "citation_section_path": ["Policy", "Canonical section"],
+        "citation_anchor": "canonical-section",
+    }
+
+    citation = main._api_service._payload_citation(payload)
+
+    assert citation.spans == ()
+    assert citation.section == "Canonical section"
+    assert citation.section_path == ("Policy", "Canonical section")
+    assert citation.anchor == "canonical-section"
+
+
+def test_qdrant_viewer_does_not_split_multispan_chunk_projection() -> None:
+    payload = {
+        "chunk_id": "chunk-multi",
+        "chunk_index": 0,
+        "chunk_text": "First element\n\nSecond element",
+        "citation_section_path": ["Policy"],
+        "citation_spans": [
+            {"page": 1, "element_id": "p001_para_001"},
+            {"page": 2, "element_id": "p002_para_001"},
+        ],
+    }
+
+    elements, chunks_by_id = main._api_service._viewer_elements(
+        "doc-1", [payload]
+    )
+
+    assert elements == []
+    assert chunks_by_id["chunk-multi"] is payload
+    assert main._api_service._payload_citation(payload).spans == (
+        CitationSpan(page=1, element_id="p001_para_001"),
+        CitationSpan(page=2, element_id="p002_para_001"),
+    )
 
 
 def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     registry = ToolRegistry()
     retriever = StubRetriever()
-    registry.register(KnowledgeSearchTool(retriever))
+    registry.register(KnowledgeSearch(retriever))
     transport = ScriptedTransport()
     agent = Agent(
         transport,
@@ -255,7 +331,30 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
             recent_history_messages=2,
         ),
     )
-    monkeypatch.setattr(main, "_agent", agent)
+    monkeypatch.setattr(main._api_service, "_agent", agent)
+    async def allow_selected_connectors(
+        _service: DatasourceService,
+        _actor: AuthContext,
+        *,
+        connector_ids: list[int],
+    ) -> dict[str, Any]:
+        assert connector_ids == [12]
+        return {
+            "items": [{
+                "id": "12",
+                "provider": "confluence",
+                "display_name": "Company Confluence",
+                "status": "active",
+                "capabilities": ["knowledge_search"],
+            }],
+            "total": 1,
+        }
+
+    monkeypatch.setattr(
+        DatasourceService,
+        "list_chat_connectors",
+        allow_selected_connectors,
+    )
     user_id, tenant_id = _install_access(monkeypatch)
     conversation_id = uuid4()
 
@@ -272,6 +371,8 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
                     {"role": "user", "content": "Recent scope question"},
                     {"role": "assistant", "content": "Recent scope answer"},
                 ],
+                "connector_mode": "selected",
+                "connector_ids": [12],
             },
         )
 
@@ -303,14 +404,16 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         if event["type"] == "response.output_text.annotation.added"
     )
     assert annotation["type"] == "bothesis:document_citation"
-    assert annotation["citation"]["document_id"] == "doc-1"
-    assert annotation["citation"]["source"] == "confluence"
+    assert annotation["citation"]["item_id"] == "doc-1"
+    assert annotation["citation"]["chunk_id"] == "chunk-1"
+    assert annotation["citation"]["source"]["provider"] == "confluence"
     assert len(retriever.contexts) == 1
     assert retriever.contexts[0].reader_ids == (
         "email:person@example.test",
         "external_group:finance",
     )
     assert retriever.contexts[0].is_admin is True
+    assert retriever.contexts[0].connector_ids == (12,)
     # ``/responses`` takes instructions as a request parameter, so the input is
     # items only — there is no synthetic leading system message.
     assert "<agent_instructions>" in transport.requests[0]["instructions"]
@@ -327,9 +430,9 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
 
 def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     registry = ToolRegistry()
-    registry.register(KnowledgeSearchTool(StubRetriever()))
+    registry.register(KnowledgeSearch(StubRetriever()))
     agent = Agent(InterleavedTransport(), registry)
-    monkeypatch.setattr(main, "_agent", agent)
+    monkeypatch.setattr(main._api_service, "_agent", agent)
     user_id, tenant_id = _install_access(monkeypatch)
 
     with TestClient(main.app) as client:
@@ -377,7 +480,7 @@ async def test_a_reasoning_item_replays_as_a_canonical_input_item() -> None:
     """Reasoning continues through the specified fields, not a provider blob."""
 
     registry = ToolRegistry()
-    registry.register(KnowledgeSearchTool(StubRetriever()))
+    registry.register(KnowledgeSearch(StubRetriever()))
     transport = ReasoningTransport()
     events = [
         event
@@ -438,3 +541,16 @@ def test_chat_api_rejects_history_message_over_context_budget() -> None:
         )
 
     assert response.status_code == 422
+
+
+def test_chat_request_requires_a_bounded_explicit_connector_selection() -> None:
+    with pytest.raises(ValueError, match="requires at least one connector"):
+        main.ChatRequest(message="hello", connector_mode="selected")
+
+    request = main.ChatRequest(
+        message="hello",
+        connector_mode="selected",
+        connector_ids=[12, 14],
+    )
+
+    assert request.connector_ids == [12, 14]

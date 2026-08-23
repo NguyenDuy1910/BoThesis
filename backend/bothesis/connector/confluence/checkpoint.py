@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..models import ConnectorCheckpoint
+from bothesis.connector.protocol import ConnectorCheckpoint
 
 
 class ConfluenceCheckpoint(ConnectorCheckpoint):

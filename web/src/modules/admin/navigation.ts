@@ -33,9 +33,9 @@ export const adminNavGroups: NavGroup[] = [
   {
     label: "Data",
     items: [
-      { label: "Data Sources", href: "/admin/connectors", icon: Plug },
+      { label: "Connectors", href: "/admin/connectors", icon: Plug },
       { label: "Ingestion", href: "/admin/ingestion/jobs", icon: Database },
-      { label: "Documents", href: "/admin/documents", icon: FileText },
+      { label: "Items", href: "/admin/items", icon: FileText },
     ],
   },
   {

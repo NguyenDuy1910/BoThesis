@@ -1,13 +1,13 @@
 "use client";
 
+import { ChevronLeft, Menu, MessageSquareText, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { cn } from "@/lib/cn";
+
+import { ProductMark } from "@/components/ui/ProductMark";
 import { appBrand } from "@/lib/brand";
+import { cn } from "@/lib/cn";
 import { adminNavGroups } from "@/modules/admin/navigation";
-import { BrandLogo } from "@/components/ui/BrandLogo";
-import { ChevronLeft, Menu, MessageSquareText } from "lucide-react";
-import { useState } from "react";
 
 interface AdminSidebarProps {
   collapsed: boolean;
@@ -16,125 +16,115 @@ interface AdminSidebarProps {
   onMobileClose: () => void;
 }
 
-export function AdminSidebar({ collapsed, onToggle, mobileOpen, onMobileClose }: AdminSidebarProps) {
+export function AdminSidebar({
+  collapsed,
+  onToggle,
+  mobileOpen,
+  onMobileClose,
+}: AdminSidebarProps) {
   const pathname = usePathname();
-
-  const isActive = (href: string) => {
-    if (href === "/admin/overview") return pathname === "/admin/overview";
-    return pathname.startsWith(href);
-  };
-
-  const sidebarContent = (
-    <div className="flex h-full flex-col bg-white">
-      <div className="flex h-14 items-center border-b border-slate-200/80 px-3">
-        {!collapsed && (
-          <div className="flex min-w-0 items-center gap-2.5">
-            <BrandLogo
-              alt={appBrand.logo.alt}
-              className="h-9 w-9 rounded-lg bg-white p-1 shadow-sm ring-1 ring-inset ring-slate-200"
-              imageClassName={appBrand.logo.imageClassName}
-              label={appBrand.logo.alt}
-              size={32}
-              src={appBrand.logo.src}
-            />
-            <span className="min-w-0">
-              <span className="block truncate text-sm font-semibold leading-5 text-slate-950">{appBrand.adminName}</span>
-              <span className="block truncate text-[11px] font-medium text-slate-500">{appBrand.adminSubtitle}</span>
-            </span>
-          </div>
-        )}
-        {collapsed && (
-          <BrandLogo
-            alt={appBrand.logo.alt}
-            className="mx-auto h-9 w-9 rounded-lg bg-white p-1 shadow-sm ring-1 ring-inset ring-slate-200"
-            imageClassName={appBrand.logo.imageClassName}
-            label={appBrand.logo.alt}
-            size={32}
-            src={appBrand.logo.src}
-          />
-        )}
-        <button
-          onClick={onToggle}
-          type="button"
-          aria-label={collapsed ? "Expand admin navigation" : "Collapse admin navigation"}
-          title={collapsed ? "Expand navigation" : "Collapse navigation"}
-          className={cn(
-            "hidden h-8 w-8 items-center justify-center rounded-md text-slate-500 transition-colors duration-150 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20 lg:flex",
-            collapsed ? "mx-auto" : "ml-auto"
-          )}
-        >
-          <ChevronLeft className={cn("h-3.5 w-3.5 transition-transform", collapsed && "rotate-180")} />
-        </button>
-      </div>
-
-      <nav className="flex-1 space-y-4 overflow-y-auto px-2 py-3">
-        {adminNavGroups.map((group, groupIdx) => (
-          <div key={groupIdx}>
-            {group.label && !collapsed && (
-              <p className="px-2.5 pb-1.5 text-[11px] font-semibold uppercase tracking-normal text-slate-500">
-                {group.label}
-              </p>
-            )}
-            <div className="space-y-0.5">
-              {group.items.map((item) => {
-                const Icon = item.icon;
-                const active = isActive(item.href);
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    onClick={() => onMobileClose()}
-                    className={cn(
-                      "group relative flex h-9 items-center gap-2 rounded-md px-2.5 text-sm font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20",
-                      active
-                        ? "bg-teal-50 text-slate-950 ring-1 ring-inset ring-teal-100"
-                        : "text-slate-600 hover:bg-slate-100 hover:text-slate-950",
-                      collapsed && "justify-center px-2"
-                    )}
-                    title={collapsed ? item.label : undefined}
-                  >
-                    {active && <span className="absolute left-0 h-4 w-0.5 rounded-r-full bg-teal-600" />}
-                    <Icon className={cn("h-4 w-4 shrink-0", active ? "text-teal-700" : "text-slate-500 group-hover:text-slate-700")} />
-                    {!collapsed && <span className="truncate">{item.label}</span>}
-                  </Link>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </nav>
-
-      <div className="border-t border-slate-200 px-2 py-2">
-        <Link
-          href="/app"
-          aria-label={collapsed ? "Back to workspace" : undefined}
-          title={collapsed ? "Back to workspace" : undefined}
-          className={cn(
-            "flex h-9 items-center gap-2 rounded-md px-2 text-sm font-medium text-slate-600 transition-colors duration-150 hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20",
-            collapsed && "justify-center"
-          )}
-        >
-          <MessageSquareText className="h-3.5 w-3.5" />
-          {!collapsed && <span>Back to workspace</span>}
-        </Link>
-      </div>
-    </div>
+  const visuallyCollapsed = collapsed && !mobileOpen;
+  const isActive = (href: string) => (
+    href === "/admin/overview" ? pathname === href : pathname.startsWith(href)
   );
 
   return (
     <>
       {mobileOpen && (
-        <div className="fixed inset-0 z-40 bg-slate-950/35 lg:hidden" onClick={onMobileClose} />
+        <button
+          aria-label="Close admin navigation"
+          className="admin-sidebar__scrim"
+          onClick={onMobileClose}
+          type="button"
+        />
       )}
 
       <aside
         className={cn(
-          "fixed left-0 top-0 z-50 h-full border-r border-slate-200 bg-white shadow-xl shadow-slate-950/5 transition-all duration-200 lg:relative lg:z-auto lg:shadow-none",
-          collapsed ? "w-[72px]" : "w-[200px]",
-          mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
+          "admin-sidebar",
+          visuallyCollapsed && "admin-sidebar--collapsed",
+          mobileOpen && "admin-sidebar--mobile-open",
         )}
       >
-        {sidebarContent}
+        <div className="admin-sidebar__header">
+          {!visuallyCollapsed ? (
+            <div className="admin-sidebar__brand">
+              <ProductMark decorative size="md" />
+              <span>
+                <strong>{appBrand.productName}</strong>
+                <small>{appBrand.adminName}</small>
+              </span>
+            </div>
+          ) : (
+            <ProductMark decorative size="md" />
+          )}
+          <button
+            aria-label={visuallyCollapsed ? "Expand admin navigation" : "Collapse admin navigation"}
+            className="admin-sidebar__icon-button admin-sidebar__collapse"
+            onClick={onToggle}
+            title={visuallyCollapsed ? "Expand navigation" : "Collapse navigation"}
+            type="button"
+          >
+            <ChevronLeft aria-hidden="true" className={cn(visuallyCollapsed && "rotate-180")} size={15} />
+          </button>
+          <button
+            aria-label="Close admin navigation"
+            className="admin-sidebar__icon-button admin-sidebar__close"
+            onClick={onMobileClose}
+            type="button"
+          >
+            <X aria-hidden="true" size={17} />
+          </button>
+        </div>
+
+        <nav aria-label="Administration" className="admin-sidebar__nav">
+          {adminNavGroups.map((group, groupIndex) => (
+            <div className="admin-sidebar__group" key={group.label ?? groupIndex}>
+              {group.label && !visuallyCollapsed && (
+                <p className="admin-sidebar__group-label">{group.label}</p>
+              )}
+              <div className="admin-sidebar__items">
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  const active = isActive(item.href);
+                  return (
+                    <Link
+                      aria-current={active ? "page" : undefined}
+                      className={cn(
+                        "admin-sidebar__item",
+                        active && "admin-sidebar__item--active",
+                        visuallyCollapsed && "admin-sidebar__item--collapsed",
+                      )}
+                      href={item.href}
+                      key={item.href}
+                      onClick={onMobileClose}
+                      title={visuallyCollapsed ? item.label : undefined}
+                    >
+                      {active && <span className="admin-sidebar__active-rail" />}
+                      <Icon aria-hidden="true" size={16} />
+                      {!visuallyCollapsed && <span>{item.label}</span>}
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </nav>
+
+        <div className="admin-sidebar__footer">
+          <Link
+            aria-label={visuallyCollapsed ? "Back to knowledge workspace" : undefined}
+            className={cn(
+              "admin-sidebar__item",
+              visuallyCollapsed && "admin-sidebar__item--collapsed",
+            )}
+            href="/app"
+            title={visuallyCollapsed ? "Back to knowledge workspace" : undefined}
+          >
+            <MessageSquareText aria-hidden="true" size={16} />
+            {!visuallyCollapsed && <span>Knowledge workspace</span>}
+          </Link>
+        </div>
       </aside>
     </>
   );
@@ -143,12 +133,12 @@ export function AdminSidebar({ collapsed, onToggle, mobileOpen, onMobileClose }:
 export function MobileMenuButton({ onClick }: { onClick: () => void }) {
   return (
     <button
-      onClick={onClick}
       aria-label="Open admin navigation"
+      className="admin-topbar__menu"
+      onClick={onClick}
       type="button"
-      className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-600 transition-colors duration-150 hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20 lg:hidden"
     >
-      <Menu className="h-4 w-4" />
+      <Menu aria-hidden="true" size={17} />
     </button>
   );
 }

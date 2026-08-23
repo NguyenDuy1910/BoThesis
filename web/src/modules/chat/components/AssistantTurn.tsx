@@ -9,10 +9,12 @@ import type { TurnState } from "../types";
 import { IncrementalMarkdown } from "./IncrementalMarkdown";
 
 export const AssistantTurn = memo(function AssistantTurn({
+  activityConnectorLabel,
   isStreaming,
   onRevealingChange,
   turn,
 }: {
+  activityConnectorLabel?: string;
   isStreaming: boolean;
   /** Report while the turn's newest text is still easing onto screen. */
   onRevealingChange?: (isRevealing: boolean) => void;
@@ -39,22 +41,21 @@ export const AssistantTurn = memo(function AssistantTurn({
             </div>
           );
         }
-        if (item.kind === "tool") return <ToolActivity item={item} key={item.id} />;
+        if (item.kind === "tool") return <ToolActivity connectorLabel={activityConnectorLabel} item={item} key={item.id} />;
         return <ReasoningActivity item={item} key={item.id} />;
       })}
       {showPending && (
         <span aria-label="Assistant is working" className="assistant-turn__pending" role="status">
-          <span />
-          <span />
-          <span />
+          <LoaderCircle aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
+          <span>Analyzing…</span>
         </span>
       )}
     </div>
   );
 });
 
-function ToolActivity({ item }: { item: Extract<AssistantTurnItem, { kind: "tool" }> }) {
-  const presentation = toolPresentation(item.name, item.state);
+function ToolActivity({ connectorLabel, item }: { connectorLabel?: string; item: Extract<AssistantTurnItem, { kind: "tool" }> }) {
+  const presentation = toolPresentation(item.name, item.state, connectorLabel);
   const Icon = item.state === "active" ? LoaderCircle : presentation.icon;
 
   return (
@@ -97,13 +98,16 @@ function ReasoningActivity({ item }: { item: Extract<AssistantTurnItem, { kind: 
 function toolPresentation(
   name: string,
   state: Extract<AssistantTurnItem, { kind: "tool" }> ["state"],
+  connectorLabel?: string,
 ) {
   const completed = state === "completed";
   if (name === "knowledge_search") {
     return {
       label: state === "error"
         ? "Knowledge search could not complete"
-        : completed ? "Searched knowledge" : "Searching knowledge…",
+        : completed
+          ? `Searched ${connectorLabel ?? "knowledge"}`
+          : `Searching ${connectorLabel ?? "knowledge"}…`,
       icon: Search,
     };
   }

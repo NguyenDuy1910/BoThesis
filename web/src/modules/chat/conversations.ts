@@ -148,7 +148,7 @@ export function getMessageText(message: ChatMessage): string {
 export function titleFromMessage(message: string) {
   const cleaned = message.replace(/\s+/g, " ").trim();
   if (!cleaned) return DEFAULT_CONVERSATION_TITLE;
-  return cleaned.length > 54 ? `${cleaned.slice(0, 51)}...` : cleaned;
+  return cleaned.length > 54 ? `${cleaned.slice(0, 51)}…` : cleaned;
 }
 
 export function cachedToUIMessage(message: CachedChatMessage): ChatMessage {

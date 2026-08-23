@@ -7,15 +7,14 @@ agent activity and final responses to a web chat interface.
 ## Architecture
 
 ```text
-Next.js chat UI
-    ↓ Server-Sent Events (SSE)
-FastAPI agent API
-    ↓
-Adaptive agent loop ──→ OpenRouter chat model
-    ↓
-Knowledge tools ──────→ OpenRouter embeddings ──→ Qdrant
-    ↓
-Grounded answer + citations
+HTTP → FastAPI (`backend/main.py`) → services
+                                  ↓
+PostgreSQL ── durable identity, Item, connector, ACL, and chat state
+R2 / S3 ──── original document bytes
+Docling ──── document understanding and canonical chunks
+Qdrant ───── contextual embeddings, retrieval payload, and ACL projection
+Knowledge ── permission filtering, retrieval, reranking, and evidence
+Agent ────── reasoning and grounded answers with citations
 
 Agent, model, retrieval, and tool traces ───────→ Langfuse (optional)
 ```
@@ -50,8 +49,19 @@ docs/                               Project documentation
 
 ## Quick start
 
-Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js, npm,
-an OpenRouter API key, and a reachable Qdrant collection.
+Prerequisites: Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker,
+Node.js, npm, and an OpenRouter API key.
+
+Initialize PostgreSQL, Qdrant, local S3-compatible object storage, the database
+schema, the raw-object bucket, and a development admin identity with one
+command:
+
+```bash
+make init
+```
+
+This command intentionally rebuilds the early-development PostgreSQL schema and
+the derived Qdrant collection. It does not preserve local data.
 
 ### Backend
 
@@ -69,33 +79,88 @@ OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-5-mini
 OPENROUTER_API_KEY=...  # document embeddings
 EMBEDDING_MODEL=openai/text-embedding-3-small
+BOTHESIS_CONTEXTUALIZATION_ENABLED=false
+BOTHESIS_CONTEXTUALIZATION_MODEL=
+BOTHESIS_HYBRID_CANDIDATE_LIMIT=20
 DATABASE_URL=postgresql+asyncpg://bothesis:bothesis@127.0.0.1:5432/bothesis
 QDRANT_URL=http://localhost:6333
-QDRANT_COLLECTION=bothesis
+QDRANT_COLLECTION=bothesis_v6
 QDRANT_API_KEY=  # set a key only when authentication is enabled
+BOTHESIS_OBJECT_STORAGE_PROVIDER=aws_s3
+BOTHESIS_OBJECT_STORAGE_BUCKET=bothesis-raw
+BOTHESIS_CONNECTOR_ENCRYPTION_KEY=  # URL-safe base64 for exactly 32 bytes
 ```
 
-Chat document uploads can use AWS S3.
+The v6 document index stores `contextual_text` in both the dense `content`
+vector and Qdrant's native BM25 `content_bm25` sparse vector, then combines
+both filtered candidate sets with reciprocal-rank fusion. Semantic chunk
+context is optional; when disabled or unavailable, indexing falls back to the
+document summary without changing canonical `chunk_text` evidence.
+
+Qdrant is derived state. `make init` recreates the local collection; connector
+checkpoints and deterministic per-Item point IDs make normal retries safe.
+
+Raw object storage is mandatory. Chat uploads and provider-downloaded binary
+files use AWS S3 or Cloudflare R2 through the same boto3 S3-compatible adapter.
 The browser uploads bytes directly to its presigned URL; configure the bucket's
 CORS policy to allow `PUT` from the WebUI origin with the `Content-Type` header.
-Without object storage, the API permits a PostgreSQL blob fallback up to 20 MiB.
-AWS credentials are resolved through boto3's standard credential chain. For
-local development, use `aws configure`, `AWS_PROFILE`, or the normal
-`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` environment variables. In AWS,
-prefer a container or instance role.
+Set `BOTHESIS_OBJECT_STORAGE_PROVIDER` to select the provider. AWS credentials
+are resolved through boto3's standard credential chain. For local development,
+`make init` configures MinIO and local credentials. In AWS, prefer a container
+or instance role.
 
 ```dotenv
-BOTHESIS_S3_BUCKET=bothesis-documents
+BOTHESIS_OBJECT_STORAGE_BUCKET=bothesis-documents
+BOTHESIS_S3_BUCKET=bothesis-documents  # optional provider-specific override
 BOTHESIS_S3_REGION=us-east-1
 # Optional for local S3-compatible development endpoints only:
 BOTHESIS_S3_ENDPOINT_URL=
 BOTHESIS_S3_ADDRESSING_STYLE=auto
 BOTHESIS_DOCUMENT_MAX_UPLOAD_BYTES=104857600
-BOTHESIS_DOCUMENT_MAX_DATABASE_BLOB_BYTES=20971520
 BOTHESIS_DOCUMENT_DIRECT_MAX_BYTES=20971520
 ```
 
+For Cloudflare R2, create an R2 API token with S3 credentials and configure its
+access key and secret through your deployment secret manager. R2 is configured
+with its account endpoint, `auto` signing region, and path-style addresses by
+the adapter; no Cloudflare SDK is used.
+
+```dotenv
+BOTHESIS_OBJECT_STORAGE_PROVIDER=cloudflare_r2
+BOTHESIS_R2_BUCKET=bothesis-documents
+BOTHESIS_R2_ACCOUNT_ID=your-cloudflare-account-id
+BOTHESIS_R2_ACCESS_KEY_ID=...
+BOTHESIS_R2_SECRET_ACCESS_KEY=...
+# Optional: override the endpoint derived from the account ID.
+BOTHESIS_R2_ENDPOINT_URL=
+```
+
 The API starts at `http://127.0.0.1:8000`.
+
+### Initial database schema
+
+The project is in initial development and has no migration compatibility
+layer. The SQLAlchemy models define the complete intended schema directly.
+Rebuild all local dependencies, schema, and seed data from the repository root:
+
+```bash
+make init
+```
+
+The individual targets remain available for diagnostics:
+
+```bash
+make services
+make db-init
+make db-seed
+make qdrant-init
+make status
+```
+
+`make db-init` drops and recreates the local `public` schema. `make qdrant-init`
+recreates the configured derived collection. Raw binary content is never stored
+in PostgreSQL; the `items` table stores only durable object metadata such as
+`storage_key`, MIME type, size, and SHA-256.
 
 - Health: `http://127.0.0.1:8000/health`
 - OpenAPI: `http://127.0.0.1:8000/docs`
@@ -136,16 +201,6 @@ Boolean environment settings use strict JSON boolean values.
 ```dotenv
 BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true
 ```
-
-For the single-tenant Phase 1 dataset only, development admins can query
-legacy Qdrant points that do not carry the current database tenant UUID:
-
-```dotenv
-BOTHESIS_PHASE1_UNSCOPED_RETRIEVAL=true
-```
-
-This setting requires insecure development identity mode, remains disabled by
-default, and must never be enabled in a shared or production environment.
 
 Then set database-backed user and tenant UUIDs in `web/.env.local`:
 

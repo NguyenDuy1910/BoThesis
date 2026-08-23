@@ -1,8 +1,9 @@
 "use client";
 
-import { usePathname } from "next/navigation";
-import Link from "next/link";
 import { ChevronRight, ShieldCheck } from "lucide-react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+
 import { MobileMenuButton } from "./AdminSidebar";
 
 interface AdminTopbarProps {
@@ -12,40 +13,40 @@ interface AdminTopbarProps {
 export function AdminTopbar({ onMobileMenuOpen }: AdminTopbarProps) {
   const pathname = usePathname();
   const segments = pathname.split("/").filter(Boolean).slice(1);
-  const breadcrumbs = segments.map((segment, idx) => {
-    const href = "/admin/" + segments.slice(0, idx + 1).join("/");
-    const label = segment
-      .replace(/[-_]/g, " ")
-      .replace(/\b\w/g, (c) => c.toUpperCase());
-    return { href, label };
-  });
+  const breadcrumbs = segments.map((segment, index) => ({
+    href: "/admin/" + segments.slice(0, index + 1).join("/"),
+    label: breadcrumbLabels[segment] ?? segment.replace(/[-_]/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
+  }));
 
   return (
-    <div className="sticky top-0 z-10 flex h-14 items-center justify-between gap-3 border-b border-slate-200 bg-white/95 px-4 backdrop-blur lg:px-6">
-      <div className="flex min-w-0 items-center gap-3">
+    <header className="admin-topbar">
+      <div className="admin-topbar__left">
         <MobileMenuButton onClick={onMobileMenuOpen} />
-        <nav className="flex min-w-0 items-center gap-1 text-xs">
-          <Link href="/admin/overview" className="shrink-0 text-slate-500 transition hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20">
-            Admin
-          </Link>
-          {breadcrumbs.map((crumb, idx) => (
-            <span key={crumb.href} className="flex min-w-0 items-center gap-1">
-              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-300" />
-              {idx === breadcrumbs.length - 1 ? (
-                <span className="truncate font-medium text-slate-700">{crumb.label}</span>
+        <nav aria-label="Breadcrumb" className="admin-topbar__breadcrumbs">
+          <Link href="/admin/overview">Admin</Link>
+          {breadcrumbs.map((crumb, index) => (
+            <span key={crumb.href}>
+              <ChevronRight aria-hidden="true" size={13} />
+              {index === breadcrumbs.length - 1 ? (
+                <span aria-current="page">{crumb.label}</span>
               ) : (
-                <Link href={crumb.href} className="truncate text-slate-500 transition hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500/20">
-                  {crumb.label}
-                </Link>
+                <Link href={crumb.href}>{crumb.label}</Link>
               )}
             </span>
           ))}
         </nav>
       </div>
-      <div className="hidden shrink-0 items-center gap-1.5 rounded-md bg-teal-50 px-2 py-1 text-xs font-medium text-teal-800 ring-1 ring-inset ring-teal-100 sm:inline-flex">
-        <ShieldCheck className="h-3.5 w-3.5" />
-        Admin Dashboard
+      <div className="admin-topbar__status" role="status">
+        <ShieldCheck aria-hidden="true" size={14} />
+        Server enforced
       </div>
-    </div>
+    </header>
   );
 }
+
+const breadcrumbLabels: Record<string, string> = {
+  acl: "ACL Policies",
+  connectors: "Connectors",
+  "access-requests": "Access Requests",
+  "audit-logs": "Audit Logs",
+};

@@ -9,52 +9,64 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from ..base import BaseSourceConnector, GenerateDocumentsOutput, LoadConnector
-from ..contracts import StorageContract
-from ..models import (
+from bothesis.connector.protocol import (
+    AccessEffect,
+    AccessPolicy,
+    AccessRule,
+    AnyItem,
+    ChangeType,
+    Chunk,
+    CollectionItem,
+    CollectionKind,
     ConnectorCheckpoint,
     ConnectorScope,
-    Document,
-    DocumentSource,
-    HierarchyNode,
-    HierarchyNodeType,
-    SourceACL,
-    SourceChange,
+    DocumentItem,
+    DocumentKind,
+    DirectAccess,
+    EffectiveAccess,
+    Hierarchy,
+    ItemChange,
+    Principal,
+    SourceIdentity,
     SourceCheckpoint,
-    SourceDocument,
-    TextSection,
+    SourceProvider,
+    StorageObject,
 )
+from bothesis.connector.protocol import RawObjectStore
 from .processing import FileProcessor
 
 log = logging.getLogger(__name__)
 
-MANUAL_UPLOAD_SOURCE = "file"
-MANUAL_UPLOAD_SCOPE_VALUE = "manual_uploads"
-MANUAL_UPLOAD_DISPLAY_NAME = "Manual uploads"
-MANUAL_UPLOAD_CONNECTOR_NAME = "Manual uploads"
-MANUAL_UPLOAD_HIERARCHY_NODE_ID = "file::manual_uploads"
+FILE_SOURCE = SourceProvider.FILE.value
+FILE_SCOPE_VALUE = SourceProvider.FILE.value
+FILE_DISPLAY_NAME = "Files"
+FILE_CONNECTOR_NAME = "Files"
+FILE_HIERARCHY_NODE_ID = "file::files"
 
 
 @dataclass(frozen=True, slots=True)
-class ManualUploadRecord:
+class FileRecord:
     external_id: str
     file_name: str
-    path: Path
+    path: Path | None
+    storage_key: str | None
     size_bytes: int
     mime_type: str | None
     sha256: str
     uploaded_at: datetime
     modified_at: datetime
-    acl: SourceACL
+    access: AccessPolicy
     metadata: dict[str, str | list[str]]
 
 
-class ManualFileUploadConnector(BaseSourceConnector):
-    """Incremental adapter for admin-uploaded files and their record JSON."""
+class FileConnector(BaseSourceConnector):
+    """Incremental adapter for a file source and its record JSON."""
 
-    source = DocumentSource.FILE.value
+    source = SourceProvider.FILE.value
     checkpoint_model = SourceCheckpoint
 
     def __init__(
@@ -65,18 +77,69 @@ class ManualFileUploadConnector(BaseSourceConnector):
     ) -> None:
         self.config = dict(config)
         self.base_dir = Path(
-            str(config.get("base_dir") or "/tmp/bothesis-manual-uploads")
+            str(config.get("base_dir") or "/tmp/bothesis-files")
         ).expanduser()
         self._processor = processor or FileProcessor(
             max_file_bytes=int(config.get("max_file_bytes") or 20 * 1024 * 1024)
         )
-        self._records: dict[str, ManualUploadRecord] = {}
+        self._records: dict[str, FileRecord] = {}
+        self._records_configured = False
+        self._processed_chunks: dict[str, tuple[Chunk, ...]] = {}
         self._next_checkpoint = SourceCheckpoint()
-        self._storage: StorageContract | None = None
-        self._default_acl = _acl_from_mapping(config.get("acl") or config)
+        self._storage: RawObjectStore | None = None
+        self._default_access = _access_from_mapping(config.get("acl") or config)
 
-    def set_storage(self, storage: StorageContract) -> None:
+    def set_storage(self, storage: RawObjectStore) -> None:
         self._storage = storage
+
+    def set_records(self, records: list[Mapping[str, Any]]) -> None:
+        """Load canonical PostgreSQL Item metadata without a sidecar manifest."""
+
+        resolved: dict[str, FileRecord] = {}
+        for raw in records:
+            external_id = str(raw.get("external_id") or "").strip()
+            file_name = str(raw.get("file_name") or "").strip()
+            storage_key = str(raw.get("storage_key") or "").strip()
+            sha256 = str(raw.get("sha256") or "").strip().casefold()
+            size_bytes = int(raw.get("size_bytes") or 0)
+            if not external_id or not file_name or not storage_key:
+                raise ValueError("stored file Item metadata is incomplete")
+            if size_bytes < 1 or len(sha256) != 64:
+                raise ValueError(f"stored file Item is invalid: {external_id}")
+            uploaded_at = _parse_datetime(
+                raw.get("uploaded_at"),
+                fallback=datetime.min.replace(tzinfo=timezone.utc),
+            )
+            modified_at = _parse_datetime(
+                raw.get("modified_at"), fallback=uploaded_at
+            )
+            metadata = raw.get("metadata") or {}
+            if not isinstance(metadata, Mapping):
+                raise ValueError(f"stored file Item metadata is invalid: {external_id}")
+            resolved[external_id] = FileRecord(
+                external_id=external_id,
+                file_name=file_name,
+                path=None,
+                storage_key=storage_key,
+                size_bytes=size_bytes,
+                mime_type=str(raw.get("mime_type") or "").strip() or None,
+                sha256=sha256,
+                uploaded_at=uploaded_at,
+                modified_at=modified_at,
+                access=_access_from_mapping(
+                    raw.get("acl") or {}, default=self._default_access
+                ),
+                metadata={
+                    str(key): (
+                        [str(item) for item in value]
+                        if isinstance(value, list)
+                        else str(value)
+                    )
+                    for key, value in metadata.items()
+                },
+            )
+        self._records = resolved
+        self._records_configured = True
 
     async def test_connection(self) -> bool:
         await asyncio.to_thread(self.base_dir.mkdir, parents=True, exist_ok=True)
@@ -85,9 +148,9 @@ class ManualFileUploadConnector(BaseSourceConnector):
     async def list_scopes(self) -> list[ConnectorScope]:
         return [
             ConnectorScope(
-                scope_type="folder",
-                scope_value=MANUAL_UPLOAD_SCOPE_VALUE,
-                display_name=MANUAL_UPLOAD_DISPLAY_NAME,
+                scope_type="source_provider",
+                scope_value=FILE_SCOPE_VALUE,
+                display_name=FILE_DISPLAY_NAME,
             )
         ]
 
@@ -95,7 +158,7 @@ class ManualFileUploadConnector(BaseSourceConnector):
         self,
         checkpoint: ConnectorCheckpoint,
         scope: ConnectorScope,
-    ) -> list[SourceChange]:
+    ) -> list[ItemChange]:
         previous = checkpoint if isinstance(checkpoint, SourceCheckpoint) else SourceCheckpoint()
         previous_position = (_parse_optional_datetime(previous.updated_at), previous.cursor or "")
         records = await asyncio.to_thread(
@@ -106,15 +169,15 @@ class ManualFileUploadConnector(BaseSourceConnector):
         )
         external_ids = [record.external_id for record in records]
         if len(external_ids) != len(set(external_ids)):
-            raise ValueError("Manual upload records contain duplicate external_id values")
+            raise ValueError("File records contain duplicate external_id values")
         self._records = {record.external_id: record for record in records}
+        self._processed_chunks.clear()
 
         changes = [
-            SourceChange(
-                external_id=record.external_id,
-                external_version=record.sha256,
-                etag=record.sha256,
-                last_modified_at=record.modified_at,
+            ItemChange(
+                type=ChangeType.UPSERT,
+                item_id=record.external_id,
+                occurred_at=record.modified_at,
             )
             for record in records
             if (record.modified_at, record.external_id) > previous_position
@@ -129,81 +192,129 @@ class ManualFileUploadConnector(BaseSourceConnector):
             self._next_checkpoint = previous
         return changes
 
-    async def fetch_document(self, external_id: str) -> SourceDocument:
+    async def fetch_item(self, external_id: str) -> AnyItem:
         record = self._records.get(external_id)
         if record is None:
             record = await asyncio.to_thread(self._load_record, external_id)
-        processed = await asyncio.to_thread(
-            self._processor.process_path, record.path, file_name=record.file_name
-        )
-        if processed.sha256 != record.sha256:
-            raise RuntimeError(f"File changed after discovery: {record.external_id}")
-
-        raw_storage_bucket = None
-        raw_storage_key = None
-        raw_storage_region = None
-        if self._storage is not None:
-            key = (
-                f"manual_uploads/{_safe_storage_part(record.external_id)}/"
-                f"{_safe_storage_part(record.file_name)}"
-            )
-            await asyncio.to_thread(self._storage.save_bytes, processed.raw_bytes, key)
-            raw_storage_bucket = getattr(self._storage, "bucket_name", None)
-            raw_storage_key = (
-                self._storage.object_key(key)
-                if hasattr(self._storage, "object_key")
-                else key
-            )
-            raw_storage_region = getattr(self._storage, "region_name", None)
-
         metadata = {
             **record.metadata,
-            "source_kind": "manual_upload",
+            "source_kind": FILE_SOURCE,
             "file_name": record.file_name,
             "sha256": record.sha256,
         }
-        return SourceDocument(
+        source = SourceIdentity(
+            connector_id=str(self.config.get("connector_id") or FILE_SOURCE),
+            provider=SourceProvider.FILE,
             external_id=record.external_id,
-            source=DocumentSource.FILE,
-            semantic_identifier=record.file_name,
-            title=record.file_name,
-            sections=[TextSection(text=processed.text)],
-            metadata=metadata,
             external_version=record.sha256,
             etag=record.sha256,
-            doc_created_at=record.uploaded_at,
-            doc_updated_at=record.modified_at,
-            parent_hierarchy_raw_node_id=MANUAL_UPLOAD_HIERARCHY_NODE_ID,
-            acl=record.acl,
-            raw_storage_bucket=raw_storage_bucket,
-            raw_storage_key=raw_storage_key,
-            raw_storage_region=raw_storage_region,
-            mime_type=record.mime_type or processed.mime_type,
-            file_name=record.file_name,
-            size_bytes=processed.size_bytes,
         )
+        source_path = record.path
+        temporary: tempfile.TemporaryDirectory[str] | None = None
+        if source_path is None:
+            if self._storage is None or not record.storage_key:
+                raise RuntimeError("file Item object storage is unavailable")
+            downloader = getattr(self._storage, "download_to_path", None)
+            if downloader is None:
+                raise RuntimeError("configured object storage cannot download files")
+            temporary = tempfile.TemporaryDirectory(prefix="bothesis-file-connector-")
+            source_path = Path(temporary.name) / record.file_name
+            await downloader(
+                record.storage_key,
+                source_path,
+                max_bytes=self._processor.max_file_bytes,
+            )
+        processed = await asyncio.to_thread(
+            self._processor.process_path,
+            source_path,
+            file_name=record.file_name,
+            item_id=record.external_id,
+            title=record.file_name,
+            source=source,
+            hierarchy=Hierarchy(parent_id=FILE_HIERARCHY_NODE_ID),
+            access=record.access,
+            metadata=metadata,
+            document_kind=_document_kind(
+                record.mime_type or mimetypes.guess_type(record.file_name)[0]
+            ),
+        )
+        try:
+            if processed.sha256 != record.sha256:
+                raise RuntimeError(f"File changed after discovery: {record.external_id}")
 
-    async def fetch_acl(self, external_id: str) -> SourceACL:
-        record = self._records.get(external_id)
-        if record is None:
-            record = await asyncio.to_thread(self._load_record, external_id)
-        return record.acl.model_copy(deep=True)
+            item = processed.item
+            key = record.storage_key
+            stored = None
+            if key is None and self._storage is not None:
+                assert record.path is not None
+                key = (
+                    f"files/{_safe_storage_part(record.external_id)}/"
+                    f"{_safe_storage_part(record.file_name)}"
+                )
+                stored = await asyncio.to_thread(
+                    self._storage.put_path,
+                    record.path,
+                    key,
+                    content_type=record.mime_type or processed.mime_type,
+                )
+            if key is not None and self._storage is not None:
+                if stored is None:
+                    stored = await self._storage.head(key)  # type: ignore[attr-defined]
+                item = item.model_copy(
+                    update={
+                        "original": _storage_object(
+                            self._storage,
+                            stored,
+                            key=key,
+                            file_name=record.file_name,
+                            content_type=record.mime_type or processed.mime_type,
+                            checksum=record.sha256,
+                            size_bytes=record.size_bytes,
+                        )
+                    }
+                )
 
-    async def fetch_hierarchy(self, scope: ConnectorScope) -> list[HierarchyNode]:
+            self._processed_chunks[item.id] = processed.chunks
+            return item.model_copy(
+                update={"created_at": record.uploaded_at, "updated_at": record.modified_at}
+            )
+        finally:
+            if temporary is not None:
+                temporary.cleanup()
+
+    async def fetch_chunks(self, item: DocumentItem) -> tuple[Chunk, ...] | None:
+        """Return chunks produced in the same Docling pass as ``fetch_item``."""
+
+        return self._processed_chunks.pop(item.id, None)
+
+    async def fetch_hierarchy(self, scope: ConnectorScope) -> list[CollectionItem]:
         del scope
         return [
-            HierarchyNode(
-                raw_node_id=MANUAL_UPLOAD_HIERARCHY_NODE_ID,
-                display_name=MANUAL_UPLOAD_DISPLAY_NAME,
-                node_type=HierarchyNodeType.FOLDER,
+            CollectionItem(
+                id=FILE_HIERARCHY_NODE_ID,
+                title=FILE_DISPLAY_NAME,
+                collection_kind=CollectionKind.FOLDER,
+                source=SourceIdentity(
+                    connector_id=str(self.config.get("connector_id") or FILE_SOURCE),
+                    provider=SourceProvider.FILE,
+                    external_id=FILE_HIERARCHY_NODE_ID,
+                ),
             )
         ]
 
     def next_checkpoint(self) -> ConnectorCheckpoint:
         return self._next_checkpoint.model_copy(deep=True)
 
-    def _records_for_scope(self, scope: ConnectorScope) -> Iterator[ManualUploadRecord]:
-        if scope.scope_type == "file" or scope.scope_value != MANUAL_UPLOAD_SCOPE_VALUE:
+    def _records_for_scope(self, scope: ConnectorScope) -> Iterator[FileRecord]:
+        if self._records_configured:
+            if scope.scope_value == FILE_SCOPE_VALUE:
+                yield from self._records.values()
+                return
+            record = self._records.get(scope.scope_value)
+            if record is not None:
+                yield record
+            return
+        if scope.scope_value != FILE_SCOPE_VALUE:
             yield self._load_record(scope.scope_value)
             return
         if not self.base_dir.exists():
@@ -211,36 +322,40 @@ class ManualFileUploadConnector(BaseSourceConnector):
         for record_path in sorted(self.base_dir.glob("*.json")):
             yield self._load_record(record_path.stem)
 
-    def _load_record(self, external_id: str) -> ManualUploadRecord:
+    def _load_record(self, external_id: str) -> FileRecord:
         record_path = _confined_path(self.base_dir, self.base_dir / f"{external_id}.json")
         if not record_path.is_file():
-            raise FileNotFoundError(f"Manual upload record not found: {external_id}")
+            raise FileNotFoundError(f"File record not found: {external_id}")
 
         try:
             data = json.loads(record_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid manual upload record {record_path.name}: {exc.msg}") from exc
+            raise ValueError(f"Invalid file record {record_path.name}: {exc.msg}") from exc
         if not isinstance(data, dict):
-            raise ValueError(f"Manual upload record must be an object: {record_path.name}")
+            raise ValueError(f"File record must be an object: {record_path.name}")
 
-        raw_path = Path(str(data.get("path") or ""))
-        file_path = raw_path if raw_path.is_absolute() else self.base_dir / raw_path
-        file_path = _confined_path(self.base_dir, file_path)
-        if not file_path.is_file():
-            raise FileNotFoundError(f"Manual upload file not found: {file_path}")
-
-        stat = file_path.stat()
-        file_name = str(data.get("file_name") or file_path.name).strip()
+        storage_key = str(data.get("storage_key") or "").strip() or None
+        raw_path = str(data.get("path") or "").strip()
+        file_path: Path | None = None
+        if raw_path:
+            candidate = Path(raw_path)
+            file_path = candidate if candidate.is_absolute() else self.base_dir / candidate
+            file_path = _confined_path(self.base_dir, file_path)
+            if not file_path.is_file():
+                raise FileNotFoundError(f"File not found: {file_path}")
+        if file_path is None and storage_key is None:
+            raise ValueError(f"File record has no storage key: {external_id}")
+        file_name = str(data.get("file_name") or (file_path.name if file_path else "")).strip()
         if not file_name:
-            raise ValueError(f"Manual upload file_name is empty: {external_id}")
-        actual_size = stat.st_size
-        declared_size = data.get("size_bytes")
-        if declared_size is not None and int(declared_size) != actual_size:
-            raise ValueError(f"Manual upload size mismatch: {external_id}")
-        actual_sha256 = _sha256_path(file_path)
+            raise ValueError(f"File name is empty: {external_id}")
+        declared_size = int(data.get("size_bytes") or 0)
+        actual_size = file_path.stat().st_size if file_path is not None else declared_size
+        if actual_size < 1 or (declared_size and declared_size != actual_size):
+            raise ValueError(f"File size mismatch: {external_id}")
         declared_sha256 = str(data.get("sha256") or "").strip().lower()
-        if declared_sha256 and declared_sha256 != actual_sha256:
-            raise ValueError(f"Manual upload checksum mismatch: {external_id}")
+        actual_sha256 = _sha256_path(file_path) if file_path is not None else declared_sha256
+        if not actual_sha256 or (declared_sha256 and declared_sha256 != actual_sha256):
+            raise ValueError(f"File checksum mismatch: {external_id}")
 
         uploaded_at = _parse_datetime(
             data.get("uploaded_at"),
@@ -249,28 +364,33 @@ class ManualFileUploadConnector(BaseSourceConnector):
         modified_at = max(
             uploaded_at,
             datetime.fromtimestamp(record_path.stat().st_mtime, tz=timezone.utc),
-            datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+            *(
+                [datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc)]
+                if file_path is not None
+                else []
+            ),
         )
         raw_metadata = data.get("metadata") or {}
         if not isinstance(raw_metadata, Mapping):
-            raise ValueError(f"Manual upload metadata must be an object: {external_id}")
+            raise ValueError(f"File metadata must be an object: {external_id}")
         metadata = {
             str(key): [str(item) for item in value] if isinstance(value, list) else str(value)
             for key, value in raw_metadata.items()
         }
         resolved_external_id = str(data.get("external_id") or external_id).strip()
         if not resolved_external_id:
-            raise ValueError(f"Manual upload external_id is empty: {record_path.name}")
-        return ManualUploadRecord(
+            raise ValueError(f"File external_id is empty: {record_path.name}")
+        return FileRecord(
             external_id=resolved_external_id,
             file_name=file_name,
             path=file_path,
+            storage_key=storage_key,
             size_bytes=actual_size,
             mime_type=str(data.get("mime_type") or mimetypes.guess_type(file_name)[0] or "") or None,
             sha256=actual_sha256,
             uploaded_at=uploaded_at,
             modified_at=modified_at,
-            acl=_acl_from_mapping(data.get("acl") or {}, default=self._default_acl),
+            access=_access_from_mapping(data.get("acl") or {}, default=self._default_access),
             metadata=metadata,
         )
 
@@ -285,7 +405,7 @@ class LocalFileConnector(LoadConnector):
         batch_size: int = 50,
         *,
         processor: FileProcessor | None = None,
-        acl: SourceACL | None = None,
+        access: AccessPolicy | None = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be at least one")
@@ -295,40 +415,55 @@ class LocalFileConnector(LoadConnector):
             raise ValueError("file_names must be empty or match file_locations")
         self.batch_size = batch_size
         self._processor = processor or FileProcessor()
-        self._acl = acl or SourceACL()
+        self._access = access or AccessPolicy()
 
     def load_credentials(self, credentials: dict[str, Any]) -> dict[str, Any] | None:
         del credentials
         return None
 
     def load_from_state(self) -> GenerateDocumentsOutput:
-        batch: list[Document | HierarchyNode] = []
+        batch: list[AnyItem] = []
         for index, path in enumerate(self.file_locations):
             if not path.is_file():
                 raise FileNotFoundError(f"Local connector file not found: {path}")
             display_name = self.file_names[index] if self.file_names else path.name
-            processed = self._processor.process_path(path, file_name=display_name)
             external_id = _local_file_id(path)
-            batch.append(
-                Document(
-                    id=external_id,
+            digest = _sha256_path(path)
+            processed = self._processor.process_path(
+                path,
+                file_name=display_name,
+                item_id=external_id,
+                title=display_name,
+                source=SourceIdentity(
+                    connector_id=FILE_SOURCE,
+                    provider=SourceProvider.FILE,
                     external_id=external_id,
-                    external_version=processed.sha256,
-                    etag=processed.sha256,
-                    source=DocumentSource.FILE,
-                    semantic_identifier=display_name,
-                    title=display_name,
-                    metadata={
-                        "source_kind": "local_file",
-                        "file_name": display_name,
-                        "sha256": processed.sha256,
-                    },
-                    sections=[TextSection(text=processed.text)],
-                    external_access=self._acl.to_external_access(),
-                    mime_type=processed.mime_type,
+                    external_version=digest,
+                    etag=digest,
+                ),
+                access=self._access,
+                metadata={
+                    "source_kind": "local_file",
+                    "file_name": display_name,
+                    "sha256": digest,
+                },
+                document_kind=_document_kind(mimetypes.guess_type(display_name)[0]),
+                original=StorageObject(
+                    provider="local",
+                    key=str(path.resolve()),
                     file_name=display_name,
-                    size_bytes=processed.size_bytes,
-                    doc_updated_at=datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+                    size_bytes=path.stat().st_size,
+                    content_type=mimetypes.guess_type(display_name)[0],
+                    checksum_sha256=digest,
+                ),
+            )
+            batch.append(
+                processed.item.model_copy(
+                    update={
+                        "updated_at": datetime.fromtimestamp(
+                            path.stat().st_mtime, tz=timezone.utc
+                        )
+                    }
                 )
             )
             if len(batch) >= self.batch_size:
@@ -338,26 +473,62 @@ class LocalFileConnector(LoadConnector):
             yield batch
 
 
-def _acl_from_mapping(value: Any, *, default: SourceACL | None = None) -> SourceACL:
+def _document_kind(mime_type: str | None) -> DocumentKind:
+    if (mime_type or "").startswith("image/"):
+        return DocumentKind.IMAGE
+    if mime_type == "application/pdf":
+        return DocumentKind.PDF
+    if mime_type in {"text/html", "application/xhtml+xml"}:
+        return DocumentKind.WEB_PAGE
+    return DocumentKind.DOCUMENT
+
+
+def _access_from_mapping(
+    value: Any,
+    *,
+    default: AccessPolicy | None = None,
+) -> AccessPolicy:
     if not isinstance(value, Mapping):
-        return default.model_copy(deep=True) if default else SourceACL()
+        return default.model_copy(deep=True) if default else AccessPolicy()
     has_acl_key = any(
         key in value
         for key in (
             "user_emails",
             "user_group_ids",
             "source_reader_ids",
+            "source_denied_reader_ids",
             "is_public",
             "public",
         )
     )
     if not has_acl_key:
-        return default.model_copy(deep=True) if default else SourceACL()
-    return SourceACL(
-        user_emails=value.get("user_emails") or [],
-        user_group_ids=value.get("user_group_ids") or [],
-        source_reader_ids=value.get("source_reader_ids") or [],
-        is_public=bool(value.get("is_public", value.get("public", False))),
+        return default.model_copy(deep=True) if default else AccessPolicy()
+    readers = [
+        *(f"email:{email}" for email in value.get("user_emails") or []),
+        *(f"external_group:{group}" for group in value.get("user_group_ids") or []),
+        *(str(reader) for reader in value.get("source_reader_ids") or []),
+    ]
+    if bool(value.get("is_public", value.get("public", False))):
+        readers.append("public")
+    denied = [str(reader) for reader in value.get("source_denied_reader_ids") or []]
+    allowed_policy = AccessPolicy.from_reader_ids(readers)
+    deny_rules = [
+        AccessRule(
+            effect=AccessEffect.DENY,
+            principal=Principal(
+                type=reader.split(":", 1)[0] if ":" in reader else "source",
+                id=reader.split(":", 1)[1] if ":" in reader else reader,
+            ),
+        )
+        for reader in denied
+        if reader.strip()
+    ]
+    return AccessPolicy(
+        direct=DirectAccess(
+            inherit=allowed_policy.direct.inherit,
+            rules=[*allowed_policy.direct.rules, *deny_rules],
+        ),
+        effective=EffectiveAccess(reader_ids=allowed_policy.effective.reader_ids),
     )
 
 
@@ -365,7 +536,7 @@ def _confined_path(base_dir: Path, candidate: Path) -> Path:
     resolved_base = base_dir.resolve()
     resolved_candidate = candidate.resolve()
     if not resolved_candidate.is_relative_to(resolved_base):
-        raise ValueError(f"Manual upload path escapes base_dir: {candidate}")
+        raise ValueError(f"File path escapes base_dir: {candidate}")
     return resolved_candidate
 
 
@@ -403,13 +574,51 @@ def _local_file_id(path: Path) -> str:
     return f"file::{hashlib.sha256(stable_path).hexdigest()}"
 
 
+def _storage_object(
+    storage: RawObjectStore,
+    stored: object,
+    *,
+    key: str,
+    file_name: str,
+    content_type: str | None,
+    checksum: str,
+    size_bytes: int,
+) -> StorageObject:
+    return StorageObject(
+        provider=_optional_attribute(storage, "provider"),
+        bucket=_optional_attribute(storage, "bucket"),
+        key=key,
+        file_name=file_name,
+        size_bytes=_integer_attribute(stored, "size_bytes") or size_bytes,
+        content_type=_optional_attribute(stored, "content_type") or content_type,
+        checksum_sha256=(
+            _optional_attribute(stored, "checksum_sha256") or checksum
+        ),
+        etag=_optional_attribute(stored, "etag"),
+        version_id=_optional_attribute(stored, "version_id"),
+    )
+
+
+def _optional_attribute(value: object, name: str) -> str | None:
+    candidate = getattr(value, name, None)
+    if not isinstance(candidate, str):
+        return None
+    normalized = candidate.strip()
+    return normalized or None
+
+
+def _integer_attribute(value: object, name: str) -> int | None:
+    candidate = getattr(value, name, None)
+    return candidate if isinstance(candidate, int) and not isinstance(candidate, bool) else None
+
+
 __all__ = [
+    "FILE_CONNECTOR_NAME",
+    "FILE_DISPLAY_NAME",
+    "FILE_HIERARCHY_NODE_ID",
+    "FILE_SCOPE_VALUE",
+    "FILE_SOURCE",
+    "FileConnector",
+    "FileRecord",
     "LocalFileConnector",
-    "MANUAL_UPLOAD_CONNECTOR_NAME",
-    "MANUAL_UPLOAD_DISPLAY_NAME",
-    "MANUAL_UPLOAD_HIERARCHY_NODE_ID",
-    "MANUAL_UPLOAD_SCOPE_VALUE",
-    "MANUAL_UPLOAD_SOURCE",
-    "ManualFileUploadConnector",
-    "ManualUploadRecord",
 ]

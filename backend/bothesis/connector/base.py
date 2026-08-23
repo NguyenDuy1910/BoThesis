@@ -4,15 +4,15 @@ import abc
 from collections.abc import Generator
 from typing import Any, Generic, TypeVar
 
-from .models import (
-    ConnectorScope,
+from bothesis.connector.protocol import (
+    AnyItem,
+    Chunk,
+    CollectionItem,
     ConnectorCheckpoint,
-    Document,
-    HierarchyNode,
-    SourceACL,
-    SourceChange,
-    SourceDocument,
-    SlimDocument,
+    ConnectorScope,
+    DocumentItem,
+    ItemChange,
+    SlimItem,
 )
 
 # ---------------------------------------------------------------------------
@@ -24,8 +24,8 @@ SecondsSinceUnixEpoch = float
 
 CheckpointT = TypeVar("CheckpointT", bound=ConnectorCheckpoint)
 
-DocumentBatch = list[Document | HierarchyNode]
-"""A single batch yielded by a connector — may contain documents and hierarchy nodes."""
+DocumentBatch = list[AnyItem]
+"""A single batch yielded by a connector containing canonical Items."""
 
 CheckpointOutput = Generator[DocumentBatch, None, CheckpointT]
 """Generator that yields document batches and returns an updated checkpoint."""
@@ -33,8 +33,8 @@ CheckpointOutput = Generator[DocumentBatch, None, CheckpointT]
 GenerateDocumentsOutput = Generator[DocumentBatch, None, None]
 """Simpler generator (no checkpoint) used by load-style connectors."""
 
-GenerateSlimDocumentOutput = Generator[list[SlimDocument], None, None]
-"""Yields batches of slim (metadata-only) documents."""
+GenerateSlimItemOutput = Generator[list[SlimItem], None, None]
+"""Yields batches of permission-sync item references."""
 
 
 # ---------------------------------------------------------------------------
@@ -87,20 +87,23 @@ class BaseSourceConnector(abc.ABC):
         self,
         checkpoint: ConnectorCheckpoint,
         scope: ConnectorScope,
-    ) -> list[SourceChange]:
+    ) -> list[ItemChange]:
         ...
 
-    @abc.abstractmethod
-    async def fetch_document(self, external_id: str) -> SourceDocument:
-        ...
+    async def fetch_item(self, item_id: str) -> AnyItem:
+        """Fetch one canonical item.
+        """
+        raise NotImplementedError("connector does not implement fetch_item")
 
-    @abc.abstractmethod
-    async def fetch_acl(self, external_id: str) -> SourceACL:
-        ...
+    async def fetch_chunks(self, item: DocumentItem) -> tuple[Chunk, ...] | None:
+        """Return chunks already produced while fetching a document, if any."""
 
-    @abc.abstractmethod
-    async def fetch_hierarchy(self, scope: ConnectorScope) -> list[HierarchyNode]:
-        ...
+        del item
+        return None
+
+    async def fetch_hierarchy(self, scope: ConnectorScope) -> list[AnyItem]:
+        del scope
+        return []
 
     @abc.abstractmethod
     def next_checkpoint(self) -> ConnectorCheckpoint:
@@ -189,16 +192,16 @@ class CredentialsConnector(abc.ABC):
 
 
 class SlimConnector(abc.ABC):
-    """Connector that can enumerate documents without fetching content."""
+    """Connector that can enumerate items without fetching content."""
 
     @abc.abstractmethod
-    def retrieve_all_slim_docs(
+    def retrieve_all_slim_items(
         self,
         start: SecondsSinceUnixEpoch | None = None,
         end: SecondsSinceUnixEpoch | None = None,
         callback: IndexingHeartbeatInterface | None = None,
-    ) -> GenerateSlimDocumentOutput:
-        # Enumerate documents without fetching content.
+    ) -> GenerateSlimItemOutput:
+        # Enumerate items without fetching content.
         ...
 
 
@@ -206,13 +209,13 @@ class SlimConnectorWithPermSync(SlimConnector):
     """SlimConnector that additionally supports permission synchronisation."""
 
     @abc.abstractmethod
-    def retrieve_all_slim_docs_perm_sync(
+    def retrieve_all_slim_items_perm_sync(
         self,
         start: SecondsSinceUnixEpoch | None = None,
         end: SecondsSinceUnixEpoch | None = None,
         callback: IndexingHeartbeatInterface | None = None,
-    ) -> GenerateSlimDocumentOutput:
-        # Enumerate documents with permission sync metadata.
+    ) -> GenerateSlimItemOutput:
+        # Enumerate items with permission sync metadata.
         ...
 
 

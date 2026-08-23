@@ -17,7 +17,13 @@ from bothesis.observability import LangfuseTracing
 
 
 _UNEXECUTED_OUTCOMES = frozenset(
-    {"invalid_arguments", "unknown_tool", "duplicate_call", "tool_call_limit"}
+    {
+        "duplicate_call",
+        "invalid_arguments",
+        "tool_call_limit",
+        "tool_not_allowed",
+        "unknown_tool",
+    }
 )
 
 
@@ -50,11 +56,17 @@ class ToolExecutor:
         remaining_calls: int,
         previous_signatures: set[str],
         evidence: dict[str, Evidence],
+        allowed_tool_names: Sequence[str] | None = None,
     ) -> ToolExecutionBatch:
         """Execute all safe independent calls and preserve model call order."""
 
         observations: list[ToolObservation | None] = [None] * len(calls)
         pending: list[tuple[int, FunctionCallItem, dict[str, Any]]] = []
+        allowed = (
+            frozenset(allowed_tool_names)
+            if allowed_tool_names is not None
+            else None
+        )
         for index, call in enumerate(calls):
             arguments = _decoded_arguments(call)
             if arguments is None:
@@ -66,6 +78,13 @@ class ToolExecutor:
             if tool is None:
                 observations[index] = _error_observation(
                     call, f"Unknown tool: {call.name}", "unknown_tool"
+                )
+                continue
+            if allowed is not None and call.name not in allowed:
+                observations[index] = _error_observation(
+                    call,
+                    "Tool is not available for this request.",
+                    "tool_not_allowed",
                 )
                 continue
             if not self._registry.arguments_are_valid(call.name, arguments):

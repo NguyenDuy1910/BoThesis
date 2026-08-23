@@ -41,6 +41,8 @@ from bothesis.agent.models import (
 )
 from bothesis.agent.tools import Tool, ToolDefinition, ToolRegistry
 from bothesis.agent.transports import RESPONSES_PROVIDERS
+from bothesis.connector.protocol import CitationInfo
+from bothesis.connector.protocol import CitationSpan
 
 PROVIDERS = sorted(RESPONSES_PROVIDERS)
 
@@ -244,10 +246,11 @@ async def test_text_reaches_the_client_before_the_response_settles() -> None:
 async def test_citation_markers_become_annotations_and_leave_the_text_clean() -> None:
     evidence = Evidence(
         id="ev-1",
-        document_id="doc-1",
+        item_id="doc-1",
+        chunk_id="chunk-1",
         title="Policy",
         content="Grounded policy",
-        page="3",
+        citation=CitationInfo(spans=(CitationSpan(page=3),)),
     )
     document = ConversationDocument(
         id="doc-1",
@@ -287,7 +290,7 @@ async def test_citation_markers_become_annotations_and_leave_the_text_clean() ->
     assert "[[cite:" not in "".join(deltas)
     assert len(annotations) == 1
     assert annotations[0].annotation["type"] == "bothesis:document_citation"
-    assert annotations[0].annotation["citation"]["page"] == "3"
+    assert annotations[0].annotation["citation"]["spans"][0]["page"] == 3
     assert annotations[0].annotation_index == 0
     assert response.final_answer_text == "Leave is 20 days  per year."
     assert response.output_annotations[0]["citation"]["id"] == "ev-1"
@@ -299,7 +302,7 @@ async def test_a_partial_citation_marker_is_the_only_text_held_back() -> None:
 
     release = asyncio.Event()
     evidence = Evidence(
-        id="ev-1", document_id="doc-1", title="Policy", content="Grounded"
+        id="ev-1", item_id="doc-1", chunk_id="chunk-1", title="Policy", content="Grounded"
     )
     document = ConversationDocument(
         id="doc-1",
@@ -414,6 +417,19 @@ async def test_tools_are_withheld_once_the_tool_round_limit_is_reached() -> None
     # The follow-up sampling declares no tools once the round budget is spent.
     assert "tools" in transport.requests[0]
     assert "tools" not in transport.requests[1]
+
+
+@pytest.mark.asyncio
+async def test_request_tool_allowlist_can_disable_plugins_for_one_turn() -> None:
+    transport = ScriptedResponsesTransport([final_answer("Answered without tools.")])
+
+    events = await run(
+        Agent(transport, registry_with_lookup()),
+        allowed_tool_names=(),
+    )
+
+    assert events[-1].type == "response.completed"
+    assert "tools" not in transport.requests[0]
 
 
 @pytest.mark.asyncio

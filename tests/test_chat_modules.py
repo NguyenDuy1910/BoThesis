@@ -75,7 +75,8 @@ def test_conversation_policy_preserves_recent_turn_and_summarizes_only_older() -
 async def test_conversation_context_uses_distinct_xml_sections() -> None:
     evidence = Evidence(
         id="ev-1",
-        document_id="doc-1",
+        item_id="doc-1",
+        chunk_id="chunk-1",
         title="Leave policy",
         content="Employees receive 20 days of annual leave.",
     )
@@ -124,7 +125,8 @@ async def test_citation_renderer_carries_split_markers_between_deltas() -> None:
     evidence = {
         "ev-1": Evidence(
             id="ev-1",
-            document_id="doc-1",
+            item_id="doc-1",
+            chunk_id="chunk-1",
             title="Leave policy",
             content="Grounded content",
         )
@@ -197,3 +199,19 @@ async def test_tool_executor_runs_independent_calls_concurrently_and_matches_cal
         ("first", "one"),
         ("second", "two"),
     ]
+
+    blocked = await ToolExecutor(
+        registry, timeout_seconds=1, max_output_characters=100
+    ).execute(
+        (FunctionCallItem(call_id="blocked", name="echo", arguments='{"value":"no"}'),),
+        context=ToolContext(agent_context=AgentContext(user_id="u", tenant_id="t", roles=[])),
+        remaining_calls=1,
+        previous_signatures=set(),
+        evidence={},
+        allowed_tool_names=(),
+    )
+
+    assert blocked.executed_call_count == 0
+    assert blocked.output_items[0].output == (
+        "Tool error: Tool is not available for this request."
+    )

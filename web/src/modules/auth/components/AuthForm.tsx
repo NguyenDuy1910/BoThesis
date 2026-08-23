@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { LockKeyhole } from "lucide-react";
-import { BrandLogo } from "@/components/ui/BrandLogo";
+import { ArrowRight, KeyRound } from "lucide-react";
+
+import { ProductMark } from "@/components/ui/ProductMark";
 import { appBrand } from "@/lib/brand";
 
 export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
@@ -8,48 +9,30 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
 
   return (
     <main className="auth-page">
-      <section className="auth-card" aria-labelledby="auth-title">
-        <div className="auth-card__header">
-          <BrandLogo
-            alt={appBrand.logo.alt}
-            className="auth-card__logo"
-            imageClassName={appBrand.logo.imageClassName}
-            priority
-            size={40}
-            src={appBrand.logo.src}
-          />
-          <h1 id="auth-title" className="auth-card__title">{appBrand.productName}</h1>
-          <p className="auth-card__subtitle">
-            Authentication will be available when the BoThesis backend exposes its identity API.
-          </p>
+      <section className="auth-shell" aria-labelledby="auth-title" id="main-content">
+        <div className="auth-shell__brand">
+          <ProductMark decorative size="md" />
+          <span>{appBrand.productName}</span>
         </div>
-
-        <div className="auth-card__fields" aria-disabled="true">
-          <div className="auth-field">
-            <label htmlFor="email">Email</label>
-            <input id="email" type="email" placeholder="you@company.com" disabled />
-          </div>
-          <div className="auth-field">
-            <label htmlFor="password">Password</label>
-            <div className="auth-field__password-wrap">
-              <input id="password" type="password" placeholder="Enter your password" disabled />
-              <LockKeyhole className="auth-field__toggle" size={16} aria-hidden="true" />
-            </div>
-          </div>
+        <div className="auth-shell__status" aria-hidden="true">
+          <KeyRound size={18} strokeWidth={1.8} />
         </div>
-
-        <div className="auth-error" role="status">
-          <span>No login or account-registration endpoint is currently implemented.</span>
+        <p className="auth-shell__eyebrow">Identity service</p>
+        <h1 id="auth-title">{isSignup ? "Account registration is not available" : "Sign in is not available"}</h1>
+        <p className="auth-shell__copy">
+          This deployment does not expose an identity API yet. Continue to the knowledge workspace using the request context configured for this environment.
+        </p>
+        <div className="auth-shell__note" role="status">
+          No credentials are collected on this screen.
         </div>
-
-        <Link className="auth-submit" href="/app">
-          Continue to knowledge chat
+        <Link className="auth-shell__action" href="/app">
+          Open knowledge workspace
+          <ArrowRight aria-hidden="true" size={15} />
         </Link>
-
-        <p className="auth-card__footer">
-          {isSignup ? "Already have an account? " : "Need an account? "}
+        <p className="auth-shell__footer">
+          {isSignup ? "Looking for sign-in status? " : "Looking for registration status? "}
           <Link href={isSignup ? "/auth/login" : "/auth/signup"}>
-            {isSignup ? "View sign-in status" : "View registration status"}
+            {isSignup ? "View sign-in" : "View registration"}
           </Link>
         </p>
       </section>

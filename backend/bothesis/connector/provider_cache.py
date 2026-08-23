@@ -4,54 +4,20 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bothesis.db.models import Document
+from bothesis.db.models import Item
+from bothesis.connector.protocol import ProviderCacheEntry, ProviderFileCache
 
 DEFAULT_MAX_PROVIDER_CACHE_BYTES = 4 * 1024 * 1024
 
 
-@dataclass(frozen=True, slots=True)
-class ProviderCacheEntry:
-    provider: str
-    source_fingerprint: str
-    reference: Mapping[str, Any]
-    expires_at: datetime | None = None
-
-    @property
-    def is_expired(self) -> bool:
-        return self.expires_at is not None and self.expires_at <= datetime.now(UTC)
-
-
-@runtime_checkable
-class ProviderFileCache(Protocol):
-    async def get(
-        self,
-        document_id: UUID,
-        *,
-        provider: str,
-        source_fingerprint: str,
-    ) -> ProviderCacheEntry | None: ...
-
-    async def put(
-        self,
-        document_id: UUID,
-        entry: ProviderCacheEntry,
-    ) -> None: ...
-
-    async def invalidate(self, document_id: UUID, *, provider: str) -> None: ...
-
-    async def clear(self, document_id: UUID) -> None: ...
-
-
 class PostgresProviderFileCache:
-    """Store bounded provider references under ``documents.metadata``."""
+    """Store bounded provider references under ``items.metadata``."""
 
     def __init__(
         self,
@@ -74,9 +40,9 @@ class PostgresProviderFileCache:
         normalized_provider = _provider(provider)
         async with self._session_factory() as session:
             metadata = await session.scalar(
-                select(Document.metadata_).where(
-                    Document.id == document_id,
-                    Document.lifecycle_status == "active",
+                select(Item.metadata_).where(
+                    Item.id == document_id,
+                    Item.status != "deleted",
                 )
             )
         if not isinstance(metadata, Mapping):
@@ -122,9 +88,9 @@ class PostgresProviderFileCache:
             )
         async with self._session_factory.begin() as session:
             document = await session.scalar(
-                select(Document).where(Document.id == document_id).with_for_update()
+                select(Item).where(Item.id == document_id).with_for_update()
             )
-            if document is None or document.lifecycle_status != "active":
+            if document is None or document.status == "deleted":
                 return
             metadata = dict(document.metadata_)
             provider_cache = dict(metadata.get("provider_cache") or {})
@@ -136,7 +102,7 @@ class PostgresProviderFileCache:
         normalized_provider = _provider(provider)
         async with self._session_factory.begin() as session:
             document = await session.scalar(
-                select(Document).where(Document.id == document_id).with_for_update()
+                select(Item).where(Item.id == document_id).with_for_update()
             )
             if document is None:
                 return
@@ -155,7 +121,7 @@ class PostgresProviderFileCache:
     async def clear(self, document_id: UUID) -> None:
         async with self._session_factory.begin() as session:
             document = await session.scalar(
-                select(Document).where(Document.id == document_id).with_for_update()
+                select(Item).where(Item.id == document_id).with_for_update()
             )
             if document is None:
                 return

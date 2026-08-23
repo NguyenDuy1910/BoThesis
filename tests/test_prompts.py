@@ -15,7 +15,7 @@ from bothesis.agent.prompts.template_render import (
 )
 
 
-def test_prompt_set_contains_only_the_three_runtime_roles() -> None:
+def test_prompt_set_contains_only_the_runtime_roles() -> None:
     prompt_directory = (
         Path(__file__).resolve().parents[1]
         / "backend"
@@ -28,6 +28,7 @@ def test_prompt_set_contains_only_the_three_runtime_roles() -> None:
     assert prompt_names == {
         "agent_base",
         "capability_base",
+        "contextual_rag",
         "conversation_compression",
     }
     assert "relevant conversation" in load_prompt("agent_base")
@@ -61,3 +62,21 @@ def test_specialized_prompts_stay_isolated_from_agent_loop_rules() -> None:
     assert "retrieval" not in capability
     assert "Preserve user goals" in compression
     assert "user-facing summary" in compression
+
+
+def test_contextual_rag_prompt_is_retrieval_specific_and_file_backed() -> None:
+    prompt = render_prompt(
+        "contextual_rag",
+        document_title="Quarterly Sales <Q2>",
+        section_path="Revenue > APAC",
+        document_context="Vietnam and Thailand were the main contributors.",
+        chunk_text="It increased by 17%.",
+    )
+
+    assert prompt.startswith("<contextual_retrieval_instructions>")
+    assert "semantic search and BM25" in prompt
+    assert "50-100 tokens" in prompt
+    assert "Do not summarize the whole document" in prompt
+    assert "Quarterly Sales &lt;Q2&gt;" in prompt
+    assert "<section_path>Revenue &gt; APAC</section_path>" in prompt
+    assert "<chunk>\nIt increased by 17%.\n</chunk>" in prompt

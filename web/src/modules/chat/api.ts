@@ -1,6 +1,5 @@
 import {
   getBothesisChatConfiguration,
-  type BothesisChatConfiguration,
 } from "@/lib/api/config";
 import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type {
@@ -8,6 +7,7 @@ import type {
   ConversationDocument,
   ResponseStreamEvent,
 } from "./types";
+import type { ChatConnector, ChatConnectorMode } from "@/modules/connectors/types";
 
 const uploadIdempotencyKeys = new WeakMap<File, string>();
 
@@ -25,6 +25,8 @@ export async function streamAgentResponse(
     conversationId?: string | null;
     history: AgentHistoryMessage[];
     documentIds?: string[];
+    connectorMode: ChatConnectorMode;
+    connectorIds: string[];
     signal: AbortSignal;
     onEvent: (event: ResponseStreamEvent) => void;
   }
@@ -44,6 +46,10 @@ export async function streamAgentResponse(
       conversation_id: options.conversationId ?? null,
       history: options.history,
       document_ids: options.documentIds ?? [],
+      connector_mode: options.connectorMode,
+      connector_ids: options.connectorMode === "selected"
+        ? options.connectorIds.map((id) => Number(id))
+        : [],
     }),
   });
   if (!response.ok || !response.body) {
@@ -79,6 +85,21 @@ export async function streamAgentResponse(
   }
 }
 
+export async function getAvailableChatConnectors(
+  signal?: AbortSignal,
+): Promise<ChatConnector[]> {
+  const configuration = getBothesisChatConfiguration();
+  if (!configuration) throw new ChatConfigurationError();
+  const response = await fetch(`${configuration.apiUrl}/api/v1/agent/connectors`, {
+    cache: "no-store",
+    headers: developmentIdentityHeaders(configuration),
+    signal,
+  });
+  if (!response.ok) throw await responseError(response, "Could not load permitted connectors.");
+  const payload = await response.json() as { items?: ChatConnector[] };
+  return Array.isArray(payload.items) ? payload.items : [];
+}
+
 interface DocumentUploadStartResponse {
   upload_required: boolean;
   target?: DocumentUploadTarget | null;
@@ -86,7 +107,7 @@ interface DocumentUploadStartResponse {
 }
 
 interface DocumentUploadTarget {
-  mode: "presigned" | "api";
+  mode: "presigned";
   url: string;
   method: string;
   headers: Record<string, string>;
@@ -98,8 +119,8 @@ interface DocumentMetadataResponse {
   file_name: string;
   content_type: string;
   size_bytes: number;
-  upload_status: "not_applicable" | "pending" | "available" | "failed";
-  indexing_status: string;
+  status: "pending" | "processing" | "ready" | "failed" | "unsupported";
+  upload_status: "pending" | "available" | "failed" | null;
 }
 
 export async function uploadConversationDocument(
@@ -137,35 +158,11 @@ export async function uploadConversationDocument(
   }
 
   options.onProgress?.("uploading");
-  let uploadResponse: Response;
-  try {
-    uploadResponse = await uploadToTarget(
-      started.target,
-      started.document.id,
-      file,
-      configuration,
-      identityHeaders,
-      options.signal,
-    );
-  } catch (cause) {
-    if (options.signal.aborted || started.target.mode !== "presigned") throw cause;
-    uploadResponse = await uploadToApiFallback(
-      started.document.id,
-      file,
-      configuration,
-      identityHeaders,
-      options.signal,
-    );
-  }
-  if (!uploadResponse.ok && started.target.mode === "presigned") {
-    uploadResponse = await uploadToApiFallback(
-      started.document.id,
-      file,
-      configuration,
-      identityHeaders,
-      options.signal,
-    );
-  }
+  const uploadResponse = await uploadToTarget(
+    started.target,
+    file,
+    options.signal,
+  );
   if (!uploadResponse.ok) {
     throw await responseError(uploadResponse, "Document storage rejected the upload.");
   }
@@ -202,48 +199,15 @@ export async function releaseConversationDocument(documentId: string): Promise<v
 
 async function uploadToTarget(
   target: DocumentUploadTarget,
-  documentId: string,
   file: File,
-  configuration: BothesisChatConfiguration,
-  identityHeaders: Record<string, string>,
   signal: AbortSignal,
 ) {
-  if (target.mode === "api") {
-    return uploadToApiFallback(
-      documentId,
-      file,
-      configuration,
-      identityHeaders,
-      signal,
-    );
-  }
   return fetch(target.url, {
     method: target.method,
     headers: target.headers,
     body: file,
     signal,
   });
-}
-
-function uploadToApiFallback(
-  documentId: string,
-  file: File,
-  configuration: BothesisChatConfiguration,
-  identityHeaders: Record<string, string>,
-  signal: AbortSignal,
-) {
-  return fetch(
-    `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(documentId)}/content`,
-    {
-      method: "PUT",
-      headers: {
-        "Content-Type": file.type || "application/octet-stream",
-        ...identityHeaders,
-      },
-      body: file,
-      signal,
-    },
-  );
 }
 
 function developmentIdentityHeaders(configuration: {

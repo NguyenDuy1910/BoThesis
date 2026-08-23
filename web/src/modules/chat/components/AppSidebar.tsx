@@ -3,7 +3,6 @@
 import clsx from "clsx";
 import { type FormEvent, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ChevronRight,
   Laptop,
   MessageSquare,
   Moon,
@@ -14,12 +13,11 @@ import {
   UserCircle,
   X,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
-import { Dropdown, DropdownItem } from "@/components/ui/Dropdown";
 import { Input } from "@/components/ui/Input";
-import { appBrand } from "@/lib/brand";
+import { ProductMark } from "@/components/ui/ProductMark";
 import {
   sidebarNavigationItems,
   sidebarSecondaryDestinations,
@@ -28,41 +26,6 @@ import {
 import type { ChatConversation } from "@/modules/chat/types";
 import { ConversationActionsMenu } from "./ConversationActionsMenu";
 import { useTheme } from "../hooks/useTheme";
-
-export function BothesisMark({
-  className,
-  decorative = false,
-  label = appBrand.logo.alt,
-}: {
-  className?: string;
-  decorative?: boolean;
-  label?: string;
-}) {
-  return (
-    <span
-      aria-hidden={decorative || undefined}
-      aria-label={decorative ? undefined : label}
-      className={clsx("bothesis-mark", className)}
-      role={decorative ? undefined : "img"}
-    >
-      <svg
-        viewBox="0 0 28 28"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-        aria-hidden="true"
-        focusable="false"
-        style={{ width: "100%", height: "100%", display: "block" }}
-      >
-        <rect width="28" height="28" rx="6" fill="#0B3A5B" />
-        <rect x="8" y="6.5" width="2.5" height="15" rx="1.25" fill="white" />
-        <rect x="9" y="6.5" width="9" height="2.5" rx="1.25" fill="white" />
-        <rect x="9" y="12.75" width="8" height="2.5" rx="1.25" fill="white" />
-        <rect x="9" y="19" width="9" height="2.5" rx="1.25" fill="white" />
-        <path d="M16.5 7.75C21 8 21 13.25 16.5 14M16.5 14C21 14.75 21 20 16.5 20.25" stroke="white" strokeWidth="2.5" strokeLinecap="round" />
-      </svg>
-    </span>
-  );
-}
 
 interface AppSidebarProps {
   collapsed: boolean;
@@ -102,7 +65,6 @@ export function AppSidebar({
   }, [isCollapsed, searchOpen]);
 
   const activateNavigationItem = (item: SidebarNavigationItem) => {
-    if (item.disabled) return;
     if (item.id === "new-chat") {
       setQuery("");
       setSearchOpen(false);
@@ -135,9 +97,10 @@ export function AppSidebar({
         activeConversationId={activeId}
         collapsed={isCollapsed}
         onActivate={activateNavigationItem}
-        onCloseMobile={onCloseMobile}
         searchOpen={searchOpen}
       />
+
+      <SidebarDestinations collapsed={isCollapsed} onCloseMobile={onCloseMobile} />
 
       {!isCollapsed && searchOpen && (
         <SidebarSearch
@@ -185,13 +148,14 @@ function SidebarHeader({
     <div className="sidebar-header">
       {!collapsed && (
         <div className="brand">
-          <BothesisMark className="bothesis-mark--sidebar" decorative />
+          <ProductMark decorative size="md" />
           <span className="brand-lockup">
-            <span className="brand-wordmark">{appBrand.shortName}</span>
+            <span className="brand-wordmark">BoThesis</span>
+            <span className="brand-caption">Knowledge workspace</span>
           </span>
         </div>
       )}
-      {collapsed && <BothesisMark className="bothesis-mark--sidebar" decorative />}
+      {collapsed && <ProductMark decorative size="md" />}
       <button
         className="sidebar-icon-btn"
         onClick={mobileOpen ? onCloseMobile : onToggleCollapse}
@@ -199,7 +163,7 @@ function SidebarHeader({
         aria-expanded={mobileOpen ? true : !collapsed}
         aria-label={mobileOpen ? "Close sidebar" : collapsed ? "Expand sidebar" : "Collapse sidebar"}
       >
-        {mobileOpen ? <X size={18} /> : collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+        {mobileOpen ? <X aria-hidden="true" size={18} /> : collapsed ? <PanelLeftOpen aria-hidden="true" size={18} /> : <PanelLeftClose aria-hidden="true" size={18} />}
       </button>
     </div>
   );
@@ -209,55 +173,16 @@ function SidebarNavigation({
   activeConversationId,
   collapsed,
   onActivate,
-  onCloseMobile,
   searchOpen,
 }: {
   activeConversationId: string | null;
   collapsed: boolean;
   onActivate: (item: SidebarNavigationItem) => void;
-  onCloseMobile: () => void;
   searchOpen: boolean;
 }) {
-  const router = useRouter();
-
   return (
     <nav aria-label="Workspace" className="sidebar-navigation">
       {sidebarNavigationItems.map((item) => {
-        if (item.id === "more") {
-          return (
-            <Dropdown
-              align="left"
-              ariaLabel="More destinations"
-              buttonClassName="sidebar-row sidebar-row--menu"
-              className="sidebar-more-dropdown"
-              key={item.id}
-              label={
-                <SidebarRowContent
-                  collapsed={collapsed}
-                  item={item}
-                />
-              }
-              menuClassName="sidebar-popover"
-              showChevron={false}
-              title={collapsed ? "More" : undefined}
-            >
-              {sidebarSecondaryDestinations.map((destination) => (
-                <DropdownItem
-                  className="sidebar-popover__item"
-                  key={destination.id}
-                  onClick={() => {
-                    router.push(destination.href);
-                    onCloseMobile();
-                  }}
-                >
-                  <span>{destination.label}</span>
-                  <ChevronRight aria-hidden="true" size={14} />
-                </DropdownItem>
-              ))}
-            </Dropdown>
-          );
-        }
-
         const active = item.id === "search-chats"
           ? searchOpen
           : item.id === "new-chat" && activeConversationId === null;
@@ -276,6 +201,36 @@ function SidebarNavigation({
   );
 }
 
+function SidebarDestinations({
+  collapsed,
+  onCloseMobile,
+}: {
+  collapsed: boolean;
+  onCloseMobile: () => void;
+}) {
+  return (
+    <nav aria-label="Product areas" className="sidebar-destinations">
+      {!collapsed && <p className="sidebar-destinations__label">Product</p>}
+      {sidebarSecondaryDestinations.map((destination) => {
+        const Icon = destination.icon;
+        return (
+          <Link
+            aria-label={collapsed ? destination.label : undefined}
+            className="sidebar-row"
+            href={destination.href}
+            key={destination.id}
+            onClick={onCloseMobile}
+            title={collapsed ? destination.label : undefined}
+          >
+            <Icon aria-hidden="true" className="sidebar-row__icon" size={18} />
+            {!collapsed && <span className="sidebar-row__label">{destination.label}</span>}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
+
 function SidebarRow({
   active = false,
   collapsed,
@@ -287,16 +242,14 @@ function SidebarRow({
   item: SidebarNavigationItem;
   onClick: () => void;
 }) {
-  const tooltip = item.statusLabel ? `${item.label} — ${item.statusLabel}` : item.label;
+  const tooltip = item.label;
 
   return (
     <button
       aria-current={active ? "page" : undefined}
-      aria-disabled={item.disabled || undefined}
       aria-label={collapsed ? tooltip : undefined}
       className="sidebar-row"
       data-active={active}
-      data-disabled={item.disabled || undefined}
       onClick={onClick}
       title={collapsed ? tooltip : undefined}
       type="button"
@@ -321,9 +274,6 @@ function SidebarRowContent({
       {!collapsed && (
         <>
           <span className="sidebar-row__label">{item.label}</span>
-          {item.statusLabel && (
-            <span className="sidebar-row__status">{item.statusLabel}</span>
-          )}
         </>
       )}
     </>
@@ -347,12 +297,16 @@ function SidebarSearch({
         <Search aria-hidden="true" size={16} />
         <input
           id="conversation-search"
+          autoComplete="off"
+          name="conversation-search"
           onChange={(e) => onQuery(e.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Escape") onClose();
           }}
-          placeholder="Search chats"
+          placeholder="Search chats…"
           ref={inputRef}
+          spellCheck={false}
+          type="search"
           value={query}
         />
       </label>
@@ -434,7 +388,7 @@ function RecentChatList({
           !collapsed && (
             <div className="sidebar-list__empty">
               <span className="sidebar-list__empty-icon">
-                <MessageSquare size={16} />
+                <MessageSquare aria-hidden="true" size={16} />
               </span>
               <strong>Start your first brief</strong>
               <span>Your conversations will appear here.</span>
@@ -444,7 +398,7 @@ function RecentChatList({
           !collapsed && (
             <div className="sidebar-list__empty">
               <span className="sidebar-list__empty-icon">
-                <Search size={16} />
+                <Search aria-hidden="true" size={16} />
               </span>
               <strong>No matching conversations</strong>
               <span>Try a shorter search term.</span>
@@ -483,7 +437,7 @@ function RecentChatList({
                         type="button"
                       >
                         {collapsed ? (
-                          <MessageSquare size={15} />
+                          <MessageSquare aria-hidden="true" size={15} />
                         ) : (
                           <span className="sidebar-conversation-title">
                             {displayTitle}
@@ -556,6 +510,7 @@ function RecentChatList({
             autoComplete="off"
             id="conversation-title"
             maxLength={120}
+            name="conversation-title"
             onChange={(event) => setRenameValue(event.target.value)}
             ref={renameInputRef}
             value={renameValue}
@@ -639,7 +594,7 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
         <span className="sidebar-account-row__avatar"><UserCircle aria-hidden="true" size={18} /></span>
         {!collapsed && (
           <span className="sidebar-account-row__copy">
-            <strong>Knowledge workspace</strong>
+            <strong>Workspace access</strong>
             <small>Private to your access</small>
           </span>
         )}
@@ -652,11 +607,11 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
           type="button"
         >
           {theme === "system" ? (
-            <Laptop size={16} />
+            <Laptop aria-hidden="true" size={16} />
           ) : resolvedTheme === "dark" ? (
-            <Moon size={16} />
+            <Moon aria-hidden="true" size={16} />
           ) : (
-            <Sun size={16} />
+            <Sun aria-hidden="true" size={16} />
           )}
         </button>
       </div>

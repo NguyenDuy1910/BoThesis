@@ -1,29 +1,34 @@
-# BoThesis Document Storage
+# BoThesis Storage Ownership
 
-PostgreSQL remains the source of truth for document metadata, ownership,
-lineage, message links, and canonical chunks. S3-compatible object storage is
-the primary raw-binary store; `document_blobs` is a bounded fallback. Qdrant is
-replaceable derived state and is never the authority for document content.
+PostgreSQL stores durable business and application state: identities, tenant
+memberships, configured connector instances, encrypted connector credentials,
+sync checkpoints and history, canonical source Items, ACLs, chat state, and
+audit records.
 
-Chat uploads create uploader-private `documents` rows before bytes are sent.
-`upload_status`, `content_sha256`, `upload_idempotency_key`, and `uploaded_at`
-make upload retries and content readiness explicit. Provider-specific reusable
-references remain under `documents.metadata.provider_cache` and must carry the
-source fingerprint they were created from.
+The canonical source model is one `items` table. `item_type` distinguishes
+collections, semantic documents, and opaque files. `parent_item_id` represents
+source containment; each child remains independently persisted. Binary Items
+store only `storage_key`, MIME type, size, and SHA-256 metadata in PostgreSQL.
 
-Messages refer to files only through `message_documents`. User-supplied
-documents use `attachment`; documents cited by an assistant use `reference`.
-No parallel file or attachment entity is introduced.
+S3-compatible object storage is mandatory for original file bytes. Presigned
+URLs are generated at runtime and are never persisted. PostgreSQL has no blob
+or raw-byte fallback.
 
-Deletion is soft-only and recoverable. Documents transition
-`active -> hidden -> deleted`; the hidden state denies reads while PostgreSQL
-chunks and fallback blobs, provider-cache entries, and Qdrant points receive
-tombstones. S3 objects, PostgreSQL bytes, provider references, metadata, and
-lineage remain retained. A failed tombstone operation remains hidden and can be
-retried. The application contains no physical purge path.
+Docling reads originals from object storage and produces normalized content and
+retry-safe chunks. Chunks flow directly through contextualization and embedding
+into Qdrant. PostgreSQL does not persist chunks. Qdrant points use deterministic
+IDs derived from the canonical Item identity and chunk index, and carry bounded
+lineage plus allowed and denied principal-token projections.
 
-`tenant_memberships`, `document_chunks`, `message_documents`,
-`user_principal_tokens`, and `document_blobs` carry `deleted_at`. Authorization,
-document processing, message linking, and retrieval queries exclude rows where
-that timestamp is set. Reusing a stable key reactivates the retained row instead
-of deleting and recreating it.
+Connector scopes advance `sync_checkpoint` only after a complete successful
+run. `sync_runs` is operational history, not an index versioning mechanism.
+There is no generation or blue/green scope state.
+
+`message_items` associates messages with canonical Items through `attachment`,
+`reference`, or `output` relations. Runtime deletion is tombstone-only: Items,
+message links, ACL records, and Qdrant points remain recoverable and normal
+reads exclude their tombstones. Original object bytes are retained.
+
+The project is in initial development. `make init` rebuilds the initial schema
+directly from the ORM and recreates the derived Qdrant collection; there is no
+migration or legacy compatibility layer.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from bothesis.agent.protocol import FunctionTool
@@ -34,18 +34,28 @@ class ToolRegistry:
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return tuple(tool.definition for tool in self._tools.values())
 
-    def function_tools(self) -> tuple[FunctionTool, ...]:
+    def function_tools(
+        self,
+        allowed_names: Iterable[str] | None = None,
+    ) -> tuple[FunctionTool, ...]:
         """Adapt core definitions to the provider-neutral wire contract."""
 
+        allowed = set(allowed_names) if allowed_names is not None else None
         return tuple(
-            tool.as_function_tool() for tool in self._tools.values()
+            tool.as_function_tool()
+            for name, tool in self._tools.items()
+            if allowed is None or name in allowed
         )
 
     def arguments_are_valid(self, name: str, arguments: Mapping[str, Any]) -> bool:
         tool = self.get(name)
         return tool is not None and _matches_schema(arguments, tool.definition.input_schema)
 
-    def is_tool_arguments_payload(self, text: str) -> bool:
+    def is_tool_arguments_payload(
+        self,
+        text: str,
+        allowed_names: Iterable[str] | None = None,
+    ) -> bool:
         """Whether a model text response is a schema-valid tool payload.
 
         A provider can occasionally serialize a function-call payload as plain
@@ -58,9 +68,11 @@ class ToolRegistry:
             return False
         if not isinstance(payload, Mapping):
             return False
+        allowed = set(allowed_names) if allowed_names is not None else None
         return any(
             _matches_schema(payload, tool.definition.input_schema)
-            for tool in self._tools.values()
+            for name, tool in self._tools.items()
+            if allowed is None or name in allowed
         )
 
 def _matches_schema(value: object, schema: Mapping[str, Any]) -> bool:

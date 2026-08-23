@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronRight, ExternalLink, Lock } from "lucide-react";
+import { BookOpen, ChevronRight, ExternalLink } from "lucide-react";
 import { memo } from "react";
 
 import { answerSources, sourcesLabel } from "../sources";
@@ -30,27 +30,27 @@ export const AnswerSources = memo(function AnswerSources({
       <ul className="answer-sources__list">
         {sources.map((source) => (
           <li className="answer-sources__item" key={source.id}>
-            {source.url ? (
+            <span className="answer-sources__actions">
               <a
                 className="answer-sources__link"
-                href={source.url}
-                rel="noopener noreferrer"
-                target="_blank"
+                href={source.internalUrl}
               >
+                <BookOpen aria-hidden="true" size={11} />
                 <span className="answer-sources__title">{source.title}</span>
-                <ExternalLink aria-hidden="true" size={11} />
               </a>
-            ) : (
-              <span className="answer-sources__title">
-                {source.title}
-                {source.restricted && (
-                  <span className="answer-sources__restricted">
-                    <Lock aria-hidden="true" size={10} />
-                    Restricted
-                  </span>
-                )}
-              </span>
-            )}
+              {source.originalUrl && (
+                <a
+                  aria-label={`Open original source for ${source.title}`}
+                  className="answer-sources__external-link"
+                  href={source.originalUrl}
+                  rel="noopener noreferrer"
+                  target="_blank"
+                  title="Open original source"
+                >
+                  <ExternalLink aria-hidden="true" size={11} />
+                </a>
+              )}
+            </span>
             {(source.locator || source.origin) && (
               <span className="answer-sources__meta">
                 {[source.origin, source.locator].filter(Boolean).join(" · ")}
