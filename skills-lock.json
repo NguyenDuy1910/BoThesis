@@ -1,6 +1,18 @@
 {
   "version": 1,
   "skills": {
+    "a11y-audit": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/a11y-audit/SKILL.md",
+      "computedHash": "9784ee71bd37dbf74b1dab3a5cb651fca4282a54c648895b084c39ff47e48153"
+    },
+    "apply-aesthetic": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/apply-aesthetic/SKILL.md",
+      "computedHash": "13cdf31405d57c13afdd80572564cdb0438c53edfcc10106419224bd82743d94"
+    },
     "banner-design": {
       "source": "nextlevelbuilder/ui-ux-pro-max-skill",
       "sourceType": "github",
@@ -13,11 +25,41 @@
       "skillPath": ".claude/skills/brand/SKILL.md",
       "computedHash": "3c7acb846082f9e4cc873f1cf85bd57ade027206e18c7c050797f815e3a56af7"
     },
+    "brandkit": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/brandkit/SKILL.md",
+      "computedHash": "96df7cedb97f4d175ff293c966566deed0a5ee6921b258c489d99cefa0ddaae1"
+    },
     "design": {
       "source": "nextlevelbuilder/ui-ux-pro-max-skill",
       "sourceType": "github",
       "skillPath": ".claude/skills/design/SKILL.md",
       "computedHash": "4e0412d29df74e6153e4944b367459a28cf52e3e81c7f45c1ecf4c2a8b21907c"
+    },
+    "design-code": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/design-code/SKILL.md",
+      "computedHash": "36497e5a34b985027c2f0f145e62301ddf556411b7ce2f9265efad885a2f7240"
+    },
+    "design-component": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/design-component/SKILL.md",
+      "computedHash": "802c059dac9bdea01140f61cf7e420b3576758ebdc35302e91ca5d47bfecd807"
+    },
+    "design-qa": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/design-qa/SKILL.md",
+      "computedHash": "76a22ff89c5791e3626fdfe4cde7481456d7df109d39b5e7a7fb493c69b1f62b"
+    },
+    "design-review": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/design-review/SKILL.md",
+      "computedHash": "7c59c73a211fdb91bf431c4962f57dff51a2926c66fc650c52d206f7384cf55a"
     },
     "design-system": {
       "source": "nextlevelbuilder/ui-ux-pro-max-skill",
@@ -25,11 +67,29 @@
       "skillPath": ".claude/skills/design-system/SKILL.md",
       "computedHash": "a05715299135276628f53519484e1267ec8ad111e6355a09c2da1cf66aee2cc3"
     },
+    "design-tokens": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/design-tokens/SKILL.md",
+      "computedHash": "ff070b33af038fe95289791d63cd9e06421dde1688d252a15962db2f59af879b"
+    },
+    "figma-integration": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/figma-integration/SKILL.md",
+      "computedHash": "5c71179f1c0756bc97e2627358980051f6750540322c450cc4a4cacc8a8c40e6"
+    },
     "frontend-design": {
       "source": "anthropics/skills",
       "sourceType": "github",
       "skillPath": "skills/frontend-design/SKILL.md",
       "computedHash": "4eabc66183767153e404b39d1b839b1c37f2d82d86f0a0d7e880a579d8d62336"
+    },
+    "governance": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/governance/SKILL.md",
+      "computedHash": "6f5ff8feb1e96694643e45af34cefa3968f4aaa221757064c582da83ec432abf"
     },
     "huashu-design": {
       "source": "alchaincyf/huashu-design",
@@ -37,11 +97,47 @@
       "skillPath": "SKILL.md",
       "computedHash": "636ff50e17901f1809d9895c9ab15fc8cb5f4c3cc41cc93417da550613ce5e3b"
     },
+    "image-to-code": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/image-to-code/SKILL.md",
+      "computedHash": "d796c217f5df15ffb2cd339b73e33bd499929ed1085fd2dbf02ebd28088a895b"
+    },
+    "migrate-design-system": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/migrate-design-system/SKILL.md",
+      "computedHash": "57f7981b7542af584258907e3743b7c5d6eff98ed970ccbd0d5e05f4c0d40a16"
+    },
+    "performance": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/performance/SKILL.md",
+      "computedHash": "ce6bee8f240cacf0b02ecd4bcaf8c1bfe8ac153f43eb9c11429a3d75bdb80ec3"
+    },
+    "prototype": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/prototype/SKILL.md",
+      "computedHash": "f3bb5bd6dee75372c4a8ca0ec635e16c58c16ff70a99bf403ef3853efbc492d2"
+    },
+    "redesign": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/redesign/SKILL.md",
+      "computedHash": "3d2bb94b29856040a079a14fad2e79610339cf2737b9db9802aa9201ea77cffe"
+    },
     "slides": {
       "source": "nextlevelbuilder/ui-ux-pro-max-skill",
       "sourceType": "github",
       "skillPath": ".claude/skills/slides/SKILL.md",
       "computedHash": "c72a8bcd2ee98a7caab8f00a816c7e7ccfa46bba6682539db2186e71220155f1"
+    },
+    "token-build": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/token-build/SKILL.md",
+      "computedHash": "fe37f9c831fa50ede2e0c4a9ae477b8e4ebac99b82d7739823b82e44b0af243c"
     },
     "ui-styling": {
       "source": "nextlevelbuilder/ui-ux-pro-max-skill",
@@ -54,6 +150,12 @@
       "sourceType": "github",
       "skillPath": ".claude/skills/ui-ux-pro-max/SKILL.md",
       "computedHash": "523b8063c07eedd2b8a1ca94d7a0be9ad340026bd9f21a1eda0b6be2a855298f"
+    },
+    "ux-writing": {
+      "source": "plugin87/ux-ui-agent-skills",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/ux-writing/SKILL.md",
+      "computedHash": "0a8a457391902587fda9ceb38ca03f807b4d499e9bd5063a54be4814f84daa71"
     },
     "web-design-guidelines": {
       "source": "vercel-labs/agent-skills",

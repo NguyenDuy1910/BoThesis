@@ -24,18 +24,17 @@ export function ConnectorCard({
     <button
       aria-haspopup="dialog"
       className={cn(
-        "connector-card group relative flex min-h-44 w-full cursor-pointer flex-col items-start rounded-2xl bg-[var(--surface)] p-4 text-left",
+        "connector-card group relative flex min-h-40 w-full cursor-pointer flex-col items-start rounded-lg bg-[var(--surface)] p-4 text-left",
         "ring-1 ring-inset ring-[color-mix(in_srgb,var(--border)_72%,transparent)]",
-        "transition-[transform,box-shadow,background-color] duration-[180ms] ease-[var(--ease-standard)]",
-        "hover:-translate-y-0.5 hover:bg-[var(--surface-raised)] hover:shadow-[0_12px_30px_rgb(15_23_42/0.085)]",
-        "active:translate-y-0 active:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2",
-        "motion-reduce:transform-none motion-reduce:transition-none",
+        "transition-[border-color,background-color] duration-[160ms] ease-[var(--ease-standard)]",
+        "hover:bg-[var(--surface-hover)] hover:ring-[var(--border-strong)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2",
       )}
       onClick={onClick}
       type="button"
     >
       <div className="flex w-full items-start justify-between gap-3">
-        <span className="transition-transform duration-[180ms] ease-[var(--ease-standard)] group-hover:scale-[1.035] motion-reduce:transform-none motion-reduce:transition-none">
+        <span>
           <ConnectorLogo provider={connector.provider} size="lg" />
         </span>
         <ConnectionStatusBadge status={status} />

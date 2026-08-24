@@ -9,7 +9,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from bothesis.db.models import Item, ItemOrigin, PluginBinding, PluginConnection
+from bothesis.db.models import Item, ItemOrigin, PluginBinding
 from bothesis.document_index.vector_store import VectorStore
 from bothesis.services import (
     ITEM_MANAGE_PERMISSION,
@@ -18,8 +18,10 @@ from bothesis.services import (
     AdminValidationError,
     AuditService,
     AuthContext,
+    CollectionAccessService,
     ItemService,
     PluginService,
+    normalize_required_text,
     normalize_page,
     require_tenant_permission,
     timestamp,
@@ -43,6 +45,43 @@ class AdminItemService:
         self._vector_store = vector_store
         self._plugin_encryption_key = plugin_encryption_key
         self._audit = audit or AuditService(session)
+
+    async def create_collection(
+        self,
+        actor: AuthContext,
+        *,
+        title: str,
+        parent_item_id: UUID | None = None,
+        inherit_access: bool = True,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        tenant_id = require_tenant_permission(actor, ITEM_MANAGE_PERMISSION)
+        item = await ItemService(self._session).create_collection(
+            tenant_id=tenant_id,
+            title=normalize_required_text(title, "collection title", 255),
+            created_by_user_id=actor.user_id,
+            parent_item_id=parent_item_id,
+            inherit_access=inherit_access,
+            metadata=metadata,
+        )
+        await CollectionAccessService(self._session).grant(
+            item.id,
+            principal_type="user",
+            principal_id=actor.user_id,
+            role="owner",
+            actor=actor,
+        )
+        await self._audit.record(
+            actor,
+            action="collection.created",
+            resource_type="collection",
+            resource_id=str(item.id),
+            details={
+                "parent_item_id": str(parent_item_id) if parent_item_id else None,
+                "creator_role": "owner",
+            },
+        )
+        return await self.get_item(actor, item.id)
 
     async def list_items(
         self,

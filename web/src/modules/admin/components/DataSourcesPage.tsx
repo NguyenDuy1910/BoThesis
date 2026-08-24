@@ -4,17 +4,14 @@ import {
   ArrowRight,
   ChevronRight,
   CircleAlert,
-  FileCheck2,
-  FileUp,
   FolderTree,
   Power,
   RefreshCw,
   RotateCw,
   ShieldCheck,
   Trash2,
-  UploadCloud,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -30,7 +27,6 @@ import { useToast } from "@/components/ui/Toast";
 import { cn } from "@/lib/cn";
 import {
   adminRequest,
-  uploadDatasourceFile,
   useAdminQuery,
 } from "@/modules/admin/api";
 import {
@@ -50,15 +46,15 @@ import type { ConnectorRegistryStatus } from "@/modules/connectors/types";
 type AdminRow = Record<string, any>;
 type RegistryFilter = "all" | "installed" | "available" | "disabled" | ConnectorCategory;
 
-interface DatasourceCapability {
-  provider: string;
-  label: string;
-  credential_reference_required: boolean;
-  scope_type: string;
+interface PluginCapability {
+  plugin_key: string;
+  display_name: string;
+  authentication_type: string;
+  capabilities: string[];
 }
 
 interface ConnectorCapabilities {
-  providers: DatasourceCapability[];
+  plugins: PluginCapability[];
 }
 
 interface PaginatedResult {
@@ -66,15 +62,6 @@ interface PaginatedResult {
   total: number;
 }
 
-interface UploadItem {
-  id: string;
-  file: File;
-  progress: number;
-  state: "queued" | "uploading" | "uploaded" | "failed";
-  error?: string;
-}
-
-const SUPPORTED_FILE_TYPES = ".pdf,.docx,.pptx,.xlsx,.csv,.md,.markdown,.txt,.json,.html,.xml,.yaml,.yml";
 const registryFilters: ReadonlyArray<{ id: RegistryFilter; label: string }> = [
   { id: "all", label: "All" },
   { id: "installed", label: "Installed" },
@@ -89,17 +76,17 @@ export function ConnectorRegistryPage() {
   const [filter, setFilter] = useState<RegistryFilter>("all");
   const [selected, setSelected] = useState<ConnectorDefinition | null>(null);
   const [setupKey, setSetupKey] = useState(0);
-  const connections = useAdminQuery<PaginatedResult>("/datasources?page_size=100");
-  const capabilities = useAdminQuery<ConnectorCapabilities>("/datasources/capabilities");
+  const connections = useAdminQuery<PaginatedResult>("/plugin-connections?page_size=100");
+  const capabilities = useAdminQuery<ConnectorCapabilities>("/plugins/capabilities");
 
   const availableProviders = useMemo(
-    () => new Set(capabilities.data?.providers.map((item) => item.provider) ?? []),
+    () => new Set(capabilities.data?.plugins.map((item) => item.plugin_key) ?? []),
     [capabilities.data],
   );
   const instancesByProvider = useMemo(() => {
     const result = new Map<string, AdminRow[]>();
     for (const connection of connections.data?.items ?? []) {
-      result.set(connection.provider, [...(result.get(connection.provider) ?? []), connection]);
+      result.set(connection.plugin_key, [...(result.get(connection.plugin_key) ?? []), connection]);
     }
     return result;
   }, [connections.data?.items]);
@@ -251,7 +238,7 @@ function ConnectorRegistrySkeleton() {
       <Skeleton className="h-4 w-28" />
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {Array.from({ length: 8 }).map((_, index) => (
-          <div className="min-h-44 rounded-2xl bg-[var(--surface)] p-4 ring-1 ring-inset ring-[var(--border)]" key={index}>
+          <div className="min-h-40 rounded-lg bg-[var(--surface)] p-4 ring-1 ring-inset ring-[var(--border)]" key={index}>
             <div className="flex justify-between"><Skeleton className="h-13 w-13 rounded-xl" /><Skeleton className="h-5 w-20 rounded-full" /></div>
             <Skeleton className="mt-4 h-4 w-28" />
             <Skeleton className="mt-2 h-3 w-4/5" />
@@ -322,16 +309,14 @@ function ConnectionRow({ connection, onChanged }: { connection: AdminRow; onChan
   const { toast } = useToast();
   const [action, setAction] = useState<"validate" | "sync" | null>(null);
   const presentation = connectionPresentation(connection);
-  const provider = String(connection.provider);
+  const provider = String(connection.plugin_key);
 
   async function run(actionName: "validate" | "sync") {
     setAction(actionName);
     try {
-      const path = actionName === "validate"
-        ? `/datasources/${connection.id}/validate`
-        : `/datasources/${connection.id}/sync`;
-      await adminRequest(path, { method: "POST", body: actionName === "sync" ? JSON.stringify({}) : undefined });
-      toast({ title: actionName === "validate" ? "Connection verified" : "Ingestion started", variant: "success" });
+      const path = `/plugin-connections/${connection.id}/validate`;
+      await adminRequest(path, { method: "POST" });
+      toast({ title: "Connection verified", description: "Bind it to a knowledge base to start ingestion.", variant: "success" });
       onChanged();
     } catch (cause) {
       toast({ title: actionName === "validate" ? "Connection test failed" : "Could not start ingestion", description: errorMessage(cause), variant: "error" });
@@ -341,7 +326,7 @@ function ConnectionRow({ connection, onChanged }: { connection: AdminRow; onChan
   }
 
   return (
-    <div className="flex min-w-0 flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:gap-4" style={{ contentVisibility: "auto", containIntrinsicSize: "72px" }}>
+    <div className="flex min-w-0 flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:gap-4" style={{ contentVisibility: "auto" }}>
       <ConnectorLogo provider={provider} size="sm" />
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-medium text-[var(--text)]" title={connection.display_name}>{connection.display_name}</p>
@@ -352,9 +337,7 @@ function ConnectionRow({ connection, onChanged }: { connection: AdminRow; onChan
         {(connection.status === "draft" || connection.status === "error") && (
           <Button icon={<ShieldCheck aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "validate"} onClick={() => run("validate")} size="sm" variant="secondary">Test</Button>
         )}
-        {connection.status === "active" && (
-          <Button icon={<RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "sync"} onClick={() => run("sync")} size="sm" variant="secondary">Sync</Button>
-        )}
+        {connection.status === "active" && <Badge variant="primary">Bind in a knowledge base</Badge>}
       </div>
     </div>
   );
@@ -445,7 +428,7 @@ function ConnectorDetailIntro({
           <p className="mt-1 text-sm leading-5 text-[var(--text-muted)]">{connector.description}</p>
         </div>
       </div>
-      <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl bg-[var(--bg-panel)] p-4 ring-1 ring-inset ring-[var(--border-muted)]">
+      <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 rounded-lg bg-[var(--bg-panel)] p-4 ring-1 ring-inset ring-[var(--border-muted)]">
         <DetailItem label="Authentication" value={connector.authentication} />
         <DetailItem label="Access boundary" value="Tenant + document ACL" />
         <DetailItem label="Indexing" value={connector.capabilities.includes("Sync") ? "Scoped synchronization" : "Governed ingestion"} />
@@ -474,17 +457,16 @@ function ConnectionInstanceCard({ connection, onChanged }: { connection: AdminRo
   const { toast } = useToast();
   const [action, setAction] = useState<"sync" | "test" | "toggle" | "delete" | null>(null);
   const presentation = connectionPresentation(connection);
-  const scopes = Array.isArray(connection.scopes) ? connection.scopes : [];
+  const scopes = configuredScopeLabels(connection.config);
 
   async function run(nextAction: "sync" | "test" | "toggle" | "delete") {
     if (nextAction === "delete" && !window.confirm(`Delete ${connection.display_name}? Indexed records remain governed by their lifecycle policy.`)) return;
     setAction(nextAction);
     try {
-      if (nextAction === "sync") await adminRequest(`/datasources/${connection.id}/sync`, { method: "POST", body: JSON.stringify({}) });
-      if (nextAction === "test") await adminRequest(`/datasources/${connection.id}/validate`, { method: "POST" });
-      if (nextAction === "toggle") await adminRequest(`/datasources/${connection.id}`, { method: "PATCH", body: JSON.stringify({ status: connection.status === "disabled" ? "active" : "disabled" }) });
-      if (nextAction === "delete") await adminRequest(`/datasources/${connection.id}`, { method: "DELETE" });
-      toast({ title: nextAction === "sync" ? "Ingestion started" : nextAction === "test" ? "Connection verified" : nextAction === "delete" ? "Connection removed" : connection.status === "disabled" ? "Connection enabled" : "Connection disabled", variant: "success" });
+      if (nextAction === "sync" || nextAction === "test") await adminRequest(`/plugin-connections/${connection.id}/validate`, { method: "POST" });
+      if (nextAction === "toggle") await adminRequest(`/plugin-connections/${connection.id}`, { method: "PATCH", body: JSON.stringify({ status: connection.status === "disabled" ? "active" : "disabled" }) });
+      if (nextAction === "delete") await adminRequest(`/plugin-connections/${connection.id}`, { method: "DELETE" });
+      toast({ title: nextAction === "sync" || nextAction === "test" ? "Connection verified" : nextAction === "delete" ? "Connection removed" : connection.status === "disabled" ? "Connection enabled" : "Connection disabled", variant: "success" });
       onChanged();
     } catch (cause) {
       toast({ title: "Connection action failed", description: errorMessage(cause), variant: "error" });
@@ -494,16 +476,16 @@ function ConnectionInstanceCard({ connection, onChanged }: { connection: AdminRo
   }
 
   return (
-    <div className="rounded-xl bg-[var(--surface)] p-3.5 ring-1 ring-inset ring-[var(--border)]">
+    <div className="rounded-lg bg-[var(--surface)] p-3.5 ring-1 ring-inset ring-[var(--border)]">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-sm font-medium text-[var(--text)]">{connection.display_name}</p>
-          <p className="mt-1 truncate text-xs text-[var(--text-muted)]">{scopes.length ? scopes.map((scope: AdminRow) => scope.display_name).filter(Boolean).join(", ") : "Tenant workspace"}</p>
+          <p className="mt-1 truncate text-xs text-[var(--text-muted)]">{scopes.length ? scopes.join(", ") : "Tenant workspace"}</p>
         </div>
         <ConnectionStatus {...presentation} />
       </div>
       <div className="mt-3 flex flex-wrap gap-1.5">
-        {connection.status === "active" ? <Button icon={<RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "sync"} onClick={() => run("sync")} size="sm" variant="secondary">Sync</Button> : <Button icon={<ShieldCheck aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "test"} onClick={() => run("test")} size="sm" variant="secondary">Test</Button>}
+        <Button icon={<ShieldCheck aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "test" || action === "sync"} onClick={() => run("test")} size="sm" variant="secondary">Test</Button>
         <Button icon={<Power aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "toggle"} onClick={() => run("toggle")} size="sm" variant="ghost">{connection.status === "disabled" ? "Enable" : "Disable"}</Button>
         <Button icon={<Trash2 aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "delete"} onClick={() => run("delete")} size="sm" variant="ghost">Delete</Button>
       </div>
@@ -571,12 +553,12 @@ function ConfluenceConnectionSetup({
     setSubmitting(true);
     setError(null);
     try {
-      const connectorId = createdId ?? String((await adminRequest<AdminRow>("/datasources", {
+      const connectorId = createdId ?? String((await adminRequest<AdminRow>("/plugin-connections", {
         method: "POST",
         body: JSON.stringify({
-          provider: "confluence",
+          plugin_key: "confluence",
           display_name: connectionName.trim(),
-          settings: {
+          config: {
             wiki_base: siteUrl.trim(),
             is_cloud: true,
             space: space.trim(),
@@ -590,9 +572,8 @@ function ConfluenceConnectionSetup({
         }),
       })).id);
       setCreatedId(connectorId);
-      await adminRequest(`/datasources/${connectorId}/validate`, { method: "POST" });
-      await adminRequest(`/datasources/${connectorId}/sync`, { method: "POST", body: JSON.stringify({}) });
-      toast({ title: "Confluence connected", description: "Initial ingestion has started.", variant: "success" });
+      await adminRequest(`/plugin-connections/${connectorId}/validate`, { method: "POST" });
+      toast({ title: "Confluence connected", description: "It is ready to bind to a knowledge base.", variant: "success" });
       onCreated();
     } catch (cause) {
       const detail = errorMessage(cause);
@@ -606,7 +587,7 @@ function ConfluenceConnectionSetup({
   return (
     <>
       <SetupIntro description="Add a governed Confluence connection. Credentials are encrypted before they are stored." />
-      <SetupSteps labels={["Configure", "Authenticate", "Choose content", "Test connection", "Start ingestion"]} />
+      <SetupSteps labels={["Configure", "Authenticate", "Choose content", "Test connection"]} />
       <form className="mt-6 space-y-5" id={formId} onSubmit={submit}>
         {error && <InlineError description={error} />}
         <FormField htmlFor="confluence-connection-name" label="Connection name" required>
@@ -643,80 +624,51 @@ function FileConnectionSetup({
 }) {
   const { toast } = useToast();
   const [connectionName, setConnectionName] = useState("Uploaded files");
-  const [files, setFiles] = useState<UploadItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createdId, setCreatedId] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
   const formId = "file-connection-setup";
-  const readyToSubmit = files.some((item) => item.state === "queued" || item.state === "failed");
 
-  useEffect(() => () => abortRef.current?.abort(), []);
   useEffect(() => {
-    onDirtyChange(Boolean(createdId || files.length || connectionName !== "Uploaded files"));
-  }, [connectionName, createdId, files.length, onDirtyChange]);
-
-  function addFiles(selectedFiles: FileList | File[]) {
-    const existing = new Set(files.map((item) => fileKey(item.file)));
-    const next = Array.from(selectedFiles)
-      .filter((file) => !existing.has(fileKey(file)))
-      .map((file) => ({ id: crypto.randomUUID(), file, progress: 0, state: "queued" as const }));
-    setFiles((current) => [...current, ...next]);
-  }
+    onDirtyChange(Boolean(createdId || connectionName !== "Uploaded files"));
+  }, [connectionName, createdId, onDirtyChange]);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!readyToSubmit && !createdId) return;
     setSubmitting(true);
     setError(null);
-    const controller = new AbortController();
-    abortRef.current = controller;
     try {
-      const connectorId = createdId ?? String((await adminRequest<AdminRow>("/datasources", {
+      const connectorId = createdId ?? String((await adminRequest<AdminRow>("/plugin-connections", {
         method: "POST",
-        body: JSON.stringify({ provider: "file", display_name: connectionName.trim(), settings: {} }),
+        body: JSON.stringify({ plugin_key: "file", display_name: connectionName.trim(), config: {} }),
       })).id);
       setCreatedId(connectorId);
-      for (const item of files.filter((candidate) => candidate.state === "queued" || candidate.state === "failed")) {
-        setFiles((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, state: "uploading", progress: 0, error: undefined } : candidate));
-        try {
-          await uploadDatasourceFile(connectorId, item.file, {
-            signal: controller.signal,
-            onProgress: (progress) => setFiles((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, progress } : candidate)),
-          });
-          setFiles((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, state: "uploaded", progress: 100 } : candidate));
-        } catch (cause) {
-          const detail = errorMessage(cause);
-          setFiles((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, state: "failed", error: detail } : candidate));
-          throw cause;
-        }
-      }
-      await adminRequest(`/datasources/${connectorId}/validate`, { method: "POST" });
-      await adminRequest(`/datasources/${connectorId}/sync`, { method: "POST", body: JSON.stringify({}) });
-      toast({ title: "Files connected", description: "Initial ingestion has started.", variant: "success" });
+      await adminRequest(`/plugin-connections/${connectorId}/validate`, { method: "POST" });
+      toast({ title: "Managed files connected", description: "It is ready to bind to a knowledge base.", variant: "success" });
       onCreated();
     } catch (cause) {
       const detail = errorMessage(cause);
       setError(detail);
-      toast({ title: createdId ? "Upload or connection test failed" : "Could not create connection", description: detail, variant: "error" });
+      toast({ title: createdId ? "Connection test failed" : "Could not create connection", description: detail, variant: "error" });
     } finally {
-      abortRef.current = null;
       setSubmitting(false);
     }
   }
 
   return (
     <>
-      <SetupIntro description="Upload files into one managed connection, then start a governed ingestion run." />
-      <SetupSteps labels={["Configure", "Add files", "Test connection", "Start ingestion"]} />
+      <SetupIntro description="Create the governed file source first, then bind it to a knowledge base before adding target-scoped documents." />
+      <SetupSteps labels={["Configure", "Test connection", "Bind to knowledge base"]} />
       <form className="mt-6 space-y-5" id={formId} onSubmit={submit}>
         {error && <InlineError description={error} />}
         <FormField htmlFor="file-connection-name" label="Connection name" required>
           <Input autoComplete="off" disabled={Boolean(createdId)} id="file-connection-name" maxLength={255} name="display_name" onChange={(event) => setConnectionName(event.target.value)} required value={connectionName} />
         </FormField>
-        <FileDropzone disabled={submitting} files={files} onAdd={addFiles} onRemove={(id) => setFiles((current) => current.filter((item) => item.id !== id))} />
+        <div className="rounded-md border border-[var(--border)] bg-[var(--bg-panel)] p-3 text-sm leading-5 text-[var(--text-muted)]">
+          File bytes are never stored in connection configuration. Uploads use the object-storage boundary after this source is attached to a governed collection.
+        </div>
       </form>
-      <SetupSubmitFooter created={Boolean(createdId)} disabled={!readyToSubmit && !createdId} form={formId} loading={submitting} />
+      <SetupSubmitFooter created={Boolean(createdId)} form={formId} loading={submitting} />
     </>
   );
 }
@@ -738,63 +690,6 @@ function SetupSteps({ labels }: { labels: string[] }) {
   );
 }
 
-function FileDropzone({
-  disabled,
-  files,
-  onAdd,
-  onRemove,
-}: {
-  disabled: boolean;
-  files: UploadItem[];
-  onAdd: (files: FileList | File[]) => void;
-  onRemove: (id: string) => void;
-}) {
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const [dragActive, setDragActive] = useState(false);
-
-  return (
-    <div className="space-y-3">
-      <div
-        className={cn(
-          "rounded-lg border border-dashed px-4 py-7 text-center transition-[border-color,background-color] duration-[160ms] ease-[var(--ease-standard)]",
-          dragActive ? "border-[var(--brand-accent)] bg-[var(--brand-accent-soft)]" : "border-[var(--border-strong)] bg-[var(--bg-panel)]",
-          disabled && "pointer-events-none opacity-60",
-        )}
-        onDragEnter={(event) => { event.preventDefault(); setDragActive(true); }}
-        onDragLeave={(event) => { event.preventDefault(); setDragActive(false); }}
-        onDragOver={(event) => event.preventDefault()}
-        onDrop={(event) => { event.preventDefault(); setDragActive(false); onAdd(event.dataTransfer.files); }}
-      >
-        <UploadCloud aria-hidden="true" className="mx-auto h-6 w-6 text-[var(--brand-accent)]" />
-        <p className="mt-3 text-sm font-medium text-[var(--text)]">Drop files here, or choose files</p>
-        <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">PDF, Office, text, CSV, JSON, HTML, XML, and YAML · up to 20 MB each</p>
-        <Button className="mt-4" icon={<FileUp aria-hidden="true" className="h-4 w-4" />} onClick={() => inputRef.current?.click()} size="sm" type="button" variant="secondary">Choose files</Button>
-        <input accept={SUPPORTED_FILE_TYPES} aria-label="Choose files to upload" className="sr-only" disabled={disabled} multiple name="files" onChange={(event) => { if (event.target.files) onAdd(event.target.files); event.currentTarget.value = ""; }} ref={inputRef} type="file" />
-      </div>
-      {files.length > 0 && (
-        <ul aria-label="Selected files" className="divide-y divide-[var(--border)] rounded-lg border border-[var(--border)]">
-          {files.map((item) => <UploadRow item={item} key={item.id} onRemove={() => onRemove(item.id)} />)}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function UploadRow({ item, onRemove }: { item: UploadItem; onRemove: () => void }) {
-  const isUploading = item.state === "uploading";
-  const status = item.state === "uploaded" ? "Uploaded" : item.state === "failed" ? "Try again" : isUploading ? `Uploading ${item.progress}%` : "Ready to upload";
-  return (
-    <li className="px-3 py-3">
-      <div className="flex min-w-0 items-center gap-3">
-        <FileCheck2 aria-hidden="true" className={cn("h-4 w-4 shrink-0", item.state === "failed" ? "text-[var(--danger)]" : item.state === "uploaded" ? "text-[var(--success)]" : "text-[var(--brand-accent)]")} />
-        <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-[var(--text)]" title={item.file.name}>{item.file.name}</p><p className={cn("mt-0.5 text-xs", item.state === "failed" ? "text-[var(--danger)]" : "text-[var(--text-muted)]")}>{item.error ?? `${formatBytes(item.file.size)} · ${status}`}</p></div>
-        {item.state !== "uploading" && item.state !== "uploaded" && <Button onClick={onRemove} size="sm" type="button" variant="ghost">Remove</Button>}
-      </div>
-      {isUploading && <div aria-label={`${item.file.name} upload progress`} aria-valuemax={100} aria-valuemin={0} aria-valuenow={item.progress} className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--bg-subtle)]" role="progressbar"><div className="h-full bg-[var(--brand-accent)]" style={{ width: `${item.progress}%` }} /></div>}
-    </li>
-  );
-}
-
 function SetupSubmitFooter({
   created,
   disabled = false,
@@ -809,14 +704,14 @@ function SetupSubmitFooter({
   return (
     <div className="mt-6 flex items-center justify-end border-t border-[var(--border)] pt-4">
       <Button disabled={disabled} form={form} icon={created ? <RotateCw aria-hidden="true" className="h-4 w-4" /> : <ArrowRight aria-hidden="true" className="h-4 w-4" />} loading={loading} type="submit">
-        {created ? "Retry test and sync" : "Connect and start ingestion"}
+        {created ? "Retry connection test" : "Connect and validate"}
       </Button>
     </div>
   );
 }
 
 function InlineError({ description }: { description: string }) {
-  return <div className="rounded-md border border-[var(--danger-border)] bg-[var(--danger-soft)] px-3 py-2.5 text-sm text-[var(--danger)]" role="alert">{description}</div>;
+  return <div className="rounded-md border border-[var(--danger-border)] bg-[var(--danger-soft)] px-3 py-2.5 text-sm text-[var(--danger-text)]" role="alert">{description}</div>;
 }
 
 function ConnectionStatus({ label, variant }: { label: string; variant: "default" | "success" | "warning" | "danger" }) {
@@ -824,8 +719,6 @@ function ConnectionStatus({ label, variant }: { label: string; variant: "default
 }
 
 function connectionPresentation(connection: AdminRow): { label: string; variant: "default" | "success" | "warning" | "danger" } {
-  const scopeRuns = Array.isArray(connection.scopes) ? connection.scopes.map((scope: AdminRow) => scope.latest_run?.status) : [];
-  if (scopeRuns.some((status) => status === "pending" || status === "running")) return { label: "Syncing", variant: "warning" };
   if (connection.status === "active") return { label: "Connected", variant: "success" };
   if (connection.status === "error") return { label: "Error", variant: "danger" };
   if (connection.status === "draft") return { label: "Needs setup", variant: "warning" };
@@ -833,10 +726,15 @@ function connectionPresentation(connection: AdminRow): { label: string; variant:
 }
 
 function connectionScopeSummary(connection: AdminRow) {
-  const scopes = Array.isArray(connection.scopes) ? connection.scopes : [];
-  const scopeLabel = scopes.length === 1 ? scopes[0]?.display_name : `${scopes.length} scopes`;
-  const lastSynced = connection.last_synced_at ? ` · Synced ${formatShortDate(connection.last_synced_at)}` : " · Not synced yet";
-  return `${providerLabel(connection.provider)} · ${scopeLabel || "No scope"}${lastSynced}`;
+  const scopes = configuredScopeLabels(connection.config);
+  const scopeLabel = scopes.length === 1 ? scopes[0] : scopes.length ? `${scopes.length} scopes` : "Scope set when bound";
+  return `${providerLabel(connection.plugin_key)} · ${scopeLabel}`;
+}
+
+function configuredScopeLabels(config: unknown): string[] {
+  if (!config || typeof config !== "object") return [];
+  const values = config as Record<string, unknown>;
+  return [values.space, values.space_key, values.space_keys, values.scopes, values.folder_ids, values.project_keys].flatMap((value) => Array.isArray(value) ? value.map(String) : typeof value === "string" && value.trim() ? [value.trim()] : []);
 }
 
 function providerLabel(provider?: string) {
@@ -848,23 +746,6 @@ function titleCase(value: string) {
   return value.replaceAll(/[._-]/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
-function formatShortDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "unknown";
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
-}
-
-function formatBytes(value: number) {
-  if (!value) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
-  return `${(value / 1024 ** exponent).toFixed(exponent ? 1 : 0)} ${units[exponent]}`;
-}
-
 function errorMessage(cause: unknown) {
   return cause instanceof Error ? cause.message : "The Admin request could not be completed.";
-}
-
-function fileKey(file: File) {
-  return `${file.name}:${file.size}:${file.lastModified}`;
 }

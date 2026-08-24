@@ -466,6 +466,13 @@ class ItemStatusUpdate(AdminRequest):
     status: Literal["pending", "processing", "ready", "failed", "unsupported"]
 
 
+class CollectionCreate(AdminRequest):
+    title: str = Field(min_length=1, max_length=255)
+    parent_item_id: UUID | None = None
+    inherit_access: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class AccessRequestCreate(AdminRequest):
     requester_user_id: UUID
     collection_item_id: UUID
@@ -1356,6 +1363,13 @@ async def admin_list_items(
         sort=sort,
         direction=direction,
     )
+
+
+@admin_router.post("/collections", status_code=status.HTTP_201_CREATED)
+async def admin_create_collection(
+    body: CollectionCreate, identity: AdminIdentity
+) -> dict[str, Any]:
+    return await _admin_service.create_collection(identity, body.model_dump())
 
 
 @admin_router.get("/items/{item_id}")

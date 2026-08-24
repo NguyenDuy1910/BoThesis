@@ -1,7 +1,6 @@
 import {
   LayoutDashboard,
   Plug,
-  Database,
   FileText,
   Layers,
   Users,
@@ -10,6 +9,8 @@ import {
   Lock,
   ScrollText,
   KeyRound,
+  Library,
+  RefreshCw,
 } from "lucide-react";
 
 export interface NavItem {
@@ -31,28 +32,29 @@ export const adminNavGroups: NavGroup[] = [
     ],
   },
   {
-    label: "Data",
+    label: "Knowledge",
     items: [
-      { label: "Connectors", href: "/admin/connectors", icon: Plug },
-      { label: "Ingestion", href: "/admin/ingestion/jobs", icon: Database },
-      { label: "Items", href: "/admin/items", icon: FileText },
+      { label: "Knowledge Bases", href: "/admin/knowledge-bases", icon: Library },
+      { label: "Sources & Integrations", href: "/admin/sources", icon: Plug },
+      { label: "Documents", href: "/admin/documents", icon: FileText },
+      { label: "Sync Activity", href: "/admin/sync-activity", icon: RefreshCw },
     ],
   },
   {
-    label: "Organization",
+    label: "Access",
     items: [
-      { label: "Spaces", href: "/admin/spaces", icon: Layers },
-      { label: "Users", href: "/admin/users", icon: Users },
+      { label: "People", href: "/admin/people", icon: Users },
       { label: "Groups", href: "/admin/groups", icon: UsersRound },
       { label: "Access Requests", href: "/admin/access-requests", icon: KeyRound },
       { label: "Roles", href: "/admin/roles", icon: ShieldCheck },
-      { label: "ACL Policies", href: "/admin/acl", icon: Lock },
+      { label: "Access Policies", href: "/admin/access-policies", icon: Lock },
     ],
   },
   {
     label: "System",
     items: [
-      { label: "Audit Logs", href: "/admin/audit-logs", icon: ScrollText },
+      { label: "Workspace Settings", href: "/admin/workspace-settings", icon: Layers },
+      { label: "Audit Log", href: "/admin/audit-logs", icon: ScrollText },
     ],
   },
 ];

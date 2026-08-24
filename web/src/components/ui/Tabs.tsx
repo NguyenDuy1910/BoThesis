@@ -15,18 +15,21 @@ interface TabsProps {
   onChange: (tabId: string) => void;
   className?: string;
   density?: "default" | "compact";
+  ariaLabel?: string;
+  idBase?: string;
 }
 
-export function Tabs({ tabs, activeTab, onChange, className, density = "default" }: TabsProps) {
+export function Tabs({ tabs, activeTab, onChange, className, density = "default", ariaLabel = "Tabs", idBase }: TabsProps) {
   const compact = density === "compact";
   const tabsId = useId();
 
   return (
     <div className={cn("border-b border-[var(--border)]", className)}>
-      <div aria-label="Tabs" className="flex gap-4 overflow-x-auto" role="tablist">
+      <div aria-label={ariaLabel} className="flex gap-4 overflow-x-auto" role="tablist">
         {tabs.map((tab, index) => (
           <button
-            id={`${tabsId}-${tab.id}`}
+            aria-controls={idBase ? `${idBase}-${tab.id}-panel` : undefined}
+            id={idBase ? `${idBase}-${tab.id}` : `${tabsId}-${tab.id}`}
             key={tab.id}
             onClick={() => onChange(tab.id)}
             onKeyDown={(event) => {
@@ -54,7 +57,7 @@ export function Tabs({ tabs, activeTab, onChange, className, density = "default"
               {tab.label}
               {tab.count !== undefined && (
                 <span className={cn(
-                  "rounded-full px-1.5 py-0.5 text-[11px] leading-none",
+                  "rounded-full px-1.5 py-0.5 text-[0.6875rem] leading-none",
                   activeTab === tab.id ? "bg-[var(--primary-soft)] text-[var(--brand-accent)]" : "bg-[var(--bg-subtle)] text-[var(--text-muted)]"
                 )}>
                   {tab.count}

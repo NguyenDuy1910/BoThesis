@@ -23,20 +23,28 @@ export async function adminRequest<T>(
       "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
     );
   }
-  const response = await fetch(
-    `${configuration.apiUrl}/api/v1/admin${path.startsWith("/") ? path : `/${path}`}`,
-    {
-      ...init,
-      cache: "no-store",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        "X-Bothesis-Tenant-Id": configuration.tenantId,
-        "X-Bothesis-User-Id": configuration.userId,
-        ...init.headers,
+  let response: Response;
+  try {
+    response = await fetch(
+      `${configuration.apiUrl}/api/v1/admin${path.startsWith("/") ? path : `/${path}`}`,
+      {
+        ...init,
+        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "X-Bothesis-Tenant-Id": configuration.tenantId,
+          "X-Bothesis-User-Id": configuration.userId,
+          ...init.headers,
+        },
       },
-    },
-  );
+    );
+  } catch (cause) {
+    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+    throw new AdminApiError(
+      "The Admin API could not be reached. Check the API address and try again.",
+    );
+  }
   if (response.status === 204) return undefined as T;
   const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
   if (!response.ok) {

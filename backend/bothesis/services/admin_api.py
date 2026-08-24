@@ -238,6 +238,13 @@ class AdminApiService:
             async with self._item_service(session) as service:
                 return await service.list_items(actor, **filters)
 
+    async def create_collection(
+        self, identity: RequestIdentity, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        async with self._request(identity) as (session, actor):
+            async with self._item_service(session) as service:
+                return await service.create_collection(actor, **values)
+
     async def get_item(self, identity: RequestIdentity, item_id: UUID) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             async with self._item_service(session) as service:

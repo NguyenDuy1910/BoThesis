@@ -8,7 +8,7 @@ type ButtonSize = "sm" | "md" | "lg";
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    "border border-[var(--primary)] bg-[var(--primary)] text-[var(--text-on-brand)] hover:border-[var(--primary-hover)] hover:bg-[var(--primary-hover)] active:opacity-90",
+    "border border-[var(--primary)] bg-[var(--primary)] text-[var(--text-on-brand)] hover:border-[var(--primary-hover)] hover:bg-[var(--primary-hover)] active:border-[var(--primary-pressed)] active:bg-[var(--primary-pressed)]",
   secondary:
     "border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-panel)] hover:text-[var(--text)] active:bg-[var(--surface-selected)]",
   ghost:
@@ -18,9 +18,9 @@ const variantClasses: Record<ButtonVariant, string> = {
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
-  sm: "h-8 gap-1.5 rounded-md px-2.5 text-sm",
-  md: "h-9 gap-2 rounded-md px-3 text-sm",
-  lg: "h-10 gap-2 rounded-md px-3.5 text-sm",
+  sm: "h-9 gap-1.5 rounded-md px-2.5 text-sm",
+  md: "h-10 gap-2 rounded-md px-3 text-sm",
+  lg: "h-11 gap-2 rounded-md px-3.5 text-sm",
 };
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {

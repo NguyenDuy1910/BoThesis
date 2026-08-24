@@ -11,9 +11,9 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from bothesis.db.models import (
+    AuditLog,
     Base,
     Conversation,
-    Item,
     ItemUpload,
     Message,
     MessageItem,
@@ -21,9 +21,9 @@ from bothesis.db.models import (
     PluginCredential,
 )
 from bothesis.services import (
+    AdminItemService,
     AuthService,
     AuthorizationError,
-    DocumentNotFoundError,
     ItemService,
     PluginCredentialService,
     PluginService,
@@ -253,6 +253,53 @@ async def test_plugin_list_eager_loads_optional_credentials(
 
     assert result["total"] == 1
     assert result["items"][0]["credential_configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_admin_collection_creation_is_tenant_scoped_and_audited(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        tenant = await auth.create_tenant("acme-knowledge", "Acme Knowledge")
+        owner = await auth.create_user("knowledge-owner@example.com")
+        role = await auth.create_role(
+            tenant.id,
+            "knowledge-admin",
+            "Knowledge Admin",
+            permission_codes=["access.manage", "item.manage"],
+        )
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
+
+        created = await AdminItemService(session).create_collection(
+            actor,
+            title="Engineering handbook",
+            inherit_access=True,
+            metadata={"description": "Governed engineering knowledge"},
+        )
+
+        assert created["item_type"] == "collection"
+        assert created["title"] == "Engineering handbook"
+        assert created["inherit_access"] is True
+        assert created["metadata"] == {
+            "description": "Governed engineering knowledge"
+        }
+        assert created["collection_access"] == [
+            {
+                "principal_type": "user",
+                "principal_id": str(owner.id),
+                "role": "owner",
+            }
+        ]
+        audit_event = await session.scalar(
+            select(AuditLog).where(
+                AuditLog.resource_id == created["id"],
+                AuditLog.action == "collection.created",
+            )
+        )
+        assert audit_event is not None
+        assert audit_event.tenant_id == tenant.id
 
 
 def test_postgresql_models_have_no_raw_byte_or_chunk_columns() -> None:
