@@ -15,7 +15,7 @@ from .chunks import Chunk
 from .citation import BoundingBox, CitationInfo, CitationSpan
 from .content import AnyContentPart, CodePart, ImagePart, LinkPart, StructuredPart, TablePart, TextPart
 from .hierarchy import Hierarchy
-from .items import AnyItem, CollectionItem, CollectionKind, ConnectorFailure, DocumentItem, DocumentKind, FileItem, Item, ItemFailure, SlimItem
+from .items import AnyItem, CollectionItem, CollectionKind, ConnectorFailure, DocumentItem, DocumentKind, Item, ItemFailure, SlimItem
 from .scope import ConnectorScope
 from .source import SourceIdentity, SourceProvider
 from .storage import RawObjectStore, StorageObject
@@ -26,7 +26,7 @@ class ProviderCacheEntry:
     """Bounded provider reference associated with canonical source content."""
 
     provider: str
-    source_fingerprint: str
+    provider_version: str
     reference: Mapping[str, Any]
     expires_at: datetime | None = None
 
@@ -44,7 +44,7 @@ class ProviderFileCache(Protocol):
         document_id: UUID,
         *,
         provider: str,
-        source_fingerprint: str,
+        provider_version: str,
     ) -> ProviderCacheEntry | None: ...
 
     async def put(
@@ -63,7 +63,7 @@ __all__ = [
     "CodePart", "CollectionItem", "CollectionKind", "ConnectorCheckpoint",
     "ConnectorFailure",
     "ConnectorScope", "DirectAccess", "DocumentItem", "DocumentKind",
-    "EffectiveAccess", "FileItem", "Hierarchy", "ImagePart", "Item", "ItemChange",
+    "EffectiveAccess", "Hierarchy", "ImagePart", "Item", "ItemChange",
     "ItemFailure", "LinkPart", "Principal", "ProviderCacheEntry",
     "ProviderFileCache", "SourceCheckpoint",
     "SlimItem", "SourceIdentity", "SourceProvider", "StructuredPart", "TablePart", "TextPart",

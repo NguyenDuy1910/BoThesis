@@ -32,7 +32,7 @@ from bothesis.connector.protocol import (
     SourceProvider,
 )
 from bothesis.knowledge import Evidence
-from bothesis.services import AuthContext, DatasourceService
+from bothesis.services import AuthContext
 
 
 def search_call(output_index: int = 0) -> list[Any]:
@@ -268,11 +268,18 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
             role_id=uuid4(),
             role_code="analyst",
             permission_codes=("admin", "knowledge.read"),
-            principal_tokens=("external_group:finance",),
+            group_ids=(),
         )
 
     monkeypatch.setattr(main._api_service, "_resolve_access", resolve_access)
     monkeypatch.setattr(main._api_service, "_session_factory", _SessionContext)
+    async def allowed_collections(*_: Any, **__: Any) -> tuple[UUID, ...]:
+        return (UUID(int=12), UUID(int=14))
+
+    monkeypatch.setattr(
+        "bothesis.services.api.CollectionAccessService.allowed_collection_ids",
+        allowed_collections,
+    )
     return user_id, tenant_id
 
 
@@ -332,29 +339,6 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(main._api_service, "_agent", agent)
-    async def allow_selected_connectors(
-        _service: DatasourceService,
-        _actor: AuthContext,
-        *,
-        connector_ids: list[int],
-    ) -> dict[str, Any]:
-        assert connector_ids == [12]
-        return {
-            "items": [{
-                "id": "12",
-                "provider": "confluence",
-                "display_name": "Company Confluence",
-                "status": "active",
-                "capabilities": ["knowledge_search"],
-            }],
-            "total": 1,
-        }
-
-    monkeypatch.setattr(
-        DatasourceService,
-        "list_chat_connectors",
-        allow_selected_connectors,
-    )
     user_id, tenant_id = _install_access(monkeypatch)
     conversation_id = uuid4()
 
@@ -371,8 +355,8 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
                     {"role": "user", "content": "Recent scope question"},
                     {"role": "assistant", "content": "Recent scope answer"},
                 ],
-                "connector_mode": "selected",
-                "connector_ids": [12],
+                "knowledge_mode": "selected",
+                "collection_item_ids": [str(UUID(int=12))],
             },
         )
 
@@ -408,12 +392,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     assert annotation["citation"]["chunk_id"] == "chunk-1"
     assert annotation["citation"]["source"]["provider"] == "confluence"
     assert len(retriever.contexts) == 1
-    assert retriever.contexts[0].reader_ids == (
-        "email:person@example.test",
-        "external_group:finance",
-    )
-    assert retriever.contexts[0].is_admin is True
-    assert retriever.contexts[0].connector_ids == (12,)
+    assert len(retriever.contexts[0].collection_item_ids) == 1
     # ``/responses`` takes instructions as a request parameter, so the input is
     # items only — there is no synthetic leading system message.
     assert "<agent_instructions>" in transport.requests[0]["instructions"]
@@ -543,14 +522,14 @@ def test_chat_api_rejects_history_message_over_context_budget() -> None:
     assert response.status_code == 422
 
 
-def test_chat_request_requires_a_bounded_explicit_connector_selection() -> None:
-    with pytest.raises(ValueError, match="requires at least one connector"):
-        main.ChatRequest(message="hello", connector_mode="selected")
+def test_chat_request_requires_a_bounded_explicit_collection_selection() -> None:
+    with pytest.raises(ValueError, match="requires at least one Collection"):
+        main.ChatRequest(message="hello", knowledge_mode="selected")
 
     request = main.ChatRequest(
         message="hello",
-        connector_mode="selected",
-        connector_ids=[12, 14],
+        knowledge_mode="selected",
+        collection_item_ids=[UUID(int=12), UUID(int=14)],
     )
 
-    assert request.connector_ids == [12, 14]
+    assert request.collection_item_ids == [UUID(int=12), UUID(int=14)]

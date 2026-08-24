@@ -82,14 +82,6 @@ class DocumentItem(Item):
         )
 
 
-class FileItem(Item):
-    """Opaque source object retained until semantic processing is supported."""
-
-    type: Literal["file"] = "file"
-    original: StorageObject
-    media_type: str | None = Field(default=None, min_length=1)
-
-
 class SlimItem(BaseModel):
     """Minimal item reference used by permission synchronisation."""
 
@@ -115,7 +107,7 @@ class ConnectorFailure(BaseModel):
 
 
 AnyItem = Annotated[
-    CollectionItem | DocumentItem | FileItem,
+    CollectionItem | DocumentItem,
     Field(discriminator="type"),
 ]
 

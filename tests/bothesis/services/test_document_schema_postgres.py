@@ -95,7 +95,6 @@ async def test_final_source_storage_schema_contract() -> None:
         "collection_kind",
         "parent_item_id",
         "storage_key",
-        "content_sha256",
         "allowed_principal_tokens",
         "denied_principal_tokens",
         "status",
@@ -109,6 +108,5 @@ async def test_final_source_storage_schema_contract() -> None:
     assert "ck_items_item_type_is_valid" in constraints
     assert "ck_items_item_kind_matches_type" in constraints
     assert "ck_items_item_status_is_valid" in constraints
-    assert "ck_items_item_content_sha256_is_valid" in constraints
 
     assert binary_columns == set()

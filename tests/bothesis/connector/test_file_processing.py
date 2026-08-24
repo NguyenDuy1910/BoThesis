@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,15 +42,6 @@ from bothesis.connector.protocol import (
     TablePart,
     TextPart,
 )
-import main as admin_module
-from bothesis.services import RequestIdentity
-from bothesis.services import (
-    AdminValidationError,
-    AuthContext,
-    DatasourceService,
-    SOURCE_MANAGE_PERMISSION,
-)
-from bothesis.services import datasources as datasources_module
 
 
 class _Converter:
@@ -119,7 +108,6 @@ def test_file_processor_extracts_text_and_json_through_docling() -> None:
 
     text = processor.process_bytes(b"alpha\r\n\r\nbeta", file_name="notes.txt")
     assert text.text == "alpha\n\nbeta"
-    assert text.sha256 == hashlib.sha256(b"alpha\r\n\r\nbeta").hexdigest()
 
     structured = processor.process_bytes(b'{"name":"BoThesis"}', file_name="data.json")
     assert '"name": "BoThesis"' in structured.text
@@ -406,7 +394,6 @@ def _file_source(external_id: str) -> SourceIdentity:
 async def test_file_connector_discovers_incrementally_and_preserves_acl(tmp_path) -> None:
     file_path = tmp_path / "policy.txt"
     file_path.write_text("Enterprise policy", encoding="utf-8")
-    digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
     record_path = tmp_path / "upload-1.json"
     record_path.write_text(
         json.dumps(
@@ -414,7 +401,7 @@ async def test_file_connector_discovers_incrementally_and_preserves_acl(tmp_path
                 "external_id": "upload-1",
                 "path": "policy.txt",
                 "file_name": "Policy.txt",
-                "sha256": digest,
+                    "provider_version": "revision-1",
                 "size_bytes": file_path.stat().st_size,
                 "uploaded_at": "2026-08-10T01:00:00Z",
                 "acl": {
@@ -441,7 +428,9 @@ async def test_file_connector_discovers_incrementally_and_preserves_acl(tmp_path
     assert [change.item_id for change in changes] == ["upload-1"]
     item = await connector.fetch_item("upload-1")
     assert item.get_text_content() == "Enterprise policy"
-    assert item.source.external_version == digest
+    assert item.source.external_version == "revision-1"
+    assert changes[0].provider_version == "revision-1"
+    assert changes[0].type.value == "created"
     assert item.access.to_reader_ids() == [
         "email:owner@example.com",
         "external_group:finance",
@@ -450,6 +439,15 @@ async def test_file_connector_discovers_incrementally_and_preserves_acl(tmp_path
 
     second_changes = await connector.discover_changes(connector.next_checkpoint(), scope)
     assert second_changes == []
+
+    record_path.write_text(
+        record_path.read_text(encoding="utf-8").replace("revision-1", "revision-2"),
+        encoding="utf-8",
+    )
+    updated_changes = await connector.discover_changes(connector.next_checkpoint(), scope)
+    assert [(change.type.value, change.provider_version) for change in updated_changes] == [
+        ("updated", "revision-2")
+    ]
 
 
 @pytest.mark.asyncio
@@ -496,223 +494,3 @@ def test_local_file_connector_batches_real_documents(tmp_path) -> None:
         "content 2",
     ]
     assert all(not item.access.is_public for batch in batches for item in batch)
-
-
-def _source_manager() -> AuthContext:
-    return AuthContext(
-        user_id=uuid4(),
-        email="manager@example.com",
-        display_name="Manager",
-        tenant_id=uuid4(),
-        role_id=None,
-        role_code="source_manager",
-        permission_codes=(SOURCE_MANAGE_PERMISSION,),
-        principal_tokens=(),
-    )
-
-
-class _AuditRecorder:
-    def __init__(self) -> None:
-        self.events: list[dict[str, object]] = []
-
-    async def record(self, *args, **kwargs) -> None:
-        del args
-        self.events.append(kwargs)
-
-
-class _ObjectStorageRecorder:
-    def __init__(self) -> None:
-        self.objects: dict[str, tuple[bytes, str]] = {}
-
-    def put_path(self, path: Path, key: str, *, content_type: str) -> None:
-        self.objects[key] = (path.read_bytes(), content_type)
-
-
-@pytest.mark.asyncio
-async def test_managed_upload_streams_through_a_validated_temporary_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    observed: dict[str, object] = {}
-
-    class Processor:
-        def __init__(self, *, max_file_bytes: int) -> None:
-            observed["max_file_bytes"] = max_file_bytes
-
-        def process_path(self, path: Path, *, file_name: str):
-            data = path.read_bytes()
-            observed.update(
-                path=path,
-                file_name=file_name,
-                content=data,
-            )
-            return SimpleNamespace(
-                sha256=hashlib.sha256(data).hexdigest(),
-                size_bytes=len(data),
-                mime_type="text/plain",
-            )
-
-    monkeypatch.setattr(datasources_module, "FileProcessor", Processor)
-
-    class Session:
-        async def scalar(self, statement: object) -> object:
-            del statement
-            return SimpleNamespace(id=11)
-
-    class Items:
-        def __init__(self, session: object) -> None:
-            assert isinstance(session, Session)
-
-        async def upsert_external_item(
-            self, scope_id: int, external_id: str, **values: object
-        ) -> object:
-            observed["item"] = {
-                "scope_id": scope_id,
-                "external_id": external_id,
-                **values,
-            }
-            return SimpleNamespace(id="canonical-item-id")
-
-    monkeypatch.setattr(datasources_module, "ItemService", Items)
-    audit = _AuditRecorder()
-    storage = _ObjectStorageRecorder()
-    service = DatasourceService(  # type: ignore[arg-type]
-        Session(), object_storage=storage, audit=audit
-    )
-    connector = SimpleNamespace(
-        id=7,
-        provider=SourceProvider.FILE.value,
-        settings={"base_dir": str(tmp_path), "max_file_bytes": 32},
-    )
-
-    async def resolve_connector(*_):
-        return connector
-
-    async def content() -> AsyncIterator[bytes]:
-        yield b"Enterprise "
-        yield b"policy"
-
-    monkeypatch.setattr(service, "_connector", resolve_connector)
-    actor = _source_manager()
-    uploaded = await service.upload_file(
-        actor,
-        connector.id,
-        file_name="policy.txt",
-        content=content(),
-    )
-
-    temporary_path = observed["path"]
-    assert isinstance(temporary_path, Path)
-    assert observed["max_file_bytes"] == 32
-    assert observed["path"] == temporary_path
-    assert observed["file_name"] == "policy.txt"
-    assert observed["content"] == b"Enterprise policy"
-    assert temporary_path.suffix == ".txt"
-    assert not temporary_path.exists()
-    stored_item = observed["item"]
-    assert isinstance(stored_item, dict)
-    storage_key = stored_item["storage_key"]
-    assert isinstance(storage_key, str)
-    assert storage_key.startswith(
-        f"tenants/{actor.tenant_id}/connectors/7/items/"
-    )
-    assert storage_key.endswith("/policy.txt")
-    assert storage.objects[storage_key] == (
-        b"Enterprise policy",
-        "text/plain",
-    )
-    assert uploaded["id"] == "canonical-item-id"
-    assert stored_item["status"] == "pending"
-    assert list(tmp_path.iterdir()) == []
-    assert audit.events[0]["action"] == "datasource.file_uploaded"
-
-
-@pytest.mark.asyncio
-async def test_managed_upload_stops_at_limit_and_cleans_temporary_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class UnexpectedProcessor:
-        def __init__(self, **kwargs) -> None:
-            del kwargs
-            raise AssertionError("oversized upload must not reach file processing")
-
-    monkeypatch.setattr(datasources_module, "FileProcessor", UnexpectedProcessor)
-    service = DatasourceService(  # type: ignore[arg-type]
-        object(),
-        object_storage=_ObjectStorageRecorder(),
-        audit=_AuditRecorder(),
-    )
-    connector = SimpleNamespace(
-        id=7,
-        provider=SourceProvider.FILE.value,
-        settings={"base_dir": str(tmp_path), "max_file_bytes": 5},
-    )
-
-    async def resolve_connector(*_):
-        return connector
-
-    async def content() -> AsyncIterator[bytes]:
-        yield b"1234"
-        yield b"56"
-        raise AssertionError("upload stream should stop after the oversized chunk")
-
-    monkeypatch.setattr(service, "_connector", resolve_connector)
-    with pytest.raises(
-        AdminValidationError,
-        match=r"File exceeds 5 byte limit: 6 bytes",
-    ):
-        await service.upload_file(
-            _source_manager(),
-            connector.id,
-            file_name="policy.txt",
-            content=content(),
-        )
-
-    assert list(tmp_path.iterdir()) == []
-
-
-@pytest.mark.asyncio
-async def test_admin_managed_upload_uses_request_stream(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    received: dict[str, object] = {}
-
-    async def upload_file(identity, connector_id, *, file_name, content):
-        received.update(
-            actor=identity.auth_context,
-            connector_id=connector_id,
-            file_name=file_name,
-            content=b"".join([chunk async for chunk in content]),
-        )
-        return {"id": "upload-1"}
-
-    class StreamingRequest:
-        def stream(self):
-            async def chunks() -> AsyncIterator[bytes]:
-                yield b"alpha"
-                yield b"beta"
-
-            return chunks()
-
-        async def body(self) -> bytes:
-            raise AssertionError("request.body() must not buffer managed uploads")
-
-    monkeypatch.setattr(
-        admin_module._admin_service, "upload_datasource_file", upload_file
-    )
-    actor = _source_manager()
-    result = await admin_module.admin_upload_datasource_file(
-        7,
-        StreamingRequest(),  # type: ignore[arg-type]
-        RequestIdentity(auth_context=actor),
-        "policy%20file.txt",
-    )
-
-    assert result == {"id": "upload-1"}
-    assert received == {
-        "actor": actor,
-        "connector_id": 7,
-        "file_name": "policy%20file.txt",
-        "content": b"alphabeta",
-    }

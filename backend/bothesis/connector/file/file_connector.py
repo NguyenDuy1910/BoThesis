@@ -56,7 +56,7 @@ class FileRecord:
     storage_key: str | None
     size_bytes: int
     mime_type: str | None
-    sha256: str
+    provider_version: str
     uploaded_at: datetime
     modified_at: datetime
     access: AccessPolicy
@@ -100,11 +100,10 @@ class FileConnector(BaseSourceConnector):
             external_id = str(raw.get("external_id") or "").strip()
             file_name = str(raw.get("file_name") or "").strip()
             storage_key = str(raw.get("storage_key") or "").strip()
-            sha256 = str(raw.get("sha256") or "").strip().casefold()
             size_bytes = int(raw.get("size_bytes") or 0)
             if not external_id or not file_name or not storage_key:
                 raise ValueError("stored file Item metadata is incomplete")
-            if size_bytes < 1 or len(sha256) != 64:
+            if size_bytes < 1:
                 raise ValueError(f"stored file Item is invalid: {external_id}")
             uploaded_at = _parse_datetime(
                 raw.get("uploaded_at"),
@@ -113,6 +112,13 @@ class FileConnector(BaseSourceConnector):
             modified_at = _parse_datetime(
                 raw.get("modified_at"), fallback=uploaded_at
             )
+            provider_version = str(
+                raw.get("provider_version")
+                or raw.get("version")
+                or modified_at.isoformat()
+            ).strip()
+            if not provider_version:
+                raise ValueError(f"stored file Item version is empty: {external_id}")
             metadata = raw.get("metadata") or {}
             if not isinstance(metadata, Mapping):
                 raise ValueError(f"stored file Item metadata is invalid: {external_id}")
@@ -123,7 +129,7 @@ class FileConnector(BaseSourceConnector):
                 storage_key=storage_key,
                 size_bytes=size_bytes,
                 mime_type=str(raw.get("mime_type") or "").strip() or None,
-                sha256=sha256,
+                provider_version=provider_version,
                 uploaded_at=uploaded_at,
                 modified_at=modified_at,
                 access=_access_from_mapping(
@@ -160,7 +166,7 @@ class FileConnector(BaseSourceConnector):
         scope: ConnectorScope,
     ) -> list[ItemChange]:
         previous = checkpoint if isinstance(checkpoint, SourceCheckpoint) else SourceCheckpoint()
-        previous_position = (_parse_optional_datetime(previous.updated_at), previous.cursor or "")
+        previous_versions = dict(previous.versions)
         records = await asyncio.to_thread(
             lambda: sorted(
                 self._records_for_scope(scope),
@@ -173,23 +179,36 @@ class FileConnector(BaseSourceConnector):
         self._records = {record.external_id: record for record in records}
         self._processed_chunks.clear()
 
+        current_ids = {record.external_id for record in records}
         changes = [
             ItemChange(
-                type=ChangeType.UPSERT,
+                type=(
+                    ChangeType.CREATED
+                    if record.external_id not in previous_versions
+                    else ChangeType.UPDATED
+                ),
                 item_id=record.external_id,
+                provider_version=record.provider_version,
                 occurred_at=record.modified_at,
             )
             for record in records
-            if (record.modified_at, record.external_id) > previous_position
+            if previous_versions.get(record.external_id) != record.provider_version
         ]
+        changes.extend(
+            ItemChange(type=ChangeType.DELETED, item_id=external_id)
+            for external_id in previous_versions.keys() - current_ids
+        )
         if records:
             last = records[-1]
             self._next_checkpoint = SourceCheckpoint(
                 updated_at=last.modified_at.isoformat(),
                 cursor=last.external_id,
+                versions={
+                    record.external_id: record.provider_version for record in records
+                },
             )
         else:
-            self._next_checkpoint = previous
+            self._next_checkpoint = SourceCheckpoint()
         return changes
 
     async def fetch_item(self, external_id: str) -> AnyItem:
@@ -200,14 +219,13 @@ class FileConnector(BaseSourceConnector):
             **record.metadata,
             "source_kind": FILE_SOURCE,
             "file_name": record.file_name,
-            "sha256": record.sha256,
         }
         source = SourceIdentity(
             connector_id=str(self.config.get("connector_id") or FILE_SOURCE),
             provider=SourceProvider.FILE,
             external_id=record.external_id,
-            external_version=record.sha256,
-            etag=record.sha256,
+            external_version=record.provider_version,
+            etag=None,
         )
         source_path = record.path
         temporary: tempfile.TemporaryDirectory[str] | None = None
@@ -239,9 +257,6 @@ class FileConnector(BaseSourceConnector):
             ),
         )
         try:
-            if processed.sha256 != record.sha256:
-                raise RuntimeError(f"File changed after discovery: {record.external_id}")
-
             item = processed.item
             key = record.storage_key
             stored = None
@@ -268,7 +283,6 @@ class FileConnector(BaseSourceConnector):
                             key=key,
                             file_name=record.file_name,
                             content_type=record.mime_type or processed.mime_type,
-                            checksum=record.sha256,
                             size_bytes=record.size_bytes,
                         )
                     }
@@ -352,11 +366,6 @@ class FileConnector(BaseSourceConnector):
         actual_size = file_path.stat().st_size if file_path is not None else declared_size
         if actual_size < 1 or (declared_size and declared_size != actual_size):
             raise ValueError(f"File size mismatch: {external_id}")
-        declared_sha256 = str(data.get("sha256") or "").strip().lower()
-        actual_sha256 = _sha256_path(file_path) if file_path is not None else declared_sha256
-        if not actual_sha256 or (declared_sha256 and declared_sha256 != actual_sha256):
-            raise ValueError(f"File checksum mismatch: {external_id}")
-
         uploaded_at = _parse_datetime(
             data.get("uploaded_at"),
             fallback=datetime.fromtimestamp(record_path.stat().st_mtime, tz=timezone.utc),
@@ -387,7 +396,12 @@ class FileConnector(BaseSourceConnector):
             storage_key=storage_key,
             size_bytes=actual_size,
             mime_type=str(data.get("mime_type") or mimetypes.guess_type(file_name)[0] or "") or None,
-            sha256=actual_sha256,
+            provider_version=str(
+                data.get("provider_version") or data.get("version") or max(
+                    record_path.stat().st_mtime_ns,
+                    file_path.stat().st_mtime_ns if file_path else 0,
+                )
+            ),
             uploaded_at=uploaded_at,
             modified_at=modified_at,
             access=_access_from_mapping(data.get("acl") or {}, default=self._default_access),
@@ -428,7 +442,7 @@ class LocalFileConnector(LoadConnector):
                 raise FileNotFoundError(f"Local connector file not found: {path}")
             display_name = self.file_names[index] if self.file_names else path.name
             external_id = _local_file_id(path)
-            digest = _sha256_path(path)
+            provider_version = str(path.stat().st_mtime_ns)
             processed = self._processor.process_path(
                 path,
                 file_name=display_name,
@@ -438,14 +452,13 @@ class LocalFileConnector(LoadConnector):
                     connector_id=FILE_SOURCE,
                     provider=SourceProvider.FILE,
                     external_id=external_id,
-                    external_version=digest,
-                    etag=digest,
+                    external_version=provider_version,
+                    etag=None,
                 ),
                 access=self._access,
                 metadata={
                     "source_kind": "local_file",
                     "file_name": display_name,
-                    "sha256": digest,
                 },
                 document_kind=_document_kind(mimetypes.guess_type(display_name)[0]),
                 original=StorageObject(
@@ -454,7 +467,6 @@ class LocalFileConnector(LoadConnector):
                     file_name=display_name,
                     size_bytes=path.stat().st_size,
                     content_type=mimetypes.guess_type(display_name)[0],
-                    checksum_sha256=digest,
                 ),
             )
             batch.append(
@@ -540,14 +552,6 @@ def _confined_path(base_dir: Path, candidate: Path) -> Path:
     return resolved_candidate
 
 
-def _sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _parse_datetime(value: Any, *, fallback: datetime) -> datetime:
     if value in (None, ""):
         return fallback
@@ -556,12 +560,6 @@ def _parse_datetime(value: Any, *, fallback: datetime) -> datetime:
     except ValueError as exc:
         raise ValueError(f"Invalid ISO timestamp: {value!r}") from exc
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def _parse_optional_datetime(value: str | None) -> datetime:
-    if not value:
-        return datetime.min.replace(tzinfo=timezone.utc)
-    return _parse_datetime(value, fallback=datetime.min.replace(tzinfo=timezone.utc))
 
 
 def _safe_storage_part(value: str) -> str:
@@ -581,7 +579,6 @@ def _storage_object(
     key: str,
     file_name: str,
     content_type: str | None,
-    checksum: str,
     size_bytes: int,
 ) -> StorageObject:
     return StorageObject(
@@ -591,9 +588,6 @@ def _storage_object(
         file_name=file_name,
         size_bytes=_integer_attribute(stored, "size_bytes") or size_bytes,
         content_type=_optional_attribute(stored, "content_type") or content_type,
-        checksum_sha256=(
-            _optional_attribute(stored, "checksum_sha256") or checksum
-        ),
         etag=_optional_attribute(stored, "etag"),
         version_id=_optional_attribute(stored, "version_id"),
     )

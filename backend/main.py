@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -164,17 +165,17 @@ class ChatRequest(BaseModel):
     roles: list[str] = Field(default_factory=list, deprecated=True)
     conversation_id: UUID | None = None
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=24)
-    connector_mode: Literal["auto", "selected", "off"] = "auto"
-    connector_ids: list[int] = Field(default_factory=list, max_length=20)
+    knowledge_mode: Literal["auto", "selected", "off"] = "auto"
+    collection_item_ids: list[UUID] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
-    def validate_connector_selection(self) -> ChatRequest:
-        if self.connector_mode == "selected" and not self.connector_ids:
-            raise ValueError("selected connector mode requires at least one connector")
-        if self.connector_mode != "selected" and self.connector_ids:
-            raise ValueError("connector IDs are only accepted in selected mode")
-        if len(self.connector_ids) != len(set(self.connector_ids)):
-            raise ValueError("connector IDs must be unique")
+    def validate_collection_selection(self) -> ChatRequest:
+        if self.knowledge_mode == "selected" and not self.collection_item_ids:
+            raise ValueError("selected knowledge mode requires at least one Collection")
+        if self.knowledge_mode != "selected" and self.collection_item_ids:
+            raise ValueError("Collection IDs are only accepted in selected mode")
+        if len(self.collection_item_ids) != len(set(self.collection_item_ids)):
+            raise ValueError("Collection IDs must be unique")
         return self
 
 
@@ -209,53 +210,19 @@ class DocumentUploadStartResponse(BaseModel):
     document: DocumentMetadata
 
 
-# --- Connectors ---
-
-
-class ConnectorCreate(BaseModel):
-    type: str  # confluence | jira | slack | pdf | google_drive | database | datalake
-    name: str
-    config: dict[str, Any]  # provider-specific; secrets resolved server-side
-
-
-class ConnectorUpdate(BaseModel):
-    name: str | None = None
-    config: dict[str, Any] | None = None
-    enabled: bool | None = None
-
-
-class Connector(BaseModel):
-    id: UUID
-    tenant_id: UUID
-    type: str
-    name: str
-    enabled: bool
-    last_synced_at: str | None
-    status: str  # idle | syncing | error
-
-
-class SyncStatus(BaseModel):
-    connector_id: UUID
-    status: str
-    started_at: str | None
-    finished_at: str | None
-    documents_indexed: int
-    error: str | None
-
-
 # --- Document Index ---
 
 
 class SearchRequest(BaseModel):
     query: str
     top_k: int = 10
-    connector_ids: list[UUID] | None = None  # None = all permitted sources
+    collection_item_ids: list[UUID] | None = None
     filters: dict[str, Any] = {}
 
 
 class DocumentResult(BaseModel):
     id: UUID
-    connector_id: UUID
+    collection_item_id: UUID
     title: str
     excerpt: str
     score: float
@@ -270,7 +237,7 @@ class SearchResponse(BaseModel):
 
 class DocumentDetail(BaseModel):
     id: UUID
-    connector_id: UUID
+    collection_item_id: UUID
     title: str
     content: str
     url: str | None
@@ -442,13 +409,11 @@ class GroupCreate(AdminRequest):
     code: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=255)
     description: str | None = Field(default=None, min_length=1, max_length=2_000)
-    permission_codes: list[str] = Field(default_factory=list)
 
 
 class GroupUpdate(AdminRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, min_length=1, max_length=2_000)
-    permission_codes: list[str] | None = None
     status: Literal["active", "inactive"] | None = None
 
 
@@ -456,35 +421,45 @@ class GroupMembersUpdate(AdminRequest):
     user_ids: list[UUID]
 
 
-class DatasourceScopeInput(AdminRequest):
-    scope_value: str = Field(min_length=1, max_length=2_000)
-    display_name: str | None = Field(default=None, min_length=1, max_length=255)
-    scope_type: str = Field(default="scope", min_length=1, max_length=32)
-    settings: dict[str, Any] = Field(default_factory=dict)
-    sync_schedule: dict[str, Any] = Field(default_factory=dict)
-
-
-class DatasourceCreate(AdminRequest):
-    provider: str = Field(min_length=1, max_length=32)
+class PluginConnectionCreate(AdminRequest):
+    plugin_key: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=255)
-    settings: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
     credentials: dict[str, Any] | None = Field(default=None, repr=False)
     credential_type: str | None = Field(default=None, min_length=1, max_length=64)
     owner_type: Literal["user", "tenant"] = "tenant"
-    scopes: list[DatasourceScopeInput] | None = None
 
 
-class DatasourceUpdate(AdminRequest):
+class PluginConnectionUpdate(AdminRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
-    settings: dict[str, Any] | None = None
+    config: dict[str, Any] | None = None
     credentials: dict[str, Any] | None = Field(default=None, repr=False)
     credential_type: str | None = Field(default=None, min_length=1, max_length=64)
     status: Literal["draft", "active", "disabled", "error"] | None = None
-    scopes: list[DatasourceScopeInput] | None = None
 
 
-class DatasourceSyncRequest(AdminRequest):
-    scope_id: int | None = Field(default=None, ge=1)
+class ScheduleInput(AdminRequest):
+    schedule_type: Literal["cron", "interval"] = "cron"
+    cron_expression: str = Field(min_length=1, max_length=255)
+    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+    enabled: bool = True
+    overlap_policy: Literal["skip", "queue", "replace"] = "skip"
+    next_run_at: datetime | None = None
+
+
+class PluginBindingCreate(AdminRequest):
+    target_item_id: UUID
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    config: dict[str, Any] = Field(default_factory=dict)
+    schedule: ScheduleInput | None = None
+
+
+class PluginBindingUpdate(AdminRequest):
+    display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    config: dict[str, Any] | None = None
+    status: Literal["active", "disabled", "error"] | None = None
+    schedule: ScheduleInput | None = None
+    clear_schedule: bool = False
 
 
 class ItemStatusUpdate(AdminRequest):
@@ -493,9 +468,8 @@ class ItemStatusUpdate(AdminRequest):
 
 class AccessRequestCreate(AdminRequest):
     requester_user_id: UUID
-    resource_type: Literal["item", "group", "role"]
-    resource_id: str = Field(min_length=1, max_length=512)
-    access_type: str = Field(min_length=1, max_length=32)
+    collection_item_id: UUID
+    requested_role: Literal["owner", "editor", "viewer"] = "viewer"
     reason: str | None = Field(default=None, min_length=1, max_length=4_000)
 
 
@@ -504,19 +478,10 @@ class AccessRequestDecision(AdminRequest):
     review_note: str | None = Field(default=None, min_length=1, max_length=4_000)
 
 
-class AclPolicyCreate(AdminRequest):
-    name: str = Field(min_length=1, max_length=255)
-    resource_type: Literal["item"] = "item"
-    resource_id: str = Field(min_length=1, max_length=512)
-    allowed_principal_tokens: list[str] = Field(min_length=1)
-    denied_principal_tokens: list[str] = Field(default_factory=list)
-
-
-class AclPolicyUpdate(AdminRequest):
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    allowed_principal_tokens: list[str] | None = None
-    denied_principal_tokens: list[str] | None = None
-    status: Literal["active", "inactive"] | None = None
+class CollectionAccessGrant(AdminRequest):
+    principal_type: Literal["user", "group"]
+    principal_id: UUID
+    role: Literal["owner", "editor", "viewer"]
 
 
 # ---------------------------------------------------------------------------
@@ -694,8 +659,8 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
         user_id=body.user_id,
         conversation_id=body.conversation_id,
         history=[(message.role, message.content) for message in body.history],
-        connector_mode=body.connector_mode,
-        connector_ids=body.connector_ids,
+        knowledge_mode=body.knowledge_mode,
+        collection_item_ids=body.collection_item_ids,
         is_disconnected=request.is_disconnected,
     )
     return StreamingResponse(
@@ -708,9 +673,9 @@ async def chat_stream(body: ChatRequest, request: Request) -> StreamingResponse:
     )
 
 
-@agent_router.get("/connectors")
-async def list_chat_connectors(request: Request) -> dict[str, Any]:
-    return await _api_service.list_chat_connectors(_request_identity(request))
+@agent_router.get("/collections")
+async def list_chat_collections(request: Request) -> dict[str, Any]:
+    return await _api_service.list_chat_collections(_request_identity(request))
 
 
 @agent_router.post(
@@ -771,78 +736,6 @@ async def stream_message(
     #     async for chunk in agent_service.stream(current_user, thread_id, message_id):
     #         yield f"data: {chunk}\n\n"
     # return StreamingResponse(event_gen(), media_type="text/event-stream")
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
-
-
-# ---------------------------------------------------------------------------
-# Connectors router
-# ---------------------------------------------------------------------------
-
-connectors_router = APIRouter(prefix="/connectors", tags=["connectors"])
-
-
-@connectors_router.get("", response_model=list[Connector])
-async def list_connectors(
-    current_user: UserProfile = Depends(get_current_user),
-) -> list[Connector]:
-    # return await connectors_service.list(current_user.tenant_id)
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
-
-
-@connectors_router.post(
-    "", response_model=Connector, status_code=status.HTTP_201_CREATED
-)
-async def create_connector(
-    body: ConnectorCreate, current_user: UserProfile = Depends(get_current_user)
-) -> Connector:
-    # return await connectors_service.create(current_user.tenant_id, body)
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
-
-
-@connectors_router.get("/{connector_id}", response_model=Connector)
-async def get_connector(
-    connector_id: UUID, current_user: UserProfile = Depends(get_current_user)
-) -> Connector:
-    # return await connectors_service.get(current_user.tenant_id, connector_id)
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
-
-
-@connectors_router.put("/{connector_id}", response_model=Connector)
-async def update_connector(
-    connector_id: UUID,
-    body: ConnectorUpdate,
-    current_user: UserProfile = Depends(get_current_user),
-) -> Connector:
-    # return await connectors_service.update(current_user.tenant_id, connector_id, body)
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
-
-
-@connectors_router.delete("/{connector_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_connector(
-    connector_id: UUID, current_user: UserProfile = Depends(get_current_user)
-) -> None:
-    # await connectors_service.delete(current_user.tenant_id, connector_id)
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
-
-
-@connectors_router.post(
-    "/{connector_id}/sync",
-    response_model=SyncStatus,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def trigger_sync(
-    connector_id: UUID, current_user: UserProfile = Depends(get_current_user)
-) -> SyncStatus:
-    """Enqueue a full re-sync for this connector."""
-    # return await connectors_service.trigger_sync(current_user.tenant_id, connector_id)
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
-
-
-@connectors_router.get("/{connector_id}/sync/status", response_model=SyncStatus)
-async def get_sync_status(
-    connector_id: UUID, current_user: UserProfile = Depends(get_current_user)
-) -> SyncStatus:
-    # return await connectors_service.sync_status(current_user.tenant_id, connector_id)
     raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
 
 
@@ -1260,107 +1153,141 @@ async def admin_delete_group(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@admin_router.get("/datasources/capabilities")
-async def admin_datasource_capabilities(
-    identity: AdminIdentity,
-) -> dict[str, Any]:
-    return await _admin_service.datasource_capabilities(identity)
+@admin_router.get("/plugins/capabilities")
+async def admin_plugin_capabilities(identity: AdminIdentity) -> dict[str, Any]:
+    return await _admin_service.plugin_capabilities(identity)
 
 
-@admin_router.get("/datasources")
-async def admin_list_datasources(
+@admin_router.get("/plugin-connections")
+async def admin_list_plugin_connections(
     identity: AdminIdentity,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     search: str | None = None,
-    provider: str | None = None,
+    plugin_key: str | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
 ) -> dict[str, Any]:
-    return await _admin_service.list_datasources(
+    return await _admin_service.list_plugin_connections(
         identity,
         page=page,
         page_size=page_size,
         search=search,
-        provider=provider,
+        plugin_key=plugin_key,
         status=status_filter,
     )
 
 
-@admin_router.post("/datasources", status_code=status.HTTP_201_CREATED)
-async def admin_create_datasource(
-    body: DatasourceCreate, identity: AdminIdentity
+@admin_router.post("/plugin-connections", status_code=status.HTTP_201_CREATED)
+async def admin_create_plugin_connection(
+    body: PluginConnectionCreate, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.create_datasource(identity, body.model_dump())
+    return await _admin_service.create_plugin_connection(identity, body.model_dump())
 
 
-@admin_router.put(
-    "/datasources/{connector_id}/files",
-    status_code=status.HTTP_201_CREATED,
-)
-async def admin_upload_datasource_file(
-    connector_id: int,
-    request: Request,
-    identity: AdminIdentity,
-    x_bothesis_file_name: Annotated[
-        str | None, Header(alias="X-Bothesis-File-Name")
-    ] = None,
+@admin_router.get("/plugin-connections/{connection_id}")
+async def admin_get_plugin_connection(
+    connection_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.upload_datasource_file(
-        identity,
-        connector_id,
-        file_name=x_bothesis_file_name or "",
-        content=request.stream(),
-    )
+    return await _admin_service.get_plugin_connection(identity, connection_id)
 
 
-@admin_router.get("/datasources/{connector_id}")
-async def admin_get_datasource(
-    connector_id: int, identity: AdminIdentity
-) -> dict[str, Any]:
-    return await _admin_service.get_datasource(identity, connector_id)
-
-
-@admin_router.patch("/datasources/{connector_id}")
-async def admin_update_datasource(
-    connector_id: int,
-    body: DatasourceUpdate,
+@admin_router.patch("/plugin-connections/{connection_id}")
+async def admin_update_plugin_connection(
+    connection_id: UUID,
+    body: PluginConnectionUpdate,
     identity: AdminIdentity,
 ) -> dict[str, Any]:
-    return await _admin_service.update_datasource(
-        identity, connector_id, body.model_dump(exclude_unset=True)
+    return await _admin_service.update_plugin_connection(
+        identity, connection_id, body.model_dump(exclude_unset=True)
     )
 
 
 @admin_router.delete(
-    "/datasources/{connector_id}",
+    "/plugin-connections/{connection_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def admin_delete_datasource(
-    connector_id: int, identity: AdminIdentity
+async def admin_delete_plugin_connection(
+    connection_id: UUID, identity: AdminIdentity
 ) -> Response:
-    await _admin_service.delete_datasource(identity, connector_id)
+    await _admin_service.delete_plugin_connection(identity, connection_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@admin_router.post("/datasources/{connector_id}/validate")
-async def admin_validate_datasource(
-    connector_id: int, identity: AdminIdentity
+@admin_router.post("/plugin-connections/{connection_id}/validate")
+async def admin_validate_plugin_connection(
+    connection_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.validate_datasource(identity, connector_id)
+    return await _admin_service.validate_plugin_connection(identity, connection_id)
+
+
+@admin_router.get("/plugin-bindings")
+async def admin_list_plugin_bindings(
+    identity: AdminIdentity,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    connection_id: UUID | None = None,
+    target_item_id: UUID | None = None,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+) -> dict[str, Any]:
+    return await _admin_service.list_plugin_bindings(
+        identity,
+        page=page,
+        page_size=page_size,
+        connection_id=connection_id,
+        target_item_id=target_item_id,
+        status=status_filter,
+    )
 
 
 @admin_router.post(
-    "/datasources/{connector_id}/sync",
-    status_code=status.HTTP_202_ACCEPTED,
+    "/plugin-connections/{connection_id}/bindings",
+    status_code=status.HTTP_201_CREATED,
 )
-async def admin_sync_datasource(
-    connector_id: int,
-    body: DatasourceSyncRequest,
+async def admin_create_plugin_binding(
+    connection_id: UUID,
+    body: PluginBindingCreate,
     identity: AdminIdentity,
 ) -> dict[str, Any]:
-    return await _admin_service.sync_datasource(
-        identity, connector_id, body.scope_id
+    return await _admin_service.create_plugin_binding(
+        identity, connection_id, body.model_dump()
     )
+
+
+@admin_router.get("/plugin-bindings/{binding_id}")
+async def admin_get_plugin_binding(
+    binding_id: UUID, identity: AdminIdentity
+) -> dict[str, Any]:
+    return await _admin_service.get_plugin_binding(identity, binding_id)
+
+
+@admin_router.patch("/plugin-bindings/{binding_id}")
+async def admin_update_plugin_binding(
+    binding_id: UUID,
+    body: PluginBindingUpdate,
+    identity: AdminIdentity,
+) -> dict[str, Any]:
+    return await _admin_service.update_plugin_binding(
+        identity, binding_id, body.model_dump(exclude_unset=True)
+    )
+
+
+@admin_router.delete(
+    "/plugin-bindings/{binding_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def admin_delete_plugin_binding(
+    binding_id: UUID, identity: AdminIdentity
+) -> Response:
+    await _admin_service.delete_plugin_binding(identity, binding_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@admin_router.post(
+    "/plugin-bindings/{binding_id}/sync", status_code=status.HTTP_202_ACCEPTED
+)
+async def admin_sync_plugin_binding(
+    binding_id: UUID, identity: AdminIdentity
+) -> dict[str, Any]:
+    return await _admin_service.sync_plugin_binding(identity, binding_id)
 
 
 @admin_router.get("/ingestion/jobs")
@@ -1369,14 +1296,16 @@ async def admin_list_ingestion_jobs(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
-    connector_id: int | None = None,
+    connection_id: UUID | None = None,
+    binding_id: UUID | None = None,
 ) -> dict[str, Any]:
     return await _admin_service.list_ingestion_jobs(
         identity,
         page=page,
         page_size=page_size,
         status=status_filter,
-        connector_id=connector_id,
+        connection_id=connection_id,
+        binding_id=binding_id,
     )
 
 
@@ -1412,7 +1341,7 @@ async def admin_list_items(
     search: str | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     item_type: str | None = None,
-    connector_id: int | None = None,
+    binding_id: UUID | None = None,
     sort: str = "updated_at",
     direction: str = "desc",
 ) -> dict[str, Any]:
@@ -1423,7 +1352,7 @@ async def admin_list_items(
         search=search,
         status=status_filter,
         item_type=item_type,
-        connector_id=connector_id,
+        binding_id=binding_id,
         sort=sort,
         direction=direction,
     )
@@ -1475,7 +1404,6 @@ async def admin_list_access_requests(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     search: str | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
-    resource_type: str | None = None,
 ) -> dict[str, Any]:
     return await _admin_service.list_access_requests(
         identity,
@@ -1483,7 +1411,6 @@ async def admin_list_access_requests(
         page_size=page_size,
         search=search,
         status=status_filter,
-        resource_type=resource_type,
     )
 
 
@@ -1512,56 +1439,45 @@ async def admin_decide_access_request(
     )
 
 
-@admin_router.get("/acl-policies")
-async def admin_list_acl_policies(
+@admin_router.get("/collections/{item_id}/access")
+async def admin_list_collection_access(
+    item_id: UUID,
     identity: AdminIdentity,
     page: Annotated[int, Query(ge=1)] = 1,
-    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
-    search: str | None = None,
-    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 100,
 ) -> dict[str, Any]:
-    return await _admin_service.list_acl_policies(
-        identity,
-        page=page,
-        page_size=page_size,
-        search=search,
-        status=status_filter,
+    return await _admin_service.list_collection_access(
+        identity, item_id, page=page, page_size=page_size
     )
 
 
-@admin_router.post("/acl-policies", status_code=status.HTTP_201_CREATED)
-async def admin_create_acl_policy(
-    body: AclPolicyCreate, identity: AdminIdentity
-) -> dict[str, Any]:
-    return await _admin_service.create_acl_policy(identity, body.model_dump())
-
-
-@admin_router.get("/acl-policies/{policy_id}")
-async def admin_get_acl_policy(
-    policy_id: UUID, identity: AdminIdentity
-) -> dict[str, Any]:
-    return await _admin_service.get_acl_policy(identity, policy_id)
-
-
-@admin_router.patch("/acl-policies/{policy_id}")
-async def admin_update_acl_policy(
-    policy_id: UUID,
-    body: AclPolicyUpdate,
+@admin_router.put("/collections/{item_id}/access")
+async def admin_grant_collection_access(
+    item_id: UUID,
+    body: CollectionAccessGrant,
     identity: AdminIdentity,
 ) -> dict[str, Any]:
-    return await _admin_service.update_acl_policy(
-        identity, policy_id, body.model_dump(exclude_unset=True)
+    return await _admin_service.grant_collection_access(
+        identity, item_id, body.model_dump()
     )
 
 
 @admin_router.delete(
-    "/acl-policies/{policy_id}",
+    "/collections/{item_id}/access/{principal_type}/{principal_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def admin_delete_acl_policy(
-    policy_id: UUID, identity: AdminIdentity
+async def admin_revoke_collection_access(
+    item_id: UUID,
+    principal_type: Literal["user", "group"],
+    principal_id: UUID,
+    identity: AdminIdentity,
 ) -> Response:
-    await _admin_service.delete_acl_policy(identity, policy_id)
+    await _admin_service.revoke_collection_access(
+        identity,
+        item_id,
+        principal_type=principal_type,
+        principal_id=principal_id,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1681,7 +1597,6 @@ _PREFIX = "/api/v1"
 app.include_router(auth_router, prefix=_PREFIX)
 app.include_router(access_router, prefix=_PREFIX)
 app.include_router(agent_router, prefix=_PREFIX)
-app.include_router(connectors_router, prefix=_PREFIX)
 app.include_router(knowledge_router, prefix=_PREFIX)
 app.include_router(documents_router, prefix=_PREFIX)
 app.include_router(crons_router, prefix=_PREFIX)

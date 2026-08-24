@@ -170,7 +170,6 @@ def test_confluence_attachment_preserves_docling_content_and_storage(
             content=[table],
             mime_type="application/pdf",
             size_bytes=100,
-            checksum_sha256="a" * 64,
             storage_provider="cloudflare_r2",
             storage_bucket="documents",
             storage_region="auto",

@@ -318,12 +318,7 @@ def _user_payload(
     role: Role,
     groups: list[Group],
 ) -> dict[str, Any]:
-    permissions = sorted(
-        {
-            *role.permission_codes,
-            *(permission for group in groups for permission in group.permission_codes),
-        }
-    )
+    permissions = sorted(set(role.permission_codes))
     return {
         "id": str(user.id),
         "email": user.email,
@@ -346,7 +341,6 @@ def _user_payload(
                 "id": str(group.id),
                 "code": group.code,
                 "display_name": group.display_name,
-                "principal_token": group.principal_token,
             }
             for group in groups
         ],

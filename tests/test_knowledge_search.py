@@ -33,15 +33,20 @@ from bothesis.connector.protocol import (
 )
 from bothesis.document_index.models import ChunkContext, ContextualChunk
 
-CONTEXT = AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[])
+CONTEXT = AgentContext(
+    user_id="user-1",
+    tenant_id="tenant-1",
+    roles=[],
+    collection_item_ids=("collection-1",),
+)
 TOOL_CONTEXT = ToolContext(agent_context=CONTEXT)
 
 
 def _chunk(
     *,
     chunk_id: str = "chunk-1",
-    connector_id: str = "connector-1",
-    reader_ids: tuple[str, ...] = ("public",),
+    connection_id: str = "connection-1",
+    collection_item_id: str = "collection-1",
     score: float = 0.91,
 ) -> ContextualChunk:
     return ContextualChunk(
@@ -56,15 +61,16 @@ def _chunk(
         ),
         context=ChunkContext(section_path=["Annual leave"]),
         title="Leave policy",
-        document_kind="document",
+        document_type="plain_text",
+        collection_item_id=collection_item_id,
         source=SourceIdentity(
-            connector_id=connector_id,
+            connector_id=connection_id,
             provider=SourceProvider.CONFLUENCE,
             external_id="doc-1",
             url="https://knowledge.example/leave-policy",
         ),
         hierarchy=Hierarchy(),
-        access=EffectiveAccess(reader_ids=list(reader_ids)),
+        access=EffectiveAccess(),
         citation=CitationInfo(
             section="Annual leave",
             section_path=("Annual leave",),
@@ -170,9 +176,7 @@ class StubDocumentIndex:
         *,
         limit: int,
         tenant_id: str,
-        reader_ids: tuple[str, ...],
-        connector_ids: tuple[int, ...] | None,
-        is_admin: bool,
+        collection_item_ids: tuple[str, ...],
     ) -> list[ContextualChunk]:
         if self.events is not None:
             self.events.append("index")
@@ -181,9 +185,7 @@ class StubDocumentIndex:
                 "query": query,
                 "limit": limit,
                 "tenant_id": tenant_id,
-                "reader_ids": reader_ids,
-                "connector_ids": connector_ids,
-                "is_admin": is_admin,
+                "collection_item_ids": collection_item_ids,
             }
         )
         return self.documents
@@ -263,18 +265,18 @@ class StubSemanticVectorStore:
                     "chunk_id": "chunk-1",
                     "chunk_index": 0,
                     "title": "Leave policy",
-                    "document_kind": "document",
+                    "document_type": "plain_text",
+                    "collection_item_id": "collection-1",
                     "content_type": "text",
                     "chunk_text": " Employees receive 20 days of annual leave.\n",
                     "contextual_text": "Document: Leave policy\nSection: Annual leave\n\n Employees receive 20 days of annual leave.\n",
-                    "provider": "confluence",
-                    "connector_id": "connector-1",
+                    "plugin_key": "confluence",
+                    "connection_id": "connection-1",
                     "external_id": "doc-1",
                     "source_url": "https://knowledge.example/leave-policy",
                     "context_section_path": ["Annual leave"],
                     "citation_section_path": ["Annual leave"],
                     "citation_section": "Annual leave",
-                    "reader_ids": ["public"],
                 },
             )
         ]
@@ -290,9 +292,7 @@ async def test_qdrant_search_index_embeds_and_rebuilds_contextual_chunks() -> No
         " annual leave ",
         limit=3,
         tenant_id="tenant-1",
-        reader_ids=("public", "user-1"),
-        connector_ids=(17,),
-        is_admin=False,
+        collection_item_ids=("collection-1",),
     )
 
     assert embedder.queries == ["annual leave"]
@@ -301,9 +301,7 @@ async def test_qdrant_search_index_embeds_and_rebuilds_contextual_chunks() -> No
     ]
     access = store.access_contexts[0]
     assert getattr(access, "tenant_id") == "tenant-1"
-    assert getattr(access, "reader_ids") == ("public", "user-1")
-    assert getattr(access, "is_admin") is False
-    assert getattr(store.payload_filters[0], "connector_ids") == (17,)
+    assert getattr(access, "collection_item_ids") == ("collection-1",)
     assert len(results) == 1
     document = results[0]
     assert document.id == "chunk-1"
@@ -319,22 +317,16 @@ async def test_qdrant_search_index_embeds_and_rebuilds_contextual_chunks() -> No
 
 
 @pytest.mark.asyncio
-async def test_scoped_retrieval_filters_before_reranking() -> None:
+async def test_collection_scoped_retrieval_filters_before_reranking() -> None:
     events: list[str] = []
-    visible = _chunk(chunk_id="visible", connector_id="7", score=0.5)
-    wrong_acl = _chunk(
-        chunk_id="wrong-acl",
-        connector_id="7",
-        reader_ids=("email:someone-else@example.test",),
+    visible = _chunk(chunk_id="visible", collection_item_id="collection-7", score=0.5)
+    wrong_collection = _chunk(
+        chunk_id="wrong-collection",
+        collection_item_id="collection-8",
         score=0.99,
     )
-    wrong_connector = _chunk(
-        chunk_id="wrong-connector",
-        connector_id="8",
-        score=0.98,
-    )
     index = StubDocumentIndex(
-        [wrong_acl, wrong_connector, visible],
+        [wrong_collection, visible],
         events=events,
     )
     reranker = RecordingReranker(events)
@@ -348,9 +340,7 @@ async def test_scoped_retrieval_filters_before_reranking() -> None:
         user_id="person@example.test",
         tenant_id="tenant-1",
         roles=["analyst"],
-        reader_ids=("external_group:finance",),
-        is_admin=False,
-        connector_ids=(7,),
+        collection_item_ids=("collection-7",),
     )
 
     results = await retriever.search(" annual leave ", limit=3, ctx=context)
@@ -360,15 +350,7 @@ async def test_scoped_retrieval_filters_before_reranking() -> None:
             "query": "annual leave",
             "limit": 3,
             "tenant_id": "tenant-1",
-            "reader_ids": (
-                "email:person@example.test",
-                "external_group:analyst",
-                "external_group:finance",
-                "person@example.test",
-                "public",
-            ),
-            "connector_ids": (7,),
-            "is_admin": False,
+            "collection_item_ids": ("collection-7",),
         }
     ]
     assert events == ["index", "rerank", "evidence"]
@@ -391,7 +373,7 @@ async def test_document_index_retriever_validates_before_search_or_reranking(
         user_id="user-1",
         tenant_id="tenant-1",
         roles=[],
-        connector_ids=(),
+        collection_item_ids=(),
     )
 
     with pytest.raises(ValueError):
@@ -409,7 +391,7 @@ async def test_document_index_retriever_requires_a_tenant_even_for_empty_scope()
         user_id="user-1",
         tenant_id="   ",
         roles=[],
-        connector_ids=(),
+        collection_item_ids=("collection-1",),
     )
 
     with pytest.raises(ValueError, match="tenant_id must not be empty"):
@@ -419,26 +401,20 @@ async def test_document_index_retriever_requires_a_tenant_even_for_empty_scope()
 
 
 @pytest.mark.asyncio
-async def test_admin_retrieval_remains_tenant_scoped() -> None:
+async def test_collection_retrieval_remains_tenant_scoped() -> None:
     index = StubDocumentIndex([DOCUMENT])
     retriever = DocumentIndexRetriever(index)
     context = AgentContext(
         user_id="admin-1",
         tenant_id="tenant-1",
         roles=["developer"],
-        is_admin=True,
+        collection_item_ids=("collection-1",),
     )
 
     results = await retriever.search("annual leave", limit=3, ctx=context)
 
     assert index.calls[0]["tenant_id"] == "tenant-1"
-    assert index.calls[0]["connector_ids"] is None
-    assert index.calls[0]["is_admin"] is True
-    assert index.calls[0]["reader_ids"] == (
-        "admin-1",
-        "external_group:developer",
-        "public",
-    )
+    assert index.calls[0]["collection_item_ids"] == ("collection-1",)
     assert results == [EVIDENCE]
 
 
@@ -453,9 +429,7 @@ async def test_qdrant_search_index_rejects_a_missing_tenant_scope() -> None:
             "annual leave",
             limit=3,
             tenant_id="",
-            reader_ids=(),
-            connector_ids=None,
-            is_admin=True,
+            collection_item_ids=("collection-1",),
         )
 
     assert store.access_contexts == []

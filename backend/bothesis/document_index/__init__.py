@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import UUID
 
-INDEX_SCHEMA_VERSION = 6
+INDEX_SCHEMA_VERSION = 7
 DENSE_VECTOR_NAME = "content"
 SPARSE_VECTOR_NAME = "content_bm25"
 BM25_MODEL = "qdrant/bm25"
@@ -67,7 +67,6 @@ class VectorIndex(Protocol):
         *,
         access: AuthContext,
         embedding_model: str,
-        source_fingerprint: str,
     ) -> None: ...
 
     async def search_document(
@@ -92,10 +91,9 @@ class VectorIndex(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PreparedDocuments:
-    """Model-ready chat document contexts and their source fingerprints."""
+    """Model-ready chat document contexts."""
 
     contexts: tuple[PreparedDocument, ...]
-    source_fingerprints: Mapping[UUID, str]
 
 
 class DocumentIndex(Protocol):
@@ -107,9 +105,7 @@ class DocumentIndex(Protocol):
         *,
         limit: int,
         tenant_id: str,
-        reader_ids: tuple[str, ...],
-        connector_ids: tuple[int, ...] | None,
-        is_admin: bool,
+        collection_item_ids: tuple[str, ...],
     ) -> list[ContextualChunk]:
         """Return indexed chunks after applying the supplied access scope."""
 

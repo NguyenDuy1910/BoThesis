@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import (
     AccessRequest,
-    Connector,
-    ConnectorScope,
     Item,
+    PluginBinding,
+    PluginConnection,
     Group,
     Role,
     SyncRun,
@@ -72,10 +72,11 @@ class AdminService:
                     Group.deleted_at.is_(None),
                 )
             ),
-            "active_datasources": await self._count(
-                select(func.count()).select_from(Connector).where(
-                    Connector.tenant_id == tenant_id,
-                    Connector.status == ACTIVE_STATUS,
+            "active_plugin_connections": await self._count(
+                select(func.count()).select_from(PluginConnection).where(
+                    PluginConnection.tenant_id == tenant_id,
+                    PluginConnection.status == ACTIVE_STATUS,
+                    PluginConnection.deleted_at.is_(None),
                 )
             ),
             "items": await self._count(
@@ -105,12 +106,12 @@ class AdminService:
                 select(func.count())
                 .select_from(SyncRun)
                 .join(
-                    ConnectorScope,
-                    ConnectorScope.id == SyncRun.connector_scope_id,
+                    PluginBinding,
+                    PluginBinding.id == SyncRun.binding_id,
                 )
-                .join(Connector, Connector.id == ConnectorScope.connector_id)
+                .join(PluginConnection, PluginConnection.id == PluginBinding.connection_id)
                 .where(
-                    Connector.tenant_id == tenant_id,
+                    PluginConnection.tenant_id == tenant_id,
                     SyncRun.status == "failed",
                 )
             ),
@@ -118,12 +119,12 @@ class AdminService:
                 select(func.count())
                 .select_from(SyncRun)
                 .join(
-                    ConnectorScope,
-                    ConnectorScope.id == SyncRun.connector_scope_id,
+                    PluginBinding,
+                    PluginBinding.id == SyncRun.binding_id,
                 )
-                .join(Connector, Connector.id == ConnectorScope.connector_id)
+                .join(PluginConnection, PluginConnection.id == PluginBinding.connection_id)
                 .where(
-                    Connector.tenant_id == tenant_id,
+                    PluginConnection.tenant_id == tenant_id,
                     SyncRun.status.in_(("pending", "running")),
                 )
             ),

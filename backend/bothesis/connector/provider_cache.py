@@ -35,7 +35,7 @@ class PostgresProviderFileCache:
         document_id: UUID,
         *,
         provider: str,
-        source_fingerprint: str,
+        provider_version: str,
     ) -> ProviderCacheEntry | None:
         normalized_provider = _provider(provider)
         async with self._session_factory() as session:
@@ -55,7 +55,7 @@ class PostgresProviderFileCache:
             return None
         if _datetime(raw_entry.get("deleted_at")) is not None:
             return None
-        if raw_entry.get("source_fingerprint") != source_fingerprint:
+        if raw_entry.get("provider_version") != provider_version:
             return None
         reference = raw_entry.get("reference")
         if not isinstance(reference, Mapping):
@@ -63,7 +63,7 @@ class PostgresProviderFileCache:
         expires_at = _datetime(raw_entry.get("expires_at"))
         entry = ProviderCacheEntry(
             provider=normalized_provider,
-            source_fingerprint=source_fingerprint,
+            provider_version=provider_version,
             reference={str(key): value for key, value in reference.items()},
             expires_at=expires_at,
         )
@@ -76,7 +76,7 @@ class PostgresProviderFileCache:
     ) -> None:
         provider = _provider(entry.provider)
         serialized = {
-            "source_fingerprint": entry.source_fingerprint,
+            "provider_version": entry.provider_version,
             "reference": dict(entry.reference),
             "expires_at": entry.expires_at.isoformat() if entry.expires_at else None,
             "updated_at": datetime.now(UTC).isoformat(),

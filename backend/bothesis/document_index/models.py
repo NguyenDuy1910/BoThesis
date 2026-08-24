@@ -39,7 +39,8 @@ class ContextualChunk(BaseModel):
     contextual_text: str = Field(min_length=1)
     context: ChunkContext = Field(default_factory=ChunkContext)
     title: str | None = None
-    document_kind: str = Field(min_length=1)
+    document_type: str = Field(min_length=1)
+    collection_item_id: str | None = None
     source: SourceIdentity
     hierarchy: Hierarchy
     access: EffectiveAccess

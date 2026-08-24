@@ -97,7 +97,7 @@ class AuthContext:
     role_id: UUID | None
     role_code: str | None
     permission_codes: tuple[str, ...]
-    principal_tokens: tuple[str, ...]
+    group_ids: tuple[UUID, ...]
 
     @property
     def is_enterprise_user(self) -> bool:
@@ -127,7 +127,6 @@ class CanonicalDocumentContent:
 
     item: DocumentItem
     chunks: tuple[Chunk, ...]
-    source_fingerprint: str
 
 
 @runtime_checkable
@@ -254,38 +253,38 @@ def timestamp(value: datetime | None) -> str | None:
 # service modules import these contracts from this package during initialization.
 from bothesis.services.auth import AuthService  # noqa: E402
 from bothesis.services.item import ItemService  # noqa: E402
+from bothesis.services.collection_access import CollectionAccessService  # noqa: E402
 from bothesis.services.conversation import ConversationService  # noqa: E402
 from bothesis.services.upload import UploadService  # noqa: E402
 from bothesis.services.audit import AuditService  # noqa: E402
-from bothesis.services.connector_credential import ConnectorCredentialService  # noqa: E402
-from bothesis.services.datasources import DatasourceService  # noqa: E402
+from bothesis.services.plugin_credential import PluginCredentialService  # noqa: E402
+from bothesis.services.plugin import PluginService  # noqa: E402
 from bothesis.services.access_requests import AccessRequestService  # noqa: E402
-from bothesis.services.acl import AclService  # noqa: E402
 from bothesis.services.admin_items import AdminItemService  # noqa: E402
+from bothesis.services.admin import AdminService  # noqa: E402
+from bothesis.services.scheduler import SchedulerService  # noqa: E402
+from bothesis.services.plugin_sync import PluginSyncService  # noqa: E402
 from bothesis.services.chat_document_source import ChatDocumentSourceService  # noqa: E402
 from bothesis.services.groups import GroupService  # noqa: E402
 from bothesis.services.roles import RoleService  # noqa: E402
 from bothesis.services.tenants import TenantService  # noqa: E402
 from bothesis.services.users import UserService  # noqa: E402
-from bothesis.services.admin import AdminService  # noqa: E402
-from bothesis.services.connector_sync import ConnectorSyncService  # noqa: E402
-from bothesis.services.admin_api import AdminApiService  # noqa: E402
 from bothesis.services.api import ApiService  # noqa: E402
+from bothesis.services.admin_api import AdminApiService  # noqa: E402
 
 __all__ = [
     "ACTIVE_STATUS",
     "ACCESS_MANAGE_PERMISSION",
+    "AccessRequestService",
     "ADMIN_PERMISSION_CATALOG",
     "ADMIN_PERMISSION",
     "AUDIT_READ_PERMISSION",
-    "AccessRequestService",
-    "AclService",
     "AdminConflictError",
+    "AdminApiService",
     "AdminItemService",
+    "AdminService",
     "AdminExternalUnavailableError",
     "AdminNotFoundError",
-    "AdminService",
-    "AdminApiService",
     "AdminServiceError",
     "AdminValidationError",
     "AuditService",
@@ -298,16 +297,14 @@ __all__ = [
     "CanonicalDocumentContent",
     "ChatDocumentSource",
     "ChatDocumentSourceService",
+    "CollectionAccessService",
     "ConversationService",
-    "ConnectorSyncService",
-    "ConnectorCredentialService",
     "DEFAULT_MAX_UPLOAD_BYTES",
     "DEFAULT_PROCESSING_MAX_BYTES",
     "DEFAULT_UPLOAD_URL_SECONDS",
     "DocumentNotFoundError",
     "DocumentServiceError",
     "ITEM_MANAGE_PERMISSION",
-    "DatasourceService",
     "GROUP_MANAGE_PERMISSION",
     "GroupService",
     "IdentityConflictError",
@@ -318,9 +315,13 @@ __all__ = [
     "ItemService",
     "KNOWLEDGE_READ_PERMISSION",
     "MESSAGE_ITEM_RELATIONS",
+    "PluginCredentialService",
+    "PluginService",
+    "PluginSyncService",
     "ROLE_MANAGE_PERMISSION",
     "RoleService",
     "SOURCE_MANAGE_PERMISSION",
+    "SchedulerService",
     "TENANT_MANAGE_PERMISSION",
     "TenantService",
     "UploadConflictError",

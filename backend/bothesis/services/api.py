@@ -9,6 +9,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from qdrant_client import models as qmodels
+from sqlalchemy import select
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext, ConversationMessage
 from bothesis.agent.tools import ToolRegistry
@@ -24,6 +25,7 @@ from bothesis.connector.protocol import (
 )
 from bothesis.connector.provider_cache import PostgresProviderFileCache
 from bothesis.db.engine import get_session_factory, session_scope
+from bothesis.db.models import Item
 from bothesis.document_index.indexer import (
     DEFAULT_DIRECT_MAX_BYTES,
     DEFAULT_PROCESSING_MAX_BYTES,
@@ -43,7 +45,7 @@ from bothesis.services import (
     KNOWLEDGE_READ_PERMISSION,
     AuthContext,
     ChatDocumentSourceService,
-    DatasourceService,
+    CollectionAccessService,
     DocumentNotFoundError,
     ItemService,
     RequestIdentity,
@@ -93,8 +95,8 @@ class ApiService:
         user_id: str | None,
         conversation_id: UUID | None,
         history: list[tuple[Literal["user", "assistant"], str]],
-        connector_mode: Literal["auto", "selected", "off"],
-        connector_ids: list[int],
+        knowledge_mode: Literal["auto", "selected", "off"],
+        collection_item_ids: list[UUID],
         is_disconnected: Callable[[], Awaitable[bool]],
     ) -> AsyncIterator[str]:
         access = await self._resolve_access(
@@ -103,28 +105,22 @@ class ApiService:
             tenant_id=tenant_id,
         )
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
-        selected_connector_ids: tuple[int, ...] | None = None
-        allowed_tool_names: tuple[str, ...] | None = (
-            () if connector_mode == "off" else None
-        )
-        if connector_mode == "selected":
-            async with session_scope(self._sessions()) as session:
-                authorized = await DatasourceService(session).list_chat_connectors(
-                    access,
-                    connector_ids=connector_ids,
-                )
-            selected_connector_ids = tuple(
-                int(item["id"]) for item in authorized["items"]
-            )
-            allowed_tool_names = tuple(
-                sorted(
-                    {
-                        capability
-                        for item in authorized["items"]
-                        for capability in item["capabilities"]
-                    }
-                )
-            )
+        async with session_scope(self._sessions()) as session:
+            allowed_ids = await CollectionAccessService(
+                session
+            ).allowed_collection_ids(access)
+        allowed_set = set(allowed_ids)
+        if knowledge_mode == "off":
+            selected_collection_ids: tuple[UUID, ...] = ()
+            allowed_tool_names: tuple[str, ...] | None = ()
+        elif knowledge_mode == "selected":
+            if not collection_item_ids or not set(collection_item_ids).issubset(allowed_set):
+                raise PermissionError("one or more selected Collections are unavailable")
+            selected_collection_ids = tuple(dict.fromkeys(collection_item_ids))
+            allowed_tool_names = None
+        else:
+            selected_collection_ids = allowed_ids
+            allowed_tool_names = None
         if access.tenant_id is None:
             raise PermissionError("an active tenant membership is required for chat")
         resolved_conversation_id = conversation_id or uuid4()
@@ -132,26 +128,13 @@ class ApiService:
             user_id=str(access.user_id),
             tenant_id=str(access.tenant_id),
             roles=[access.role_code] if access.role_code else [],
-            reader_ids=tuple(
-                sorted(
-                    {
-                        f"email:{access.email.strip().lower()}",
-                        *(
-                            token.strip().lower()
-                            for token in access.principal_tokens
-                            if token.strip()
-                        ),
-                    }
-                )
-            ),
-            is_admin=access.is_admin,
+            collection_item_ids=tuple(str(value) for value in selected_collection_ids),
             conversation_id=str(resolved_conversation_id),
             request_id=uuid4().hex,
             history=tuple(
                 ConversationMessage(role=role, content=content)
                 for role, content in history
             ),
-            connector_ids=selected_connector_ids,
             allowed_tool_names=allowed_tool_names,
         )
         agent = self._get_agent()
@@ -168,7 +151,7 @@ class ApiService:
 
         return event_stream()
 
-    async def list_chat_connectors(
+    async def list_chat_collections(
         self,
         identity: RequestIdentity,
     ) -> dict[str, Any]:
@@ -180,7 +163,29 @@ class ApiService:
                     self._allow_insecure_development_identity
                 ),
             )
-            return await DatasourceService(session).list_chat_connectors(access)
+            ids = await CollectionAccessService(session).allowed_collection_ids(access)
+            if not ids:
+                return {"items": [], "total": 0}
+            collections = list(
+                await session.scalars(
+                    select(Item)
+                    .where(Item.id.in_(ids))
+                    .order_by(Item.title, Item.id)
+                )
+            )
+            return {
+                "items": [
+                    {
+                        "id": str(item.id),
+                        "title": item.title,
+                        "parent_item_id": (
+                            str(item.parent_item_id) if item.parent_item_id else None
+                        ),
+                    }
+                    for item in collections
+                ],
+                "total": len(collections),
+            }
 
     async def start_document_upload(
         self,
@@ -252,8 +257,18 @@ class ApiService:
             item = await ItemService(session).get_item_by_canonical_id(
                 item_id, access=access
             )
+            assert access.tenant_id is not None
+            collection_id = await CollectionAccessService(
+                session
+            ).authorization_collection_id(item.id, tenant_id=access.tenant_id)
+            if collection_id is None:
+                raise DocumentNotFoundError("citation not found")
             payloads = await self._qdrant_item_payloads(
-                item_id=str(item.id), access=access, chunk_id=chunk_id, limit=1
+                item_id=str(item.id),
+                collection_item_id=str(collection_id),
+                access=access,
+                chunk_id=chunk_id,
+                limit=1,
             )
             if not payloads:
                 raise DocumentNotFoundError("citation not found")
@@ -289,8 +304,15 @@ class ApiService:
             item = await ItemService(session).get_item_by_canonical_id(
                 item_id, access=access
             )
+            assert access.tenant_id is not None
+            collection_id = await CollectionAccessService(
+                session
+            ).authorization_collection_id(item.id, tenant_id=access.tenant_id)
+            if collection_id is None:
+                raise DocumentNotFoundError("item not found")
             payloads = await self._qdrant_item_payloads(
                 item_id=str(item.id),
+                collection_item_id=str(collection_id),
                 access=access,
                 chunk_id=chunk_id,
                 limit=1 if chunk_id else 100,
@@ -330,6 +352,7 @@ class ApiService:
         self,
         *,
         item_id: str,
+        collection_item_id: str,
         access: AuthContext,
         chunk_id: str | None,
         limit: int,
@@ -345,13 +368,7 @@ class ApiService:
         )
         access_filter = store.build_access_filter(
             tenant_id=str(access.tenant_id),
-            reader_ids={
-                "public",
-                f"email:{access.email.strip().casefold()}",
-                *access.principal_tokens,
-                str(access.user_id),
-            },
-            is_admin=access.is_admin,
+            collection_item_ids={collection_item_id},
         )
         must = [
             *(access_filter.must or []),
@@ -822,7 +839,7 @@ class ApiService:
             connector_id="upload",
             provider=SourceProvider.FILE,
             external_id=str(document.id),
-            url=document.source_url,
+            url=None,
         )
 
 

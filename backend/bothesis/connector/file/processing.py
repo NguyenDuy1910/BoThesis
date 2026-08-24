@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import mimetypes
 from io import BytesIO
 from pathlib import Path
@@ -86,7 +85,6 @@ class FileProcessor:
         size_bytes = source_path.stat().st_size
         self._validate_input(resolved_name, size_bytes=size_bytes)
         self._validate_archive_path(source_path, extension=_extension(resolved_name))
-        digest = _sha256_path(source_path)
         try:
             # The path's extension is retained by upload/storage flows. Avoid
             # passing a display-name override because Docling would otherwise
@@ -98,7 +96,6 @@ class FileProcessor:
             document,
             file_name=resolved_name,
             size_bytes=size_bytes,
-            digest=digest,
             item_id=item_id,
             title=title,
             source=source,
@@ -126,7 +123,6 @@ class FileProcessor:
         resolved_name = _file_name(file_name)
         self._validate_input(resolved_name, size_bytes=len(data))
         self._validate_archive_bytes(data, extension=_extension(resolved_name))
-        digest = hashlib.sha256(data).hexdigest()
         try:
             document = self._docling.process_bytes(data, file_name=resolved_name)
         except DoclingProcessingError as exc:
@@ -135,7 +131,6 @@ class FileProcessor:
             document,
             file_name=resolved_name,
             size_bytes=len(data),
-            digest=digest,
             item_id=item_id,
             title=title,
             source=source,
@@ -152,7 +147,6 @@ class FileProcessor:
         *,
         file_name: str,
         size_bytes: int,
-        digest: str,
         item_id: str | None,
         title: str | None,
         source: SourceIdentity | None,
@@ -162,19 +156,18 @@ class FileProcessor:
         metadata: dict[str, str | list[str]] | None,
         original: StorageObject | None,
     ) -> ProcessedFile:
-        resolved_id = item_id or f"file::{digest}"
+        resolved_id = item_id or f"file::{file_name}"
         mime_type = mimetypes.guess_type(file_name)[0]
         resolved_source = source or SourceIdentity(
             connector_id=SourceProvider.FILE.value,
             provider=SourceProvider.FILE,
             external_id=resolved_id,
-            external_version=digest,
-            etag=digest,
+            external_version=None,
+            etag=None,
         )
         resolved_metadata = {
             **(metadata or {}),
             "file_name": file_name,
-            "sha256": digest,
         }
         resolved_kind = document_kind or _document_kind(mime_type)
         item = self._mapper.to_item(
@@ -222,7 +215,6 @@ class FileProcessor:
             file_name=file_name,
             text=text,
             size_bytes=size_bytes,
-            sha256=digest,
             mime_type=mime_type,
             item=item,
             chunks=chunks,
@@ -291,14 +283,6 @@ def _file_name(value: str) -> str:
 
 def _extension(file_name: str) -> str:
     return Path(file_name).suffix.casefold()
-
-
-def _sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _document_kind(mime_type: str | None) -> DocumentKind:

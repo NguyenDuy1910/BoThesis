@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ast
 from datetime import UTC, datetime
-import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -153,7 +152,7 @@ def _access(user_id: Any, tenant_id: Any | None = None) -> AuthContext:
         role_id=uuid4() if tenant_id else None,
         role_code="analyst" if tenant_id else None,
         permission_codes=("knowledge.read",) if tenant_id else (),
-        principal_tokens=(),
+        group_ids=(),
     )
 
 
@@ -165,11 +164,13 @@ def _document(
     processing: dict[str, str] | None = None,
 ) -> Item:
     owner_id = uuid4()
+    collection_id = uuid4()
     document = Item(
         id=uuid4(),
         item_type="document",
-        document_kind="document",
-        owner_user_id=owner_id,
+        document_type="plain_text",
+        parent_item_id=collection_id,
+        parent_relation="contains",
         tenant_id=uuid4(),
         title="sample",
         mime_type=content_type,
@@ -186,7 +187,6 @@ def _document(
         idempotency_key="test",
         status="available",
     )
-    document.content_sha256 = "a" * 64
     return document
 
 
@@ -197,14 +197,15 @@ def test_routing_precedence_prefers_images_then_current_index_then_small_pdf() -
     def route(document: Item, *, current: bool = False) -> str:
         if current:
             document.status = "ready"
+            document.metadata_["provider_version"] = "v1"
             document.metadata_["processing"] = {
-                "source_fingerprint": "a" * 64,
+                "provider_version": "v1",
                 "parser_version": PARSER_VERSION,
                 "chunker_version": CHUNKER_VERSION,
                 "embedding_model": _Embedder.model,
                 "index_schema_version": INDEX_SCHEMA_VERSION,
                 "tenant_id": str(tenant_id),
-                "owner_user_id": str(document.owner_user_id),
+                "owner_user_id": str(document.upload.owner_user_id),
             }
         return processor._route(document)
 
@@ -241,7 +242,7 @@ async def test_direct_inputs_use_signed_urls_and_replay_cached_pdf_annotations()
     image = _document("image/png")
     image.storage_key = "users/u/documents/image/raw"
 
-    context, _ = await processor._prepare_direct(image)
+    context = await processor._prepare_direct(image)
 
     assert context.content_block == {
         "type": "image_url",
@@ -260,13 +261,13 @@ async def test_direct_inputs_use_signed_urls_and_replay_cached_pdf_annotations()
     }
     cache.entry = ProviderCacheEntry(
         provider="openrouter",
-        source_fingerprint="a" * 64,
+        provider_version="v1",
         reference={"annotations": [annotation]},
     )
     pdf = _document("application/pdf")
     pdf.storage_key = "users/u/documents/pdf/raw"
 
-    context, _ = await processor._prepare_direct(pdf)
+    context = await processor._prepare_direct(pdf)
 
     assert context.content_block is None
     assert context.provider_annotations == (annotation,)
@@ -305,7 +306,6 @@ class _StreamingStorage:
         return StoredObject(
             size_bytes=len(self.content),
             content_type="text/plain",
-            checksum_sha256=hashlib.sha256(self.content).hexdigest(),
         )
 
     async def read(self, key: str, *, max_bytes: int) -> bytes:
@@ -342,7 +342,6 @@ class _PathProcessor:
         return SimpleNamespace(
             item=item,
             chunks=(chunk,),
-            sha256=hashlib.sha256(self.content).hexdigest(),
         )
 
 
@@ -360,14 +359,14 @@ async def test_index_processing_streams_object_storage_to_a_temporary_path() -> 
 
     processed = await service.canonicalize(
         document,
-        access=_access(document.owner_user_id, uuid4()),
+        access=_access(document.upload.owner_user_id, uuid4()),
     )
 
     assert storage.downloads == 1
     assert storage.reads == 0
     assert source_processor.content == raw
     assert processed.chunks[0].chunk_text == "streamed evidence"
-    assert processed.source_fingerprint == hashlib.sha256(raw).hexdigest()
+    assert processed.item.id == str(document.id)
 
 
 @pytest.mark.asyncio
@@ -384,36 +383,11 @@ async def test_index_processing_rejects_oversize_source_before_download() -> Non
     with pytest.raises(DocumentProcessingError, match="processing limit"):
         await service.canonicalize(
             document,
-            access=_access(document.owner_user_id, uuid4()),
+            access=_access(document.upload.owner_user_id, uuid4()),
         )
 
     assert storage.downloads == 0
     assert storage.reads == 0
-
-
-@pytest.mark.asyncio
-async def test_index_processing_rejects_a_processor_checksum_mismatch() -> None:
-    raw = b"bounded source content"
-    storage = _StreamingStorage(raw)
-
-    class _MismatchedProcessor(_PathProcessor):
-        def process_path(self, path: Path, **kwargs: Any) -> object:
-            processed = cast(Any, super().process_path(path, **kwargs))
-            processed.sha256 = "0" * 64
-            return processed
-
-    service = ChatDocumentSourceService(
-        object_storage=cast(Any, storage),
-        processor=cast(Any, _MismatchedProcessor()),
-    )
-    document = _document("text/plain", size_bytes=len(raw))
-    document.storage_key = "tenant/document/raw"
-
-    with pytest.raises(DocumentProcessingError, match="checksum"):
-        await service.canonicalize(
-            document,
-            access=_access(document.owner_user_id, uuid4()),
-        )
 
 
 def test_document_indexer_has_no_raw_processing_implementation_dependencies() -> None:
@@ -541,7 +515,6 @@ def test_s3_put_path_streams_from_a_file(tmp_path: Path) -> None:
     assert client.uploaded_body == b"raw document"
     assert client.parameters["Bucket"] == "documents"
     assert client.parameters["Key"] == "files/document-1/report.txt"
-    assert stored.checksum_sha256 == hashlib.sha256(b"raw document").hexdigest()
 
 
 def test_s3_constructor_uses_the_standard_boto_session(
@@ -665,7 +638,7 @@ async def test_s3_read_closes_the_stream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_s3_download_to_path_streams_and_hashes_content(tmp_path: Path) -> None:
+async def test_s3_download_to_path_streams_content(tmp_path: Path) -> None:
     client = _ReadingS3Client(b"streamed content")
     storage = S3DocumentStorage(bucket="documents", client=client)
     destination = tmp_path / "downloaded.bin"
@@ -677,7 +650,7 @@ async def test_s3_download_to_path_streams_and_hashes_content(tmp_path: Path) ->
     )
 
     assert destination.read_bytes() == b"streamed content"
-    assert stored.checksum_sha256 == hashlib.sha256(b"streamed content").hexdigest()
+    assert stored.size_bytes == len(b"streamed content")
     assert client.body.closed is True
 
 
@@ -706,7 +679,6 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
     tenant_id = uuid4()
     user_id = uuid4()
     document = _document("text/plain")
-    document.owner_user_id = user_id
     chunks = [
         ContextualChunk(
             id=f"{document.id}:0",
@@ -717,7 +689,8 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
             contextual_text="Document: sample\n\ngrounded content",
             context=ChunkContext(section_path=["Summary"]),
             title="sample",
-            document_kind="document",
+            document_type="plain_text",
+            collection_item_id=str(document.parent_item_id),
             source=SourceIdentity(
                 connector_id="upload",
                 provider=SourceProvider.FILE,
@@ -740,7 +713,7 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
         role_id=uuid4(),
         role_code="analyst",
         permission_codes=("knowledge.read",),
-        principal_tokens=(),
+        group_ids=(),
     )
     store = _RecordingVectorStore()
     index = QdrantDocumentIndex(cast(Any, store))
@@ -751,7 +724,6 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
         [[0.1, 0.2]],
         access=access,
         embedding_model="embedding-v1",
-        source_fingerprint="a" * 64,
     )
     await index.replace_document(
         document,
@@ -759,7 +731,6 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
         [[0.3, 0.4]],
         access=access,
         embedding_model="embedding-v1",
-        source_fingerprint="a" * 64,
     )
 
     assert store.deleted == [str(document.id), str(document.id)]
@@ -773,7 +744,7 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
         options=BM25_OPTIONS,
     )
     assert payload["tenant_id"] == str(tenant_id)
-    assert payload["reader_ids"] == [str(user_id)]
+    assert payload["collection_item_id"] == str(document.parent_item_id)
     assert payload["item_id"] == str(document.id)
     assert payload["chunk_id"] == f"{document.id}:0"
     assert payload["chunk_text"] == "grounded content"
@@ -783,15 +754,7 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
     assert "storage" not in payload
 
     await index.update_document_access(document.id, access=access)
-    assert store.access_updates == [
-        (
-            str(document.id),
-            {
-                "tenant_id": str(tenant_id),
-                "reader_ids": [str(user_id)],
-            },
-        )
-    ]
+    assert store.access_updates == []
 
     await index.soft_delete_document(document.id)
     assert store.deleted == [str(document.id), str(document.id), str(document.id)]
@@ -800,7 +763,7 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
 def test_provider_cache_expiry_uses_utc() -> None:
     entry = ProviderCacheEntry(
         provider="openrouter",
-        source_fingerprint="a" * 64,
+        provider_version="v1",
         reference={"file_id": "file-123"},
         expires_at=datetime(2000, 1, 1, tzinfo=UTC),
     )

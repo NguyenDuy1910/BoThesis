@@ -13,6 +13,7 @@ from bothesis.connector.protocol import (
     CollectionItem,
     ConnectorCheckpoint,
     ConnectorScope,
+    ChangeType,
     DocumentItem,
     ItemChange,
 )
@@ -95,9 +96,10 @@ class CheckpointedSourceConnectorAdapter(BaseSourceConnector):
                         items[normalized.id] = normalized
                         changes.append(
                             ItemChange(
-                                type="upsert",
+                                type=ChangeType.UPDATED,
                                 item_id=normalized.id,
                                 item=normalized,
+                                provider_version=normalized.source.external_version,
                                 occurred_at=normalized.updated_at,
                             )
                         )

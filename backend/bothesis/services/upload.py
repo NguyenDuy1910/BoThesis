@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import logging
 from uuid import UUID
 
@@ -73,7 +71,7 @@ class UploadService:
                     file_name=normalized_name,
                     mime_type=normalized_type,
                     size_bytes=size_bytes,
-                    document_kind=_document_kind(normalized_type),
+                    document_type=_document_type(normalized_type),
                 )
         except InvalidDocumentStateError as exc:
             raise UploadConflictError(str(exc)) from exc
@@ -139,17 +137,14 @@ class UploadService:
                 error_code="object_validation_failed",
             )
             raise
-        checksum = _checksum_hex(stored.checksum_sha256)
         async with self._session_factory.begin() as session:
             return await ItemService(session).mark_upload_available(
                 document_id,
                 access.user_id,
                 access.tenant_id,
-                content_sha256=checksum,
                 storage_metadata={
                     "etag": stored.etag,
                     "version_id": stored.version_id,
-                    "source_fingerprint": stored.source_fingerprint,
                 },
             )
 
@@ -257,29 +252,20 @@ def _validate_stored_object(
         )
 
 
-def _checksum_hex(value: str | None) -> str | None:
-    if not value:
-        return None
-    normalized = value.strip()
-    if len(normalized) == 64 and all(
-        character in "0123456789abcdefABCDEF" for character in normalized
-    ):
-        return normalized.casefold()
-    try:
-        decoded = base64.b64decode(normalized, validate=True)
-    except (binascii.Error, ValueError):
-        return None
-    return decoded.hex() if len(decoded) == 32 else None
-
-
 __all__ = ["UploadService"]
 
 
-def _document_kind(content_type: str) -> str:
+def _document_type(content_type: str) -> str:
     if content_type.startswith("image/"):
         return "image"
     if content_type == "application/pdf":
         return "pdf"
     if content_type in {"text/html", "application/xhtml+xml"}:
         return "web_page"
-    return "document"
+    if content_type in {"text/markdown", "text/x-markdown"}:
+        return "markdown"
+    if content_type.startswith("audio/"):
+        return "audio"
+    if content_type.startswith("video/"):
+        return "video"
+    return "plain_text"

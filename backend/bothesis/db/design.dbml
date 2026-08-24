@@ -1,6 +1,6 @@
-// BoThesis initial database design.
-// PostgreSQL owns durable business state only. Raw bytes are in S3/R2 and
-// retrieval chunks are in Qdrant.
+// BoThesis canonical knowledge architecture.
+// PostgreSQL owns durable domain state. Raw bytes live in S3/R2. Retrieval
+// chunks, embeddings, and BM25 representation live in Qdrant.
 
 Table users {
   id uuid [pk]
@@ -47,8 +47,207 @@ Table tenant_memberships {
   indexes { (user_id, tenant_id) [pk] }
 }
 
+Table groups {
+  id uuid [pk]
+  tenant_id uuid [not null]
+  code varchar(64) [not null]
+  display_name varchar(255) [not null]
+  description text
+  status varchar(16) [not null, default: 'active']
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes { (tenant_id, code) [unique] }
+}
+
+Table group_memberships {
+  group_id uuid [not null]
+  user_id uuid [not null]
+  status varchar(16) [not null, default: 'active']
+  joined_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes { (group_id, user_id) [pk] }
+}
+
+Table items {
+  id uuid [pk]
+  tenant_id uuid [not null]
+  item_type varchar(16) [not null, note: 'collection | document']
+  parent_item_id uuid
+  parent_relation varchar(32) [note: 'contains | child | attachment | embedded']
+  document_type varchar(64) [note: 'Required only for Documents; semantic, not provider identity']
+  title text [not null]
+  mime_type varchar(255)
+  size_bytes bigint
+  storage_key text [note: 'Durable object key only; no raw bytes']
+  metadata jsonb [not null, default: `{}`]
+  inherit_access boolean [not null, default: true]
+  status varchar(16) [not null, note: 'pending | processing | ready | failed | unsupported | deleted']
+  created_by_user_id uuid
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    tenant_id
+    parent_item_id
+    (tenant_id, status)
+  }
+  Note: 'Only Collections may be roots. Parent and parent_relation are both null or both set; self-parenting is rejected. Collection children are allowed only under Collections. Document children may be Documents. Database constraints/triggers enforce same-tenant parentage, prevent cycles, and reject Document -> Collection.'
+}
+
+Table collection_access {
+  item_id uuid [not null, note: 'Must reference an Item with item_type=collection']
+  principal_type varchar(16) [not null, note: 'user | group']
+  principal_id uuid [not null]
+  role varchar(16) [not null, note: 'owner | editor | viewer']
+  created_by_user_id uuid
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (item_id, principal_type, principal_id) [pk]
+    (principal_type, principal_id)
+  }
+}
+
+Table item_uploads {
+  item_id uuid [pk, note: 'Must reference a Document Item']
+  tenant_id uuid [not null]
+  owner_user_id uuid [not null]
+  idempotency_key varchar(128) [not null]
+  status varchar(16) [not null, note: 'pending | available | failed']
+  error_code varchar(128)
+  uploaded_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes { (tenant_id, owner_user_id, idempotency_key) [unique] }
+}
+
+Table message_items {
+  message_id uuid [not null]
+  item_id uuid [not null]
+  relation_type varchar(16) [not null]
+  position int [not null, default: 0]
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  indexes { (message_id, item_id, relation_type) [pk] }
+}
+
+Table plugin_connections {
+  id uuid [pk]
+  tenant_id uuid [not null]
+  plugin_key varchar(64) [not null]
+  owner_type varchar(16) [not null, note: 'user | tenant']
+  owner_user_id uuid
+  display_name varchar(255) [not null]
+  config jsonb [not null, default: `{}`, note: 'Non-secret connection/runtime configuration']
+  status varchar(16) [not null, default: 'active']
+  created_by_user_id uuid
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    tenant_id
+    plugin_key
+    owner_user_id
+    (tenant_id, display_name) [unique]
+  }
+}
+
+Table plugin_credentials {
+  id uuid [pk]
+  connection_id uuid [not null, unique]
+  credential_type varchar(64) [not null]
+  encrypted_payload text [not null]
+  expires_at timestamptz
+  key_version varchar(64)
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+}
+
+Table plugin_bindings {
+  id uuid [pk]
+  connection_id uuid [not null]
+  target_item_id uuid [not null, note: 'Must reference an Item with item_type=collection']
+  display_name varchar(255)
+  config jsonb [not null, default: `{}`, note: 'Plugin-owned external scope']
+  checkpoint jsonb [not null, default: `{}`]
+  status varchar(16) [not null, default: 'active']
+  last_synced_at timestamptz
+  last_indexed_at timestamptz
+  created_by_user_id uuid
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    connection_id
+    target_item_id
+  }
+}
+
+Table item_origins {
+  id uuid [pk]
+  item_id uuid [not null, note: 'Normally references a Document Item']
+  binding_id uuid [not null]
+  external_id text [not null]
+  external_version text
+  etag text
+  external_updated_at timestamptz
+  source_url text
+  metadata jsonb [not null, default: `{}`]
+  last_seen_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (binding_id, external_id) [unique]
+    item_id
+  }
+}
+
+Table schedules {
+  id uuid [pk]
+  binding_id uuid [not null, unique]
+  schedule_type varchar(16) [not null, note: 'cron | interval']
+  cron_expression varchar(255)
+  timezone varchar(64)
+  enabled boolean [not null, default: true]
+  overlap_policy varchar(16) [not null, default: 'skip', note: 'skip | queue | replace']
+  next_run_at timestamptz
+  last_run_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes { (enabled, next_run_at) }
+}
+
+Table sync_runs {
+  id uuid [pk]
+  binding_id uuid [not null]
+  schedule_id uuid
+  trigger_type varchar(16) [not null, note: 'manual | scheduled | webhook | initial']
+  status varchar(16) [not null, default: 'pending']
+  discovered_item_count bigint [not null, default: 0]
+  processed_item_count bigint [not null, default: 0]
+  written_chunk_count bigint [not null, default: 0]
+  deleted_item_count bigint [not null, default: 0]
+  error_code varchar(128)
+  error_message text
+  started_at timestamptz
+  finished_at timestamptz
+  created_at timestamptz [not null]
+  indexes {
+    binding_id
+    status
+    created_at
+  }
+}
+
 Table conversations {
   id uuid [pk]
+  tenant_id uuid [not null]
   user_id uuid [not null]
   title varchar(512)
   summary text
@@ -73,6 +272,7 @@ Table messages {
 
 Table memories {
   id uuid [pk]
+  tenant_id uuid [not null]
   user_id uuid [not null]
   conversation_id uuid
   memory_type varchar(32) [not null]
@@ -89,189 +289,17 @@ Table memories {
   updated_at timestamptz [not null]
 }
 
-Table connectors {
-  id bigint [pk, increment]
-  tenant_id uuid [not null]
-  owner_type varchar(16) [not null]
-  owner_user_id uuid
-  provider varchar(32) [not null]
-  display_name varchar(255) [not null]
-  settings jsonb [not null, default: `{}`]
-  status varchar(16) [not null, default: 'active']
-  created_by_user_id uuid
-  created_at timestamptz [not null]
-  updated_at timestamptz [not null]
-  indexes { (tenant_id, display_name) [unique] }
-}
-
-Table connector_credentials {
-  id uuid [pk]
-  connector_id bigint [not null, unique]
-  credential_type varchar(64) [not null]
-  encrypted_payload text [not null]
-  expires_at timestamptz
-  key_version varchar(64)
-  created_at timestamptz [not null]
-  updated_at timestamptz [not null]
-}
-
-Table connector_scopes {
-  id bigint [pk, increment]
-  connector_id bigint [not null]
-  scope_type varchar(32)
-  scope_value text [not null]
-  display_name varchar(255)
-  settings jsonb [not null, default: `{}`]
-  sync_checkpoint jsonb [not null, default: `{}`]
-  sync_schedule jsonb [not null, default: `{}`]
-  status varchar(16) [not null, default: 'active']
-  last_synced_at timestamptz
-  last_indexed_at timestamptz
-  created_at timestamptz [not null]
-  updated_at timestamptz [not null]
-  indexes { (connector_id, scope_value) [unique] }
-}
-
-Table sync_runs {
-  id uuid [pk]
-  connector_scope_id bigint [not null]
-  trigger_type varchar(16) [not null]
-  status varchar(16) [not null, default: 'pending']
-  discovered_item_count bigint [not null, default: 0]
-  processed_item_count bigint [not null, default: 0]
-  written_chunk_count bigint [not null, default: 0]
-  deleted_item_count bigint [not null, default: 0]
-  error_code varchar(128)
-  error_message text
-  started_at timestamptz
-  finished_at timestamptz
-  created_at timestamptz [not null]
-}
-
-Table items {
-  id uuid [pk]
-  item_type varchar(16) [not null, note: 'collection | document | file']
-  document_kind varchar(32)
-  collection_kind varchar(32)
-  tenant_id uuid [not null]
-  owner_user_id uuid
-  connector_id bigint
-  connector_scope_id bigint
-  external_id text
-  external_version text
-  etag text
-  external_updated_at timestamptz
-  parent_item_id uuid
-  title text [not null]
-  source_url text
-  mime_type varchar(255)
-  size_bytes bigint
-  storage_key text [note: 'Durable key only; bucket/provider come from config']
-  content_sha256 varchar(64)
-  allowed_principal_tokens text[] [not null]
-  denied_principal_tokens text[] [not null]
-  metadata jsonb [not null, default: `{}`]
-  status varchar(16) [not null, note: 'pending | processing | ready | failed | unsupported | deleted']
-  created_by_user_id uuid
-  deleted_at timestamptz
-  created_at timestamptz [not null]
-  updated_at timestamptz [not null]
-  indexes {
-    (connector_id, external_id) [unique]
-    (tenant_id, status)
-    parent_item_id
-  }
-}
-
-Table item_uploads {
-  item_id uuid [pk]
-  tenant_id uuid [not null]
-  owner_user_id uuid [not null]
-  idempotency_key varchar(128) [not null]
-  status varchar(16) [not null, note: 'pending | available | failed']
-  error_code varchar(128)
-  uploaded_at timestamptz
-  created_at timestamptz [not null]
-  updated_at timestamptz [not null]
-  indexes { (tenant_id, owner_user_id, idempotency_key) [unique] }
-}
-
-Table message_items {
-  message_id uuid [not null]
-  item_id uuid [not null]
-  relation_type varchar(16) [not null]
-  position int [not null, default: 0]
-  deleted_at timestamptz
-  created_at timestamptz [not null]
-  indexes { (message_id, item_id, relation_type) [pk] }
-}
-
-Table user_principal_tokens {
-  tenant_id uuid [not null]
-  user_id uuid [not null]
-  principal_token varchar(512) [not null]
-  connector_id bigint
-  deleted_at timestamptz
-  created_at timestamptz [not null]
-  indexes { (tenant_id, user_id, principal_token) [pk] }
-}
-
-Table groups {
-  id uuid [pk]
-  tenant_id uuid [not null]
-  code varchar(64) [not null]
-  display_name varchar(255) [not null]
-  description text
-  principal_token varchar(512) [not null]
-  permission_codes text[] [not null]
-  status varchar(16) [not null]
-  deleted_at timestamptz
-  created_at timestamptz [not null]
-  updated_at timestamptz [not null]
-  indexes {
-    (tenant_id, code) [unique]
-    (tenant_id, principal_token) [unique]
-  }
-}
-
-Table group_memberships {
-  group_id uuid [not null]
-  user_id uuid [not null]
-  status varchar(16) [not null]
-  joined_at timestamptz
-  deleted_at timestamptz
-  created_at timestamptz [not null]
-  updated_at timestamptz [not null]
-  indexes { (group_id, user_id) [pk] }
-}
-
 Table access_requests {
   id uuid [pk]
   tenant_id uuid [not null]
   requester_user_id uuid [not null]
-  resource_type varchar(32) [not null]
-  resource_id varchar(512) [not null]
-  access_type varchar(32) [not null]
+  collection_item_id uuid [not null]
+  requested_role varchar(16) [not null, note: 'owner | editor | viewer']
   reason text
-  status varchar(16) [not null]
+  status varchar(16) [not null, default: 'pending']
   reviewed_by_user_id uuid
   review_note text
   reviewed_at timestamptz
-  deleted_at timestamptz
-  created_at timestamptz [not null]
-  updated_at timestamptz [not null]
-}
-
-Table acl_policies {
-  id uuid [pk]
-  tenant_id uuid [not null]
-  name varchar(255) [not null]
-  resource_type varchar(32) [not null, note: 'item']
-  resource_id varchar(512) [not null]
-  allowed_principal_tokens text[] [not null]
-  denied_principal_tokens text[] [not null]
-  status varchar(16) [not null]
-  created_by_user_id uuid
   deleted_at timestamptz
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
@@ -293,38 +321,45 @@ Ref: roles.tenant_id > tenants.id
 Ref: tenant_memberships.user_id > users.id
 Ref: tenant_memberships.tenant_id > tenants.id
 Ref: tenant_memberships.role_id > roles.id
-Ref: conversations.user_id > users.id
-Ref: messages.conversation_id > conversations.id
-Ref: memories.user_id > users.id
-Ref: memories.conversation_id > conversations.id
-Ref: memories.source_message_id > messages.id
-Ref: connectors.tenant_id > tenants.id
-Ref: connectors.owner_user_id > users.id
-Ref: connectors.created_by_user_id > users.id
-Ref: connector_credentials.connector_id - connectors.id
-Ref: connector_scopes.connector_id > connectors.id
-Ref: sync_runs.connector_scope_id > connector_scopes.id
+Ref: groups.tenant_id > tenants.id
+Ref: group_memberships.group_id > groups.id
+Ref: group_memberships.user_id > users.id
+
 Ref: items.tenant_id > tenants.id
-Ref: items.owner_user_id > users.id
-Ref: items.connector_id > connectors.id
-Ref: items.connector_scope_id > connector_scopes.id
 Ref: items.parent_item_id > items.id
 Ref: items.created_by_user_id > users.id
+Ref: collection_access.item_id > items.id
+Ref: collection_access.created_by_user_id > users.id
 Ref: item_uploads.item_id - items.id
 Ref: item_uploads.tenant_id > tenants.id
 Ref: item_uploads.owner_user_id > users.id
 Ref: message_items.message_id > messages.id
 Ref: message_items.item_id > items.id
-Ref: user_principal_tokens.tenant_id > tenants.id
-Ref: user_principal_tokens.user_id > users.id
-Ref: user_principal_tokens.connector_id > connectors.id
-Ref: groups.tenant_id > tenants.id
-Ref: group_memberships.group_id > groups.id
-Ref: group_memberships.user_id > users.id
+
+Ref: plugin_connections.tenant_id > tenants.id
+Ref: plugin_connections.owner_user_id > users.id
+Ref: plugin_connections.created_by_user_id > users.id
+Ref: plugin_credentials.connection_id - plugin_connections.id
+Ref: plugin_bindings.connection_id > plugin_connections.id
+Ref: plugin_bindings.target_item_id > items.id
+Ref: plugin_bindings.created_by_user_id > users.id
+Ref: item_origins.item_id > items.id
+Ref: item_origins.binding_id > plugin_bindings.id
+Ref: schedules.binding_id - plugin_bindings.id
+Ref: sync_runs.binding_id > plugin_bindings.id
+Ref: sync_runs.schedule_id > schedules.id
+
+Ref: conversations.tenant_id > tenants.id
+Ref: conversations.user_id > users.id
+Ref: messages.conversation_id > conversations.id
+Ref: memories.tenant_id > tenants.id
+Ref: memories.user_id > users.id
+Ref: memories.conversation_id > conversations.id
+Ref: memories.source_message_id > messages.id
+
 Ref: access_requests.tenant_id > tenants.id
 Ref: access_requests.requester_user_id > users.id
+Ref: access_requests.collection_item_id > items.id
 Ref: access_requests.reviewed_by_user_id > users.id
-Ref: acl_policies.tenant_id > tenants.id
-Ref: acl_policies.created_by_user_id > users.id
 Ref: audit_logs.tenant_id > tenants.id
 Ref: audit_logs.actor_user_id > users.id

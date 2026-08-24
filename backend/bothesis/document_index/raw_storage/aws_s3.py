@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -174,7 +173,6 @@ class S3DocumentStorage:
             content_type=content_type,
             etag=_optional_string(result.get("ETag"), strip_quotes=True),
             version_id=_optional_string(result.get("VersionId")),
-            checksum_sha256=hashlib.sha256(data).hexdigest(),
         )
 
     def put_path(
@@ -190,10 +188,6 @@ class S3DocumentStorage:
         if size_bytes < 1:
             raise ValueError("object storage file must not be empty")
         normalized_key = _object_key(key)
-        checksum = hashlib.sha256()
-        with path.open("rb") as source:
-            for block in iter(lambda: source.read(1024 * 1024), b""):
-                checksum.update(block)
         parameters: dict[str, Any] = {
             "Bucket": self._bucket,
             "Key": normalized_key,
@@ -212,7 +206,6 @@ class S3DocumentStorage:
             content_type=content_type,
             etag=_optional_string(result.get("ETag"), strip_quotes=True),
             version_id=_optional_string(result.get("VersionId")),
-            checksum_sha256=checksum.hexdigest(),
         )
 
     def presign_upload(
@@ -358,7 +351,6 @@ class S3DocumentStorage:
         response = self._client.get_object(Bucket=self._bucket, Key=key)
         body = response["Body"]
         written = 0
-        digest = hashlib.sha256()
         try:
             with path.open("wb") as destination:
                 while True:
@@ -371,7 +363,6 @@ class S3DocumentStorage:
                             f"raw document exceeds the {max_bytes} byte read limit"
                         )
                     destination.write(block)
-                    digest.update(block)
         finally:
             body.close()
         if written != stored.size_bytes:
@@ -381,7 +372,6 @@ class S3DocumentStorage:
             content_type=stored.content_type,
             etag=stored.etag,
             version_id=stored.version_id,
-            checksum_sha256=digest.hexdigest(),
         )
 
     async def aclose(self) -> None:
@@ -402,7 +392,6 @@ def _stored_object(value: dict[str, Any]) -> StoredObject:
         content_type=_optional_string(value.get("ContentType")),
         etag=_optional_string(value.get("ETag"), strip_quotes=True),
         version_id=_optional_string(value.get("VersionId")),
-        checksum_sha256=_optional_string(value.get("ChecksumSHA256")),
     )
 
 

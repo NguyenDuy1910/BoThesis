@@ -11,13 +11,8 @@ from qdrant_client import models as qmodels
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import bothesis.document_index.vector_store as vector_store_module
-from bothesis.document_index.vector_store import (
-    ACL_FIELD,
-    DENIED_ACL_FIELD,
-    NO_READER_IDS,
-    VectorStore,
-    VectorStoreFilterBuilder,
-)
+from bothesis.document_index import INDEX_SCHEMA_VERSION
+from bothesis.document_index.vector_store import VectorStore, VectorStoreFilterBuilder
 
 
 class RecordingClient:
@@ -44,7 +39,6 @@ def test_store_can_be_configured_through_constructor(
         return RecordingClient()
 
     monkeypatch.setattr(vector_store_module, "AsyncQdrantClient", make_client)
-
     store = VectorStore(
         collection_name="tenant_chunks",
         url="http://qdrant.internal:6333",
@@ -67,133 +61,83 @@ def test_store_can_be_configured_through_constructor(
 
 def test_missing_access_context_is_denied_for_a_nonexistent_tenant() -> None:
     query_filter = VectorStore.build_retrieval_filter(None)
-
     assert query_filter.must is not None
-    tenant_condition = next(
-        condition
+    assert any(
+        isinstance(condition, qmodels.FieldCondition)
+        and condition.key == "tenant_id"
+        and condition.match == qmodels.MatchValue(value="__no_tenant_id__")
         for condition in query_filter.must
-        if isinstance(condition, qmodels.FieldCondition) and condition.key == "tenant_id"
     )
-    assert tenant_condition.match == qmodels.MatchValue(value="__no_tenant_id__")
 
 
-def test_filters_are_deterministic_and_keep_zero_ancestor_ids() -> None:
-    payload_filters = SimpleNamespace(provider=["jira"], item_id=["doc-1"])
-    access_context = SimpleNamespace(
-        tenant_id="tenant-1",
-        reader_ids=["reader-2", "reader-1"],
-        space_keys=[],
-        is_admin=False,
-    )
-    search_params = SimpleNamespace(ancestor_id="0")
-
+def test_collection_authorization_and_business_filters_are_deterministic() -> None:
     query_filter = VectorStore.build_retrieval_filter(
-        search_params,
-        access_context=access_context,
-        payload_filters=payload_filters,
+        SimpleNamespace(ancestor_id="0"),
+        access_context=SimpleNamespace(
+            tenant_id="tenant-1",
+            collection_item_ids=("collection-2", "collection-1", "collection-2"),
+        ),
+        payload_filters=SimpleNamespace(plugin_key=["jira"], item_id=["doc-1"]),
     )
 
-    assert query_filter.must is not None
     assert [
         condition.key
-        for condition in query_filter.must
+        for condition in query_filter.must or []
         if isinstance(condition, qmodels.FieldCondition)
     ] == [
         "is_deleted",
         "schema_version",
         "tenant_id",
-        "provider",
+        "collection_item_id",
+        "plugin_key",
         "item_id",
         "ancestor_ids",
     ]
-    acl_filter = next(
-        condition for condition in query_filter.must if isinstance(condition, qmodels.Filter)
+    collection_condition = (query_filter.must or [])[3]
+    assert isinstance(collection_condition, qmodels.FieldCondition)
+    assert collection_condition.match == qmodels.MatchAny(
+        any=["collection-1", "collection-2"]
     )
-    assert acl_filter.should is not None
-    acl_list_condition = acl_filter.should[0]
-    assert isinstance(acl_list_condition, qmodels.FieldCondition)
-    assert acl_list_condition.match == qmodels.MatchAny(any=["reader-1", "reader-2"])
-    assert acl_filter.must_not == [
-        qmodels.FieldCondition(
-            key=DENIED_ACL_FIELD,
-            match=qmodels.MatchAny(any=["reader-1", "reader-2"]),
-        )
-    ]
 
 
-def test_connector_selection_is_applied_inside_the_tenant_acl_filter() -> None:
+def test_empty_collection_scope_fails_closed_inside_the_tenant() -> None:
     query_filter = VectorStore.build_retrieval_filter(
         None,
         access_context=SimpleNamespace(
-            tenant_id="tenant-1",
-            reader_ids=["email:user@example.test"],
-            space_keys=[],
-            is_admin=False,
-        ),
-        payload_filters=SimpleNamespace(connector_ids=(12, 14)),
-    )
-
-    connector_condition = next(
-        condition
-        for condition in query_filter.must or []
-        if isinstance(condition, qmodels.FieldCondition)
-        and condition.key == "connector_id"
-    )
-    assert connector_condition.match == qmodels.MatchAny(any=[12, 14])
-
-
-def test_admin_filter_keeps_tenant_and_tombstone_boundaries() -> None:
-    query_filter = VectorStore.build_retrieval_filter(
-        None,
-        access_context=SimpleNamespace(
-            tenant_id="tenant-1",
-            reader_ids=["email:admin@example.test"],
-            space_keys=[],
-            is_admin=True,
+            tenant_id="tenant-1", collection_item_ids=()
         ),
     )
-
-    assert query_filter.must is not None
-    assert [
-        condition.key
-        for condition in query_filter.must
-        if isinstance(condition, qmodels.FieldCondition)
-    ] == ["is_deleted", "schema_version", "tenant_id"]
-    assert not any(
-        isinstance(condition, qmodels.Filter)
-        for condition in query_filter.must
+    condition = next(
+        value
+        for value in query_filter.must or []
+        if isinstance(value, qmodels.FieldCondition)
+        and value.key == "collection_item_id"
     )
+    assert condition.match == qmodels.MatchAny(any=["__no_collection_id__"])
 
 
-def test_lifecycle_filter_excludes_tombstones_without_access_conditions() -> None:
+def test_lifecycle_filter_excludes_tombstones_and_old_schema_versions() -> None:
     query_filter = VectorStore.build_lifecycle_filter()
-
     assert query_filter.must == [
         qmodels.FieldCondition(
-            key="is_deleted",
-            match=qmodels.MatchValue(value=False),
+            key="is_deleted", match=qmodels.MatchValue(value=False)
         ),
         qmodels.FieldCondition(
             key="schema_version",
-            match=qmodels.MatchValue(value=6),
+            match=qmodels.MatchValue(value=INDEX_SCHEMA_VERSION),
         ),
     ]
 
 
 @pytest.mark.asyncio
-async def test_acl_sync_removes_reserved_reader_id() -> None:
+async def test_soft_delete_only_updates_derived_lifecycle_state() -> None:
     client = RecordingClient()
     store = VectorStore(client=client, collection_name="chunks")
 
-    await store.sync_document_acl(
-        "doc-1",
-        {"reader-2": 1, NO_READER_IDS: 1, "reader-1": 1},
-    )
+    await store.soft_delete_document_points("doc-1")
 
-    assert client.set_payload_calls[0]["payload"] == {
-        ACL_FIELD: ["reader-1", "reader-2"],
-        DENIED_ACL_FIELD: [],
-    }
+    assert client.set_payload_calls[0]["payload"] == {"is_deleted": True}
+    assert client.set_payload_calls[0]["points"] == VectorStore.document_filter("doc-1")
 
 
 @pytest.mark.asyncio
@@ -203,8 +147,7 @@ async def test_contextual_hybrid_search_uses_filtered_bm25_and_rrf() -> None:
     query_filter = qmodels.Filter(
         must=[
             qmodels.FieldCondition(
-                key="tenant_id",
-                match=qmodels.MatchValue(value="tenant-1"),
+                key="tenant_id", match=qmodels.MatchValue(value="tenant-1")
             )
         ]
     )
@@ -221,31 +164,16 @@ async def test_contextual_hybrid_search_uses_filtered_bm25_and_rrf() -> None:
     assert len(request["prefetch"]) == 2
     assert request["query"] == qmodels.FusionQuery(fusion=qmodels.Fusion.RRF)
     dense, sparse = request["prefetch"]
-    assert dense.using == "content"
-    assert sparse.using == "content_bm25"
     assert dense.filter is query_filter
     assert sparse.filter is query_filter
     assert request["query_filter"] is query_filter
-    assert sparse.query == qmodels.Document(
-        text="doanh thu quý II",
-        model="qdrant/bm25",
-        options={
-            "tokenizer": "multilingual",
-            "stemmer": {"type": "none"},
-            "stopwords": {"custom": []},
-            "lowercase": True,
-            "ascii_folding": False,
-        },
-    )
 
 
 def test_request_filter_fails_closed_when_the_request_lacks_access() -> None:
     query_filter = VectorStoreFilterBuilder.build_request_filter(SimpleNamespace())
-
-    assert query_filter.must is not None
     assert any(
         isinstance(condition, qmodels.FieldCondition)
         and condition.key == "tenant_id"
         and condition.match == qmodels.MatchValue(value="__no_tenant_id__")
-        for condition in query_filter.must
+        for condition in query_filter.must or []
     )

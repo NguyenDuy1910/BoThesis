@@ -1,4 +1,4 @@
-"""Tenant access request review and governed grant application."""
+"""Governed requests for user access to a Collection."""
 
 from __future__ import annotations
 
@@ -9,49 +9,28 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.db.models import (
-    AccessRequest,
-    Item,
-    Group,
-    GroupMembership,
-    Role,
-    TenantMembership,
-    User,
-)
-from bothesis.document_index.vector_store import VectorStore
+from bothesis.db.models import AccessRequest, Item, TenantMembership, User
 from bothesis.services import (
     ACCESS_MANAGE_PERMISSION,
     ACTIVE_STATUS,
     AdminConflictError,
-    AdminExternalUnavailableError,
     AdminNotFoundError,
     AdminValidationError,
     AuditService,
     AuthContext,
-    AuthService,
+    CollectionAccessService,
     normalize_page,
     normalize_required_text,
     require_tenant_permission,
     timestamp,
 )
 
-_RESOURCE_TYPES = frozenset({"item", "group", "role"})
-
 
 class AccessRequestService:
-    """Review requests and atomically apply approved access grants."""
+    """Review Collection access requests and materialize approved grants."""
 
-    def __init__(
-        self,
-        session: AsyncSession,
-        *,
-        auth: AuthService | None = None,
-        vector_store: VectorStore | None = None,
-        audit: AuditService | None = None,
-    ) -> None:
+    def __init__(self, session: AsyncSession, *, audit: AuditService | None = None) -> None:
         self._session = session
-        self._auth = auth or AuthService(session)
-        self._vector_store = vector_store
         self._audit = audit or AuditService(session)
 
     async def list_requests(
@@ -62,11 +41,9 @@ class AccessRequestService:
         page_size: int = 20,
         search: str | None = None,
         status: str | None = None,
-        resource_type: str | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
         page, page_size, offset = normalize_page(page, page_size)
-        reviewer = User.__table__.alias("reviewer")
         filters = [
             AccessRequest.tenant_id == tenant_id,
             AccessRequest.deleted_at.is_(None),
@@ -74,43 +51,20 @@ class AccessRequestService:
         if search and search.strip():
             term = f"%{search.strip()}%"
             filters.append(
-                or_(
-                    User.email.ilike(term),
-                    User.display_name.ilike(term),
-                    AccessRequest.resource_id.ilike(term),
-                    AccessRequest.reason.ilike(term),
-                )
+                or_(User.email.ilike(term), User.display_name.ilike(term), Item.title.ilike(term))
             )
         if status:
-            normalized_status = status.strip().casefold()
-            if normalized_status not in {
-                "pending",
-                "approved",
-                "denied",
-                "cancelled",
-            }:
+            normalized = status.strip().casefold()
+            if normalized not in {"pending", "approved", "denied", "cancelled"}:
                 raise AdminValidationError("unsupported access request status")
-            filters.append(AccessRequest.status == normalized_status)
-        if resource_type:
-            normalized_type = resource_type.strip().casefold()
-            if normalized_type not in _RESOURCE_TYPES:
-                raise AdminValidationError("unsupported access request resource type")
-            filters.append(AccessRequest.resource_type == normalized_type)
+            filters.append(AccessRequest.status == normalized)
         base = (
-            select(
-                AccessRequest,
-                User.email,
-                User.display_name,
-                reviewer.c.email,
-                reviewer.c.display_name,
-            )
+            select(AccessRequest, User, Item)
             .join(User, User.id == AccessRequest.requester_user_id)
-            .outerjoin(reviewer, reviewer.c.id == AccessRequest.reviewed_by_user_id)
+            .join(Item, Item.id == AccessRequest.collection_item_id)
             .where(*filters)
         )
-        total = await self._session.scalar(
-            select(func.count()).select_from(base.subquery())
-        )
+        total = await self._session.scalar(select(func.count()).select_from(base.subquery()))
         rows = (
             await self._session.execute(
                 base.order_by(AccessRequest.created_at.desc(), AccessRequest.id.desc())
@@ -119,85 +73,44 @@ class AccessRequestService:
             )
         ).all()
         return {
-            "items": [
-                _request_payload(
-                    request,
-                    requester_email=email,
-                    requester_name=display_name,
-                    reviewer_email=reviewer_email,
-                    reviewer_name=reviewer_name,
-                )
-                for request, email, display_name, reviewer_email, reviewer_name in rows
-            ],
+            "items": [self._payload(request, user=user, collection=item) for request, user, item in rows],
             "total": int(total or 0),
             "page": page,
             "page_size": page_size,
         }
-
-    async def get_request(
-        self, actor: AuthContext, request_id: UUID
-    ) -> dict[str, Any]:
-        tenant_id = require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
-        request = await self._request(tenant_id, request_id)
-        requester = await self._session.get(User, request.requester_user_id)
-        reviewer = (
-            await self._session.get(User, request.reviewed_by_user_id)
-            if request.reviewed_by_user_id is not None
-            else None
-        )
-        if requester is None:
-            raise AdminNotFoundError("access request user was not found")
-        return _request_payload(
-            request,
-            requester_email=requester.email,
-            requester_name=requester.display_name,
-            reviewer_email=reviewer.email if reviewer else None,
-            reviewer_name=reviewer.display_name if reviewer else None,
-        )
 
     async def create_request(
         self,
         actor: AuthContext,
         *,
         requester_user_id: UUID,
-        resource_type: str,
-        resource_id: str,
-        access_type: str,
+        collection_item_id: UUID,
+        requested_role: str,
         reason: str | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
-        requester = await self._tenant_user(tenant_id, requester_user_id)
-        normalized_type = resource_type.strip().casefold()
-        if normalized_type not in _RESOURCE_TYPES:
-            raise AdminValidationError("unsupported access request resource type")
-        normalized_resource_id = normalize_required_text(
-            resource_id, "resource ID", 512
-        )
-        normalized_access_type = normalize_required_text(
-            access_type, "access type", 32
-        ).casefold()
-        await self._validate_resource(
-            tenant_id, normalized_type, normalized_resource_id
-        )
+        user = await self._tenant_user(tenant_id, requester_user_id)
+        collection = await self._collection(tenant_id, collection_item_id)
+        role = requested_role.strip().casefold()
+        if role not in {"owner", "editor", "viewer"}:
+            raise AdminValidationError("requested role must be owner, editor, or viewer")
         duplicate = await self._session.scalar(
             select(AccessRequest.id).where(
                 AccessRequest.tenant_id == tenant_id,
-                AccessRequest.requester_user_id == requester.id,
-                AccessRequest.resource_type == normalized_type,
-                AccessRequest.resource_id == normalized_resource_id,
-                AccessRequest.access_type == normalized_access_type,
+                AccessRequest.requester_user_id == user.id,
+                AccessRequest.collection_item_id == collection.id,
+                AccessRequest.requested_role == role,
                 AccessRequest.status == "pending",
                 AccessRequest.deleted_at.is_(None),
             )
         )
         if duplicate is not None:
-            raise AdminConflictError("an equivalent access request is already pending")
+            raise AdminConflictError("an equivalent Collection access request is pending")
         request = AccessRequest(
             tenant_id=tenant_id,
-            requester_user_id=requester.id,
-            resource_type=normalized_type,
-            resource_id=normalized_resource_id,
-            access_type=normalized_access_type,
+            requester_user_id=user.id,
+            collection_item_id=collection.id,
+            requested_role=role,
             reason=(
                 normalize_required_text(reason, "request reason", 4_000)
                 if reason is not None
@@ -208,22 +121,33 @@ class AccessRequestService:
         await self._session.flush()
         await self._audit.record(
             actor,
-            action="access_request.created",
-            resource_type="access_request",
-            resource_id=str(request.id),
-            details={
-                "requester_user_id": str(requester.id),
-                "target_type": normalized_type,
-                "target_id": normalized_resource_id,
-            },
+            action="collection.access.requested",
+            resource_type="collection",
+            resource_id=str(collection.id),
+            details={"request_id": str(request.id), "requester_user_id": str(user.id)},
         )
-        return _request_payload(
-            request,
-            requester_email=requester.email,
-            requester_name=requester.display_name,
-            reviewer_email=None,
-            reviewer_name=None,
-        )
+        return self._payload(request, user=user, collection=collection)
+
+    async def get_request(
+        self, actor: AuthContext, request_id: UUID
+    ) -> dict[str, Any]:
+        tenant_id = require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
+        row = (
+            await self._session.execute(
+                select(AccessRequest, User, Item)
+                .join(User, User.id == AccessRequest.requester_user_id)
+                .join(Item, Item.id == AccessRequest.collection_item_id)
+                .where(
+                    AccessRequest.id == request_id,
+                    AccessRequest.tenant_id == tenant_id,
+                    AccessRequest.deleted_at.is_(None),
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            raise AdminNotFoundError(f"access request not found: {request_id}")
+        request, user, collection = row
+        return self._payload(request, user=user, collection=collection)
 
     async def decide_request(
         self,
@@ -234,16 +158,33 @@ class AccessRequestService:
         review_note: str | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
-        request = await self._request(tenant_id, request_id, for_update=True)
+        request = await self._session.scalar(
+            select(AccessRequest)
+            .where(
+                AccessRequest.id == request_id,
+                AccessRequest.tenant_id == tenant_id,
+                AccessRequest.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if request is None:
+            raise AdminNotFoundError(f"access request not found: {request_id}")
         if request.status != "pending":
             raise AdminConflictError("only pending access requests can be reviewed")
-        normalized_decision = decision.strip().casefold()
-        if normalized_decision not in {"approved", "denied"}:
+        normalized = decision.strip().casefold()
+        if normalized not in {"approved", "denied"}:
             raise AdminValidationError("decision must be approved or denied")
-        requester = await self._tenant_user(tenant_id, request.requester_user_id)
-        if normalized_decision == "approved":
-            await self._apply_grant(tenant_id, requester, request)
-        request.status = normalized_decision
+        user = await self._tenant_user(tenant_id, request.requester_user_id)
+        collection = await self._collection(tenant_id, request.collection_item_id)
+        if normalized == "approved":
+            await CollectionAccessService(self._session).grant(
+                collection.id,
+                principal_type="user",
+                principal_id=user.id,
+                role=request.requested_role,
+                actor=actor,
+            )
+        request.status = normalized
         request.reviewed_by_user_id = actor.user_id
         request.review_note = (
             normalize_required_text(review_note, "review note", 4_000)
@@ -251,117 +192,15 @@ class AccessRequestService:
             else None
         )
         request.reviewed_at = datetime.now(UTC)
-        request.updated_at = request.reviewed_at
         await self._session.flush()
         await self._audit.record(
             actor,
-            action=f"access_request.{normalized_decision}",
-            resource_type="access_request",
-            resource_id=str(request.id),
-            details={
-                "requester_user_id": str(requester.id),
-                "target_type": request.resource_type,
-                "target_id": request.resource_id,
-            },
+            action=f"collection.access_request.{normalized}",
+            resource_type="collection",
+            resource_id=str(collection.id),
+            details={"request_id": str(request.id)},
         )
-        return _request_payload(
-            request,
-            requester_email=requester.email,
-            requester_name=requester.display_name,
-            reviewer_email=actor.email,
-            reviewer_name=actor.display_name,
-        )
-
-    async def _apply_grant(
-        self, tenant_id: UUID, requester: User, request: AccessRequest
-    ) -> None:
-        resource_uuid = _uuid_resource(request.resource_id)
-        if request.resource_type == "item":
-            item = await self._session.scalar(
-                select(Item)
-                .where(
-                    Item.id == resource_uuid,
-                    Item.tenant_id == tenant_id,
-                    Item.status != "deleted",
-                    Item.deleted_at.is_(None),
-                )
-                .with_for_update()
-            )
-            if item is None:
-                raise AdminNotFoundError("requested item was not found")
-            token = f"email:{requester.email.casefold()}"
-            item.allowed_principal_tokens = sorted(
-                {*item.allowed_principal_tokens, token}
-            )
-            item.denied_principal_tokens = sorted(
-                set(item.denied_principal_tokens) - {token}
-            )
-            if self._vector_store is None:
-                raise AdminExternalUnavailableError(
-                    "Qdrant is required to grant access to an indexed Item"
-                )
-            await self._vector_store.sync_document_acl(
-                str(item.id),
-                item.allowed_principal_tokens,
-                denied_reader_ids=item.denied_principal_tokens,
-            )
-            return
-        if request.resource_type == "group":
-            group = await self._session.scalar(
-                select(Group).where(
-                    Group.id == resource_uuid,
-                    Group.tenant_id == tenant_id,
-                    Group.status == ACTIVE_STATUS,
-                    Group.deleted_at.is_(None),
-                )
-            )
-            if group is None:
-                raise AdminNotFoundError("requested group was not found")
-            membership = await self._session.get(
-                GroupMembership,
-                {"group_id": group.id, "user_id": requester.id},
-            )
-            if membership is None:
-                self._session.add(
-                    GroupMembership(
-                        group_id=group.id,
-                        user_id=requester.id,
-                        joined_at=datetime.now(UTC),
-                    )
-                )
-            else:
-                membership.status = ACTIVE_STATUS
-                membership.deleted_at = None
-                membership.joined_at = membership.joined_at or datetime.now(UTC)
-            return
-        if request.resource_type == "role":
-            role = await self._session.scalar(
-                select(Role).where(
-                    Role.id == resource_uuid,
-                    Role.tenant_id == tenant_id,
-                    Role.status == ACTIVE_STATUS,
-                )
-            )
-            if role is None:
-                raise AdminNotFoundError("requested role was not found")
-            await self._auth.assign_membership(requester.id, tenant_id, role.id)
-            return
-        raise AdminValidationError("unsupported access request resource type")
-
-    async def _request(
-        self, tenant_id: UUID, request_id: UUID, *, for_update: bool = False
-    ) -> AccessRequest:
-        statement = select(AccessRequest).where(
-            AccessRequest.id == request_id,
-            AccessRequest.tenant_id == tenant_id,
-            AccessRequest.deleted_at.is_(None),
-        )
-        if for_update:
-            statement = statement.with_for_update()
-        request = await self._session.scalar(statement)
-        if request is None:
-            raise AdminNotFoundError(f"access request not found: {request_id}")
-        return request
+        return self._payload(request, user=user, collection=collection)
 
     async def _tenant_user(self, tenant_id: UUID, user_id: UUID) -> User:
         user = await self._session.scalar(
@@ -376,73 +215,44 @@ class AccessRequestService:
             )
         )
         if user is None:
-            raise AdminNotFoundError(f"user not found: {user_id}")
+            raise AdminNotFoundError(f"tenant user not found: {user_id}")
         return user
 
-    async def _validate_resource(
-        self, tenant_id: UUID, resource_type: str, resource_id: str
-    ) -> None:
-        resource_uuid = _uuid_resource(resource_id)
-        model = {"item": Item, "group": Group, "role": Role}[resource_type]
-        statement = select(model.id).where(model.id == resource_uuid)
-        if model is Item:
-            statement = statement.where(
+    async def _collection(self, tenant_id: UUID, item_id: UUID) -> Item:
+        item = await self._session.scalar(
+            select(Item).where(
+                Item.id == item_id,
                 Item.tenant_id == tenant_id,
+                Item.item_type == "collection",
                 Item.status != "deleted",
                 Item.deleted_at.is_(None),
             )
-        elif model is Group:
-            statement = statement.where(
-                Group.tenant_id == tenant_id,
-                Group.deleted_at.is_(None),
-            )
-        else:
-            statement = statement.where(Role.tenant_id == tenant_id)
-        if await self._session.scalar(statement) is None:
-            raise AdminNotFoundError(f"{resource_type} not found: {resource_id}")
+        )
+        if item is None:
+            raise AdminNotFoundError(f"Collection not found: {item_id}")
+        return item
 
-
-def _uuid_resource(value: str) -> UUID:
-    try:
-        return UUID(value)
-    except ValueError as exc:
-        raise AdminValidationError("resource ID must be a UUID") from exc
-
-
-def _request_payload(
-    request: AccessRequest,
-    *,
-    requester_email: str,
-    requester_name: str | None,
-    reviewer_email: str | None,
-    reviewer_name: str | None,
-) -> dict[str, Any]:
-    return {
-        "id": str(request.id),
-        "resource_type": request.resource_type,
-        "resource_id": request.resource_id,
-        "access_type": request.access_type,
-        "reason": request.reason,
-        "status": request.status,
-        "requester": {
-            "id": str(request.requester_user_id),
-            "email": requester_email,
-            "display_name": requester_name,
-        },
-        "reviewer": (
-            {
-                "id": str(request.reviewed_by_user_id),
-                "email": reviewer_email,
-                "display_name": reviewer_name,
-            }
-            if request.reviewed_by_user_id is not None
-            else None
-        ),
-        "review_note": request.review_note,
-        "reviewed_at": timestamp(request.reviewed_at),
-        "created_at": timestamp(request.created_at),
-        "updated_at": timestamp(request.updated_at),
-    }
+    @staticmethod
+    def _payload(request: AccessRequest, *, user: User, collection: Item) -> dict[str, Any]:
+        return {
+            "id": str(request.id),
+            "requester": {
+                "id": str(user.id),
+                "email": user.email,
+                "display_name": user.display_name,
+            },
+            "collection": {"id": str(collection.id), "title": collection.title},
+            "requested_role": request.requested_role,
+            "reason": request.reason,
+            "status": request.status,
+            "reviewed_by_user_id": (
+                str(request.reviewed_by_user_id) if request.reviewed_by_user_id else None
+            ),
+            "review_note": request.review_note,
+            "reviewed_at": timestamp(request.reviewed_at),
+            "created_at": timestamp(request.created_at),
+            "updated_at": timestamp(request.updated_at),
+        }
 
 
 __all__ = ["AccessRequestService"]

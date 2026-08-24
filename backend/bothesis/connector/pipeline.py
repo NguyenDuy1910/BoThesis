@@ -162,7 +162,7 @@ class ConnectorPipeline:
         processed_items = 0
         written_chunks = 0
         for change in changes:
-            if change.type != ChangeType.DELETE:
+            if change.type != ChangeType.DELETED:
                 continue
             try:
                 await self._sink.soft_delete_item(
@@ -174,11 +174,13 @@ class ConnectorPipeline:
             except Exception as exc:
                 failures.append(_failure(change.item_id, "delete", exc))
 
-        upserts = [
-            change for change in changes if change.type != ChangeType.DELETE
+        changed_items = [
+            change
+            for change in changes
+            if change.type in {ChangeType.CREATED, ChangeType.UPDATED}
         ]
-        for start in range(0, len(upserts), self._config.fetch_concurrency):
-            change_batch = upserts[start : start + self._config.fetch_concurrency]
+        for start in range(0, len(changed_items), self._config.fetch_concurrency):
+            change_batch = changed_items[start : start + self._config.fetch_concurrency]
             loaded = await asyncio.gather(
                 *(self._load_item(change) for change in change_batch),
                 return_exceptions=True,
