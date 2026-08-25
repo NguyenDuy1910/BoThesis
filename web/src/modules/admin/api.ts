@@ -1,7 +1,6 @@
 "use client";
 
-import { getBothesisChatConfiguration, getBothesisDataMode } from "@/lib/api/config";
-import { mockAdminRequest, mockDatasourceUpload } from "@/lib/mock/admin";
+import { getBothesisChatConfiguration } from "@/lib/api/config";
 import { useCallback, useEffect, useState } from "react";
 
 export class AdminApiError extends Error {
@@ -18,7 +17,6 @@ export async function adminRequest<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  if (getBothesisDataMode() === "mock") return mockAdminRequest<T>(path, init);
   const configuration = getBothesisChatConfiguration();
   if (!configuration) {
     throw new AdminApiError(
@@ -107,9 +105,6 @@ export function uploadDatasourceFile<T>(
   file: File,
   options: { onProgress?: (percent: number) => void; signal?: AbortSignal } = {},
 ): Promise<T> {
-  if (getBothesisDataMode() === "mock") {
-    return mockDatasourceUpload<T>(connectorId, file, options);
-  }
   const configuration = getBothesisChatConfiguration();
   if (!configuration) {
     return Promise.reject(new AdminApiError(
@@ -148,4 +143,95 @@ export function uploadDatasourceFile<T>(
     };
     request.send(file);
   });
+}
+
+/** Upload one local file directly into a governed collection. */
+export function uploadCollectionFile<T>(
+  collectionId: string,
+  file: File,
+  options: {
+    idempotencyKey: string;
+    onProgress?: (percent: number) => void;
+    onProcessing?: () => void;
+  },
+): Promise<T> {
+  const configuration = getBothesisChatConfiguration();
+  if (!configuration) {
+    return Promise.reject(new AdminApiError(
+      "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
+    ));
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    const form = new FormData();
+    form.append("file", file, file.name);
+    request.open(
+      "POST",
+      `${configuration.apiUrl}/api/v1/collections/${encodeURIComponent(collectionId)}/documents/upload`,
+    );
+    request.responseType = "json";
+    request.setRequestHeader("Accept", "application/json");
+    request.setRequestHeader("Idempotency-Key", options.idempotencyKey);
+    request.setRequestHeader("X-Bothesis-Tenant-Id", configuration.tenantId);
+    request.setRequestHeader("X-Bothesis-User-Id", configuration.userId);
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        options.onProgress?.(Math.round((event.loaded / event.total) * 100));
+      }
+    };
+    request.upload.onload = () => options.onProcessing?.();
+    request.onerror = () => reject(new AdminApiError(
+      "The upload could not reach the BoThesis API.",
+    ));
+    request.onload = () => {
+      const payload = request.response as { detail?: unknown } | T | null;
+      if (request.status >= 200 && request.status < 300) {
+        resolve(payload as T);
+        return;
+      }
+      const detail = payload && typeof payload === "object" && "detail" in payload && typeof payload.detail === "string"
+        ? payload.detail
+        : `Upload failed with status ${request.status}`;
+      reject(new AdminApiError(detail, request.status));
+    };
+    request.send(form);
+  });
+}
+
+/** Retry indexing from a previously stored native upload. */
+export async function retryCollectionDocument<T>(documentId: string): Promise<T> {
+  const configuration = getBothesisChatConfiguration();
+  if (!configuration) {
+    throw new AdminApiError(
+      "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
+    );
+  }
+  let response: Response;
+  try {
+    response = await fetch(
+      `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(documentId)}/retry`,
+      {
+        method: "POST",
+        cache: "no-store",
+        headers: {
+          Accept: "application/json",
+          "X-Bothesis-Tenant-Id": configuration.tenantId,
+          "X-Bothesis-User-Id": configuration.userId,
+        },
+      },
+    );
+  } catch {
+    throw new AdminApiError(
+      "The indexing retry could not reach the BoThesis API.",
+    );
+  }
+  const payload = await response.json().catch(() => null) as { detail?: unknown } | T | null;
+  if (!response.ok) {
+    const detail = payload && typeof payload === "object" && "detail" in payload && typeof payload.detail === "string"
+      ? payload.detail
+      : `Indexing retry failed with status ${response.status}`;
+    throw new AdminApiError(detail, response.status);
+  }
+  return payload as T;
 }

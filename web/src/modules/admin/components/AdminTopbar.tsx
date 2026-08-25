@@ -4,7 +4,6 @@ import { ChevronRight, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { getBothesisDataMode } from "@/lib/api/config";
 import { MobileMenuButton } from "./AdminSidebar";
 
 interface AdminTopbarProps {
@@ -13,7 +12,6 @@ interface AdminTopbarProps {
 
 export function AdminTopbar({ onMobileMenuOpen }: AdminTopbarProps) {
   const pathname = usePathname();
-  const isMockMode = getBothesisDataMode() === "mock";
   const segments = pathname.split("/").filter(Boolean).slice(1);
   const breadcrumbs = segments.map((segment, index) => ({
     href: "/admin/" + segments.slice(0, index + 1).join("/"),
@@ -40,7 +38,7 @@ export function AdminTopbar({ onMobileMenuOpen }: AdminTopbarProps) {
       </div>
       <div className="admin-topbar__status" role="status">
         <ShieldCheck aria-hidden="true" size={14} />
-        {isMockMode ? "Demo data" : "Server enforced"}
+        Server enforced
       </div>
     </header>
   );
@@ -53,7 +51,9 @@ const breadcrumbLabels: Record<string, string> = {
   people: "People",
   sources: "Sources & Integrations",
   "knowledge-bases": "Knowledge Bases",
+  "all-items": "All Items",
   "sync-activity": "Sync Activity",
+  schedules: "Schedules",
   "access-policies": "Access Policies",
   "workspace-settings": "Workspace Settings",
   "access-requests": "Access Requests",

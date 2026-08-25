@@ -12,6 +12,7 @@ import {
   Library,
   RefreshCw,
   Workflow,
+  CalendarClock,
 } from "lucide-react";
 
 export interface NavItem {
@@ -27,7 +28,7 @@ export interface NavGroup {
 
 export const adminNavGroups: NavGroup[] = [
   {
-    label: "Workspace",
+    label: null,
     items: [
       { label: "Overview", href: "/admin/overview", icon: LayoutDashboard },
     ],
@@ -36,19 +37,20 @@ export const adminNavGroups: NavGroup[] = [
     label: "Knowledge",
     items: [
       { label: "Knowledge Bases", href: "/admin/knowledge-bases", icon: Library },
-      { label: "Documents", href: "/admin/documents", icon: FileText },
+      { label: "All Items", href: "/admin/all-items", icon: FileText },
     ],
   },
   {
-    label: "Connectors",
+    label: "Data",
     items: [
       { label: "Sources & Integrations", href: "/admin/sources", icon: Plug },
       { label: "Sync Activity", href: "/admin/sync-activity", icon: RefreshCw },
     ],
   },
   {
-    label: "Automations",
+    label: "Automation",
     items: [
+      { label: "Schedules", href: "/admin/schedules", icon: CalendarClock },
       { label: "Workflows", href: "/workflows", icon: Workflow },
     ],
   },

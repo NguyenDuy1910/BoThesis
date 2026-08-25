@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,7 +32,8 @@ from bothesis.connector.protocol import (
     SourceProvider,
 )
 from bothesis.knowledge import Evidence
-from bothesis.services import AuthContext
+from bothesis.document_index import DocumentProcessingError
+from bothesis.services import AuthContext, RequestIdentity
 
 
 def search_call(output_index: int = 0) -> list[Any]:
@@ -281,6 +282,155 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
         allowed_collections,
     )
     return user_id, tenant_id
+
+
+def test_collection_upload_route_accepts_multipart_without_a_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collection_id = uuid4()
+    tenant_id = uuid4()
+    user_id = uuid4()
+    now = datetime.now(UTC).isoformat()
+
+    async def upload_collection_document(
+        identity: RequestIdentity,
+        requested_collection_id: UUID,
+        **values: Any,
+    ) -> dict[str, Any]:
+        assert identity.tenant_id == str(tenant_id)
+        assert identity.user_id == str(user_id)
+        assert requested_collection_id == collection_id
+        assert values["idempotency_key"] == "upload-contract-1"
+        assert values["file_name"] == "policy.txt"
+        assert values["content_type"] == "text/plain"
+        assert await values["content"].read() == b"governed policy"
+        return {
+            "document": {
+                "id": str(uuid4()),
+                "parent_item_id": str(collection_id),
+                "file_name": "policy.txt",
+                "content_type": "text/plain",
+                "size_bytes": 15,
+                "status": "ready",
+                "indexed": True,
+                "upload_status": "available",
+                "created_at": now,
+                "uploaded_at": now,
+            },
+            "ingestion_status": "ready",
+            "created": True,
+        }
+
+    monkeypatch.setattr(
+        main._api_service,
+        "upload_collection_document",
+        upload_collection_document,
+    )
+    with TestClient(main.app) as client:
+        response = client.post(
+            f"/api/v1/collections/{collection_id}/documents/upload",
+            headers={
+                "Idempotency-Key": "upload-contract-1",
+                "X-Bothesis-Tenant-Id": str(tenant_id),
+                "X-Bothesis-User-Id": str(user_id),
+            },
+            files={"file": ("policy.txt", b"governed policy", "text/plain")},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["document"]["parent_item_id"] == str(collection_id)
+    assert response.json()["ingestion_status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_collection_upload_reports_ingestion_dispatch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = api_service_module.ApiService(
+        allow_insecure_development_identity=True,
+        qdrant_prefer_grpc=False,
+    )
+    user_id = uuid4()
+    tenant_id = uuid4()
+    collection_id = uuid4()
+    now = datetime.now(UTC)
+    upload_record = SimpleNamespace(status="available", uploaded_at=now)
+    document = SimpleNamespace(
+        id=uuid4(),
+        parent_item_id=collection_id,
+        title="policy.txt",
+        mime_type="text/plain",
+        size_bytes=15,
+        status="ready",
+        metadata_={"file_name": "policy.txt"},
+        upload=upload_record,
+        created_at=now,
+    )
+    access = AuthContext(
+        user_id=user_id,
+        email="editor@example.test",
+        display_name="Editor",
+        tenant_id=tenant_id,
+        role_id=uuid4(),
+        role_code="editor",
+        permission_codes=(),
+        group_ids=(),
+    )
+
+    class Uploads:
+        async def upload_to_collection(self, *_: Any, **__: Any) -> Any:
+            return SimpleNamespace(item=document, created=True)
+
+        async def get_document(self, *_: Any, **__: Any) -> Any:
+            return document
+
+    class Pipeline:
+        attempts = 0
+
+        async def index_document(self, *_: Any, **__: Any) -> Any:
+            self.attempts += 1
+            if self.attempts == 1:
+                document.status = "failed"
+                raise DocumentProcessingError("index dispatch failed")
+            document.status = "ready"
+            document.metadata_["processing"] = {"index_schema_version": "test"}
+            return document
+
+    async def resolve_access(*_: Any, **__: Any) -> AuthContext:
+        return access
+
+    async def record_audit(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_resolve_access", resolve_access)
+    monkeypatch.setattr(service, "_uploads", Uploads())
+    monkeypatch.setattr(service, "_pipeline", Pipeline())
+    monkeypatch.setattr(service, "_session_factory", _SessionContext)
+    monkeypatch.setattr(api_service_module.AuditService, "record", record_audit)
+
+    result = await service.upload_collection_document(
+        RequestIdentity(user_id=user_id, tenant_id=tenant_id),
+        collection_id,
+        idempotency_key="dispatch-failure",
+        file_name="policy.txt",
+        content_type="text/plain",
+        content=SimpleNamespace(read=lambda *_: b""),
+    )
+
+    assert result["created"] is True
+    assert result["ingestion_status"] == "failed"
+    assert result["document"]["status"] == "failed"
+    assert result["document"]["parent_item_id"] == str(collection_id)
+
+    retried = await service.retry_document_indexing(
+        RequestIdentity(user_id=user_id, tenant_id=tenant_id),
+        document.id,
+    )
+
+    assert retried["created"] is False
+    assert retried["ingestion_status"] == "ready"
+    assert retried["document"]["status"] == "ready"
+    assert retried["document"]["indexed"] is True
 
 
 def test_qdrant_citation_does_not_synthesize_element_ranges() -> None:

@@ -38,7 +38,8 @@ ACL, source, and hierarchy filters before evidence is returned.
 
 ## Uploads
 
-Request-owned indexed uploads use the same Docling processor, canonical chunks,
-contextualization, and flat Qdrant projection as scheduled connectors.
-Direct-capable files can still use the direct model path; indexed files remain
-permission-filtered and source-grounded.
+Personal and collection-scoped uploads use the same Docling processor,
+canonical chunks, contextualization, and flat Qdrant projection as scheduled
+connectors. Collection uploads retain native upload lineage under their
+destination Item and never create a connector, credential, binding, or sync
+configuration. Indexed files remain tenant- and collection-permission filtered.

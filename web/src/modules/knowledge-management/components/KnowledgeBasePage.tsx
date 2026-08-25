@@ -1,218 +1,362 @@
 "use client";
 
 import {
-  Database,
-  FileText,
+  Archive,
+  Edit3,
+  Library,
+  LockKeyhole,
+  MoreHorizontal,
   Plus,
-  RefreshCw,
-  SearchCheck,
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { type Column, DataTable } from "@/components/ui/DataTable";
+import { Dialog } from "@/components/ui/Dialog";
+import { Dropdown, DropdownItem } from "@/components/ui/Dropdown";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { SearchInput } from "@/components/ui/SearchInput";
 import { Select } from "@/components/ui/Select";
-import { queryString, useAdminQuery } from "@/modules/admin/api";
-import { KnowledgeBaseWizard } from "@/modules/knowledge-management/components/KnowledgeBaseWizard";
-import { formatDate, StatusBadge } from "@/modules/knowledge-management/presentation";
+import { Skeleton } from "@/components/ui/Skeleton";
+import { useToast } from "@/components/ui/Toast";
+import { adminRequest, queryString, useAdminQuery } from "@/modules/admin/api";
+import { KnowledgeBaseCreateDialog } from "@/modules/knowledge-management/components/KnowledgeBaseCreateDialog";
+import {
+  collectionDescription,
+  KnowledgeBaseEditDialog,
+} from "@/modules/knowledge-management/components/KnowledgeBaseEditDialog";
+import { errorMessage, formatDate } from "@/modules/knowledge-management/presentation";
 import type {
+  DirectoryUser,
   KnowledgeItem,
   Paginated,
   PluginBinding,
-  SyncRun,
 } from "@/modules/knowledge-management/types";
 
-type Readiness = "search_ready" | "indexing" | "needs_attention" | "not_started";
+type SortOption = "updated_desc" | "updated_asc" | "name_asc";
+type KnowledgeBaseRecord = KnowledgeItem & {
+  documentCount: number;
+  sourceCount: number;
+  ownerName: string;
+};
 
 export function KnowledgeBasePage() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const { toast } = useToast();
   const [search, setSearch] = useState(() => searchParams.get("q") ?? "");
-  const [status, setStatus] = useState(() => searchParams.get("status") ?? "");
-  const [wizardOpen, setWizardOpen] = useState(false);
-  const collectionsPath = `/items${queryString({ page_size: 100, item_type: "collection", search, status })}`;
-  const collections = useAdminQuery<Paginated<KnowledgeItem>>(collectionsPath);
+  const [owner, setOwner] = useState(() => searchParams.get("owner") ?? "");
+  const [sort, setSort] = useState<SortOption>(() => sortOption(searchParams.get("sort")));
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editing, setEditing] = useState<KnowledgeItem | null>(null);
+  const [deleting, setDeleting] = useState<KnowledgeItem | null>(null);
+  const [deletingNow, setDeletingNow] = useState(false);
+  const backendSort = sort === "name_asc"
+    ? { sort: "title", direction: "asc" }
+    : { sort: "updated_at", direction: sort === "updated_asc" ? "asc" : "desc" };
+  const collections = useAdminQuery<Paginated<KnowledgeItem>>(
+    `/items${queryString({
+      page_size: 100,
+      item_type: "collection",
+      search,
+      created_by_user_id: owner || undefined,
+      ...backendSort,
+    })}`,
+  );
   const documents = useAdminQuery<Paginated<KnowledgeItem>>("/items?page_size=100&item_type=document");
   const bindings = useAdminQuery<Paginated<PluginBinding>>("/plugin-bindings?page_size=100");
-  const runs = useAdminQuery<Paginated<SyncRun>>("/ingestion/jobs?page_size=100");
-  const updateFilter = useCallback((key: "q" | "status", value: string) => {
+  const users = useAdminQuery<Paginated<DirectoryUser>>("/users?page_size=100&status=active");
+
+  const updateFilter = useCallback((key: "q" | "owner" | "sort", value: string) => {
     const params = new URLSearchParams(searchParams.toString());
-    if (value) params.set(key, value);
+    if (value && !(key === "sort" && value === "updated_desc")) params.set(key, value);
     else params.delete(key);
     router.replace(`${pathname}${params.size ? `?${params.toString()}` : ""}`, { scroll: false });
   }, [pathname, router, searchParams]);
-  const reloadAll = useCallback(() => {
-    collections.reload();
-    documents.reload();
-    bindings.reload();
-    runs.reload();
-  }, [bindings, collections, documents, runs]);
+  const handleSearch = useCallback((value: string) => {
+    setSearch(value);
+    updateFilter("q", value);
+  }, [updateFilter]);
 
-  const records = useMemo(() => (collections.data?.items ?? []).map((collection) => {
-    const collectionBindings = (bindings.data?.items ?? []).filter((binding) => binding.target_item_id === collection.id);
-    const bindingIds = new Set(collectionBindings.map((binding) => binding.id));
-    const collectionRuns = (runs.data?.items ?? []).filter((run) => bindingIds.has(run.binding_id));
-    const collectionDocuments = (documents.data?.items ?? []).filter((document) => document.parent_item_id === collection.id);
-    return {
-      ...collection,
-      sourceCount: collectionBindings.length,
-      documentCount: collectionDocuments.length,
-      readiness: readiness(collectionBindings, collectionDocuments, collectionRuns),
-      schedule: scheduleLabel(collectionBindings),
-    };
-  }), [bindings.data?.items, collections.data?.items, documents.data?.items, runs.data?.items]);
+  const records = useMemo<KnowledgeBaseRecord[]>(() => {
+    const people = new Map((users.data?.items ?? []).map((user) => [user.id, user]));
+    return (collections.data?.items ?? []).map((collection) => {
+      const creator = collection.created_by_user_id
+        ? people.get(collection.created_by_user_id)
+        : undefined;
+      return {
+        ...collection,
+        documentCount: collection.item_count ?? (documents.data?.items ?? []).filter((document) => document.parent_item_id === collection.id).length,
+        sourceCount: collection.source_count ?? (bindings.data?.items ?? []).filter((binding) => binding.target_item_id === collection.id).length,
+        ownerName: creator?.display_name || creator?.email || "Workspace owner",
+      };
+    }).filter((collection) => !owner || collection.created_by_user_id === owner);
+  }, [bindings.data?.items, collections.data?.items, documents.data?.items, owner, users.data?.items]);
 
-  const counts = useMemo(() => ({
-    documents: documents.data?.total ?? 0,
-    sources: (bindings.data?.items ?? []).filter((binding) => binding.status === "active").length,
-    ready: (documents.data?.items ?? []).filter((document) => document.status === "ready" && document.indexed).length,
-    recentSyncs: (runs.data?.items ?? []).filter((run) => {
-      const timestamp = Date.parse(run.finished_at ?? run.created_at);
-      return Number.isFinite(timestamp) && timestamp >= Date.now() - 7 * 24 * 60 * 60 * 1000;
-    }).length,
-  }), [bindings.data?.items, documents.data?.items, documents.data?.total, runs.data?.items]);
+  const ownerOptions = useMemo(() => [
+    { value: "", label: "All owners" },
+    ...(users.data?.items ?? []).map((user) => ({
+      value: user.id,
+      label: user.display_name || user.email,
+    })),
+  ], [users.data?.items]);
 
-  const columns = useMemo<Column<typeof records[number]>[]>(() => [
+  const columns = useMemo<Column<KnowledgeBaseRecord>[]>(() => [
     {
       key: "title",
       label: "Knowledge base",
-      minWidth: 260,
+      minWidth: 300,
       sortable: true,
       render: (row) => (
-        <div className="min-w-0">
+        <div className="min-w-0 py-0.5">
           <p className="truncate font-medium text-[var(--text)]">{row.title}</p>
-          <p className="mt-0.5 truncate text-xs text-[var(--text-muted)]">{typeof row.metadata?.description === "string" ? row.metadata.description : `Collection · ${shortId(row.id)}`}</p>
+          <p className="mt-0.5 max-w-xl truncate text-xs text-[var(--text-muted)]">
+            {collectionDescription(row) || "No description"}
+          </p>
         </div>
       ),
     },
-    { key: "readiness", label: "Readiness", render: (row) => <ReadinessBadge value={row.readiness} /> },
+    { key: "documentCount", label: "Items", align: "right", sortable: true },
     { key: "sourceCount", label: "Sources", align: "right", sortable: true },
-    { key: "documentCount", label: "Documents", align: "right", sortable: true },
-    { key: "schedule", label: "Refresh", render: (row) => row.schedule },
-    { key: "status", label: "Lifecycle", render: (row) => <StatusBadge status={row.status} /> },
+    { key: "ownerName", label: "Owner", minWidth: 170, sortable: true },
     { key: "updated_at", label: "Updated", minWidth: 170, sortable: true, render: (row) => formatDate(row.updated_at) },
   ], []);
+
+  async function removeKnowledgeBase() {
+    if (!deleting || deletingNow) return;
+    setDeletingNow(true);
+    try {
+      await adminRequest(`/items/${deleting.id}`, { method: "DELETE" });
+      toast({
+        title: "Knowledge base archived",
+        description: "The collection is hidden from normal reads; its lineage remains retained.",
+        variant: "success",
+      });
+      setDeleting(null);
+      collections.reload();
+    } catch (cause) {
+      toast({ title: "Knowledge base could not be archived", description: errorMessage(cause), variant: "error" });
+    } finally {
+      setDeletingNow(false);
+    }
+  }
+
+  const filtersActive = Boolean(search || owner || sort !== "updated_desc");
 
   return (
     <div className="mx-auto min-w-0 w-full max-w-[92rem]">
       <PageHeader
-        actions={(
-          <>
-            <Button icon={<RefreshCw aria-hidden="true" className="h-4 w-4" />} onClick={reloadAll} variant="secondary">Refresh</Button>
-            <Button icon={<Plus aria-hidden="true" className="h-4 w-4" />} onClick={() => setWizardOpen(true)}>Add knowledge</Button>
-          </>
-        )}
-        description="Curate trusted enterprise knowledge from governed sources, access rules, and auditable syncs."
+        actions={<Button icon={<Plus aria-hidden="true" className="h-4 w-4" />} onClick={() => setCreateOpen(true)}>Create knowledge base</Button>}
+        description="Organize trusted company knowledge into collections, then add content in the way that fits each team."
         metadata={collections.data ? <span>{collections.data.total.toLocaleString()} total</span> : undefined}
-        title="Knowledge"
+        title="Knowledge Bases"
       />
 
-      <section aria-label="Knowledge base summary" className="knowledge-metrics">
-        <Metric icon={<FileText />} label="Documents" value={counts.documents} />
-        <Metric icon={<Database />} label="Connected sources" tone="ready" value={counts.sources} />
-        <Metric icon={<SearchCheck />} label="Search-ready" tone="processing" value={counts.ready} />
-        <Metric icon={<RefreshCw />} label="Syncs · 7 days" value={counts.recentSyncs} />
-      </section>
-
-      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-        <SearchInput ariaLabel="Search knowledge bases" className="w-full sm:max-w-sm" onChange={(value) => { setSearch(value); updateFilter("q", value); }} placeholder="Search knowledge bases…" value={search} />
-        <Select
-          aria-label="Filter knowledge bases by lifecycle status"
-          className="w-full sm:w-44"
-          onChange={(event) => { setStatus(event.target.value); updateFilter("status", event.target.value); }}
-          options={[
-            { value: "", label: "All lifecycle states" },
-            { value: "ready", label: "Ready" },
-            { value: "processing", label: "Processing" },
-            { value: "failed", label: "Failed" },
-            { value: "pending", label: "Pending" },
-          ]}
-          value={status}
+      <div className="knowledge-list-toolbar">
+        <SearchInput
+          ariaLabel="Search knowledge bases"
+          className="w-full md:max-w-md"
+          onChange={handleSearch}
+          placeholder="Search by name or description…"
+          value={search}
         />
+        <div className="grid grid-cols-2 gap-2 sm:flex">
+          <Select
+            aria-label="Filter knowledge bases by owner"
+            className="min-w-0 sm:w-48"
+            onChange={(event) => {
+              setOwner(event.target.value);
+              updateFilter("owner", event.target.value);
+            }}
+            options={ownerOptions}
+            value={owner}
+          />
+          <Select
+            aria-label="Sort knowledge bases"
+            className="min-w-0 sm:w-48"
+            onChange={(event) => {
+              const next = event.target.value as SortOption;
+              setSort(next);
+              updateFilter("sort", next);
+            }}
+            options={[
+              { value: "updated_desc", label: "Recently updated" },
+              { value: "updated_asc", label: "Least recently updated" },
+              { value: "name_asc", label: "Name A–Z" },
+            ]}
+            value={sort}
+          />
+        </div>
       </div>
 
       {collections.loading ? (
-        <div aria-busy="true" className="knowledge-table-skeleton">
-          <span>Loading governed collections…</span>
-        </div>
+        <KnowledgeBaseListSkeleton />
       ) : collections.error ? (
         <ErrorState actionLabel="Retry" description={collections.error} onAction={collections.reload} title="Knowledge bases are unavailable" />
       ) : records.length ? (
-        <DataTable
-          columns={columns}
-          data={records}
-          density="default"
-          emptyMessage="No knowledge bases match these filters"
-          onRowClick={(row) => router.push(`/admin/knowledge-bases/${row.id}`)}
-        />
+        <>
+          <DataTable
+            className="max-md:hidden"
+            columns={columns}
+            data={records}
+            onRowClick={(row) => router.push(`/admin/knowledge-bases/${row.id}`)}
+            rowActions={(row) => (
+              <KnowledgeBaseRowMenu
+                onArchive={() => setDeleting(row)}
+                onEdit={() => setEditing(row)}
+                onManageAccess={() => router.push(`/admin/knowledge-bases/${row.id}?tab=settings#access`)}
+                onOpen={() => router.push(`/admin/knowledge-bases/${row.id}`)}
+                row={row}
+              />
+            )}
+          />
+          <div className="space-y-2 md:hidden">
+            {records.map((row) => (
+              <article className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3" key={row.id}>
+                <div className="flex items-start gap-3">
+                  <button className="min-w-0 flex-1 text-left" onClick={() => router.push(`/admin/knowledge-bases/${row.id}`)} type="button">
+                    <h2 className="truncate text-sm font-semibold text-[var(--text)]">{row.title}</h2>
+                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--text-muted)]">{collectionDescription(row) || "No description"}</p>
+                  </button>
+                  <KnowledgeBaseRowMenu
+                    onArchive={() => setDeleting(row)}
+                    onEdit={() => setEditing(row)}
+                    onManageAccess={() => router.push(`/admin/knowledge-bases/${row.id}?tab=settings#access`)}
+                    onOpen={() => router.push(`/admin/knowledge-bases/${row.id}`)}
+                    row={row}
+                  />
+                </div>
+                <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-[var(--border)] pt-3 text-xs">
+                  <div><dt className="text-[var(--text-muted)]">Items</dt><dd className="mt-0.5 font-medium text-[var(--text)]">{row.documentCount.toLocaleString()}</dd></div>
+                  <div><dt className="text-[var(--text-muted)]">Sources</dt><dd className="mt-0.5 font-medium text-[var(--text)]">{row.sourceCount.toLocaleString()}</dd></div>
+                  <div><dt className="text-[var(--text-muted)]">Owner</dt><dd className="mt-0.5 truncate font-medium text-[var(--text)]">{row.ownerName}</dd></div>
+                  <div><dt className="text-[var(--text-muted)]">Updated</dt><dd className="mt-0.5 font-medium text-[var(--text)]">{formatDate(row.updated_at)}</dd></div>
+                </dl>
+              </article>
+            ))}
+          </div>
+        </>
       ) : (
-        <div className="border-y border-[var(--border)] bg-[var(--surface)]">
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)]">
           <EmptyState
-            action={<Button icon={<Plus aria-hidden="true" className="h-4 w-4" />} onClick={() => setWizardOpen(true)}>Add knowledge</Button>}
-            description="Connect a trusted source, choose scope and access, then start the first governed sync."
-            icon={<FileText className="h-5 w-5" />}
-            title={search || status ? "No knowledge bases match these filters" : "Create your first knowledge base"}
+            action={filtersActive ? (
+              <Button onClick={() => {
+                setSearch("");
+                setOwner("");
+                setSort("updated_desc");
+                router.replace(pathname, { scroll: false });
+              }} variant="secondary">Clear filters</Button>
+            ) : (
+              <Button icon={<Plus aria-hidden="true" className="h-4 w-4" />} onClick={() => setCreateOpen(true)}>Create knowledge base</Button>
+            )}
+            description={filtersActive
+              ? "Try a different search, owner, or sort option."
+              : "Create an empty collection now, then upload files, add items, or connect a source when you are ready."}
+            icon={<Library className="h-5 w-5" />}
+            title={filtersActive ? "No knowledge bases match these filters" : "Create your first knowledge base"}
           />
         </div>
       )}
 
-      {(bindings.error || documents.error || runs.error) && !collections.error && (
-        <p className="mt-3 text-xs leading-5 text-[var(--warning)]" role="status">
-          Some readiness details are unavailable. Collection records remain visible; refresh after the source services recover.
+      {(documents.error || bindings.error || users.error) && !collections.error && (
+        <p className="mt-3 text-xs leading-5 text-[var(--warning-text)]" role="status">
+          Some item, source, or owner details are unavailable. Knowledge bases remain openable.
         </p>
       )}
 
-      {wizardOpen && (
-        <KnowledgeBaseWizard
-          onClose={() => setWizardOpen(false)}
-          onCreated={(knowledgeBaseId) => {
-            setWizardOpen(false);
-            router.push(`/admin/knowledge-bases/${knowledgeBaseId}`);
+      {createOpen && (
+        <KnowledgeBaseCreateDialog
+          onClose={() => setCreateOpen(false)}
+          onCreated={(knowledgeBase) => {
+            setCreateOpen(false);
+            router.push(`/admin/knowledge-bases/${knowledgeBase.id}`);
           }}
         />
+      )}
+      {editing && (
+        <KnowledgeBaseEditDialog
+          item={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            collections.reload();
+          }}
+        />
+      )}
+      {deleting && (
+        <Dialog
+          footer={(
+            <>
+              <Button disabled={deletingNow} onClick={() => setDeleting(null)} variant="secondary">Cancel</Button>
+              <Button loading={deletingNow} onClick={removeKnowledgeBase} variant="danger">Archive knowledge base</Button>
+            </>
+          )}
+          onClose={() => { if (!deletingNow) setDeleting(null); }}
+          open
+          title="Archive knowledge base?"
+        >
+          <p className="text-sm leading-6 text-[var(--text-muted)]">
+            <strong className="font-semibold text-[var(--text)]">{deleting.title}</strong> will be hidden from normal reads. Source lineage, raw objects, provider references, and vector records remain retained under lifecycle policy.
+          </p>
+        </Dialog>
       )}
     </div>
   );
 }
 
-function Metric({ icon, label, tone, value }: { icon: React.ReactNode; label: string; tone?: "ready" | "processing" | "warning"; value: number }) {
+function KnowledgeBaseListSkeleton() {
   return (
-    <div className={tone ? `knowledge-metric knowledge-metric--${tone}` : "knowledge-metric"}>
-      <span aria-hidden="true">{icon}</span>
-      <span><strong>{value.toLocaleString()}</strong><small>{label}</small></span>
+    <div aria-busy="true" aria-label="Loading knowledge bases" className="overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)]">
+      <div className="grid grid-cols-[minmax(0,2fr)_repeat(3,minmax(7rem,0.6fr))] gap-4 border-b border-[var(--border)] bg-[var(--bg-panel)] px-4 py-3 max-md:hidden">
+        {["w-32", "w-12", "w-16", "w-20"].map((width, index) => <Skeleton className={`h-3 ${width}`} key={index} />)}
+      </div>
+      <div className="divide-y divide-[var(--border)]">
+        {[0, 1, 2, 3, 4].map((index) => (
+          <div className="grid min-h-16 grid-cols-[minmax(0,2fr)_repeat(3,minmax(7rem,0.6fr))] items-center gap-4 px-4 py-3 max-md:block" key={index}>
+            <div className="space-y-2"><Skeleton className="h-4 w-48 max-w-full" /><Skeleton className="h-3 w-72 max-w-full" /></div>
+            <Skeleton className="h-3 w-12 max-md:hidden" />
+            <Skeleton className="h-3 w-24 max-md:hidden" />
+            <Skeleton className="h-3 w-28 max-md:hidden" />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
-function ReadinessBadge({ value }: { value: Readiness }) {
-  if (value === "search_ready") return <Badge dot variant="primary">Search-ready</Badge>;
-  if (value === "indexing") return <Badge dot variant="info">Processing</Badge>;
-  if (value === "needs_attention") return <Badge dot variant="warning">Needs attention</Badge>;
-  return <Badge dot variant="default">Not started</Badge>;
+function sortOption(value: string | null): SortOption {
+  return value === "updated_asc" || value === "name_asc" ? value : "updated_desc";
 }
 
-function readiness(bindings: PluginBinding[], documents: KnowledgeItem[], runs: SyncRun[]): Readiness {
-  if (runs.some((run) => run.status === "failed") || documents.some((document) => document.status === "failed")) return "needs_attention";
-  if (!bindings.length && !runs.length) return "not_started";
-  if (documents.length && documents.every((document) => document.status === "ready" && document.indexed)) return "search_ready";
-  return "indexing";
-}
-
-function scheduleLabel(bindings: PluginBinding[]) {
-  const scheduled = bindings.find((binding) => binding.schedule?.enabled)?.schedule;
-  if (!scheduled) return "Manual";
-  if (scheduled.cron_expression === "0 2 * * *") return "Daily · 02:00";
-  if (scheduled.cron_expression === "0 2 * * 1") return "Weekly · Mon 02:00";
-  return scheduled.cron_expression;
-}
-
-function shortId(value: string) {
-  return value.length > 14 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+function KnowledgeBaseRowMenu({
+  onArchive,
+  onEdit,
+  onManageAccess,
+  onOpen,
+  row,
+}: {
+  onArchive: () => void;
+  onEdit: () => void;
+  onManageAccess: () => void;
+  onOpen: () => void;
+  row: KnowledgeBaseRecord;
+}) {
+  return (
+    <Dropdown
+      ariaLabel={`Actions for ${row.title}`}
+      buttonClassName="h-10 w-10 px-0"
+      label={<MoreHorizontal aria-hidden="true" className="h-4 w-4" />}
+      menuClassName="w-48"
+      showChevron={false}
+    >
+      <DropdownItem onClick={onOpen}><Library aria-hidden="true" className="h-4 w-4" />Open</DropdownItem>
+      <DropdownItem onClick={onEdit}><Edit3 aria-hidden="true" className="h-4 w-4" />Rename</DropdownItem>
+      <DropdownItem onClick={onManageAccess}><LockKeyhole aria-hidden="true" className="h-4 w-4" />Manage access</DropdownItem>
+      <DropdownItem destructive onClick={onArchive}><Archive aria-hidden="true" className="h-4 w-4" />Archive</DropdownItem>
+    </Dropdown>
+  );
 }

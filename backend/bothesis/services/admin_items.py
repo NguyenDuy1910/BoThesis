@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -93,6 +93,7 @@ class AdminItemService:
         status: str | None = None,
         item_type: str | None = None,
         binding_id: UUID | None = None,
+        created_by_user_id: UUID | None = None,
         sort: str = "updated_at",
         direction: str = "desc",
     ) -> dict[str, Any]:
@@ -108,7 +109,13 @@ class AdminItemService:
             matching_origins = select(ItemOrigin.item_id).where(
                 ItemOrigin.external_id.ilike(term), ItemOrigin.deleted_at.is_(None)
             )
-            filters.append(or_(Item.title.ilike(term), Item.id.in_(matching_origins)))
+            filters.append(
+                or_(
+                    Item.title.ilike(term),
+                    cast(Item.metadata_["description"], String).ilike(term),
+                    Item.id.in_(matching_origins),
+                )
+            )
         if status:
             normalized = status.strip().casefold()
             if normalized not in _ITEM_STATUSES:
@@ -128,6 +135,8 @@ class AdminItemService:
                     )
                 )
             )
+        if created_by_user_id is not None:
+            filters.append(Item.created_by_user_id == created_by_user_id)
         total = await self._session.scalar(
             select(func.count()).select_from(select(Item.id).where(*filters).subquery())
         )
@@ -155,8 +164,54 @@ class AdminItemService:
                 .offset(offset)
             )
         )
+        collection_ids = [item.id for item in items if item.item_type == "collection"]
+        item_counts: dict[UUID, int] = {}
+        source_counts: dict[UUID, int] = {}
+        if collection_ids:
+            item_counts = {
+                parent_id: int(count)
+                for parent_id, count in (
+                    await self._session.execute(
+                        select(Item.parent_item_id, func.count(Item.id))
+                        .where(
+                            Item.parent_item_id.in_(collection_ids),
+                            Item.item_type == "document",
+                            Item.status != "deleted",
+                            Item.deleted_at.is_(None),
+                        )
+                        .group_by(Item.parent_item_id)
+                    )
+                ).all()
+                if parent_id is not None
+            }
+            source_counts = {
+                target_id: int(count)
+                for target_id, count in (
+                    await self._session.execute(
+                        select(PluginBinding.target_item_id, func.count(PluginBinding.id))
+                        .where(
+                            PluginBinding.target_item_id.in_(collection_ids),
+                            PluginBinding.deleted_at.is_(None),
+                        )
+                        .group_by(PluginBinding.target_item_id)
+                    )
+                ).all()
+            }
         return {
-            "items": [self._payload(item) for item in items],
+            "items": [
+                {
+                    **self._payload(item),
+                    **(
+                        {
+                            "item_count": item_counts.get(item.id, 0),
+                            "source_count": source_counts.get(item.id, 0),
+                        }
+                        if item.item_type == "collection"
+                        else {}
+                    ),
+                }
+                for item in items
+            ],
             "total": int(total or 0),
             "page": page,
             "page_size": page_size,
@@ -217,6 +272,53 @@ class AdminItemService:
         )
         return await self.get_item(actor, item_id)
 
+    async def update_collection(
+        self,
+        actor: AuthContext,
+        item_id: UUID,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        description_provided: bool = False,
+    ) -> dict[str, Any]:
+        previous = await self.get_item(actor, item_id)
+        if previous["item_type"] != "collection":
+            raise AdminValidationError("only collections can use this update")
+        if title is None and not description_provided:
+            raise AdminValidationError("collection update has no changes")
+
+        item = await self._session.get(Item, item_id)
+        assert item is not None
+        changed_fields: list[str] = []
+        if title is not None:
+            item.title = normalize_required_text(title, "collection title", 255)
+            changed_fields.append("title")
+        if description_provided:
+            normalized_description = (
+                description.strip() if description is not None else ""
+            )
+            if len(normalized_description) > 2_000:
+                raise AdminValidationError(
+                    "collection description must be at most 2000 characters"
+                )
+            metadata = dict(item.metadata_)
+            if normalized_description:
+                metadata["description"] = normalized_description
+            else:
+                metadata.pop("description", None)
+            item.metadata_ = metadata
+            changed_fields.append("description")
+
+        await self._session.flush()
+        await self._audit.record(
+            actor,
+            action="collection.updated",
+            resource_type="collection",
+            resource_id=str(item.id),
+            details={"changed_fields": changed_fields},
+        )
+        return await self.get_item(actor, item.id)
+
     async def retry_item(self, actor: AuthContext, item_id: UUID) -> dict[str, Any]:
         payload = await self.get_item(actor, item_id)
         if payload["status"] != "failed":
@@ -254,6 +356,7 @@ class AdminItemService:
     @staticmethod
     def _payload(item: Item) -> dict[str, Any]:
         processing = item.metadata_.get("processing")
+        description = item.metadata_.get("description")
         origins = [origin for origin in item.origins if origin.deleted_at is None]
         return {
             "id": str(item.id),
@@ -267,6 +370,13 @@ class AdminItemService:
             "status": item.status,
             "indexed": isinstance(processing, dict)
             and processing.get("index_schema_version") is not None,
+            "metadata": (
+                {"description": description} if isinstance(description, str) else {}
+            ),
+            "inherit_access": item.inherit_access,
+            "created_by_user_id": (
+                str(item.created_by_user_id) if item.created_by_user_id else None
+            ),
             "created_at": timestamp(item.created_at),
             "updated_at": timestamp(item.updated_at),
             "origins": [

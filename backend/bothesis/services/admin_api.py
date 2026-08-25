@@ -250,6 +250,22 @@ class AdminApiService:
             async with self._item_service(session) as service:
                 return await service.get_item(actor, item_id)
 
+    async def update_collection(
+        self,
+        identity: RequestIdentity,
+        item_id: UUID,
+        changes: dict[str, Any],
+    ) -> dict[str, Any]:
+        async with self._request(identity) as (session, actor):
+            async with self._item_service(session) as service:
+                return await service.update_collection(
+                    actor,
+                    item_id,
+                    title=changes.get("title"),
+                    description=changes.get("description"),
+                    description_provided="description" in changes,
+                )
+
     async def update_item(
         self, identity: RequestIdentity, item_id: UUID, status: str
     ) -> dict[str, Any]:

@@ -195,10 +195,12 @@ class DocumentUploadTarget(BaseModel):
 
 class DocumentMetadata(BaseModel):
     id: str
+    parent_item_id: str | None = None
     file_name: str
     content_type: str
     size_bytes: int
     status: Literal["pending", "processing", "ready", "failed", "unsupported"]
+    indexed: bool = False
     upload_status: Literal["pending", "available", "failed"] | None = None
     created_at: str
     uploaded_at: str | None = None
@@ -208,6 +210,12 @@ class DocumentUploadStartResponse(BaseModel):
     upload_required: bool
     target: DocumentUploadTarget | None = None
     document: DocumentMetadata
+
+
+class CollectionDocumentUploadResponse(BaseModel):
+    document: DocumentMetadata
+    ingestion_status: Literal["ready", "failed"]
+    created: bool
 
 
 # --- Document Index ---
@@ -471,6 +479,11 @@ class CollectionCreate(AdminRequest):
     parent_item_id: UUID | None = None
     inherit_access: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class CollectionUpdate(AdminRequest):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2_000)
 
 
 class AccessRequestCreate(AdminRequest):
@@ -790,6 +803,33 @@ async def get_knowledge_item_viewer(
 
 
 documents_router = APIRouter(prefix="/documents", tags=["documents"])
+collections_router = APIRouter(prefix="/collections", tags=["collections"])
+
+
+@collections_router.post(
+    "/{collection_id}/documents/upload",
+    response_model=CollectionDocumentUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_collection_document(
+    collection_id: UUID,
+    request: Request,
+    file: Annotated[UploadFile, File(...)],
+    idempotency_key: Annotated[
+        str,
+        Header(min_length=1, max_length=128, alias="Idempotency-Key"),
+    ],
+) -> CollectionDocumentUploadResponse:
+    return CollectionDocumentUploadResponse.model_validate(
+        await _api_service.upload_collection_document(
+            _request_identity(request),
+            collection_id,
+            idempotency_key=idempotency_key,
+            file_name=file.filename or "upload",
+            content_type=file.content_type or "application/octet-stream",
+            content=file,
+        )
+    )
 
 
 @documents_router.post(
@@ -827,6 +867,22 @@ async def complete_document_upload(
 ) -> DocumentMetadata:
     return DocumentMetadata.model_validate(
         await _api_service.complete_document_upload(
+            _request_identity(request),
+            document_id,
+        )
+    )
+
+
+@documents_router.post(
+    "/{document_id}/retry",
+    response_model=CollectionDocumentUploadResponse,
+)
+async def retry_document_indexing(
+    document_id: UUID,
+    request: Request,
+) -> CollectionDocumentUploadResponse:
+    return CollectionDocumentUploadResponse.model_validate(
+        await _api_service.retry_document_indexing(
             _request_identity(request),
             document_id,
         )
@@ -1349,6 +1405,7 @@ async def admin_list_items(
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     item_type: str | None = None,
     binding_id: UUID | None = None,
+    created_by_user_id: UUID | None = None,
     sort: str = "updated_at",
     direction: str = "desc",
 ) -> dict[str, Any]:
@@ -1360,6 +1417,7 @@ async def admin_list_items(
         status=status_filter,
         item_type=item_type,
         binding_id=binding_id,
+        created_by_user_id=created_by_user_id,
         sort=sort,
         direction=direction,
     )
@@ -1370,6 +1428,19 @@ async def admin_create_collection(
     body: CollectionCreate, identity: AdminIdentity
 ) -> dict[str, Any]:
     return await _admin_service.create_collection(identity, body.model_dump())
+
+
+@admin_router.patch("/collections/{item_id}")
+async def admin_update_collection(
+    item_id: UUID,
+    body: CollectionUpdate,
+    identity: AdminIdentity,
+) -> dict[str, Any]:
+    return await _admin_service.update_collection(
+        identity,
+        item_id,
+        body.model_dump(exclude_unset=True),
+    )
 
 
 @admin_router.get("/items/{item_id}")
@@ -1612,6 +1683,7 @@ app.include_router(auth_router, prefix=_PREFIX)
 app.include_router(access_router, prefix=_PREFIX)
 app.include_router(agent_router, prefix=_PREFIX)
 app.include_router(knowledge_router, prefix=_PREFIX)
+app.include_router(collections_router, prefix=_PREFIX)
 app.include_router(documents_router, prefix=_PREFIX)
 app.include_router(crons_router, prefix=_PREFIX)
 app.include_router(bi_router, prefix=_PREFIX)

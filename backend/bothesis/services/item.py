@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import and_, false, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -21,7 +21,6 @@ from bothesis.db.models import (
     Message,
     MessageItem,
     PluginBinding,
-    PluginConnection,
 )
 from bothesis.services import (
     ACTIVE_STATUS,
@@ -185,6 +184,90 @@ class ItemService:
             NAMESPACE_URL,
             f"bothesis:upload:{tenant_id}:{owner_user_id}:{normalized_key}",
         )
+        return await self._create_or_get_upload(
+            item_id=item_id,
+            owner_user_id=owner_user_id,
+            tenant_id=tenant_id,
+            collection_id=collection_id,
+            idempotency_key=normalized_key,
+            file_name=normalized_name,
+            mime_type=normalized_mime,
+            size_bytes=size_bytes,
+            document_type=document_type,
+            metadata=metadata,
+        )
+
+    async def create_or_get_collection_upload(
+        self,
+        owner_user_id: UUID,
+        tenant_id: UUID,
+        collection_id: UUID,
+        *,
+        idempotency_key: str,
+        file_name: str,
+        mime_type: str,
+        size_bytes: int,
+        document_type: str,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> tuple[Item, bool]:
+        """Create one idempotent native upload under an existing collection."""
+
+        await AuthService(self._session).get_user(owner_user_id)
+        await AuthService(self._session).get_tenant(tenant_id)
+        collection = await self._session.scalar(
+            select(Item).where(
+                Item.id == collection_id,
+                Item.tenant_id == tenant_id,
+                Item.item_type == "collection",
+                Item.status == "ready",
+                Item.deleted_at.is_(None),
+            )
+        )
+        if collection is None:
+            raise InvalidDocumentStateError(
+                f"destination collection is unavailable: {collection_id}"
+            )
+        normalized_key = _required_text(
+            idempotency_key, "upload idempotency key", max_length=128
+        )
+        normalized_name = _required_text(file_name, "file name", max_length=240)
+        normalized_mime = _required_text(
+            mime_type, "mime type", max_length=255
+        ).casefold()
+        if size_bytes < 1:
+            raise ValueError("upload size must be greater than zero")
+        item_id = uuid5(
+            NAMESPACE_URL,
+            "bothesis:collection-upload:"
+            f"{tenant_id}:{owner_user_id}:{collection_id}:{normalized_key}",
+        )
+        return await self._create_or_get_upload(
+            item_id=item_id,
+            owner_user_id=owner_user_id,
+            tenant_id=tenant_id,
+            collection_id=collection_id,
+            idempotency_key=normalized_key,
+            file_name=normalized_name,
+            mime_type=normalized_mime,
+            size_bytes=size_bytes,
+            document_type=document_type,
+            metadata=metadata,
+        )
+
+    async def _create_or_get_upload(
+        self,
+        *,
+        item_id: UUID,
+        owner_user_id: UUID,
+        tenant_id: UUID,
+        collection_id: UUID,
+        idempotency_key: str,
+        file_name: str,
+        mime_type: str,
+        size_bytes: int,
+        document_type: str,
+        metadata: Mapping[str, Any] | None,
+    ) -> tuple[Item, bool]:
         storage_key = f"tenants/{tenant_id}/items/{item_id}/raw"
         inserted_id = await self._session.scalar(
             insert(Item)
@@ -195,11 +278,11 @@ class ItemService:
                 parent_item_id=collection_id,
                 parent_relation="contains",
                 document_type=_document_type(document_type),
-                title=normalized_name,
-                mime_type=normalized_mime,
+                title=file_name,
+                mime_type=mime_type,
                 size_bytes=size_bytes,
                 storage_key=storage_key,
-                metadata_={**dict(metadata or {}), "file_name": normalized_name},
+                metadata_={**dict(metadata or {}), "file_name": file_name},
                 status="pending",
                 created_by_user_id=owner_user_id,
             )
@@ -212,7 +295,7 @@ class ItemService:
                 item_id=item_id,
                 tenant_id=tenant_id,
                 owner_user_id=owner_user_id,
-                idempotency_key=normalized_key,
+                idempotency_key=idempotency_key,
                 status="pending",
             )
             .on_conflict_do_nothing(
@@ -231,8 +314,8 @@ class ItemService:
         if (
             item.tenant_id != tenant_id
             or item.parent_item_id != collection_id
-            or item.title != normalized_name
-            or item.mime_type != normalized_mime
+            or item.title != file_name
+            or item.mime_type != mime_type
             or item.size_bytes != size_bytes
             or item.status == "deleted"
         ):
@@ -449,6 +532,33 @@ class ItemService:
         if for_update:
             statement = statement.with_for_update(of=Item)
         item = await self._session.scalar(statement)
+        if item is None or item.upload is None:
+            raise DocumentNotFoundError(f"item not found: {item_id}")
+        return item
+
+    async def get_upload_for_access(
+        self,
+        item_id: UUID,
+        access: AuthContext,
+        *,
+        minimum_role: str = "viewer",
+    ) -> Item:
+        """Load a native upload through its governing collection permission."""
+
+        from bothesis.services.collection_access import CollectionAccessService
+
+        authorized = await CollectionAccessService(self._session).require_item_access(
+            item_id,
+            access=access,
+            minimum_role=minimum_role,
+        )
+        if authorized.item_type != "document":
+            raise DocumentNotFoundError(f"item not found: {item_id}")
+        item = await self._session.scalar(
+            select(Item)
+            .options(joinedload(Item.upload))
+            .where(Item.id == authorized.id)
+        )
         if item is None or item.upload is None:
             raise DocumentNotFoundError(f"item not found: {item_id}")
         return item

@@ -98,7 +98,6 @@ class DocumentPipeline:
         contexts: list[PreparedDocument] = []
         for document_id in document_ids:
             document = await self._load_visible_document(document_id, access=access)
-            title = _file_name(document)
             mode = self._route(document)
             try:
                 if mode == "direct":
@@ -170,6 +169,16 @@ class DocumentPipeline:
                     "provider annotation cache exceeded its limit document_id=%s",
                     document_id,
                 )
+
+    async def index_document(
+        self,
+        document_id: UUID,
+        *,
+        access: AuthContext,
+    ) -> Item:
+        """Parse and index an available native upload with retry-safe locking."""
+
+        return await self._ensure_indexed(document_id, access=access)
 
     async def soft_delete_document(
         self,
@@ -248,10 +257,9 @@ class DocumentPipeline:
         if access.tenant_id is None:
             raise DocumentUnavailableError("an active tenant is required")
         async with self._session_factory() as session:
-            document = await ItemService(session).get_owned_upload(
+            document = await ItemService(session).get_upload_for_access(
                 document_id,
-                access.user_id,
-                access.tenant_id,
+                access,
             )
             assert document.upload is not None
             if document.upload.status != "available":
@@ -433,8 +441,10 @@ class DocumentPipeline:
             if access.tenant_id is None:
                 raise DocumentUnavailableError("an active tenant is required")
             items = ItemService(session)
-            document = await items.get_owned_upload(
-                document_id, access.user_id, access.tenant_id
+            document = await items.get_upload_for_access(
+                document_id,
+                access,
+                minimum_role="editor",
             )
             if self._index_is_current(document, access=access):
                 return document

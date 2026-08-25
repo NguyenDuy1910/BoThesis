@@ -23,8 +23,7 @@ import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayout
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { AppShell } from "@/components/ui/AppShell";
 import { ProductMark } from "@/components/ui/ProductMark";
-import { getBothesisChatConfiguration, getBothesisDataMode } from "@/lib/api/config";
-import { seedMockConversationHistory } from "@/lib/mock/chat";
+import { getBothesisChatConfiguration } from "@/lib/api/config";
 import {
   getAvailableChatConnectors,
   releaseConversationDocument,
@@ -119,12 +118,7 @@ export default function ChatShell() {
 
   useEffect(() => {
     setConversationUser(getBothesisChatConfiguration()?.userId);
-    void (async () => {
-      if (getBothesisDataMode() === "mock") {
-        await seedMockConversationHistory(conversationAdapter);
-      }
-      await refresh();
-    })();
+    void refresh();
   }, [refresh]);
 
   useEffect(() => {
@@ -249,7 +243,6 @@ function ChatConversation({
   onMessagesSaved: (conversationId: string, messages: ChatMessage[]) => Promise<void>;
   onOpenSidebar: () => void;
 }) {
-  const isMockMode = getBothesisDataMode() === "mock";
   const [input, setInput] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<ComposerDocument[]>([]);
   const [connectors, setConnectors] = useState<ChatConnector[]>([]);
@@ -474,11 +467,6 @@ function ChatConversation({
             </span>
           </div>
         </div>
-        {isMockMode && (
-          <span className="mr-4 inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--primary-soft)] px-2.5 py-1 text-xs font-medium text-[var(--brand-accent)]">
-            Demo data
-          </span>
-        )}
       </header>
 
       <div className="conversation-pane">

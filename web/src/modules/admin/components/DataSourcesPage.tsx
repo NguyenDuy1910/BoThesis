@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ArrowLeft,
   ArrowRight,
   ChevronRight,
   CircleAlert,
@@ -11,6 +12,8 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/Badge";
@@ -72,6 +75,9 @@ const registryFilters: ReadonlyArray<{ id: RegistryFilter; label: string }> = [
 
 /** Tenant connector registry, separate from configured connection instances. */
 export function ConnectorRegistryPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const returnTo = safeKnowledgeBaseReturn(searchParams.get("returnTo"));
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<RegistryFilter>("all");
   const [selected, setSelected] = useState<ConnectorDefinition | null>(null);
@@ -119,6 +125,7 @@ export function ConnectorRegistryPage() {
   return (
     <div className="mx-auto min-w-0 w-full max-w-[88rem]">
       <PageHeader
+        actions={returnTo ? <Link className="knowledge-secondary-link" href={returnTo}><ArrowLeft aria-hidden="true" />Back to knowledge base</Link> : undefined}
         title="Connector Registry"
         description="Enable trusted integrations, manage connection instances, and control what BoThesis can search."
         metadata={<span>{connectorDefinitions.length} connector types{connections.data?.total ? ` · ${connections.data.total} configured` : ""}</span>}
@@ -186,9 +193,12 @@ export function ConnectorRegistryPage() {
           connections={instancesByProvider.get(selected.provider) ?? []}
           key={setupKey}
           onClose={() => setSelected(null)}
-          onCreated={() => {
+          onCreated={(connectionId) => {
             connections.reload();
             setSelected(null);
+            if (returnTo && connectionId) {
+              router.push(`${returnTo}?connect=${encodeURIComponent(connectionId)}`);
+            }
           }}
         />
       )}
@@ -360,7 +370,7 @@ function ConnectorDetailsDrawer({
   connector: ConnectorDefinition;
   connections: AdminRow[];
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (connectionId?: string) => void;
 }) {
   const backendProvider = connector.provider;
   const isFile = backendProvider === "file";
@@ -523,7 +533,7 @@ function ConfluenceConnectionSetup({
   onCreated,
   onDirtyChange,
 }: {
-  onCreated: () => void;
+  onCreated: (connectionId?: string) => void;
   onDirtyChange: (hasChanges: boolean) => void;
 }) {
   const { toast } = useToast();
@@ -576,7 +586,7 @@ function ConfluenceConnectionSetup({
       setCreatedId(connectorId);
       await adminRequest(`/plugin-connections/${connectorId}/validate`, { method: "POST" });
       toast({ title: "Confluence connected", description: "It is ready to bind to a knowledge base.", variant: "success" });
-      onCreated();
+      onCreated(connectorId);
     } catch (cause) {
       const detail = errorMessage(cause);
       setError(detail);
@@ -621,7 +631,7 @@ function FileConnectionSetup({
   onCreated,
   onDirtyChange,
 }: {
-  onCreated: () => void;
+  onCreated: (connectionId?: string) => void;
   onDirtyChange: (hasChanges: boolean) => void;
 }) {
   const { toast } = useToast();
@@ -647,7 +657,7 @@ function FileConnectionSetup({
       setCreatedId(connectorId);
       await adminRequest(`/plugin-connections/${connectorId}/validate`, { method: "POST" });
       toast({ title: "Managed files connected", description: "It is ready to bind to a knowledge base.", variant: "success" });
-      onCreated();
+      onCreated(connectorId);
     } catch (cause) {
       const detail = errorMessage(cause);
       setError(detail);
@@ -750,4 +760,10 @@ function titleCase(value: string) {
 
 function errorMessage(cause: unknown) {
   return cause instanceof Error ? cause.message : "The Admin request could not be completed.";
+}
+
+function safeKnowledgeBaseReturn(value: string | null) {
+  return value && /^\/admin\/knowledge-bases\/[A-Za-z0-9-]+$/.test(value)
+    ? value
+    : null;
 }

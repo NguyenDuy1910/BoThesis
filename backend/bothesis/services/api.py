@@ -31,6 +31,7 @@ from bothesis.document_index.indexer import (
     DEFAULT_PROCESSING_MAX_BYTES,
     DocumentPipeline,
 )
+from bothesis.document_index import DocumentProcessingError
 from bothesis.document_index.openrouter_embedding import OpenRouterEmbeddingService
 from bothesis.document_index.raw_storage import S3DocumentStorage
 from bothesis.document_index.search import QdrantSearchIndex
@@ -43,12 +44,15 @@ from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
     KNOWLEDGE_READ_PERMISSION,
+    AsyncUploadStream,
+    AuditService,
     AuthContext,
     ChatDocumentSourceService,
     CollectionAccessService,
     DocumentNotFoundError,
     ItemService,
     RequestIdentity,
+    UploadConflictError,
     UploadService,
     require_tenant_permission,
 )
@@ -218,6 +222,95 @@ class ApiService:
         access = await self._resolve_access(identity)
         document = await self._upload_service().complete_upload(access, document_id)
         return self._document_metadata(document)
+
+    async def upload_collection_document(
+        self,
+        identity: RequestIdentity,
+        collection_id: UUID,
+        *,
+        idempotency_key: str,
+        file_name: str,
+        content_type: str,
+        content: AsyncUploadStream,
+    ) -> dict[str, Any]:
+        """Store and index a native upload under one authorized collection."""
+
+        access = await self._resolve_access(identity)
+        upload = await self._upload_service().upload_to_collection(
+            access,
+            collection_id,
+            idempotency_key=idempotency_key,
+            file_name=file_name,
+            content_type=content_type,
+            content=content,
+        )
+        ingestion_status: Literal["ready", "failed"] = "ready"
+        document = upload.item
+        try:
+            document = await self._document_pipeline().index_document(
+                document.id,
+                access=access,
+            )
+        except DocumentProcessingError:
+            ingestion_status = "failed"
+            document = await self._upload_service().get_document(access, document.id)
+        async with session_scope(self._sessions()) as session:
+            await AuditService(session).record(
+                access,
+                action="document.uploaded",
+                resource_type="document",
+                resource_id=str(document.id),
+                details={
+                    "collection_id": str(collection_id),
+                    "created": upload.created,
+                    "ingestion_status": ingestion_status,
+                },
+            )
+        return {
+            "document": self._document_metadata(document),
+            "ingestion_status": ingestion_status,
+            "created": upload.created,
+        }
+
+    async def retry_document_indexing(
+        self,
+        identity: RequestIdentity,
+        document_id: UUID,
+    ) -> dict[str, Any]:
+        """Retry indexing from an already available native upload."""
+
+        access = await self._resolve_access(identity)
+        document = await self._upload_service().get_document(
+            access,
+            document_id,
+            minimum_role="editor",
+        )
+        if document.upload is None or document.upload.status != "available":
+            raise UploadConflictError(
+                "the original file is unavailable; upload the file again"
+            )
+        ingestion_status: Literal["ready", "failed"] = "ready"
+        try:
+            document = await self._document_pipeline().index_document(
+                document.id,
+                access=access,
+            )
+        except DocumentProcessingError:
+            ingestion_status = "failed"
+            document = await self._upload_service().get_document(access, document.id)
+        async with session_scope(self._sessions()) as session:
+            await AuditService(session).record(
+                access,
+                action="document.indexing.retried",
+                resource_type="document",
+                resource_id=str(document.id),
+                details={"ingestion_status": ingestion_status},
+            )
+        return {
+            "document": self._document_metadata(document),
+            "ingestion_status": ingestion_status,
+            "created": False,
+        }
 
     async def get_document(
         self,
@@ -668,8 +761,12 @@ class ApiService:
     @staticmethod
     def _document_metadata(document: Any) -> dict[str, Any]:
         upload = document.upload
+        processing = document.metadata_.get("processing")
         return {
             "id": str(document.id),
+            "parent_item_id": (
+                str(document.parent_item_id) if document.parent_item_id else None
+            ),
             "file_name": str(
                 document.metadata_.get("file_name")
                 or document.title
@@ -678,6 +775,8 @@ class ApiService:
             "content_type": document.mime_type or "application/octet-stream",
             "size_bytes": document.size_bytes or 0,
             "status": document.status,
+            "indexed": isinstance(processing, Mapping)
+            and processing.get("index_schema_version") is not None,
             "upload_status": upload.status if upload is not None else None,
             "created_at": document.created_at.isoformat(),
             "uploaded_at": (

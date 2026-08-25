@@ -88,7 +88,9 @@ class AccessRequestService:
         requested_role: str,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        tenant_id = require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
+        tenant_id = require_tenant_permission(actor)
+        if requester_user_id != actor.user_id:
+            require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
         user = await self._tenant_user(tenant_id, requester_user_id)
         collection = await self._collection(tenant_id, collection_item_id)
         role = requested_role.strip().casefold()

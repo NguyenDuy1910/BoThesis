@@ -78,7 +78,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               <button
                 aria-label={`Dismiss ${t.title} notification`}
                 onClick={() => dismiss(t.id)}
-                className="shrink-0 rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                 type="button"
               >
                 <X aria-hidden="true" className="h-3.5 w-3.5" />

@@ -29,6 +29,9 @@ export interface KnowledgeItem {
   parent_relation: string | null;
   status: "pending" | "processing" | "ready" | "failed" | "unsupported";
   indexed: boolean;
+  item_count?: number;
+  source_count?: number;
+  created_by_user_id: string | null;
   created_at: string;
   updated_at: string;
   origins: ItemOrigin[];
@@ -119,4 +122,21 @@ export interface DirectoryGroup {
   display_name: string;
   status: string;
   member_count: number;
+}
+
+export interface CollectionUploadResponse {
+  document: {
+    id: string;
+    parent_item_id: string | null;
+    file_name: string;
+    content_type: string;
+    size_bytes: number;
+    status: "pending" | "processing" | "ready" | "failed" | "unsupported";
+    indexed: boolean;
+    upload_status: "pending" | "available" | "failed" | null;
+    created_at: string;
+    uploaded_at: string | null;
+  };
+  ingestion_status: "ready" | "failed";
+  created: boolean;
 }

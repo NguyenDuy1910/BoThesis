@@ -254,7 +254,7 @@ export function DropdownItem({
       type={type}
       role="menuitem"
       className={cn(
-        "flex min-h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
+        "flex min-h-10 w-full items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
         destructive
           ? "text-[var(--danger)] hover:bg-[var(--danger-soft)]"
           : selected

@@ -6,10 +6,10 @@ errors, and shared constants live here so callers use one stable boundary.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 from uuid import UUID
 
 from bothesis.db.models import Item, ItemUpload
@@ -175,6 +175,13 @@ class UploadValidationError(UploadServiceError):
     pass
 
 
+@runtime_checkable
+class AsyncUploadStream(Protocol):
+    """Framework-neutral async byte stream accepted by upload services."""
+
+    async def read(self, size: int = -1) -> bytes: ...
+
+
 @dataclass(frozen=True, slots=True)
 class UploadTarget:
     mode: Literal["presigned"]
@@ -187,6 +194,14 @@ class UploadStart:
     upload: ItemUpload
     upload_required: bool
     target: UploadTarget | None
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionUpload:
+    """A retry-safe upload record created under a governed collection."""
+
+    item: Item
+    created: bool
 
 
 def _permission_code(value: str) -> str:
@@ -294,10 +309,12 @@ __all__ = [
     "AuthService",
     "AuthServiceError",
     "AuthorizationError",
+    "AsyncUploadStream",
     "CanonicalDocumentContent",
     "ChatDocumentSource",
     "ChatDocumentSourceService",
     "CollectionAccessService",
+    "CollectionUpload",
     "ConversationService",
     "DEFAULT_MAX_UPLOAD_BYTES",
     "DEFAULT_PROCESSING_MAX_BYTES",
