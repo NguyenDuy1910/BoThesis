@@ -1,4 +1,7 @@
 import {
+  LibraryBig,
+  PlugZap,
+  RefreshCw,
   ShieldCheck,
   Search,
   SquarePen,
@@ -22,6 +25,9 @@ export const sidebarNavigationItems: readonly SidebarNavigationItem[] = [
 ];
 
 export const sidebarSecondaryDestinations = [
+  { id: "knowledge", label: "Knowledge spaces", href: "/admin/knowledge-bases", icon: LibraryBig },
+  { id: "tools", label: "Plugins & tools", href: "/admin/sources", icon: PlugZap },
   { id: "workflows", label: "Workflows", href: "/workflows", icon: Workflow },
+  { id: "sync", label: "Sync activity", href: "/admin/sync-activity", icon: RefreshCw },
   { id: "admin", label: "Admin console", href: "/admin/overview", icon: ShieldCheck },
 ] as const;

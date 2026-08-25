@@ -26,7 +26,7 @@ class FinxConfluence:
             from atlassian import Confluence
         except ImportError as exc:
             raise RuntimeError(
-                "Confluence connector requires the optional 'atlassian-python-api' package"
+                "Confluence connector dependency 'atlassian-python-api' is not installed"
             ) from exc
         self.config = config
         self.base_url = url.rstrip("/")

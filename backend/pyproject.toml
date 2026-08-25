@@ -22,4 +22,5 @@ dependencies = [
     "textual>=8,<9",
     "uvicorn[standard]>=0.52.1",
     "docling>=2.121,<2.122",
+    "atlassian-python-api>=5.0.3,<6",
 ]

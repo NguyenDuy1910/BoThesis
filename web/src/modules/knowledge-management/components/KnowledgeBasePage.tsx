@@ -1,10 +1,8 @@
 "use client";
 
 import {
-  BookOpenCheck,
-  CircleAlert,
+  Database,
   FileText,
-  Library,
   Plus,
   RefreshCw,
   SearchCheck,
@@ -72,11 +70,14 @@ export function KnowledgeBasePage() {
   }), [bindings.data?.items, collections.data?.items, documents.data?.items, runs.data?.items]);
 
   const counts = useMemo(() => ({
-    total: records.length,
-    ready: records.filter((record) => record.readiness === "search_ready").length,
-    processing: records.filter((record) => record.readiness === "indexing").length,
-    attention: records.filter((record) => record.readiness === "needs_attention").length,
-  }), [records]);
+    documents: documents.data?.total ?? 0,
+    sources: (bindings.data?.items ?? []).filter((binding) => binding.status === "active").length,
+    ready: (documents.data?.items ?? []).filter((document) => document.status === "ready" && document.indexed).length,
+    recentSyncs: (runs.data?.items ?? []).filter((run) => {
+      const timestamp = Date.parse(run.finished_at ?? run.created_at);
+      return Number.isFinite(timestamp) && timestamp >= Date.now() - 7 * 24 * 60 * 60 * 1000;
+    }).length,
+  }), [bindings.data?.items, documents.data?.items, documents.data?.total, runs.data?.items]);
 
   const columns = useMemo<Column<typeof records[number]>[]>(() => [
     {
@@ -105,19 +106,19 @@ export function KnowledgeBasePage() {
         actions={(
           <>
             <Button icon={<RefreshCw aria-hidden="true" className="h-4 w-4" />} onClick={reloadAll} variant="secondary">Refresh</Button>
-            <Button icon={<Plus aria-hidden="true" className="h-4 w-4" />} onClick={() => setWizardOpen(true)}>New knowledge base</Button>
+            <Button icon={<Plus aria-hidden="true" className="h-4 w-4" />} onClick={() => setWizardOpen(true)}>Add knowledge</Button>
           </>
         )}
         description="Curate trusted enterprise knowledge from governed sources, access rules, and auditable syncs."
         metadata={collections.data ? <span>{collections.data.total.toLocaleString()} total</span> : undefined}
-        title="Knowledge Bases"
+        title="Knowledge"
       />
 
       <section aria-label="Knowledge base summary" className="knowledge-metrics">
-        <Metric icon={<Library />} label="Total" value={counts.total} />
-        <Metric icon={<SearchCheck />} label="Search-ready" tone="ready" value={counts.ready} />
-        <Metric icon={<BookOpenCheck />} label="Processing" tone="processing" value={counts.processing} />
-        <Metric icon={<CircleAlert />} label="Needs attention" tone="warning" value={counts.attention} />
+        <Metric icon={<FileText />} label="Documents" value={counts.documents} />
+        <Metric icon={<Database />} label="Connected sources" tone="ready" value={counts.sources} />
+        <Metric icon={<SearchCheck />} label="Search-ready" tone="processing" value={counts.ready} />
+        <Metric icon={<RefreshCw />} label="Syncs · 7 days" value={counts.recentSyncs} />
       </section>
 
       <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -154,7 +155,7 @@ export function KnowledgeBasePage() {
       ) : (
         <div className="border-y border-[var(--border)] bg-[var(--surface)]">
           <EmptyState
-            action={<Button icon={<Plus aria-hidden="true" className="h-4 w-4" />} onClick={() => setWizardOpen(true)}>Create knowledge base</Button>}
+            action={<Button icon={<Plus aria-hidden="true" className="h-4 w-4" />} onClick={() => setWizardOpen(true)}>Add knowledge</Button>}
             description="Connect a trusted source, choose scope and access, then start the first governed sync."
             icon={<FileText className="h-5 w-5" />}
             title={search || status ? "No knowledge bases match these filters" : "Create your first knowledge base"}

@@ -19,8 +19,8 @@ const variantClasses: Record<ButtonVariant, string> = {
 
 const sizeClasses: Record<ButtonSize, string> = {
   sm: "h-9 gap-1.5 rounded-md px-2.5 text-sm",
-  md: "h-10 gap-2 rounded-md px-3 text-sm",
-  lg: "h-11 gap-2 rounded-md px-3.5 text-sm",
+  md: "h-10 gap-2 rounded-md px-3.5 text-sm",
+  lg: "h-11 gap-2 rounded-md px-4 text-sm",
 };
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -47,7 +47,7 @@ export function Button({
     <button
       aria-busy={loading || undefined}
       className={cn(
-        "inline-flex shrink-0 items-center justify-center font-medium leading-none transition",
+        "inline-flex shrink-0 items-center justify-center font-medium leading-none transition-[background-color,border-color,color,box-shadow,opacity,transform] duration-[var(--duration-base)] ease-[var(--ease-standard)]",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)]",
         "disabled:pointer-events-none disabled:border-[var(--border)] disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)] disabled:opacity-50 disabled:shadow-none",
         variantClasses[variant],

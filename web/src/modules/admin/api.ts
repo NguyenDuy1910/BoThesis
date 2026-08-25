@@ -1,6 +1,7 @@
 "use client";
 
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getBothesisChatConfiguration, getBothesisDataMode } from "@/lib/api/config";
+import { mockAdminRequest, mockDatasourceUpload } from "@/lib/mock/admin";
 import { useCallback, useEffect, useState } from "react";
 
 export class AdminApiError extends Error {
@@ -17,6 +18,7 @@ export async function adminRequest<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  if (getBothesisDataMode() === "mock") return mockAdminRequest<T>(path, init);
   const configuration = getBothesisChatConfiguration();
   if (!configuration) {
     throw new AdminApiError(
@@ -105,6 +107,9 @@ export function uploadDatasourceFile<T>(
   file: File,
   options: { onProgress?: (percent: number) => void; signal?: AbortSignal } = {},
 ): Promise<T> {
+  if (getBothesisDataMode() === "mock") {
+    return mockDatasourceUpload<T>(connectorId, file, options);
+  }
   const configuration = getBothesisChatConfiguration();
   if (!configuration) {
     return Promise.reject(new AdminApiError(

@@ -11,9 +11,9 @@ export const ui = {
   focus:
     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)]",
   control:
-    "h-10 w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text)] transition-[border-color,box-shadow,background-color] placeholder:text-[var(--text-muted)] hover:border-[var(--border-strong)] focus:border-[var(--brand-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring)] disabled:cursor-not-allowed disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)]",
+    "h-10 w-full rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text)] transition-[border-color,box-shadow,background-color] duration-[var(--duration-base)] ease-[var(--ease-standard)] placeholder:text-[var(--text-placeholder)] hover:border-[var(--border-strong)] focus:border-[var(--brand-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring)] disabled:cursor-not-allowed disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)] disabled:opacity-60",
   textarea:
-    "min-h-20 w-full resize-y rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm leading-5 text-[var(--text)] transition-[border-color,box-shadow,background-color] placeholder:text-[var(--text-muted)] hover:border-[var(--border-strong)] focus:border-[var(--brand-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring)] disabled:cursor-not-allowed disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)]",
+    "min-h-20 w-full resize-y rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm leading-5 text-[var(--text)] transition-[border-color,box-shadow,background-color] duration-[var(--duration-base)] ease-[var(--ease-standard)] placeholder:text-[var(--text-placeholder)] hover:border-[var(--border-strong)] focus:border-[var(--brand-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--focus-ring)] disabled:cursor-not-allowed disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)] disabled:opacity-60",
   panel:
     "rounded-lg border border-[var(--border)] bg-[var(--surface)]",
   insetPanel:
@@ -28,7 +28,7 @@ export const ui = {
   iconButton:
     "inline-flex shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] transition-[background-color,color] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] active:bg-[var(--surface-selected)] disabled:pointer-events-none disabled:opacity-45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
   dangerFocus:
-    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/20 focus-visible:ring-offset-1 focus-visible:ring-offset-white",
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--danger-border)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)]",
   toolbar:
     "flex min-h-11 flex-wrap items-center gap-2 border-y border-[var(--border)] bg-[var(--surface)] px-3 py-2",
   tableShell:

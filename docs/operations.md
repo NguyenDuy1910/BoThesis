@@ -79,14 +79,14 @@ used by Compose; a `SignatureDoesNotMatch` response means they do not match.
 
 ```dotenv
 # Exactly 32 URL-safe base64-decoded bytes; generate once and retain securely.
-BOTHESIS_CONNECTOR_ENCRYPTION_KEY=...
+BOTHESIS_PLUGIN_ENCRYPTION_KEY=...
 
 # Local development only. Never enable this in deployment.
 BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true
 ```
 
-Connector provider credentials are encrypted before they are written to
-`connector_credentials`. They are not Item metadata, Qdrant payload, frontend
+Plugin provider credentials are encrypted before they are written to
+`plugin_credentials`. They are not Item metadata, Qdrant payload, frontend
 configuration, or audit-log content.
 
 ## Health and observability

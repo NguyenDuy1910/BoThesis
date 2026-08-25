@@ -200,8 +200,10 @@ function connectorRegistryStatus(
   connections: AdminRow[],
   providerAvailable: boolean,
 ): ConnectorRegistryStatus {
+  if (connections.some((connection) => ["running", "syncing"].includes(connection.latest_run?.status))) return "syncing";
   if (connections.some((connection) => connection.status === "active")) return "connected";
-  if (connections.some((connection) => connection.status === "draft" || connection.status === "error")) return "needs_setup";
+  if (connections.some((connection) => connection.status === "error")) return "failed";
+  if (connections.some((connection) => connection.status === "draft")) return "needs_setup";
   if (connections.length && connections.every((connection) => connection.status === "disabled")) return "disabled";
   return providerAvailable ? "available" : "unavailable";
 }

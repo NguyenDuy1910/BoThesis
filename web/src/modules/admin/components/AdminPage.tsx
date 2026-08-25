@@ -32,6 +32,7 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { SearchInput } from "@/components/ui/SearchInput";
 import { Select } from "@/components/ui/Select";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useToast } from "@/components/ui/Toast";
 import { adminRequest, queryString, useAdminQuery } from "@/modules/admin/api";
 import { ConnectorRegistryPage } from "@/modules/admin/components/DataSourcesPage";
@@ -48,11 +49,16 @@ interface PaginatedResult {
 }
 
 interface OverviewResult {
-  tenant: { id: string; code: string; name: string; status: string; updated_at: string };
-  metrics: Record<string, number>;
-  attention: Record<string, number>;
-  recent_activity: AdminRow[];
-  generated_at: string;
+  tenant?: { id: string; code: string; name: string; status: string; updated_at: string };
+  metrics?: {
+    active_users?: number;
+    active_plugin_connections?: number;
+    active_datasources?: number;
+    items?: number;
+  } | null;
+  attention?: Record<string, number | undefined> | null;
+  recent_activity?: AdminRow[] | null;
+  generated_at?: string;
 }
 
 interface SectionDefinition {
@@ -166,30 +172,52 @@ function OverviewPage() {
   if (query.error || !query.data) {
     return <ErrorState description={query.error ?? "The overview response was empty."} actionLabel="Retry" onAction={query.reload} />;
   }
-  const { tenant, metrics, attention, recent_activity: recentActivity } = query.data;
+  const { tenant, generated_at: generatedAt } = query.data;
+  if (!tenant) {
+    return <ErrorState description="The overview response does not include tenant details." actionLabel="Retry" onAction={query.reload} />;
+  }
+  const metrics = query.data.metrics ?? {};
+  const attention = query.data.attention ?? {};
+  const recentActivity = Array.isArray(query.data.recent_activity) ? query.data.recent_activity : [];
+  const attentionEntries = Object.entries(attention).map(
+    ([key, value]) => [key, countMetric(value)] as const,
+  );
   const evidence = [
-    { label: "Active users", value: metrics.active_users, icon: Users },
-    { label: "Data sources", value: metrics.active_datasources, icon: Database },
-    { label: "Items", value: metrics.items, icon: FileText },
-    { label: "Open attention", value: Object.values(attention).reduce((sum, value) => sum + value, 0), icon: CircleAlert },
+    { label: "Active users", value: countMetric(metrics.active_users), icon: Users },
+    {
+      label: "Active connections",
+      value: countMetric(metrics.active_plugin_connections, metrics.active_datasources),
+      icon: Database,
+    },
+    { label: "Items", value: countMetric(metrics.items), icon: FileText },
+    { label: "Open attention", value: sumMetrics(Object.values(attention)), icon: CircleAlert },
   ];
   return (
     <div className="mx-auto min-w-0 w-full max-w-[88rem]">
       <PageHeader
         title={tenant.name}
         description="A tenant-scoped view of identity, source, ingestion, and access state. Every value comes from durable backend records."
-        metadata={<><span className="font-mono">{tenant.code}</span><StatusBadge status={tenant.status} /></>}
+        metadata={<><span className="font-mono">{tenant.code}</span><StatusBadge status={tenant.status} />{generatedAt && <span>Snapshot {formatDate(generatedAt)}</span>}</>}
+        actions={<Button icon={<RefreshCw aria-hidden="true" className="h-4 w-4" />} variant="secondary" onClick={query.reload}>Refresh</Button>}
       />
-      <div className="mb-5 grid border-y border-[var(--border)] bg-[var(--surface)] sm:grid-cols-2 xl:grid-cols-4">
+      <dl className="mb-5 grid overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)] sm:grid-cols-2 xl:grid-cols-4">
         {evidence.map(({ label, value, icon: Icon }, index) => (
-          <div className={`flex min-h-24 items-center gap-3 px-4 py-3 ${index ? "border-t border-[var(--border)] sm:border-l sm:border-t-0" : ""}`} key={label}>
+          <div
+            className={`flex min-h-24 items-center gap-3 px-4 py-3 ${index ? "border-t border-[var(--border)] xl:border-l xl:border-t-0" : ""} ${index % 2 ? "sm:border-l" : ""} ${index >= 2 ? "sm:border-t" : "sm:border-t-0"}`}
+            key={label}
+          >
             <span className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-[var(--primary-soft)] text-[var(--brand-accent)] ring-1 ring-inset ring-[var(--border)]">
               <Icon aria-hidden="true" className="h-4 w-4" />
             </span>
-            <div><p className="font-mono text-2xl font-semibold text-[var(--text)]">{value.toLocaleString()}</p><p className="text-xs text-[var(--text-muted)]">{label}</p></div>
+            <div className="flex min-w-0 flex-col">
+              <dt className="order-2 text-xs text-[var(--text-muted)]">{label}</dt>
+              <dd className="order-1 font-mono text-2xl font-semibold text-[var(--text)]">
+                {value === undefined ? <span aria-label="Unavailable">—</span> : value.toLocaleString()}
+              </dd>
+            </div>
           </div>
         ))}
-      </div>
+      </dl>
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <Card>
           <CardHeader><h2 className="text-sm font-semibold text-[var(--text)]">Recent administration activity</h2></CardHeader>
@@ -202,10 +230,12 @@ function OverviewPage() {
         <Card>
           <CardHeader><h2 className="text-sm font-semibold text-[var(--text)]">Needs attention</h2></CardHeader>
           <CardBody className="space-y-1 p-0">
-            {Object.entries(attention).map(([key, value]) => (
+            {attentionEntries.map(([key, value]) => (
               <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3 last:border-b-0" key={key}>
                 <span className="text-sm text-[var(--text-secondary)]">{titleCase(key)}</span>
-                <Badge variant={value ? "warning" : "success"}>{value}</Badge>
+                <Badge variant={value === undefined ? "default" : value ? "warning" : "success"}>
+                  {value === undefined ? <span aria-label="Unavailable">—</span> : value.toLocaleString()}
+                </Badge>
               </div>
             ))}
           </CardBody>
@@ -415,12 +445,6 @@ function columnsFor(section: string): Column<AdminRow>[] {
   return [{ key: "created_at", label: "Time", render: (row) => formatDate(row.created_at) }, { key: "actor", label: "Actor", render: (row) => row.actor?.display_name ?? row.actor?.email ?? "System" }, { key: "action", label: "Action", render: (row) => titleCase(row.action) }, { key: "resource_type", label: "Resource", render: (row) => <Identity primary={titleCase(row.resource_type)} secondary={shortId(row.resource_id)} /> }, { key: "outcome", label: "Outcome", render: (row) => <StatusBadge status={row.outcome} /> }];
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const normalized = status?.toLowerCase() ?? "unknown";
-  const variant = ["active", "approved", "completed", "indexed", "success", "available"].includes(normalized) ? "success" : ["failed", "error", "denied", "unsupported"].includes(normalized) ? "danger" : ["pending", "running", "draft"].includes(normalized) ? "warning" : ["disabled", "inactive", "cancelled", "hidden", "retired", "none"].includes(normalized) ? "default" : "info";
-  return <Badge dot variant={variant}>{titleCase(normalized)}</Badge>;
-}
-
 function Identity({ primary, secondary }: { primary: string; secondary?: string }) {
   return <div className="min-w-0"><p className="truncate font-medium text-[var(--text)]">{primary}</p>{secondary && <p className="truncate text-xs text-[var(--text-muted)]">{secondary}</p>}</div>;
 }
@@ -441,6 +465,19 @@ function formatBytes(value?: number | null) {
   const units = ["B", "KB", "MB", "GB"];
   const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
   return `${(value / 1024 ** exponent).toFixed(exponent ? 1 : 0)} ${units[exponent]}`;
+}
+
+function countMetric(...values: unknown[]): number | undefined {
+  return values.find(
+    (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0,
+  );
+}
+
+function sumMetrics(values: unknown[]): number | undefined {
+  const counts = values
+    .map((value) => countMetric(value))
+    .filter((value): value is number => value !== undefined);
+  return counts.length ? counts.reduce((sum, value) => sum + value, 0) : undefined;
 }
 
 function shortId(value?: string | null) {

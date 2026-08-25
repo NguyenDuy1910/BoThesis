@@ -1,18 +1,4 @@
-import { Badge } from "@/components/ui/Badge";
-
-export function StatusBadge({ status }: { status: string }) {
-  const normalized = status?.toLowerCase() ?? "unknown";
-  const variant = ["active", "approved", "completed", "indexed", "ready", "success", "available"].includes(normalized)
-    ? "success"
-    : ["failed", "error", "denied", "unsupported"].includes(normalized)
-      ? "danger"
-      : ["pending", "running", "processing", "draft"].includes(normalized)
-        ? "info"
-        : ["disabled", "inactive", "cancelled", "skipped", "deleted"].includes(normalized)
-          ? "default"
-          : "warning";
-  return <Badge dot variant={variant}>{titleCase(normalized)}</Badge>;
-}
+export { StatusBadge } from "@/components/ui/StatusBadge";
 
 export function titleCase(value: string) {
   return String(value ?? "")

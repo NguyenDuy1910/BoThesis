@@ -198,7 +198,7 @@ export function Dropdown({
             }}
             style={menuStyle}
             className={cn(
-              "z-[60] min-w-48 overflow-y-auto overscroll-contain rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1 shadow-[var(--shadow-lg)]",
+              "ui-popover z-[60] min-w-48 overflow-y-auto overscroll-contain rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1 shadow-[var(--shadow-lg)]",
               menuClassName
             )}
           >

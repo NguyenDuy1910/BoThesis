@@ -70,6 +70,21 @@ The local WebUI uses the seeded identity from `web/.env.local`. The API accepts
 it only while `BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true`; it is not an
 authentication mechanism for deployment.
 
+### Run the WebUI with review data only
+
+For UX review without the backend or provider credentials, set this in
+`web/.env.local` and restart the Next.js development server:
+
+```dotenv
+NEXT_PUBLIC_BOTHESIS_DATA_MODE=mock
+```
+
+Mock mode populates chat, citations, knowledge bases, connectors, documents,
+sync history, people, access controls, and audit activity. Admin mutations
+reset after a full page reload; demo chat history is kept in browser storage.
+Set the value back to `api` to use the real backend; API mode still requires
+the URL, tenant, and user values documented in `web/.env.example`.
+
 ## Local service endpoints
 
 | Service | URL |
@@ -87,9 +102,14 @@ authentication mechanism for deployment.
 make services     # dependencies only
 make db-init      # PostgreSQL schema only; destructive
 make db-seed      # deterministic admin identity only
+make db-reset     # PostgreSQL schema plus deterministic admin identity
 make qdrant-init  # Qdrant collection only; destructive
 make status       # Compose status and API health
 ```
+
+Use `make db-reset` after changing SQLAlchemy models. It starts missing local
+services, rebuilds PostgreSQL from the current ORM metadata, and restores the
+development administrator without recreating Qdrant.
 
 For the ownership implications of these resets, see
 [Architecture](architecture.md) and [Data schema](data.schema.md).

@@ -1,6 +1,12 @@
 import {
   getBothesisChatConfiguration,
+  getBothesisDataMode,
 } from "@/lib/api/config";
+import {
+  mockChatConnectors,
+  mockStreamAgentResponse,
+  mockUploadConversationDocument,
+} from "@/lib/mock/chat";
 import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type {
   AgentHistoryMessage,
@@ -31,6 +37,9 @@ export async function streamAgentResponse(
     onEvent: (event: ResponseStreamEvent) => void;
   }
 ): Promise<void> {
+  if (getBothesisDataMode() === "mock") {
+    return mockStreamAgentResponse(message, options);
+  }
   const configuration = getBothesisChatConfiguration();
   if (!configuration) throw new ChatConfigurationError();
 
@@ -88,6 +97,7 @@ export async function streamAgentResponse(
 export async function getAvailableChatConnectors(
   signal?: AbortSignal,
 ): Promise<ChatConnector[]> {
+  if (getBothesisDataMode() === "mock") return mockChatConnectors(signal);
   const configuration = getBothesisChatConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(`${configuration.apiUrl}/api/v1/agent/connectors`, {
@@ -130,6 +140,9 @@ export async function uploadConversationDocument(
     onProgress?: (status: "starting" | "uploading" | "validating") => void;
   },
 ): Promise<ConversationDocument> {
+  if (getBothesisDataMode() === "mock") {
+    return mockUploadConversationDocument(file, options);
+  }
   const configuration = getBothesisChatConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   options.onProgress?.("starting");
@@ -183,6 +196,7 @@ export async function uploadConversationDocument(
 }
 
 export async function releaseConversationDocument(documentId: string): Promise<void> {
+  if (getBothesisDataMode() === "mock") return;
   const configuration = getBothesisChatConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(

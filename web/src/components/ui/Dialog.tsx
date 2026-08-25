@@ -77,7 +77,7 @@ export function Dialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button
         aria-label="Close dialog"
-        className="fixed inset-0 cursor-default bg-slate-950/40"
+        className="fixed inset-0 cursor-default bg-[var(--overlay-scrim)]"
         onClick={onClose}
         tabIndex={-1}
         type="button"
@@ -89,7 +89,7 @@ export function Dialog({
         aria-labelledby={titleId}
         className={cn(
           "relative z-10 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto overscroll-contain rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-[var(--shadow-lg)]",
-          "animate-in fade-in-0 zoom-in-95",
+          "ui-dialog-panel",
           className
         )}
       >

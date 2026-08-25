@@ -219,6 +219,13 @@ async def test_plugin_credentials_are_encrypted_and_owner_models_are_explicit(
         ) is record
 
 
+def test_plugin_encryption_key_accepts_unpadded_urlsafe_base64() -> None:
+    expected = bytes(range(32))
+    encryption_key = base64.urlsafe_b64encode(expected).decode("ascii").rstrip("=")
+
+    assert PluginCredentialService._decode_key(encryption_key) == expected
+
+
 @pytest.mark.asyncio
 async def test_plugin_list_eager_loads_optional_credentials(
     session_factory: async_sessionmaker[AsyncSession],

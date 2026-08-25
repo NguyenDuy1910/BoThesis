@@ -1,4 +1,5 @@
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getBothesisChatConfiguration, getBothesisDataMode } from "@/lib/api/config";
+import { mockKnowledgeCitation, mockKnowledgeViewer } from "@/lib/mock/knowledge";
 import type { KnowledgeCitationResponse, KnowledgeItemViewer } from "./types";
 
 export async function getKnowledgeItemViewer(
@@ -6,6 +7,7 @@ export async function getKnowledgeItemViewer(
   chunkId?: string,
   signal?: AbortSignal,
 ): Promise<KnowledgeItemViewer> {
+  if (getBothesisDataMode() === "mock") return mockKnowledgeViewer(itemId, chunkId, signal);
   const configuration = getBothesisChatConfiguration();
   if (!configuration) throw new Error("Knowledge viewer is not configured.");
   const query = chunkId ? `?chunk=${encodeURIComponent(chunkId)}` : "";
@@ -32,6 +34,7 @@ export async function getKnowledgeCitation(
   chunkId: string,
   signal?: AbortSignal,
 ): Promise<KnowledgeCitationResponse> {
+  if (getBothesisDataMode() === "mock") return mockKnowledgeCitation(itemId, chunkId, signal);
   const configuration = getBothesisChatConfiguration();
   if (!configuration) throw new Error("Knowledge viewer is not configured.");
   const response = await fetch(

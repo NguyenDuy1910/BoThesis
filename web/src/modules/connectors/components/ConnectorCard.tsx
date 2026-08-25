@@ -17,7 +17,7 @@ export function ConnectorCard({
   onClick: () => void;
   status: ConnectorRegistryStatus;
 }) {
-  const action = status === "connected" || status === "disabled" || status === "needs_setup"
+  const action = status === "connected" || status === "syncing" || status === "failed" || status === "disabled" || status === "needs_setup"
     ? "Manage"
     : status === "available" ? "Connect" : "View";
   return (

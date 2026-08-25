@@ -95,8 +95,13 @@ class PluginCredentialService:
         normalized = value.strip()
         if not normalized:
             raise RuntimeError("BOTHESIS_PLUGIN_ENCRYPTION_KEY is required")
+        padded = normalized + "=" * (-len(normalized) % 4)
         try:
-            key = base64.urlsafe_b64decode(normalized.encode("ascii"))
+            key = base64.b64decode(
+                padded.encode("ascii"),
+                altchars=b"-_",
+                validate=True,
+            )
         except Exception as exc:
             raise RuntimeError(
                 "BOTHESIS_PLUGIN_ENCRYPTION_KEY must be URL-safe base64"

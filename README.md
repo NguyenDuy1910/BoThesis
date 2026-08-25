@@ -131,7 +131,7 @@ OPENROUTER_API_KEY=...
 ```
 
 The local dependency endpoints, object-storage settings, development identity,
-and generated connector-encryption key are configured by `make init`. See
+and generated plugin-credential encryption key are configured by `make init`. See
 [Configuration and operations](docs/operations.md) for every setting and for
 S3 or Cloudflare R2 deployments.
 
@@ -186,6 +186,7 @@ make services    # start PostgreSQL, Qdrant, and MinIO
 make status      # inspect dependency state and API health
 make db-init     # reset only the local PostgreSQL schema
 make db-seed     # seed the development administrator
+make db-reset    # reset PostgreSQL and seed the development administrator
 make qdrant-init # recreate only the derived Qdrant collection
 ```
 
