@@ -1745,7 +1745,7 @@ if __name__ == "__main__":
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     uvicorn.run(
         app,
-        host="127.0.0.1",
+        host=os.getenv("BOTHESIS_HOST", "127.0.0.1"),
         port=int(os.getenv("BOTHESIS_PORT", "8000")),
         env_file=Path(__file__).with_name(".env"),
     )

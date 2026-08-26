@@ -111,7 +111,6 @@ AnyItem = Annotated[
     Field(discriminator="type"),
 ]
 
-
 def _content_part_text(part: AnyContentPart) -> str:
     if isinstance(part, TextPart):
         return part.text.strip()
