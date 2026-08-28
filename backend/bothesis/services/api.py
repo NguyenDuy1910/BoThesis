@@ -32,7 +32,6 @@ from bothesis.document_index.indexer import (
     DocumentPipeline,
 )
 from bothesis.document_index import DocumentProcessingError
-from bothesis.document_index.openrouter_embedding import OpenRouterEmbeddingService
 from bothesis.document_index.raw_storage import S3DocumentStorage
 from bothesis.document_index.search import QdrantSearchIndex
 from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
@@ -496,6 +495,10 @@ class ApiService:
             await self._pipeline.aclose()
         if self._contextualization_transport is not None:
             await self._contextualization_transport.aclose()
+        if self._agent is not None:
+            close = getattr(self._agent.model, "aclose", None)
+            if close is not None:
+                await close()
         if self._storage is not None:
             await self._storage.aclose()
 
@@ -634,7 +637,7 @@ class ApiService:
                 "OPEN_ROUTER_BASE_URL",
                 OpenRouterTransport.DEFAULT_BASE_URL,
             )
-            embedder = OpenRouterEmbeddingService(base_url=base_url)
+            embedder = OpenRouterTransport(base_url=base_url)
             semantic_contextualizer = None
             if self._contextualization_enabled:
                 self._contextualization_transport = OpenRouterTransport(
@@ -696,6 +699,7 @@ class ApiService:
                 "OPEN_ROUTER_BASE_URL",
                 OpenRouterTransport.DEFAULT_BASE_URL,
             )
+            transport = OpenRouterTransport(base_url=base_url)
             retriever = DocumentIndexRetriever(
                 QdrantSearchIndex(
                     VectorStore(
@@ -705,14 +709,14 @@ class ApiService:
                         prefer_grpc=self._qdrant_prefer_grpc,
                         timeout=8,
                     ),
-                    OpenRouterEmbeddingService(base_url=base_url),
+                    transport,
                     candidate_limit=self._hybrid_candidate_limit,
                 )
             )
             tracing = create_langfuse_tracing()
             registry.register(KnowledgeSearch(retriever, tracing=tracing))
             self._agent = Agent(
-                model=OpenRouterTransport(base_url=base_url),
+                model=transport,
                 tools=registry,
                 config=AgentConfig(
                     max_model_turns=int(os.getenv("BOTHESIS_MAX_MODEL_TURNS", "3")),

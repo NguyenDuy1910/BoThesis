@@ -10,11 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bothesis.db.models import (
     AccessRequest,
     Item,
-    PluginBinding,
     PluginConnection,
     Group,
     Role,
-    SyncRun,
     Tenant,
     TenantMembership,
     User,
@@ -100,32 +98,6 @@ class AdminService:
                     Item.tenant_id == tenant_id,
                     Item.status == "failed",
                     Item.deleted_at.is_(None),
-                )
-            ),
-            "failed_ingestion_runs": await self._count(
-                select(func.count())
-                .select_from(SyncRun)
-                .join(
-                    PluginBinding,
-                    PluginBinding.id == SyncRun.binding_id,
-                )
-                .join(PluginConnection, PluginConnection.id == PluginBinding.connection_id)
-                .where(
-                    PluginConnection.tenant_id == tenant_id,
-                    SyncRun.status == "failed",
-                )
-            ),
-            "pending_ingestion_runs": await self._count(
-                select(func.count())
-                .select_from(SyncRun)
-                .join(
-                    PluginBinding,
-                    PluginBinding.id == SyncRun.binding_id,
-                )
-                .join(PluginConnection, PluginConnection.id == PluginBinding.connection_id)
-                .where(
-                    PluginConnection.tenant_id == tenant_id,
-                    SyncRun.status.in_(("pending", "running")),
                 )
             ),
         }

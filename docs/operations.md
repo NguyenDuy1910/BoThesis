@@ -10,7 +10,7 @@ boundaries that must be configured explicitly in deployment. Start with
 | --- | --- |
 | `backend/.env.example` | Complete backend configuration template. Copy values into ignored `backend/.env`. |
 | `web/.env.example` | Public WebUI configuration template. Local setup creates ignored `web/.env.local`. |
-| `deployment/compose.yml` | Local PostgreSQL, Qdrant, and MinIO topology. Optional Compose overrides go in ignored `deployment/.env`. |
+| `deployment/compose.yml` | Local PostgreSQL, Qdrant, MinIO, and Temporal topology. Optional Compose overrides go in ignored `deployment/.env`. |
 
 Do not commit credentials, encryption keys, signed object URLs, or deployment
 environment files.
@@ -23,12 +23,16 @@ OPENAI_MODEL=gpt-5-mini
 
 OPENROUTER_API_KEY=...
 OPEN_ROUTER_BASE_URL=https://openrouter.ai/api/v1
+BOTHESIS_DOCLING_MODEL=qwen/qwen3-vl-30b-a3b-instruct
 EMBEDDING_MODEL=openai/text-embedding-3-small
 ```
 
-OpenAI serves the chat path. OpenRouter serves embedding requests. Health
-reports each dependency separately so a missing key is visible as an unhealthy
-required service instead of a silent fallback.
+OpenAI serves the chat path. OpenRouter serves embedding requests and Docling's
+remote vision pipeline for PDF and image ingestion. PDF/image pages are sent to
+`BOTHESIS_DOCLING_MODEL`, which returns grounded text and table blocks with page
+coordinates for citation provenance. No Docling layout, OCR, table, or tokenizer
+model is loaded locally. Health reports each dependency separately so a missing
+key is visible as an unhealthy required service instead of a silent fallback.
 
 ## Document index configuration
 
@@ -117,6 +121,11 @@ npm --prefix web test
 npm --prefix web run typecheck
 npm --prefix web run build
 ```
+
+`make reset-all` is the complete local data reset. It clears application and
+Temporal persistence, reapplies the current SQLAlchemy database design, seeds
+the local administrator, and recreates the Qdrant collection while retaining
+raw MinIO objects.
 
 For the running API, use `http://127.0.0.1:8000/docs` as the authoritative
 request and response reference.

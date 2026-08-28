@@ -20,7 +20,6 @@ from bothesis.services import (
     AuthContext,
     CollectionAccessService,
     ItemService,
-    PluginService,
     normalize_required_text,
     normalize_page,
     require_tenant_permission,
@@ -333,12 +332,11 @@ class AdminItemService:
             assert item is not None
             item.status = "pending"
             return {"item": await self.get_item(actor, item.id), "sync_run": None}
-        run = await PluginService(
-            self._session,
-            credential_encryption_key=self._plugin_encryption_key,
-            audit=self._audit,
-        ).trigger_binding(actor, origin.binding_id)
-        return {"item": payload, "sync_run": run}
+        return {
+            "item": payload,
+            "binding_id": str(origin.binding_id),
+            "sync_run": None,
+        }
 
     async def delete_item(self, actor: AuthContext, item_id: UUID) -> None:
         require_tenant_permission(actor, ITEM_MANAGE_PERMISSION)

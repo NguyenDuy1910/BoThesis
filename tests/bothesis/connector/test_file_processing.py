@@ -6,7 +6,11 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from docling.datamodel.base_models import ConversionStatus, DocumentStream
+from docling.datamodel.base_models import ConversionStatus, DocumentStream, InputFormat
+from docling.models.inference_engines.vlm.api_openai_compatible_engine import (
+    ApiVlmEngine,
+)
+from docling.models.stages.vlm_convert.vlm_convert_model import VlmConvertModel
 from docling_core.transforms.chunker import DocChunk, DocMeta
 from docling_core.transforms.chunker.line_chunker import LineBasedTokenChunker
 from docling_core.transforms.chunker.tokenizer.base import BaseTokenizer
@@ -29,7 +33,14 @@ from bothesis.connector.file.file_connector import (
 )
 from bothesis.connector.file import UnsupportedFileTypeError
 from bothesis.connector.file.processing import FileProcessor
-from bothesis.connector.processing import DoclingChunker, DoclingProcessor, DocumentMapper
+from bothesis.connector.processing import (
+    ApproximateTokenizer,
+    DoclingChunker,
+    DoclingProcessingError,
+    DoclingProcessor,
+    DocumentMapper,
+)
+from bothesis.connector.processing.docling import _configured_converter
 from bothesis.connector.protocol import (
     ConnectorScope,
     DocumentItem,
@@ -139,6 +150,21 @@ def test_file_processor_keeps_a_non_text_image_as_a_document_item() -> None:
     assert result.chunks == ()
 
 
+def test_file_processor_accepts_remote_vlm_text_for_an_image() -> None:
+    converted = DoclingDocument(name="invoice.png")
+    converted.add_text(label=DocItemLabel.TEXT, text="Total: 42 USD")
+    processor = FileProcessor(
+        docling=DoclingProcessor(converter=_Converter(converted)),
+        chunker=DoclingChunker(hybrid_chunker=_DocumentChunker()),
+    )
+
+    result = processor.process_bytes(b"image-bytes", file_name="invoice.png")
+
+    assert result.item.document_kind == DocumentKind.IMAGE
+    assert result.text == "Total: 42 USD"
+    assert result.chunks[0].chunk_text == "Total: 42 USD"
+
+
 def test_docling_processor_reuses_converter_and_enforces_limits() -> None:
     converted = DoclingDocument(name="policy.pdf")
     converted.add_text(label=DocItemLabel.TEXT, text="Policy")
@@ -165,6 +191,48 @@ def test_docling_processor_reuses_converter_and_enforces_limits() -> None:
 
     with pytest.raises(ValueError, match="32 byte limit"):
         processor.process_bytes(b"x" * 33, file_name="large.pdf")
+
+
+def test_docling_pdf_pipeline_uses_openrouter_without_local_model_stages() -> None:
+    converter = _configured_converter(
+        api_key="secret",
+        base_url="https://openrouter.ai/api/v1",
+        model="qwen/qwen3-vl-30b-a3b-instruct",
+        timeout_seconds=30,
+        concurrency=2,
+        max_tokens=4096,
+    )
+    options = converter.format_to_options[InputFormat.PDF].pipeline_options
+
+    assert options.enable_remote_services is True
+    assert options.do_picture_classification is False
+    assert options.do_picture_description is False
+    assert options.do_chart_extraction is False
+    assert (
+        options.vlm_options.model_spec.response_format.value
+        == "deepseekocr_markdown"
+    )
+    assert str(options.vlm_options.engine_options.url) == (
+        "https://openrouter.ai/api/v1/chat/completions"
+    )
+    assert options.vlm_options.engine_options.params == {
+        "model": "qwen/qwen3-vl-30b-a3b-instruct",
+        "max_tokens": 4096,
+    }
+
+    converter.initialize_pipeline(InputFormat.PDF)
+    pipeline = next(iter(converter.initialized_pipelines.values()))
+    assert len(pipeline.build_pipe) == 1
+    assert isinstance(pipeline.build_pipe[0], VlmConvertModel)
+    assert isinstance(pipeline.build_pipe[0].engine, ApiVlmEngine)
+
+
+def test_docling_pdf_requires_openrouter_key_before_conversion(monkeypatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    processor = DoclingProcessor(openrouter_api_key=None)
+
+    with pytest.raises(DoclingProcessingError, match="OPENROUTER_API_KEY"):
+        processor.process_bytes(b"%PDF", file_name="policy.pdf")
 
 
 def test_document_mapper_preserves_structure_storage_and_normalized_provenance() -> None:
@@ -357,6 +425,13 @@ def test_docling_chunker_does_not_infer_offsets_from_repeated_text() -> None:
     assert span.element_id == "doc_para_001"
     assert span.start_offset is None
     assert span.end_offset is None
+
+
+def test_docling_chunker_default_has_no_downloaded_tokenizer_model() -> None:
+    chunker = DoclingChunker()
+
+    assert isinstance(chunker._resolve_chunker("hybrid").tokenizer, ApproximateTokenizer)
+    assert isinstance(chunker._resolve_chunker("line").tokenizer, ApproximateTokenizer)
 
 
 def test_line_chunking_retains_exact_record_element_provenance() -> None:

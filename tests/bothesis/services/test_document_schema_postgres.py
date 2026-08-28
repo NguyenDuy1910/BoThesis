@@ -40,8 +40,7 @@ async def test_final_source_storage_schema_contract() -> None:
                     'message_items',
                     'user_principal_tokens',
                     'connector_credentials',
-                    'connector_scopes',
-                    'sync_runs'
+                    'connector_scopes'
                   )
                 """
             )
@@ -81,7 +80,6 @@ async def test_final_source_storage_schema_contract() -> None:
         "message_items",
         "connector_credentials",
         "connector_scopes",
-        "sync_runs",
     }.issubset(table_names)
     assert {
         "documents",
@@ -103,7 +101,6 @@ async def test_final_source_storage_schema_contract() -> None:
     assert "encrypted_payload" in columns_by_table["connector_credentials"]
     assert column_types[("connector_credentials", "encrypted_payload")] == "text"
     assert "sync_checkpoint" in columns_by_table["connector_scopes"]
-    assert "generation" not in columns_by_table["sync_runs"]
     assert "active_generation" not in columns_by_table["connector_scopes"]
     assert "ck_items_item_type_is_valid" in constraints
     assert "ck_items_item_kind_matches_type" in constraints

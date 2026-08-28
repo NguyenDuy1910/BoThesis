@@ -26,8 +26,6 @@ EXPECTED_TABLES = {
     "plugin_connections",
     "plugin_credentials",
     "roles",
-    "sync_runs",
-    "schedules",
     "tenant_memberships",
     "tenants",
     "users",

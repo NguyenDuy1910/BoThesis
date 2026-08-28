@@ -114,12 +114,13 @@ make init
 ```
 
 `make init` creates missing local environment files, starts PostgreSQL, Qdrant,
-and MinIO, creates the raw-object bucket, rebuilds the local database schema,
-seeds a development administrator, and recreates the derived Qdrant collection.
+MinIO, and Temporal, creates the raw-object bucket, rebuilds the local database
+schema, seeds a development administrator, recreates the derived Qdrant
+collection, and registers Temporal Search Attributes.
 
-> **Local-development reset:** `make init` intentionally resets the PostgreSQL
-> schema and Qdrant collection. Do not use it against an environment with data
-> you need to retain.
+> **Local-development reset:** `make init` intentionally resets the application
+> schema, Temporal persistence, and Qdrant collection. Do not use it against an
+> environment with data you need to retain.
 
 ### 2. Configure model access
 
@@ -160,6 +161,7 @@ Open:
 | Health | [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health) |
 | Qdrant dashboard | [http://127.0.0.1:6333/dashboard](http://127.0.0.1:6333/dashboard) |
 | MinIO console | [http://127.0.0.1:9001](http://127.0.0.1:9001) |
+| Temporal UI | [http://127.0.0.1:8080](http://127.0.0.1:8080) |
 
 ## Documentation
 
@@ -182,7 +184,8 @@ Useful local targets:
 
 ```bash
 make help        # list all targets
-make services    # start PostgreSQL, Qdrant, and MinIO
+make services    # start PostgreSQL, Qdrant, MinIO, and Temporal
+make reset-all   # reset all databases/Qdrant, apply schema, and seed the admin
 make status      # inspect dependency state and API health
 make db-init     # reset only the local PostgreSQL schema
 make db-seed     # seed the development administrator

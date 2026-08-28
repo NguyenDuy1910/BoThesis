@@ -16,9 +16,9 @@ from bothesis.document_index import (
     BM25_MODEL,
     BM25_OPTIONS,
     DENSE_VECTOR_NAME,
+    EmbeddingService,
     SPARSE_VECTOR_NAME,
 )
-from bothesis.document_index.embedding import EmbeddingService
 from bothesis.document_index.payload import QdrantPayloadContext, build_qdrant_records
 from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
 from bothesis.document_index.vector_store import VectorStore
@@ -82,7 +82,7 @@ class QdrantKnowledgeSink:
                     parent_item_id=(str(stored.parent_item_id) if stored.parent_item_id else None),
                     document_type=stored.document_type or "plain_text",
                     plugin_key=binding.connection.plugin_key,
-                    embedding_model=self._embedder.model,
+                    embedding_model=self._embedder.embedding_model,
                 ),
                 semantic_contextualizer=self._semantic_contextualizer,
             )

@@ -1,4 +1,4 @@
-"""Plugin Connection, Binding, Schedule, and Sync Run administration."""
+"""Plugin Connection and independently checkpointed Binding administration."""
 
 from __future__ import annotations
 
@@ -18,8 +18,6 @@ from bothesis.db.models import (
     Item,
     PluginBinding,
     PluginConnection,
-    Schedule,
-    SyncRun,
 )
 from bothesis.plugin import PluginDefinition
 from bothesis.plugin.registry import PluginRegistry
@@ -228,9 +226,7 @@ class PluginService:
         now = datetime.now(UTC)
         bindings = list(
             await self._session.scalars(
-                select(PluginBinding)
-                .options(joinedload(PluginBinding.schedule))
-                .where(
+                select(PluginBinding).where(
                     PluginBinding.connection_id == connection.id,
                     PluginBinding.deleted_at.is_(None),
                 )
@@ -239,9 +235,6 @@ class PluginService:
         for binding in bindings:
             binding.status = "disabled"
             binding.deleted_at = now
-            if binding.schedule is not None and binding.schedule.deleted_at is None:
-                binding.schedule.enabled = False
-                binding.schedule.deleted_at = now
         connection.status = "disabled"
         connection.deleted_at = now
         await self._session.flush()
@@ -260,7 +253,6 @@ class PluginService:
         target_item_id: UUID,
         display_name: str | None,
         config: Mapping[str, Any],
-        schedule: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
         connection = await self._connection(tenant_id, connection_id)
@@ -290,8 +282,6 @@ class PluginService:
         )
         self._session.add(binding)
         await self._session.flush()
-        if schedule is not None:
-            await self._set_schedule(binding, schedule)
         await self._audit.record(
             actor,
             action="plugin.binding.created",
@@ -389,7 +379,6 @@ class PluginService:
             .options(
                 joinedload(PluginBinding.connection),
                 joinedload(PluginBinding.target_item),
-                joinedload(PluginBinding.schedule),
             )
             .where(*filters)
         )
@@ -418,7 +407,6 @@ class PluginService:
             .options(
                 joinedload(PluginBinding.connection),
                 joinedload(PluginBinding.target_item),
-                joinedload(PluginBinding.schedule),
             )
             .where(
                 PluginBinding.id == binding_id,
@@ -439,8 +427,6 @@ class PluginService:
         display_name: str | None = None,
         config: Mapping[str, Any] | None = None,
         status: str | None = None,
-        schedule: Mapping[str, Any] | None = None,
-        clear_schedule: bool = False,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
         binding = await self._binding(tenant_id, binding_id, for_update=True)
@@ -455,20 +441,6 @@ class PluginService:
             if normalized_status not in {"active", "disabled", "error"}:
                 raise AdminValidationError("unsupported Binding status")
             binding.status = normalized_status
-        existing_schedule = await self._session.scalar(
-            select(Schedule).where(
-                Schedule.binding_id == binding.id,
-                Schedule.deleted_at.is_(None),
-            )
-        )
-        if clear_schedule and existing_schedule is not None:
-            existing_schedule.enabled = False
-            existing_schedule.deleted_at = datetime.now(UTC)
-        elif schedule is not None:
-            if existing_schedule is not None:
-                self._apply_schedule_values(existing_schedule, schedule)
-            else:
-                await self._set_schedule(binding, schedule)
         await self._session.flush()
         await self._audit.record(
             actor,
@@ -484,15 +456,6 @@ class PluginService:
         now = datetime.now(UTC)
         binding.status = "disabled"
         binding.deleted_at = now
-        schedule = await self._session.scalar(
-            select(Schedule).where(
-                Schedule.binding_id == binding.id,
-                Schedule.deleted_at.is_(None),
-            )
-        )
-        if schedule is not None:
-            schedule.enabled = False
-            schedule.deleted_at = now
         await self._session.flush()
         await self._audit.record(
             actor,
@@ -530,169 +493,6 @@ class PluginService:
         )
         return {"valid": True, "status": connection.status}
 
-    async def trigger_binding(
-        self,
-        actor: AuthContext,
-        binding_id: UUID,
-        *,
-        trigger_type: str = "manual",
-        schedule_id: UUID | None = None,
-    ) -> dict[str, Any]:
-        tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        binding = await self._binding(tenant_id, binding_id, for_update=True)
-        normalized_trigger = trigger_type.strip().casefold()
-        if normalized_trigger not in {"manual", "scheduled", "webhook", "initial"}:
-            raise AdminValidationError("unsupported sync trigger type")
-        active_run = await self._session.scalar(
-            select(SyncRun.id).where(
-                SyncRun.binding_id == binding.id,
-                SyncRun.status.in_(("pending", "running")),
-            )
-        )
-        status = "skipped" if active_run is not None else "pending"
-        now = datetime.now(UTC)
-        run = SyncRun(
-            binding_id=binding.id,
-            schedule_id=schedule_id,
-            trigger_type=normalized_trigger,
-            status=status,
-            error_code="overlap_skipped" if active_run is not None else None,
-            finished_at=now if active_run is not None else None,
-        )
-        self._session.add(run)
-        if schedule_id is not None:
-            schedule = await self._session.get(Schedule, schedule_id)
-            if schedule is None or schedule.binding_id != binding.id:
-                raise AdminValidationError("schedule does not belong to Binding")
-            schedule.last_run_at = now
-        await self._session.flush()
-        await self._audit.record(
-            actor,
-            action="plugin.binding.sync_requested",
-            resource_type="plugin_binding",
-            resource_id=str(binding.id),
-            details={"run_id": str(run.id), "status": status},
-        )
-        return self._sync_payload(run, binding)
-
-    async def list_sync_runs(
-        self,
-        actor: AuthContext,
-        *,
-        page: int = 1,
-        page_size: int = 20,
-        status: str | None = None,
-        connection_id: UUID | None = None,
-        binding_id: UUID | None = None,
-    ) -> dict[str, Any]:
-        tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        page, page_size, offset = normalize_page(page, page_size)
-        filters = [
-            PluginConnection.tenant_id == tenant_id,
-            PluginConnection.deleted_at.is_(None),
-            PluginBinding.deleted_at.is_(None),
-        ]
-        if status:
-            filters.append(SyncRun.status == status.strip().casefold())
-        if connection_id:
-            filters.append(PluginConnection.id == connection_id)
-        if binding_id:
-            filters.append(PluginBinding.id == binding_id)
-        base = (
-            select(SyncRun, PluginBinding)
-            .join(PluginBinding, PluginBinding.id == SyncRun.binding_id)
-            .join(PluginConnection, PluginConnection.id == PluginBinding.connection_id)
-            .options(joinedload(PluginBinding.connection), joinedload(PluginBinding.target_item))
-            .where(*filters)
-        )
-        total = await self._session.scalar(select(func.count()).select_from(base.subquery()))
-        rows = (
-            await self._session.execute(
-                base.order_by(SyncRun.created_at.desc(), SyncRun.id.desc())
-                .limit(page_size)
-                .offset(offset)
-            )
-        ).all()
-        return {
-            "items": [self._sync_payload(run, binding) for run, binding in rows],
-            "total": int(total or 0),
-            "page": page,
-            "page_size": page_size,
-        }
-
-    async def get_sync_run(
-        self, actor: AuthContext, run_id: UUID
-    ) -> dict[str, Any]:
-        tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        row = (
-            await self._session.execute(
-                select(SyncRun, PluginBinding)
-                .join(PluginBinding, PluginBinding.id == SyncRun.binding_id)
-                .join(
-                    PluginConnection,
-                    PluginConnection.id == PluginBinding.connection_id,
-                )
-                .options(
-                    joinedload(PluginBinding.connection),
-                    joinedload(PluginBinding.target_item),
-                )
-                .where(
-                    SyncRun.id == run_id,
-                    PluginConnection.tenant_id == tenant_id,
-                    PluginConnection.deleted_at.is_(None),
-                )
-            )
-        ).one_or_none()
-        if row is None:
-            raise AdminNotFoundError(f"Sync Run not found: {run_id}")
-        run, binding = row
-        return self._sync_payload(run, binding)
-
-    async def retry_sync_run(
-        self, actor: AuthContext, run_id: UUID
-    ) -> dict[str, Any]:
-        payload = await self.get_sync_run(actor, run_id)
-        if payload["status"] not in {"failed", "cancelled", "skipped"}:
-            raise AdminConflictError(
-                "only failed, cancelled, or skipped Sync Runs can be retried"
-            )
-        return await self.trigger_binding(
-            actor, UUID(str(payload["binding_id"])), trigger_type="manual"
-        )
-
-    async def cancel_sync_run(
-        self, actor: AuthContext, run_id: UUID
-    ) -> dict[str, Any]:
-        tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        run = await self._session.scalar(
-            select(SyncRun)
-            .join(PluginBinding, PluginBinding.id == SyncRun.binding_id)
-            .join(
-                PluginConnection, PluginConnection.id == PluginBinding.connection_id
-            )
-            .where(
-                SyncRun.id == run_id,
-                PluginConnection.tenant_id == tenant_id,
-                PluginConnection.deleted_at.is_(None),
-            )
-            .with_for_update(of=SyncRun)
-        )
-        if run is None:
-            raise AdminNotFoundError(f"Sync Run not found: {run_id}")
-        if run.status not in {"pending", "running"}:
-            raise AdminConflictError("only pending or running Sync Runs can be cancelled")
-        run.status = "cancelled"
-        run.finished_at = datetime.now(UTC)
-        run.error_code = "cancelled_by_user"
-        await self._session.flush()
-        await self._audit.record(
-            actor,
-            action="plugin.sync_run.cancelled",
-            resource_type="sync_run",
-            resource_id=str(run.id),
-        )
-        return await self.get_sync_run(actor, run.id)
-
     async def runtime_for_binding(self, binding_id: UUID) -> tuple[PluginBinding, Any]:
         binding = await self._session.scalar(
             select(PluginBinding)
@@ -711,50 +511,6 @@ class PluginService:
         return binding, self._runtime(
             binding.connection, config=binding.config, credentials=credentials
         )
-
-    async def _set_schedule(
-        self, binding: PluginBinding, values: Mapping[str, Any]
-    ) -> Schedule:
-        schedule = Schedule(
-            binding_id=binding.id,
-        )
-        self._apply_schedule_values(schedule, values)
-        self._session.add(schedule)
-        await self._session.flush()
-        return schedule
-
-    @staticmethod
-    def _apply_schedule_values(schedule: Schedule, values: Mapping[str, Any]) -> None:
-        schedule_type = str(
-            values.get("schedule_type") or schedule.schedule_type or "cron"
-        ).strip().casefold()
-        overlap_policy = str(
-            values.get("overlap_policy") or schedule.overlap_policy or "skip"
-        ).strip().casefold()
-        if schedule_type not in {"cron", "interval"}:
-            raise AdminValidationError("schedule_type must be cron or interval")
-        if overlap_policy not in {"skip", "queue", "replace"}:
-            raise AdminValidationError("unsupported overlap policy")
-        enabled = values.get("enabled", schedule.enabled if schedule.id else True)
-        if not isinstance(enabled, bool):
-            raise AdminValidationError("schedule enabled must be a boolean")
-        schedule.schedule_type = schedule_type
-        schedule.cron_expression = (
-            str(values["cron_expression"]).strip()
-            if values.get("cron_expression") is not None
-            else schedule.cron_expression
-        )
-        schedule.timezone = (
-            str(values["timezone"]).strip()
-            if values.get("timezone") is not None
-            else schedule.timezone
-        )
-        schedule.enabled = enabled
-        schedule.overlap_policy = overlap_policy
-        if "next_run_at" in values:
-            schedule.next_run_at = values.get("next_run_at")
-        if not schedule.cron_expression:
-            raise AdminValidationError("schedule expression is required")
 
     async def _connection(
         self, tenant_id: UUID, connection_id: UUID
@@ -866,7 +622,6 @@ class PluginService:
 
     @staticmethod
     def _binding_payload(binding: PluginBinding) -> dict[str, Any]:
-        schedule = binding.schedule
         return {
             "id": str(binding.id),
             "connection_id": str(binding.connection_id),
@@ -877,49 +632,12 @@ class PluginService:
             "status": binding.status,
             "last_synced_at": timestamp(binding.last_synced_at),
             "last_indexed_at": timestamp(binding.last_indexed_at),
-            "schedule": (
-                {
-                    "id": str(schedule.id),
-                    "schedule_type": schedule.schedule_type,
-                    "cron_expression": schedule.cron_expression,
-                    "timezone": schedule.timezone,
-                    "enabled": schedule.enabled,
-                    "overlap_policy": schedule.overlap_policy,
-                    "next_run_at": timestamp(schedule.next_run_at),
-                    "last_run_at": timestamp(schedule.last_run_at),
-                }
-                if schedule is not None and schedule.deleted_at is None
-                else None
-            ),
-        }
-
-    @staticmethod
-    def _sync_payload(run: SyncRun, binding: PluginBinding) -> dict[str, Any]:
-        return {
-            "id": str(run.id),
-            "binding_id": str(run.binding_id),
-            "schedule_id": str(run.schedule_id) if run.schedule_id else None,
-            "trigger_type": run.trigger_type,
-            "status": run.status,
-            "discovered_item_count": run.discovered_item_count,
-            "processed_item_count": run.processed_item_count,
-            "written_chunk_count": run.written_chunk_count,
-            "deleted_item_count": run.deleted_item_count,
-            "error_code": run.error_code,
-            "error_message": run.error_message,
-            "started_at": timestamp(run.started_at),
-            "finished_at": timestamp(run.finished_at),
-            "created_at": timestamp(run.created_at),
             "connection": {
                 "id": str(binding.connection.id),
                 "display_name": binding.connection.display_name,
                 "plugin_key": binding.connection.plugin_key,
             },
-            "binding": {
-                "id": str(binding.id),
-                "display_name": binding.display_name,
-                "target_item_id": str(binding.target_item_id),
-            },
+            "schedule": None,
         }
 
     @staticmethod

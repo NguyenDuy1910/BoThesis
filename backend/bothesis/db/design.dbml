@@ -207,44 +207,6 @@ Table item_origins {
   }
 }
 
-Table schedules {
-  id uuid [pk]
-  binding_id uuid [not null, unique]
-  schedule_type varchar(16) [not null, note: 'cron | interval']
-  cron_expression varchar(255)
-  timezone varchar(64)
-  enabled boolean [not null, default: true]
-  overlap_policy varchar(16) [not null, default: 'skip', note: 'skip | queue | replace']
-  next_run_at timestamptz
-  last_run_at timestamptz
-  deleted_at timestamptz
-  created_at timestamptz [not null]
-  updated_at timestamptz [not null]
-  indexes { (enabled, next_run_at) }
-}
-
-Table sync_runs {
-  id uuid [pk]
-  binding_id uuid [not null]
-  schedule_id uuid
-  trigger_type varchar(16) [not null, note: 'manual | scheduled | webhook | initial']
-  status varchar(16) [not null, default: 'pending']
-  discovered_item_count bigint [not null, default: 0]
-  processed_item_count bigint [not null, default: 0]
-  written_chunk_count bigint [not null, default: 0]
-  deleted_item_count bigint [not null, default: 0]
-  error_code varchar(128)
-  error_message text
-  started_at timestamptz
-  finished_at timestamptz
-  created_at timestamptz [not null]
-  indexes {
-    binding_id
-    status
-    created_at
-  }
-}
-
 Table conversations {
   id uuid [pk]
   tenant_id uuid [not null]
@@ -345,10 +307,6 @@ Ref: plugin_bindings.target_item_id > items.id
 Ref: plugin_bindings.created_by_user_id > users.id
 Ref: item_origins.item_id > items.id
 Ref: item_origins.binding_id > plugin_bindings.id
-Ref: schedules.binding_id - plugin_bindings.id
-Ref: sync_runs.binding_id > plugin_bindings.id
-Ref: sync_runs.schedule_id > schedules.id
-
 Ref: conversations.tenant_id > tenants.id
 Ref: conversations.user_id > users.id
 Ref: messages.conversation_id > conversations.id

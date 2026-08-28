@@ -23,7 +23,6 @@ DEFAULT_HYBRID_CANDIDATE_LIMIT = 20
 
 from .contextualization import StructuralContextualizer  # noqa: E402
 from .semantic_contextualizer import SemanticContextualizer  # noqa: E402
-from .embedding import EmbeddingService, EmbeddingTokenizer, embedding_texts
 from .models import ChunkContext, ContextualChunk, IndexQuery, PreparedDocument
 from .payload import (
     IndexPayload,
@@ -53,6 +52,17 @@ class DocumentProcessingError(RuntimeError):
 
 class DocumentUnavailableError(DocumentProcessingError):
     """Raised when an authorized document's raw content is unavailable."""
+
+
+@runtime_checkable
+class EmbeddingService(Protocol):
+    """Provider-neutral embedding operations used by document indexing."""
+
+    embedding_model: str
+
+    async def embed_query(self, query: str) -> list[float]: ...
+
+    async def embed_documents(self, documents: list[str]) -> list[list[float]]: ...
 
 
 @runtime_checkable
@@ -115,12 +125,12 @@ __all__ = [
     "ContextualChunk", "DEFAULT_HYBRID_CANDIDATE_LIMIT", "DENSE_VECTOR_NAME",
     "DEFAULT_DIRECT_MAX_BYTES", "DIRECT_IMAGE_TYPES", "DocumentIndex",
     "DocumentProcessingError", "DocumentUnavailableError", "EmbeddingService",
-    "EmbeddingTokenizer", "IndexPayload", "IndexQuery",
+    "IndexPayload", "IndexQuery",
     "PARSER_VERSION", "PreparedDocument", "PreparedDocuments",
     "QdrantChunkPayload", "QdrantChunkRecord",
     "QdrantPayloadContext", "INDEX_SCHEMA_VERSION", "SPARSE_VECTOR_NAME",
     "SemanticContextualizer", "StructuralContextualizer",
     "build_contextual_chunks",
     "build_qdrant_records",
-    "VectorIndex", "embedding_texts",
+    "VectorIndex",
 ]

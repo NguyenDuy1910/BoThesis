@@ -52,7 +52,7 @@ import bothesis.document_index.indexer as document_indexer
 
 
 class _Embedder:
-    model = "test-embedding-v1"
+    embedding_model = "test-embedding-v1"
 
     async def embed_query(self, query: str) -> list[float]:
         return [float(len(query))]
@@ -202,7 +202,7 @@ def test_routing_precedence_prefers_images_then_current_index_then_small_pdf() -
                 "provider_version": "v1",
                 "parser_version": PARSER_VERSION,
                 "chunker_version": CHUNKER_VERSION,
-                "embedding_model": _Embedder.model,
+                "embedding_model": _Embedder.embedding_model,
                 "index_schema_version": INDEX_SCHEMA_VERSION,
                 "tenant_id": str(tenant_id),
                 "owner_user_id": str(document.upload.owner_user_id),

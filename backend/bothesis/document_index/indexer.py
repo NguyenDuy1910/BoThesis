@@ -27,10 +27,10 @@ from bothesis.document_index import (
     PARSER_VERSION,
     DocumentProcessingError,
     DocumentUnavailableError,
+    EmbeddingService,
     PreparedDocuments,
     VectorIndex,
 )
-from bothesis.document_index.embedding import EmbeddingService, embedding_texts
 from bothesis.document_index.models import ContextualChunk, PreparedDocument
 from bothesis.document_index.payload import build_contextual_chunks
 from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
@@ -295,7 +295,7 @@ class DocumentPipeline:
             and processing.get("provider_version") == _provider_version(document)
             and processing.get("parser_version") == PARSER_VERSION
             and processing.get("chunker_version") == CHUNKER_VERSION
-            and processing.get("embedding_model") == self._embedder.model
+            and processing.get("embedding_model") == self._embedder.embedding_model
             and processing.get("index_schema_version") == INDEX_SCHEMA_VERSION
         )
 
@@ -485,14 +485,16 @@ class DocumentPipeline:
             for start in range(0, len(contextual_chunks), self._embedding_batch_size):
                 batch = contextual_chunks[start : start + self._embedding_batch_size]
                 vectors.extend(
-                    await self._embedder.embed_documents(embedding_texts(batch))
+                    await self._embedder.embed_documents(
+                        [chunk.contextual_text for chunk in batch]
+                    )
                 )
             await self._vector_index.replace_document(
                 document,
                 contextual_chunks,
                 vectors,
                 access=access,
-                embedding_model=self._embedder.model,
+                embedding_model=self._embedder.embedding_model,
             )
             async with self._session_factory.begin() as session:
                 items = ItemService(session)
@@ -503,7 +505,7 @@ class DocumentPipeline:
                             "provider_version": _provider_version(document),
                             "parser_version": PARSER_VERSION,
                             "chunker_version": CHUNKER_VERSION,
-                            "embedding_model": self._embedder.model,
+                            "embedding_model": self._embedder.embedding_model,
                             "index_schema_version": INDEX_SCHEMA_VERSION,
                             "tenant_id": str(access.tenant_id),
                             "owner_user_id": str(access.user_id),
@@ -559,7 +561,6 @@ __all__ = [
     "DocumentProcessingError",
     "DocumentPipeline",
     "DocumentUnavailableError",
-    "EmbeddingService",
     "PARSER_VERSION",
     "PreparedDocuments",
     "VectorIndex",

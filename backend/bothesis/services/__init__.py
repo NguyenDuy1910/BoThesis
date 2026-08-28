@@ -277,8 +277,6 @@ from bothesis.services.plugin import PluginService  # noqa: E402
 from bothesis.services.access_requests import AccessRequestService  # noqa: E402
 from bothesis.services.admin_items import AdminItemService  # noqa: E402
 from bothesis.services.admin import AdminService  # noqa: E402
-from bothesis.services.scheduler import SchedulerService  # noqa: E402
-from bothesis.services.plugin_sync import PluginSyncService  # noqa: E402
 from bothesis.services.chat_document_source import ChatDocumentSourceService  # noqa: E402
 from bothesis.services.groups import GroupService  # noqa: E402
 from bothesis.services.roles import RoleService  # noqa: E402
@@ -334,11 +332,9 @@ __all__ = [
     "MESSAGE_ITEM_RELATIONS",
     "PluginCredentialService",
     "PluginService",
-    "PluginSyncService",
     "ROLE_MANAGE_PERMISSION",
     "RoleService",
     "SOURCE_MANAGE_PERMISSION",
-    "SchedulerService",
     "TENANT_MANAGE_PERMISSION",
     "TenantService",
     "UploadConflictError",

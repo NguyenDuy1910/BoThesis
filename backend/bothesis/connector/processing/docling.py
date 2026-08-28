@@ -1,20 +1,26 @@
-"""Configured Docling conversion owned by the connector boundary."""
+"""Docling conversion with remote OpenRouter vision at the connector boundary."""
 
 from __future__ import annotations
 
 import json
+import os
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
 from docling.datamodel.base_models import ConversionStatus, DocumentStream, InputFormat
-from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.pipeline_options import VlmConvertOptions, VlmPipelineOptions
+from docling.datamodel.pipeline_options_vlm_model import ResponseFormat
+from docling.datamodel.stage_model_specs import VlmModelSpec
+from docling.datamodel.vlm_engine_options import ApiVlmEngineOptions
 from docling.document_converter import (
     DocumentConverter,
     ImageFormatOption,
     PdfFormatOption,
 )
+from docling.models.inference_engines.vlm.base import VlmEngineType
+from docling.pipeline.vlm_pipeline import VlmPipeline
 from docling_core.types.doc import (
     DescriptionAnnotation,
     DocItem,
@@ -31,6 +37,25 @@ from . import DoclingProcessingError
 _DEFAULT_MAX_FILE_BYTES = 20 * 1024 * 1024
 _DEFAULT_MAX_TEXT_CHARACTERS = 2_000_000
 _DEFAULT_MAX_PAGES = 1_000
+_DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_DEFAULT_OPENROUTER_MODEL = "qwen/qwen3-vl-30b-a3b-instruct"
+_DEFAULT_OPENROUTER_TIMEOUT_SECONDS = 120.0
+_DEFAULT_OPENROUTER_CONCURRENCY = 2
+_DEFAULT_OPENROUTER_MAX_TOKENS = 16_384
+_OPENROUTER_DOCUMENT_PROMPT = """\
+Transcribe and ground every visible block in reading order. Output only records with
+exactly two lines per block. First line:
+<|ref|>LABEL<|/ref|><|det|>[[x1,y1,x2,y2]]<|/det|>
+Second line: the exact visible content. Example:
+<|ref|>title<|/ref|><|det|>[[50,40,900,100]]<|/det|>
+Annual report
+Coordinates are integers from 0 to 1000 with top-left origin. LABEL must be title,
+sub_title, text, table, table_caption, figure, figure_caption, header, or footer. Keep
+non-table content on one line. For tables, content must be a complete HTML table and
+may span lines through </table>. Preserve all facts, formulas, code, repeated values,
+and meaningful chart or diagram descriptions. Never emit a record without content.
+Do not use code fences, summarize, omit, or invent information.
+"""
 
 _PLAIN_TEXT_EXTENSIONS = frozenset(
     {
@@ -47,6 +72,20 @@ _PLAIN_TEXT_EXTENSIONS = frozenset(
     }
 )
 _LINE_SENSITIVE_EXTENSIONS = frozenset({".jsonl", ".log", ".sql", ".tsv"})
+_VLM_EXTENSIONS = frozenset(
+    {
+        ".avif",
+        ".bmp",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".pdf",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".webp",
+    }
+)
 _CONVERTER_EXTENSIONS = frozenset(
     {
         ".avif",
@@ -72,7 +111,7 @@ _CONVERTER_EXTENSIONS = frozenset(
 
 
 class DoclingProcessor:
-    """Convert bounded path/byte inputs with one reusable Docling converter."""
+    """Convert bounded inputs without loading local inference model weights."""
 
     def __init__(
         self,
@@ -81,6 +120,12 @@ class DoclingProcessor:
         do_ocr: bool = True,
         do_table_structure: bool = True,
         do_picture_description: bool = False,
+        openrouter_api_key: str | None = None,
+        openrouter_base_url: str | None = None,
+        openrouter_model: str | None = None,
+        openrouter_timeout_seconds: float = _DEFAULT_OPENROUTER_TIMEOUT_SECONDS,
+        openrouter_concurrency: int = _DEFAULT_OPENROUTER_CONCURRENCY,
+        openrouter_max_tokens: int = _DEFAULT_OPENROUTER_MAX_TOKENS,
         max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES,
         max_text_characters: int = _DEFAULT_MAX_TEXT_CHARACTERS,
         max_num_pages: int = _DEFAULT_MAX_PAGES,
@@ -93,6 +138,12 @@ class DoclingProcessor:
             raise ValueError("max_text_characters must be positive")
         if max_num_pages < 1:
             raise ValueError("max_num_pages must be positive")
+        if openrouter_timeout_seconds <= 0:
+            raise ValueError("openrouter_timeout_seconds must be positive")
+        if openrouter_concurrency < 1:
+            raise ValueError("openrouter_concurrency must be positive")
+        if openrouter_max_tokens < 1:
+            raise ValueError("openrouter_max_tokens must be positive")
         resolved_page_range = page_range or (1, max_num_pages)
         if (
             len(resolved_page_range) != 2
@@ -108,11 +159,26 @@ class DoclingProcessor:
         self.max_num_pages = max_num_pages
         self.page_range = resolved_page_range
         self.allow_partial = allow_partial
-        self._converter = converter or _configured_converter(
-            do_ocr=do_ocr,
-            do_table_structure=do_table_structure,
-            do_picture_description=do_picture_description,
-        )
+        self._converter = converter
+        # Retain the former keyword arguments as a stable public interface. The
+        # remote VLM replaces all three local model stages in one page request.
+        del do_ocr, do_table_structure, do_picture_description
+        self._openrouter_api_key = (
+            openrouter_api_key or os.getenv("OPENROUTER_API_KEY") or ""
+        ).strip()
+        self._openrouter_base_url = (
+            openrouter_base_url
+            or os.getenv("OPEN_ROUTER_BASE_URL")
+            or _DEFAULT_OPENROUTER_BASE_URL
+        ).rstrip("/")
+        self._openrouter_model = (
+            openrouter_model
+            or os.getenv("BOTHESIS_DOCLING_MODEL")
+            or _DEFAULT_OPENROUTER_MODEL
+        ).strip()
+        self._openrouter_timeout_seconds = openrouter_timeout_seconds
+        self._openrouter_concurrency = openrouter_concurrency
+        self._openrouter_max_tokens = openrouter_max_tokens
 
     def process_path(
         self,
@@ -183,6 +249,19 @@ class DoclingProcessor:
         return document
 
     def _convert(self, source: Any, *, file_name: str) -> DoclingDocument:
+        if self._converter is None:
+            if _extension(file_name) in _VLM_EXTENSIONS and not self._openrouter_api_key:
+                raise DoclingProcessingError(
+                    "OPENROUTER_API_KEY is required for PDF and image processing"
+                )
+            self._converter = _configured_converter(
+                api_key=self._openrouter_api_key,
+                base_url=self._openrouter_base_url,
+                model=self._openrouter_model,
+                timeout_seconds=self._openrouter_timeout_seconds,
+                concurrency=self._openrouter_concurrency,
+                max_tokens=self._openrouter_max_tokens,
+            )
         try:
             result = self._converter.convert(
                 source,
@@ -242,14 +321,37 @@ class DoclingProcessor:
 
 def _configured_converter(
     *,
-    do_ocr: bool,
-    do_table_structure: bool,
-    do_picture_description: bool,
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout_seconds: float,
+    concurrency: int,
+    max_tokens: int,
 ) -> DocumentConverter:
-    pipeline_options = PdfPipelineOptions(
-        do_ocr=do_ocr,
-        do_table_structure=do_table_structure,
-        do_picture_description=do_picture_description,
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    engine_options = ApiVlmEngineOptions(
+        engine_type=VlmEngineType.API,
+        url=f"{base_url}/chat/completions",
+        headers=headers,
+        params={"model": model, "max_tokens": max_tokens},
+        timeout=timeout_seconds,
+        concurrency=concurrency,
+    )
+    vlm_options = VlmConvertOptions(
+        engine_options=engine_options,
+        model_spec=VlmModelSpec(
+            name="OpenRouter document vision",
+            default_repo_id=model,
+            prompt=_OPENROUTER_DOCUMENT_PROMPT,
+            response_format=ResponseFormat.DEEPSEEKOCR_MARKDOWN,
+            supported_engines={VlmEngineType.API},
+            max_new_tokens=max_tokens,
+        ),
+        batch_size=concurrency,
+    )
+    pipeline_options = VlmPipelineOptions(
+        vlm_options=vlm_options,
+        enable_remote_services=True,
         generate_page_images=False,
         generate_picture_images=False,
     )
@@ -266,8 +368,14 @@ def _configured_converter(
     return DocumentConverter(
         allowed_formats=allowed_formats,
         format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
-            InputFormat.IMAGE: ImageFormatOption(pipeline_options=pipeline_options),
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_cls=VlmPipeline,
+                pipeline_options=pipeline_options,
+            ),
+            InputFormat.IMAGE: ImageFormatOption(
+                pipeline_cls=VlmPipeline,
+                pipeline_options=pipeline_options,
+            ),
         },
     )
 

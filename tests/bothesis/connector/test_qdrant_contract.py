@@ -16,7 +16,6 @@ from bothesis.connector.protocol import (
     TextPart,
 )
 from bothesis.document_index import INDEX_SCHEMA_VERSION
-from bothesis.document_index.embedding import embedding_texts
 from bothesis.document_index.models import ContextualChunk
 from bothesis.document_index.payload import (
     QdrantPayloadContext,
@@ -75,8 +74,6 @@ async def test_index_projection_is_bounded_and_collection_scoped() -> None:
     assert isinstance(contextual[0], ContextualChunk)
     assert contextual[0].chunk_text == source_chunk.chunk_text
     assert "RAW-CONTENT-MUST-NOT-BE-INDEXED" not in contextual[0].contextual_text
-    assert embedding_texts(contextual) == [contextual[0].contextual_text]
-
     record = (await build_qdrant_records([source_chunk], document, _context()))[0]
     payload = record.payload
     assert payload.collection_item_id == "collection-1"

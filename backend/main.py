@@ -6,7 +6,6 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -452,7 +451,6 @@ class ScheduleInput(AdminRequest):
     timezone: str | None = Field(default=None, min_length=1, max_length=64)
     enabled: bool = True
     overlap_policy: Literal["skip", "queue", "replace"] = "skip"
-    next_run_at: datetime | None = None
 
 
 class PluginBindingCreate(AdminRequest):
@@ -1353,6 +1351,84 @@ async def admin_sync_plugin_binding(
     return await _admin_service.sync_plugin_binding(identity, binding_id)
 
 
+@admin_router.get("/plugin-bindings/{binding_id}/workflows")
+async def admin_list_binding_workflows(
+    binding_id: UUID,
+    identity: AdminIdentity,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+) -> dict[str, Any]:
+    return await _admin_service.list_binding_workflows(
+        identity,
+        binding_id,
+        page=page,
+        page_size=page_size,
+        status=status_filter,
+    )
+
+
+@admin_router.get("/plugin-bindings/{binding_id}/workflows/{workflow_id}")
+async def admin_get_binding_workflow(
+    binding_id: UUID,
+    workflow_id: str,
+    identity: AdminIdentity,
+) -> dict[str, Any]:
+    return await _admin_service.get_binding_workflow(
+        identity, binding_id, workflow_id
+    )
+
+
+@admin_router.get("/plugin-bindings/{binding_id}/status")
+async def admin_get_binding_status(
+    binding_id: UUID, identity: AdminIdentity
+) -> dict[str, Any]:
+    return await _admin_service.get_binding_status(identity, binding_id)
+
+
+@admin_router.get("/plugin-bindings/{binding_id}/schedule")
+async def admin_get_binding_schedule(
+    binding_id: UUID, identity: AdminIdentity
+) -> dict[str, Any]:
+    return await _admin_service.get_binding_schedule(identity, binding_id)
+
+
+@admin_router.put("/plugin-bindings/{binding_id}/schedule")
+async def admin_set_binding_schedule(
+    binding_id: UUID,
+    body: ScheduleInput,
+    identity: AdminIdentity,
+) -> dict[str, Any]:
+    return await _admin_service.set_binding_schedule(
+        identity, binding_id, body.model_dump()
+    )
+
+
+@admin_router.delete(
+    "/plugin-bindings/{binding_id}/schedule",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def admin_delete_binding_schedule(
+    binding_id: UUID, identity: AdminIdentity
+) -> Response:
+    await _admin_service.delete_binding_schedule(identity, binding_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@admin_router.post("/plugin-bindings/{binding_id}/schedule/pause")
+async def admin_pause_binding_schedule(
+    binding_id: UUID, identity: AdminIdentity
+) -> dict[str, Any]:
+    return await _admin_service.pause_binding_schedule(identity, binding_id)
+
+
+@admin_router.post("/plugin-bindings/{binding_id}/schedule/resume")
+async def admin_resume_binding_schedule(
+    binding_id: UUID, identity: AdminIdentity
+) -> dict[str, Any]:
+    return await _admin_service.resume_binding_schedule(identity, binding_id)
+
+
 @admin_router.get("/ingestion/jobs")
 async def admin_list_ingestion_jobs(
     identity: AdminIdentity,
@@ -1372,28 +1448,28 @@ async def admin_list_ingestion_jobs(
     )
 
 
-@admin_router.get("/ingestion/jobs/{run_id}")
+@admin_router.get("/ingestion/jobs/{workflow_id}")
 async def admin_get_ingestion_job(
-    run_id: UUID, identity: AdminIdentity
+    workflow_id: str, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.get_ingestion_job(identity, run_id)
+    return await _admin_service.get_ingestion_job(identity, workflow_id)
 
 
 @admin_router.post(
-    "/ingestion/jobs/{run_id}/retry",
+    "/ingestion/jobs/{workflow_id}/retry",
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def admin_retry_ingestion_job(
-    run_id: UUID, identity: AdminIdentity
+    workflow_id: str, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.retry_ingestion_job(identity, run_id)
+    return await _admin_service.retry_ingestion_job(identity, workflow_id)
 
 
-@admin_router.post("/ingestion/jobs/{run_id}/cancel")
+@admin_router.post("/ingestion/jobs/{workflow_id}/cancel")
 async def admin_cancel_ingestion_job(
-    run_id: UUID, identity: AdminIdentity
+    workflow_id: str, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.cancel_ingestion_job(identity, run_id)
+    return await _admin_service.cancel_ingestion_job(identity, workflow_id)
 
 
 @admin_router.get("/items")

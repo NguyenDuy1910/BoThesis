@@ -188,6 +188,7 @@ class FileProcessor:
             )
         if (
             resolved_kind == DocumentKind.IMAGE
+            and not text.strip()
             and not any(isinstance(part, ImagePart) for part in item.content)
         ):
             raise FileProcessingError(

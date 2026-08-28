@@ -541,8 +541,6 @@ class PluginBinding(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     connection: Mapped[PluginConnection] = relationship(back_populates="bindings")
     target_item: Mapped[Item] = relationship(back_populates="targeted_bindings")
     origins: Mapped[list[ItemOrigin]] = relationship(back_populates="binding")
-    schedule: Mapped[Schedule | None] = relationship(back_populates="binding", uselist=False)
-    sync_runs: Mapped[list[SyncRun]] = relationship(back_populates="binding")
 
 
 class ItemOrigin(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -576,88 +574,6 @@ class ItemOrigin(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     item: Mapped[Item] = relationship(back_populates="origins")
     binding: Mapped[PluginBinding] = relationship(back_populates="origins")
-
-
-class Schedule(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    __tablename__ = "schedules"
-    __table_args__ = (
-        UniqueConstraint("binding_id"),
-        Index(None, "enabled", "next_run_at"),
-        CheckConstraint(
-            "schedule_type IN ('cron', 'interval')", name="schedule_type_is_valid"
-        ),
-        CheckConstraint(
-            "overlap_policy IN ('skip', 'queue', 'replace')",
-            name="overlap_policy_is_valid",
-        ),
-    )
-
-    binding_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("plugin_bindings.id"), nullable=False
-    )
-    schedule_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    cron_expression: Mapped[str | None] = mapped_column(String(255))
-    timezone: Mapped[str | None] = mapped_column(String(64))
-    enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default=text("true")
-    )
-    overlap_policy: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="skip", server_default="skip"
-    )
-    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    binding: Mapped[PluginBinding] = relationship(back_populates="schedule")
-    sync_runs: Mapped[list[SyncRun]] = relationship(back_populates="schedule")
-
-
-class SyncRun(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
-    __tablename__ = "sync_runs"
-    __table_args__ = (
-        Index(None, "binding_id", "created_at"),
-        Index(None, "binding_id", "status"),
-        Index(None, "status", "created_at"),
-        CheckConstraint(
-            "trigger_type IN ('manual', 'scheduled', 'webhook', 'initial')",
-            name="trigger_type_is_valid",
-        ),
-        CheckConstraint(
-            "status IN ('pending', 'running', 'completed', 'failed', "
-            "'cancelled', 'skipped')",
-            name="status_is_valid",
-        ),
-    )
-
-    binding_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("plugin_bindings.id"), nullable=False
-    )
-    schedule_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("schedules.id")
-    )
-    trigger_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending", server_default="pending"
-    )
-    discovered_item_count: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, default=0, server_default="0"
-    )
-    processed_item_count: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, default=0, server_default="0"
-    )
-    written_chunk_count: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, default=0, server_default="0"
-    )
-    deleted_item_count: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, default=0, server_default="0"
-    )
-    error_code: Mapped[str | None] = mapped_column(String(128))
-    error_message: Mapped[str | None] = mapped_column(Text)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    binding: Mapped[PluginBinding] = relationship(back_populates="sync_runs")
-    schedule: Mapped[Schedule | None] = relationship(back_populates="sync_runs")
 
 
 class ItemUpload(TimestampMixin, Base):
@@ -923,8 +839,6 @@ __all__ = [
     "PluginConnection",
     "PluginCredential",
     "Role",
-    "Schedule",
-    "SyncRun",
     "Tenant",
     "TenantMembership",
     "User",
