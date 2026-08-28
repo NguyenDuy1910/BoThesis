@@ -62,7 +62,6 @@ class ProcessedFile:
     file_name: str
     text: str
     size_bytes: int
-    sha256: str
     mime_type: str | None
     item: DocumentItem
     chunks: tuple[Chunk, ...]

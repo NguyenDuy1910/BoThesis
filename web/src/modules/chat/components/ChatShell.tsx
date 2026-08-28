@@ -11,7 +11,7 @@ import {
   ListChecks,
   LoaderCircle,
   Menu,
-  Plus,
+  Paperclip,
   RefreshCw,
   Send,
   ShieldCheck,
@@ -21,6 +21,7 @@ import {
 import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
+import { AppShell } from "@/components/ui/AppShell";
 import { ProductMark } from "@/components/ui/ProductMark";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
 import {
@@ -194,8 +195,8 @@ export default function ChatShell() {
   }, [conversations, refresh]);
 
   return (
-    <div className="app-shell">
-      <AppSidebar
+    <AppShell
+      sidebar={<AppSidebar
         activeId={activeId}
         collapsed={sidebar.collapsed}
         conversations={conversations}
@@ -207,7 +208,8 @@ export default function ChatShell() {
         onRenameConversation={renameConversation}
         onSelectConversation={(id) => void selectConversation(id)}
         onToggleCollapse={sidebar.toggleCollapse}
-      />
+      />}
+    >
       {sidebar.mobileOpen && (
         <button
           aria-label="Close conversation sidebar"
@@ -224,7 +226,7 @@ export default function ChatShell() {
         onMessagesSaved={saveMessages}
         onOpenSidebar={sidebar.openMobile}
       />
-    </div>
+    </AppShell>
   );
 }
 
@@ -760,6 +762,17 @@ function ChatComposer({
           value={input}
         />
         <div className="composer__footer">
+          <button
+            aria-label="Attach files"
+            className="composer-tool"
+            disabled={!isConfigured || attachments.length >= 12}
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach files"
+            type="button"
+          >
+            <Paperclip aria-hidden="true" size={15} />
+            <span>Attach</span>
+          </button>
           <PluginPicker
             connectors={connectors}
             disabled={!isConfigured || isStreaming}
@@ -771,17 +784,6 @@ function ChatComposer({
             onSelectionChange={onConnectorSelectionChange}
             selectedIds={selectedConnectorIds}
           />
-          <button
-            aria-label="Attach files"
-            className="composer-tool"
-            disabled={!isConfigured || attachments.length >= 12}
-            onClick={() => fileInputRef.current?.click()}
-            title="Attach files"
-            type="button"
-          >
-            <Plus aria-hidden="true" size={16} />
-            <span>Attach</span>
-          </button>
           <span className="composer__privacy"><ShieldCheck aria-hidden="true" size={13} /> Permission-aware</span>
           <span className="composer__shortcut">Enter to send · Shift + Enter for new line</span>
           <button
@@ -824,14 +826,14 @@ function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
     <div className="welcome">
       <div className="welcome__content">
         <div className="welcome-hero">
+          <span className="welcome-hero__mark"><ProductMark decorative size="lg" /></span>
           <div className="welcome-identity">
-            <span aria-hidden="true" />
-            Grounded enterprise assistance
+            BoThesis workspace
           </div>
           <div className="welcome-heading">
-            <h2>What would you like to understand?</h2>
+            <h2>What can I help you understand?</h2>
           </div>
-          <p className="welcome-copy">Find trusted context, compare business signals, or turn what your organization knows into a clear next step.</p>
+          <p className="welcome-copy">Ask across the company knowledge you can access, compare business signals, or turn trusted context into a clear next step.</p>
           <div className="welcome-trust" aria-label="Assistant capabilities">
             <span><ShieldCheck aria-hidden="true" size={14} /> Searches only content you can access</span>
             <span><FileSearch aria-hidden="true" size={14} /> Keeps evidence with every answer</span>

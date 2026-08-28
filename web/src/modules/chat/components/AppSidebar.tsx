@@ -9,6 +9,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Search,
+  Settings2,
   Sun,
   UserCircle,
   X,
@@ -586,6 +587,15 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
 
   return (
     <div className="sidebar-footer">
+      <Link
+        aria-label={collapsed ? "Workspace settings" : undefined}
+        className="sidebar-account-row sidebar-account-row--link"
+        href="/admin/workspace-settings"
+        title={collapsed ? "Workspace settings" : undefined}
+      >
+        <Settings2 aria-hidden="true" size={17} />
+        {!collapsed && <span>Workspace settings</span>}
+      </Link>
       <div
         aria-label={collapsed ? "Knowledge workspace" : undefined}
         className="sidebar-account-row"

@@ -1,4 +1,4 @@
-"""Tenant groups, permission grants, and membership administration."""
+"""Tenant group and membership administration."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bothesis.db.models import Group, GroupMembership, TenantMembership, User
 from bothesis.services import (
     ACTIVE_STATUS,
-    ADMIN_PERMISSION_CATALOG,
     GROUP_MANAGE_PERMISSION,
     INACTIVE_STATUS,
     AdminConflictError,
@@ -21,7 +20,6 @@ from bothesis.services import (
     AuditService,
     AuthContext,
     normalize_code,
-    normalize_codes,
     normalize_page,
     normalize_required_text,
     require_tenant_permission,
@@ -30,7 +28,7 @@ from bothesis.services import (
 
 
 class GroupService:
-    """Manage groups that contribute permissions and document ACL principals."""
+    """Manage groups that may receive Collection access grants."""
 
     def __init__(
         self,
@@ -107,7 +105,6 @@ class GroupService:
         code: str,
         display_name: str,
         description: str | None = None,
-        permission_codes: list[str] | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, GROUP_MANAGE_PERMISSION)
         normalized_code = normalize_code(code, "group code")
@@ -130,8 +127,6 @@ class GroupService:
                 if description is not None
                 else None
             ),
-            principal_token=f"group:{normalized_code}",
-            permission_codes=_permissions(permission_codes or []),
         )
         self._session.add(group)
         await self._session.flush()
@@ -151,7 +146,6 @@ class GroupService:
         *,
         display_name: str | None = None,
         description: str | None = None,
-        permission_codes: list[str] | None = None,
         status: str | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, GROUP_MANAGE_PERMISSION)
@@ -167,9 +161,6 @@ class GroupService:
                 description, "group description", 2_000
             )
             changed.append("description")
-        if permission_codes is not None:
-            group.permission_codes = _permissions(permission_codes)
-            changed.append("permission_codes")
         if status is not None:
             normalized_status = status.strip().casefold()
             if normalized_status not in {ACTIVE_STATUS, INACTIVE_STATUS}:
@@ -320,17 +311,6 @@ class GroupService:
         ]
 
 
-def _permissions(values: list[str]) -> list[str]:
-    normalized = normalize_codes(values, "permission code")
-    known = {code for code, _ in ADMIN_PERMISSION_CATALOG}
-    unknown = sorted(set(normalized) - known)
-    if unknown:
-        raise AdminValidationError(
-            "unknown permission codes: " + ", ".join(unknown)
-        )
-    return normalized
-
-
 def _group_payload(group: Group, member_count: int) -> dict[str, Any]:
     return {
         "id": str(group.id),
@@ -338,8 +318,6 @@ def _group_payload(group: Group, member_count: int) -> dict[str, Any]:
         "code": group.code,
         "display_name": group.display_name,
         "description": group.description,
-        "principal_token": group.principal_token,
-        "permission_codes": sorted(group.permission_codes),
         "status": group.status,
         "member_count": member_count,
         "created_at": timestamp(group.created_at),

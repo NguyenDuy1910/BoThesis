@@ -15,9 +15,9 @@ const variantClasses: Record<IconButtonVariant, string> = {
 };
 
 const sizeClasses: Record<IconButtonSize, string> = {
-  sm: "h-7 w-7 rounded-md",
-  md: "h-8 w-8 rounded-md",
-  lg: "h-9 w-9 rounded-md",
+  sm: "h-8 w-8 rounded-md",
+  md: "h-9 w-9 rounded-md",
+  lg: "h-10 w-10 rounded-md",
 };
 
 interface IconButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -44,7 +44,7 @@ export function IconButton({
       aria-label={label}
       title={props.title ?? label}
       className={cn(
-        "inline-flex shrink-0 items-center justify-center transition",
+        "inline-flex shrink-0 items-center justify-center transition-[background-color,border-color,color,box-shadow,opacity] duration-[var(--duration-base)] ease-[var(--ease-standard)]",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)]",
         "disabled:pointer-events-none disabled:border-[var(--border)] disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)] disabled:opacity-50 disabled:shadow-none",
         variantClasses[variant],

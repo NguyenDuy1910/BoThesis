@@ -39,7 +39,7 @@ from bothesis.connector.protocol import (
     TextPart,
 )
 
-from . import DoclingChunkingError
+from . import ApproximateTokenizer, DoclingChunkingError
 from .mapper import (
     _caption_refs,
     _docling_item_text,
@@ -63,7 +63,7 @@ class DoclingChunker:
         hybrid_chunker: Any | None = None,
         line_chunker: Any | None = None,
     ) -> None:
-        self._tokenizer = tokenizer
+        self._tokenizer = tokenizer or ApproximateTokenizer()
         self._hybrid_chunker = hybrid_chunker
         self._line_chunker = line_chunker
 
@@ -160,15 +160,13 @@ class DoclingChunker:
         if strategy == "hybrid":
             if self._hybrid_chunker is None:
                 arguments: dict[str, Any] = {"repeat_table_header": True}
-                if self._tokenizer is not None:
-                    arguments["tokenizer"] = self._tokenizer
+                arguments["tokenizer"] = self._tokenizer
                 self._hybrid_chunker = HybridChunker(**arguments)
             return self._hybrid_chunker
         if strategy == "line":
             if self._line_chunker is None:
                 arguments = {}
-                if self._tokenizer is not None:
-                    arguments["tokenizer"] = self._tokenizer
+                arguments["tokenizer"] = self._tokenizer
                 self._line_chunker = LineBasedTokenChunker(**arguments)
             return self._line_chunker
         raise ValueError(f"Unknown Docling chunk strategy: {strategy}")

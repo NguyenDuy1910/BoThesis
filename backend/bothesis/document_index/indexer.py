@@ -27,10 +27,10 @@ from bothesis.document_index import (
     PARSER_VERSION,
     DocumentProcessingError,
     DocumentUnavailableError,
+    EmbeddingService,
     PreparedDocuments,
     VectorIndex,
 )
-from bothesis.document_index.embedding import EmbeddingService, embedding_texts
 from bothesis.document_index.models import ContextualChunk, PreparedDocument
 from bothesis.document_index.payload import build_contextual_chunks
 from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
@@ -96,16 +96,14 @@ class DocumentPipeline:
         if len(document_ids) != len(set(document_ids)):
             raise ValueError("document IDs must be unique")
         contexts: list[PreparedDocument] = []
-        fingerprints: dict[UUID, str] = {}
         for document_id in document_ids:
             document = await self._load_visible_document(document_id, access=access)
-            title = _file_name(document)
             mode = self._route(document)
             try:
                 if mode == "direct":
-                    context, fingerprint = await self._prepare_direct(document)
+                    context = await self._prepare_direct(document)
                 else:
-                    context, fingerprint = await self._prepare_indexed(
+                    context = await self._prepare_indexed(
                         document,
                         access=access,
                         message=message,
@@ -113,8 +111,7 @@ class DocumentPipeline:
             except Exception:
                 raise
             contexts.append(context)
-            fingerprints[document.id] = fingerprint
-        return PreparedDocuments(tuple(contexts), fingerprints)
+        return PreparedDocuments(tuple(contexts))
 
     async def cache_provider_annotations(
         self,
@@ -153,15 +150,17 @@ class DocumentPipeline:
                 continue
             annotation = remaining.pop(match_index)
             document_id = UUID(context.id)
-            fingerprint = prepared.source_fingerprints.get(document_id)
-            if not fingerprint:
+            async with self._session_factory() as session:
+                document = await session.get(Item, document_id)
+            if document is None:
                 continue
+            provider_version = _provider_version(document)
             try:
                 await self._provider_cache.put(
                     document_id,
                     ProviderCacheEntry(
                         provider="openrouter",
-                        source_fingerprint=fingerprint,
+                        provider_version=provider_version,
                         reference={"annotations": [annotation]},
                     ),
                 )
@@ -170,6 +169,16 @@ class DocumentPipeline:
                     "provider annotation cache exceeded its limit document_id=%s",
                     document_id,
                 )
+
+    async def index_document(
+        self,
+        document_id: UUID,
+        *,
+        access: AuthContext,
+    ) -> Item:
+        """Parse and index an available native upload with retry-safe locking."""
+
+        return await self._ensure_indexed(document_id, access=access)
 
     async def soft_delete_document(
         self,
@@ -248,10 +257,9 @@ class DocumentPipeline:
         if access.tenant_id is None:
             raise DocumentUnavailableError("an active tenant is required")
         async with self._session_factory() as session:
-            document = await ItemService(session).get_owned_upload(
+            document = await ItemService(session).get_upload_for_access(
                 document_id,
-                access.user_id,
-                access.tenant_id,
+                access,
             )
             assert document.upload is not None
             if document.upload.status != "available":
@@ -284,22 +292,22 @@ class DocumentPipeline:
             return False
         return (
             document.status == "ready"
-            and processing.get("source_fingerprint") == _source_fingerprint(document)
+            and processing.get("provider_version") == _provider_version(document)
             and processing.get("parser_version") == PARSER_VERSION
             and processing.get("chunker_version") == CHUNKER_VERSION
-            and processing.get("embedding_model") == self._embedder.model
+            and processing.get("embedding_model") == self._embedder.embedding_model
             and processing.get("index_schema_version") == INDEX_SCHEMA_VERSION
         )
 
     async def _prepare_direct(
         self,
         document: Item,
-    ) -> tuple[PreparedDocument, str]:
-        fingerprint = _source_fingerprint(document)
+    ) -> PreparedDocument:
+        provider_version = _provider_version(document)
         cached = await self._provider_cache.get(
             document.id,
             provider="openrouter",
-            source_fingerprint=fingerprint,
+            provider_version=provider_version,
         )
         annotations: tuple[Mapping[str, Any], ...] = ()
         if cached is not None:
@@ -337,8 +345,7 @@ class DocumentPipeline:
                 }
             else:
                 raise DocumentProcessingError("document type is not direct-capable")
-        return (
-            PreparedDocument(
+        return PreparedDocument(
                 id=str(document.id),
                 title=_file_name(document),
                 content_type=content_type,
@@ -354,12 +361,17 @@ class DocumentPipeline:
                         chunk_text="Original user-supplied document provided directly to the model.",
                         contextual_text="Original user-supplied document provided directly to the model.",
                         title=_file_name(document),
-                        document_kind="document",
+                        document_type=document.document_type or "plain_text",
+                        collection_item_id=(
+                            str(document.parent_item_id)
+                            if document.parent_item_id is not None
+                            else None
+                        ),
                         source=SourceIdentity(
                             connector_id="upload",
                             provider=SourceProvider.FILE,
                             external_id=str(document.id),
-                            url=document.source_url,
+                            url=None,
                         ),
                         hierarchy=Hierarchy(),
                         access=EffectiveAccess(),
@@ -367,9 +379,7 @@ class DocumentPipeline:
                     ),
                 ),
                 provider_annotations=annotations,
-            ),
-            fingerprint,
-        )
+            )
 
     async def _prepare_indexed(
         self,
@@ -377,7 +387,7 @@ class DocumentPipeline:
         *,
         access: AuthContext,
         message: str,
-    ) -> tuple[PreparedDocument, str]:
+    ) -> PreparedDocument:
         document = await self._ensure_indexed(document.id, access=access)
         query_vector = await self._embedder.embed_query(message)
         chunks = await self._vector_index.search_document(
@@ -387,17 +397,14 @@ class DocumentPipeline:
             access=access,
             limit=self._retrieval_limit,
         )
-        return (
-            PreparedDocument(
+        return PreparedDocument(
                 id=str(document.id),
                 title=_file_name(document),
                 content_type=document.mime_type or "application/octet-stream",
                 mode="indexed",
                 citation_id=f"document:{document.id}",
                 chunks=chunks,
-            ),
-            _source_fingerprint(document),
-        )
+            )
 
     async def _ensure_indexed(
         self,
@@ -434,8 +441,10 @@ class DocumentPipeline:
             if access.tenant_id is None:
                 raise DocumentUnavailableError("an active tenant is required")
             items = ItemService(session)
-            document = await items.get_owned_upload(
-                document_id, access.user_id, access.tenant_id
+            document = await items.get_upload_for_access(
+                document_id,
+                access,
+                minimum_role="editor",
             )
             if self._index_is_current(document, access=access):
                 return document
@@ -457,7 +466,6 @@ class DocumentPipeline:
                         document.id,
                         {"processing": processing},
                     )
-            source_fingerprint = _source_fingerprint(document)
 
         try:
             async with self._session_factory.begin() as session:
@@ -466,13 +474,7 @@ class DocumentPipeline:
                 document, access=access
             )
             canonical_item = canonical.item
-            source_fingerprint = canonical.source_fingerprint
             canonical_chunks = canonical.chunks
-            async with self._session_factory.begin() as session:
-                await ItemService(session).set_content_sha256(
-                    document.id, source_fingerprint
-                )
-            document.content_sha256 = source_fingerprint
 
             contextual_chunks = await build_contextual_chunks(
                 canonical_chunks,
@@ -483,15 +485,16 @@ class DocumentPipeline:
             for start in range(0, len(contextual_chunks), self._embedding_batch_size):
                 batch = contextual_chunks[start : start + self._embedding_batch_size]
                 vectors.extend(
-                    await self._embedder.embed_documents(embedding_texts(batch))
+                    await self._embedder.embed_documents(
+                        [chunk.contextual_text for chunk in batch]
+                    )
                 )
             await self._vector_index.replace_document(
                 document,
                 contextual_chunks,
                 vectors,
                 access=access,
-                embedding_model=self._embedder.model,
-                source_fingerprint=source_fingerprint,
+                embedding_model=self._embedder.embedding_model,
             )
             async with self._session_factory.begin() as session:
                 items = ItemService(session)
@@ -499,10 +502,10 @@ class DocumentPipeline:
                     document.id,
                     {
                         "processing": {
-                            "source_fingerprint": source_fingerprint,
+                            "provider_version": _provider_version(document),
                             "parser_version": PARSER_VERSION,
                             "chunker_version": CHUNKER_VERSION,
-                            "embedding_model": self._embedder.model,
+                            "embedding_model": self._embedder.embedding_model,
                             "index_schema_version": INDEX_SCHEMA_VERSION,
                             "tenant_id": str(access.tenant_id),
                             "owner_user_id": str(access.user_id),
@@ -518,15 +521,20 @@ class DocumentPipeline:
             raise DocumentProcessingError("document indexing failed") from exc
 
 
-def _source_fingerprint(document: Item) -> str:
-    if document.content_sha256:
-        return document.content_sha256
-    storage = document.metadata_.get("storage")
-    if isinstance(storage, Mapping):
-        value = storage.get("source_fingerprint")
+def _provider_version(document: Item) -> str:
+    metadata = document.metadata_
+    for key in ("provider_version", "version_id", "etag"):
+        value = metadata.get(key)
         if isinstance(value, str) and value:
             return value
-    return f"{document.storage_key or 'missing'}:{document.size_bytes or 0}"
+    storage = metadata.get("storage")
+    if isinstance(storage, Mapping):
+        for key in ("provider_version", "version_id", "etag"):
+            value = storage.get(key)
+            if isinstance(value, str) and value:
+                return value
+    updated_at = getattr(document, "updated_at", None)
+    return f"native:{document.id}:{updated_at.isoformat() if updated_at else 'initial'}"
 
 
 def _advisory_lock_key(document_id: UUID) -> int:
@@ -553,7 +561,6 @@ __all__ = [
     "DocumentProcessingError",
     "DocumentPipeline",
     "DocumentUnavailableError",
-    "EmbeddingService",
     "PARSER_VERSION",
     "PreparedDocuments",
     "VectorIndex",

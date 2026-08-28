@@ -29,11 +29,14 @@ class QdrantPayloadContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tenant_id: str = Field(min_length=1)
-    connector_id: str | int
-    scope_id: str | int | None = None
+    connection_id: str
+    binding_id: str
+    collection_item_id: str = Field(min_length=1)
+    parent_item_id: str | None = None
+    document_type: str = Field(min_length=1)
+    plugin_key: str = Field(min_length=1)
     is_deleted: bool = False
     embedding_model: str | None = None
-    denied_reader_ids: list[str] = Field(default_factory=list)
 
     @field_validator("tenant_id")
     @classmethod
@@ -55,28 +58,27 @@ class IndexPayload(BaseModel):
 
     schema_version: int = INDEX_SCHEMA_VERSION
     tenant_id: str = Field(min_length=1)
-    scope_id: str | int | None = None
+    connection_id: str
+    binding_id: str
     is_deleted: bool = False
 
     item_id: str = Field(min_length=1)
     chunk_id: str = Field(min_length=1)
     chunk_index: int = Field(ge=0)
     title: str | None = None
-    document_kind: str = Field(min_length=1)
+    collection_item_id: str = Field(min_length=1)
+    parent_item_id: str | None = None
+    document_type: str = Field(min_length=1)
     content_type: str = Field(min_length=1)
     chunk_text: str = Field(min_length=1)
     contextual_text: str = Field(min_length=1)
     context_section_path: list[str] = Field(default_factory=list)
     context_summary: str | None = None
 
-    connector_id: str | int
-    provider: str = Field(min_length=1)
+    plugin_key: str = Field(min_length=1)
     external_id: str = Field(min_length=1)
-    parent_id: str | None = None
     root_id: str | None = None
     ancestor_ids: list[str] = Field(default_factory=list)
-    reader_ids: list[str] = Field(default_factory=list)
-    denied_reader_ids: list[str] = Field(default_factory=list)
 
     source_url: str | None = None
     citation_section: str | None = None
@@ -86,11 +88,6 @@ class IndexPayload(BaseModel):
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
     embedding_model: str | None = None
-
-    @field_validator("reader_ids", "denied_reader_ids")
-    @classmethod
-    def _normalise_reader_ids(cls, value: list[str]) -> list[str]:
-        return sorted({item.strip().lower() for item in value if item.strip()})
 
     @field_validator("ancestor_ids", "context_section_path")
     @classmethod
@@ -115,26 +112,25 @@ class IndexPayload(BaseModel):
     ) -> "IndexPayload":
         return cls(
             tenant_id=context.tenant_id,
-            scope_id=context.scope_id,
+            connection_id=context.connection_id,
+            binding_id=context.binding_id,
             is_deleted=context.is_deleted,
             item_id=chunk.item_id,
             chunk_id=chunk.id,
             chunk_index=chunk.chunk_index,
             title=chunk.title,
-            document_kind=chunk.document_kind,
+            collection_item_id=context.collection_item_id,
+            parent_item_id=context.parent_item_id,
+            document_type=context.document_type,
             content_type=chunk.content_type,
             chunk_text=chunk.chunk_text,
             contextual_text=chunk.contextual_text,
             context_section_path=chunk.context.section_path,
             context_summary=chunk.context.summary,
-            connector_id=context.connector_id,
-            provider=chunk.source.provider.value,
+            plugin_key=context.plugin_key,
             external_id=chunk.source.external_id,
-            parent_id=chunk.hierarchy.parent_id,
             root_id=chunk.hierarchy.root_id,
             ancestor_ids=chunk.hierarchy.ancestor_ids,
-            reader_ids=chunk.access.reader_ids,
-            denied_reader_ids=context.denied_reader_ids,
             source_url=_persisted_source_url(chunk.source.url),
             citation_section=chunk.citation.section,
             citation_section_path=list(chunk.citation.section_path),
@@ -166,8 +162,7 @@ class QdrantChunkRecord(BaseModel):
         point_id = str(
             uuid5(
                 NAMESPACE_URL,
-                f"{context.tenant_id}:{context.connector_id}:"
-                f"{chunk.item_id}:{chunk.chunk_index}",
+                f"{context.tenant_id}:{chunk.item_id}:{chunk.chunk_index}",
             )
         )
         return cls(
@@ -223,7 +218,7 @@ async def build_contextual_chunks(
                 source=item.source,
                 hierarchy=item.hierarchy,
                 access=item.access,
-                document_kind=item.document_kind,
+                document_type=item.document_kind,
                 document_summary=summary,
                 semantic_context=semantic_context,
             )

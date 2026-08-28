@@ -94,11 +94,11 @@ export function PluginPicker({
         disabled={disabled}
         onClick={() => setOpen((value) => !value)}
         ref={triggerRef}
-        title="Choose knowledge connectors"
+        title="Choose knowledge sources"
         type="button"
       >
         <PlugZap aria-hidden="true" size={15} />
-        <span>Connectors</span>
+        <span>Knowledge</span>
         <small>{summary}</small>
         <ChevronDown aria-hidden="true" className={cn("plugin-picker__chevron", open && "plugin-picker__chevron--open")} size={13} />
       </button>
@@ -106,7 +106,7 @@ export function PluginPicker({
         <div aria-label="Choose connectors for this chat" className="plugin-picker__menu" role="dialog">
           <div className="plugin-picker__header">
             <div>
-              <p>Knowledge connectors</p>
+              <p>Knowledge sources</p>
               <span>Control what this message can search.</span>
             </div>
           </div>

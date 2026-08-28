@@ -90,10 +90,10 @@ class StubConnector(BaseSourceConnector):
     ) -> list[ItemChange]:
         del checkpoint, scope
         return [
-            ItemChange(type=ChangeType.UPSERT, item_id="doc-1"),
-            ItemChange(type=ChangeType.UPSERT, item_id="doc-2"),
-            ItemChange(type=ChangeType.DELETE, item_id="doc-old"),
-            ItemChange(type=ChangeType.UPSERT, item_id="doc-1"),
+            ItemChange(type=ChangeType.CREATED, item_id="doc-1"),
+            ItemChange(type=ChangeType.CREATED, item_id="doc-2"),
+            ItemChange(type=ChangeType.DELETED, item_id="doc-old"),
+            ItemChange(type=ChangeType.UPDATED, item_id="doc-1"),
         ]
 
     async def fetch_item(self, external_id: str) -> DocumentItem:

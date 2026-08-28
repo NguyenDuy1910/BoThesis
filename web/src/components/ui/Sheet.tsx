@@ -33,8 +33,25 @@ export function Sheet({
   useEffect(() => {
     if (!open) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
+    let backgroundElements: Array<{
+      element: HTMLElement;
+      ariaHidden: string | null;
+      inert: boolean;
+    }> = [];
     document.body.style.overflow = "hidden";
     const frame = window.requestAnimationFrame(() => {
+      const overlayRoot = sheetRef.current?.parentElement;
+      backgroundElements = Array.from(document.body.children)
+        .filter((element): element is HTMLElement => element instanceof HTMLElement && element !== overlayRoot)
+        .map((element) => ({
+          element,
+          ariaHidden: element.getAttribute("aria-hidden"),
+          inert: element.inert,
+        }));
+      for (const { element } of backgroundElements) {
+        element.inert = true;
+        element.setAttribute("aria-hidden", "true");
+      }
       (initialFocusRef?.current ?? focusableElements(sheetRef.current)[0])?.focus();
     });
     const onKeyDown = (event: KeyboardEvent) => {
@@ -61,6 +78,11 @@ export function Sheet({
       document.body.style.overflow = "";
       window.cancelAnimationFrame(frame);
       document.removeEventListener("keydown", onKeyDown);
+      for (const { element, ariaHidden, inert } of backgroundElements) {
+        element.inert = inert;
+        if (ariaHidden === null) element.removeAttribute("aria-hidden");
+        else element.setAttribute("aria-hidden", ariaHidden);
+      }
       previouslyFocused?.focus();
     };
   }, [initialFocusRef, open]);
@@ -71,7 +93,7 @@ export function Sheet({
     <div className="fixed inset-0 z-50 flex justify-end" role="presentation">
       <button
         aria-label="Close setup panel"
-        className="ui-sheet-scrim absolute inset-0 cursor-default bg-slate-950/30"
+        className="ui-sheet-scrim absolute inset-0 cursor-default bg-[var(--overlay-scrim)]"
         onClick={onClose}
         tabIndex={-1}
         type="button"

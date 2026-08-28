@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -66,18 +65,15 @@ class ChatDocumentSourceService:
                 max_bytes=self._max_processing_bytes,
             )
             self._validate_stored_size(document, stored.size_bytes)
-            digest = stored.checksum_sha256 or self._sha256_path(path)
             try:
                 processed = await asyncio.to_thread(
                     self._processor.process_path,
                     path,
-                    **self._processing_arguments(document, access=access, digest=digest),
+                    **self._processing_arguments(document, access=access),
                 )
             except FileProcessingError as exc:
                 raise DocumentProcessingError("document source processing failed") from exc
-            return self._canonical_content(
-                document, processed, digest=digest, access=access
-            )
+            return self._canonical_content(document, processed, access=access)
 
     async def direct_file_data(
         self,
@@ -101,13 +97,8 @@ class ChatDocumentSourceService:
         document: Item,
         processed: ProcessedFile,
         *,
-        digest: str,
         access: AuthContext,
     ) -> CanonicalDocumentContent:
-        if processed.sha256 != digest:
-            raise DocumentProcessingError(
-                "processed document checksum does not match its source"
-            )
         expected_item_id = str(document.id)
         if processed.item.id != expected_item_id:
             raise DocumentProcessingError(
@@ -124,7 +115,6 @@ class ChatDocumentSourceService:
         return CanonicalDocumentContent(
             item=processed.item,
             chunks=tuple(processed.chunks),
-            source_fingerprint=digest,
         )
 
     def _validate_size(self, document: Item) -> None:
@@ -146,7 +136,6 @@ class ChatDocumentSourceService:
         document: Item,
         *,
         access: AuthContext,
-        digest: str,
     ) -> dict[str, Any]:
         file_name = cls._file_name(document)
         return {
@@ -157,9 +146,9 @@ class ChatDocumentSourceService:
                 connector_id="upload",
                 provider=SourceProvider.FILE,
                 external_id=str(document.id),
-                external_version=digest,
-                etag=digest,
-                url=document.source_url,
+                external_version=None,
+                etag=None,
+                url=None,
             ),
             "document_kind": cls._document_kind(document.mime_type),
             "access": AccessPolicy.from_reader_ids([str(access.user_id)]),
@@ -187,14 +176,6 @@ class ChatDocumentSourceService:
             ):
                 projected[str(key)] = list(value)
         return projected
-
-    @staticmethod
-    def _sha256_path(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as source:
-            for block in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(block)
-        return digest.hexdigest()
 
     @staticmethod
     def _document_kind(content_type: str | None) -> DocumentKind:

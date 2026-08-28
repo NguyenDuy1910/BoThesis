@@ -15,7 +15,7 @@ export function AdminTopbar({ onMobileMenuOpen }: AdminTopbarProps) {
   const segments = pathname.split("/").filter(Boolean).slice(1);
   const breadcrumbs = segments.map((segment, index) => ({
     href: "/admin/" + segments.slice(0, index + 1).join("/"),
-    label: breadcrumbLabels[segment] ?? segment.replace(/[-_]/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
+    label: breadcrumbLabels[segment] ?? (uuidPattern.test(segment) ? "Details" : segment.replace(/[-_]/g, " ").replace(/\b\w/g, (character) => character.toUpperCase())),
   }));
 
   return (
@@ -47,6 +47,17 @@ export function AdminTopbar({ onMobileMenuOpen }: AdminTopbarProps) {
 const breadcrumbLabels: Record<string, string> = {
   acl: "ACL Policies",
   connectors: "Connectors",
+  documents: "Documents",
+  people: "People",
+  sources: "Sources & Integrations",
+  "knowledge-bases": "Knowledge Bases",
+  "all-items": "All Items",
+  "sync-activity": "Sync Activity",
+  schedules: "Schedules",
+  "access-policies": "Access Policies",
+  "workspace-settings": "Workspace Settings",
   "access-requests": "Access Requests",
-  "audit-logs": "Audit Logs",
+  "audit-logs": "Audit Log",
 };
+
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

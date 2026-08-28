@@ -13,9 +13,7 @@ class RetrievalContext(Protocol):
     tenant_id: str
     user_id: str
     roles: list[str]
-    reader_ids: tuple[str, ...]
-    is_admin: bool
-    connector_ids: tuple[int, ...] | None
+    collection_item_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)

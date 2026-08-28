@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
+import asyncio
 import logging
+import tempfile
+from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bothesis.connector.file import FinxFileExtensions
 from bothesis.db.models import Item
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
+    AsyncUploadStream,
     AuthContext,
+    CollectionAccessService,
+    CollectionUpload,
+    DocumentNotFoundError,
     ItemService,
     InvalidDocumentStateError,
     UploadConflictError,
@@ -73,7 +79,7 @@ class UploadService:
                     file_name=normalized_name,
                     mime_type=normalized_type,
                     size_bytes=size_bytes,
-                    document_kind=_document_kind(normalized_type),
+                    document_type=_document_type(normalized_type),
                 )
         except InvalidDocumentStateError as exc:
             raise UploadConflictError(str(exc)) from exc
@@ -96,6 +102,93 @@ class UploadService:
             upload_required=True,
             target=UploadTarget(mode="presigned", request=request),
         )
+
+    async def upload_to_collection(
+        self,
+        access: AuthContext,
+        collection_id: UUID,
+        *,
+        idempotency_key: str,
+        file_name: str,
+        content_type: str,
+        content: AsyncUploadStream,
+    ) -> CollectionUpload:
+        """Store and register one native file directly under a writable collection."""
+
+        if access.tenant_id is None:
+            raise UploadValidationError("an active tenant is required")
+        normalized_name = _file_name(file_name)
+        normalized_type = _content_type(content_type)
+        _validate_supported_file(normalized_name)
+        await self._require_writable_collection(access, collection_id)
+        temporary_path, size_bytes = await self._spool(content, normalized_name)
+        try:
+            try:
+                async with self._session_factory.begin() as session:
+                    await self._require_writable_collection(
+                        access, collection_id, session=session
+                    )
+                    item, created = await ItemService(
+                        session
+                    ).create_or_get_collection_upload(
+                        access.user_id,
+                        access.tenant_id,
+                        collection_id,
+                        idempotency_key=idempotency_key,
+                        file_name=normalized_name,
+                        mime_type=normalized_type,
+                        size_bytes=size_bytes,
+                        document_type=_document_type(normalized_type),
+                    )
+            except InvalidDocumentStateError as exc:
+                raise UploadConflictError(str(exc)) from exc
+
+            assert item.upload is not None
+            if item.upload.status != "available":
+                if not item.storage_key:
+                    raise UploadConflictError(
+                        "item has no durable object storage key"
+                    )
+                try:
+                    stored = await asyncio.to_thread(
+                        self._object_storage.put_path,
+                        temporary_path,
+                        item.storage_key,
+                        content_type=normalized_type,
+                    )
+                    _validate_stored_object(
+                        stored,
+                        expected_size=size_bytes,
+                        expected_content_type=normalized_type,
+                    )
+                except UploadValidationError:
+                    await self._record_failure(
+                        access, item.id, error_code="object_validation_failed"
+                    )
+                    raise
+                except ObjectStorageError:
+                    await self._record_failure(
+                        access, item.id, error_code="object_storage_failed"
+                    )
+                    raise
+                except Exception as exc:
+                    await self._record_failure(
+                        access, item.id, error_code="object_storage_failed"
+                    )
+                    raise ObjectStorageError("object storage upload failed") from exc
+                async with self._session_factory.begin() as session:
+                    item = await ItemService(session).mark_upload_available(
+                        item.id,
+                        access.user_id,
+                        access.tenant_id,
+                        storage_metadata={
+                            "etag": stored.etag,
+                            "version_id": stored.version_id,
+                        },
+                    )
+            return CollectionUpload(item=item, created=created)
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     async def complete_upload(
         self,
@@ -139,17 +232,14 @@ class UploadService:
                 error_code="object_validation_failed",
             )
             raise
-        checksum = _checksum_hex(stored.checksum_sha256)
         async with self._session_factory.begin() as session:
             return await ItemService(session).mark_upload_available(
                 document_id,
                 access.user_id,
                 access.tenant_id,
-                content_sha256=checksum,
                 storage_metadata={
                     "etag": stored.etag,
                     "version_id": stored.version_id,
-                    "source_fingerprint": stored.source_fingerprint,
                 },
             )
 
@@ -158,16 +248,15 @@ class UploadService:
         access: AuthContext,
         document_id: UUID,
         *,
-        include_hidden: bool = False,
+        minimum_role: str = "viewer",
     ) -> Item:
         if access.tenant_id is None:
             raise UploadValidationError("an active tenant is required")
         async with self._session_factory() as session:
-            return await ItemService(session).get_owned_upload(
+            return await ItemService(session).get_upload_for_access(
                 document_id,
-                access.user_id,
-                access.tenant_id,
-                include_deleted=include_hidden,
+                access,
+                minimum_role=minimum_role,
             )
 
     async def mark_failed(
@@ -206,6 +295,62 @@ class UploadService:
                 document_id,
             )
 
+    async def _require_writable_collection(
+        self,
+        access: AuthContext,
+        collection_id: UUID,
+        *,
+        session: AsyncSession | None = None,
+    ) -> None:
+        if access.tenant_id is None:
+            raise UploadValidationError("an active tenant is required")
+        if session is None:
+            async with self._session_factory() as owned_session:
+                await self._require_writable_collection(
+                    access, collection_id, session=owned_session
+                )
+            return
+        collection = await CollectionAccessService(session).require_item_access(
+            collection_id,
+            access=access,
+            minimum_role="editor",
+        )
+        if collection.item_type != "collection":
+            raise DocumentNotFoundError(f"collection not found: {collection_id}")
+        if collection.status != "ready":
+            raise UploadValidationError("collection is unavailable for uploads")
+
+    async def _spool(
+        self,
+        content: AsyncUploadStream,
+        file_name: str,
+    ) -> tuple[Path, int]:
+        temporary = tempfile.NamedTemporaryFile(
+            prefix="bothesis-collection-upload-",
+            suffix=Path(file_name).suffix,
+            delete=False,
+        )
+        path = Path(temporary.name)
+        size_bytes = 0
+        try:
+            while True:
+                chunk = await content.read(min(1024 * 1024, self.max_upload_bytes + 1))
+                if not chunk:
+                    break
+                size_bytes += len(chunk)
+                self._validate_upload_size(size_bytes)
+                temporary.write(chunk)
+            temporary.flush()
+            self._validate_upload_size(size_bytes)
+            return path, size_bytes
+        except Exception:
+            temporary.close()
+            path.unlink(missing_ok=True)
+            raise
+        finally:
+            if not temporary.closed:
+                temporary.close()
+
     def _validate_upload_size(self, size_bytes: int) -> None:
         if size_bytes < 1:
             raise UploadValidationError("upload size must be greater than zero")
@@ -235,6 +380,14 @@ def _content_type(value: str) -> str:
     return normalized
 
 
+def _validate_supported_file(file_name: str) -> None:
+    extension = Path(file_name).suffix.casefold()
+    if extension not in FinxFileExtensions.ALL_ALLOWED_EXTENSIONS:
+        raise UploadValidationError(
+            f"unsupported file type: {extension or 'file has no extension'}"
+        )
+
+
 def _validate_stored_object(
     stored: StoredObject,
     *,
@@ -257,29 +410,20 @@ def _validate_stored_object(
         )
 
 
-def _checksum_hex(value: str | None) -> str | None:
-    if not value:
-        return None
-    normalized = value.strip()
-    if len(normalized) == 64 and all(
-        character in "0123456789abcdefABCDEF" for character in normalized
-    ):
-        return normalized.casefold()
-    try:
-        decoded = base64.b64decode(normalized, validate=True)
-    except (binascii.Error, ValueError):
-        return None
-    return decoded.hex() if len(decoded) == 32 else None
-
-
 __all__ = ["UploadService"]
 
 
-def _document_kind(content_type: str) -> str:
+def _document_type(content_type: str) -> str:
     if content_type.startswith("image/"):
         return "image"
     if content_type == "application/pdf":
         return "pdf"
     if content_type in {"text/html", "application/xhtml+xml"}:
         return "web_page"
-    return "document"
+    if content_type in {"text/markdown", "text/x-markdown"}:
+        return "markdown"
+    if content_type.startswith("audio/"):
+        return "audio"
+    if content_type.startswith("video/"):
+        return "video"
+    return "plain_text"

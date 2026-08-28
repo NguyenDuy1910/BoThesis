@@ -1,6 +1,4 @@
-import {
-  getBothesisChatConfiguration,
-} from "@/lib/api/config";
+import { getBothesisChatConfiguration } from "@/lib/api/config";
 import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type {
   AgentHistoryMessage,

@@ -38,6 +38,75 @@ services:
       retries: 12
     restart: unless-stopped
 
+  temporal:
+    image: temporalio/auto-setup:${TEMPORAL_VERSION:-1.29.1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-bothesis}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-bothesis}
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CLI_ADDRESS: temporal:7233
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    volumes:
+      - ./temporal-dynamicconfig:/etc/temporal/config/dynamicconfig:ro
+    restart: unless-stopped
+
+  temporal-admin-tools:
+    image: temporalio/admin-tools:${TEMPORAL_ADMIN_TOOLS_VERSION:-1.29.1-tctl-1.18.4-cli-1.5.0}
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CLI_ADDRESS: temporal:7233
+    stdin_open: true
+    tty: true
+
+  temporal-init:
+    image: temporalio/admin-tools:${TEMPORAL_ADMIN_TOOLS_VERSION:-1.29.1-tctl-1.18.4-cli-1.5.0}
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CLI_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        until temporal operator cluster health >/dev/null 2>&1; do sleep 1; done
+        until temporal operator namespace describe \
+          --namespace "$$TEMPORAL_NAMESPACE" >/dev/null 2>&1; do sleep 1; done
+        until temporal operator search-attribute list \
+          --namespace "$$TEMPORAL_NAMESPACE" >/dev/null 2>&1; do sleep 1; done
+        for attribute in TenantId BindingId ConnectionId PluginKey WorkflowCategory TriggerType; do
+          output="$$(temporal operator search-attribute create \
+            --namespace "$$TEMPORAL_NAMESPACE" \
+            --name "$$attribute" \
+            --type Keyword 2>&1)" || {
+              echo "$$output" | grep -qi "already exists" || {
+                echo "$$output" >&2
+                exit 1
+              }
+            }
+        done
+
+  temporal-ui:
+    image: temporalio/ui:${TEMPORAL_UI_VERSION:-2.34.0}
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "${TEMPORAL_UI_PORT:-8080}:8080"
+    restart: unless-stopped
+
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"

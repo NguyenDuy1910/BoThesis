@@ -1,4 +1,4 @@
-"""Permission-aware Qdrant operations for indexed document chunks.
+"""Collection-authorized Qdrant operations for indexed document chunks.
 
 This module is the only place that knows Qdrant's query and payload models.
 Callers must supply an authenticated access context before retrieving content;
@@ -46,36 +46,28 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-ACL_FIELD = "reader_ids"
-DENIED_ACL_FIELD = "denied_reader_ids"
-NO_READER_IDS = "__no_reader_ids__"
 _NO_TENANT_ID = "__no_tenant_id__"
+_NO_COLLECTION_ID = "__no_collection_id__"
 _SEARCH_RETRY_DELAYS = (0.5, 1.0)
-
-
-def acl_match_condition(reader_ids: list[str] | set[str]) -> qmodels.Filter:
-    return VectorStore.acl_match_condition(reader_ids)
-
-
-def no_access_qdrant_condition() -> qmodels.Filter:
-    return VectorStore.no_access_condition()
 
 
 class VectorStoreFilterBuilder:
     # A tuple makes generated filters deterministic, which helps auditing and
     # makes equivalent retrieval requests easier to compare in tests/logs.
     FILTERABLE_LIST_FIELDS: tuple[str, ...] = (
-        "provider",
-        "document_kind",
+        "plugin_key",
+        "document_type",
         "content_type",
         "item_id",
         "chunk_id",
         "section",
         "external_id",
-        "parent_id",
+        "parent_item_id",
         "root_id",
         "ancestor_ids",
-        "connector_id",
+        "collection_item_id",
+        "connection_id",
+        "binding_id",
     )
 
     @classmethod
@@ -97,8 +89,6 @@ class VectorStoreFilterBuilder:
         resolved_field_map = {"section": "citation_section", **(field_map or {})}
         for logical_name in cls.FILTERABLE_LIST_FIELDS:
             values = getattr(filters, logical_name, [])
-            if not values and logical_name == "connector_id":
-                values = getattr(filters, "connector_ids", [])
             if not values:
                 continue
             qdrant_field = resolved_field_map.get(logical_name, logical_name)
@@ -215,38 +205,17 @@ class VectorStore:
             ),
         )
 
-    async def sync_document_acl(
-        self,
-        document_id: str,
-        acl: Mapping[str, int] | Iterable[str],
-        *,
-        denied_reader_ids: Iterable[str] = (),
-        acl_field: str = ACL_FIELD,
-        document_id_field: str = "item_id",
-        collection_name: str | None = None,
-    ) -> Any:
-        raw_reader_ids = acl.keys() if isinstance(acl, Mapping) else acl
-        reader_ids = self._normalise_reader_ids(raw_reader_ids)
-        denied = self._normalise_reader_ids(denied_reader_ids)
-        return await self.set_document_payload(
-            document_id,
-            {acl_field: reader_ids, DENIED_ACL_FIELD: denied},
-            document_id_field=document_id_field,
-            collection_name=collection_name,
-        )
-
     async def soft_delete_document_points(
         self,
         document_id: str,
         *,
         document_id_field: str = "item_id",
         is_deleted_field: str = "is_deleted",
-        acl_field: str = ACL_FIELD,
         collection_name: str | None = None,
     ) -> Any:
         return await self.set_document_payload(
             document_id,
-            {is_deleted_field: True, acl_field: [], DENIED_ACL_FIELD: []},
+            {is_deleted_field: True},
             document_id_field=document_id_field,
             collection_name=collection_name,
         )
@@ -565,7 +534,7 @@ class VectorStore:
         limit: int = 5,
         document_id_field: str = "item_id",
         is_deleted_field: str = "is_deleted",
-        chunk_kind_field: str = "document_kind",
+        chunk_kind_field: str = "document_type",
         collection_name: str | None = None,
     ) -> Any:
         must = self._document_context_must(
@@ -601,7 +570,7 @@ class VectorStore:
         limit: int = 8,
         document_id_field: str = "item_id",
         is_deleted_field: str = "is_deleted",
-        hierarchy_node_id_field: str = "parent_id",
+        hierarchy_node_id_field: str = "parent_item_id",
         ancestor_ids_field: str = "ancestor_ids",
         collection_name: str | None = None,
     ) -> Any:
@@ -655,17 +624,17 @@ class VectorStore:
         is_deleted_field: str = "is_deleted",
         tenant_id_field: str = "tenant_id",
         document_id_field: str = "item_id",
-        source_type_field: str = "provider",
-        space_key_field: str = "parent_id",
+        source_type_field: str = "plugin_key",
+        space_key_field: str = "parent_item_id",
         ancestor_ids_field: str = "ancestor_ids",
     ) -> qmodels.Filter:
         tenant_id = getattr(access_context, "tenant_id", None)
         if isinstance(tenant_id, str) and tenant_id.strip():
             conditions = cls.access_conditions(
                 tenant_id=tenant_id,
-                reader_ids=getattr(access_context, "reader_ids", []),
-                space_keys=getattr(access_context, "space_keys", []),
-                is_admin=getattr(access_context, "is_admin", False) is True,
+                collection_item_ids=getattr(
+                    access_context, "collection_item_ids", []
+                ),
                 is_deleted_field=is_deleted_field,
                 tenant_id_field=tenant_id_field,
             )
@@ -684,8 +653,7 @@ class VectorStore:
                 payload_filters,
                 field_map={
                     "item_id": document_id_field,
-                    "provider": source_type_field,
-                    "connector_id": "connector_id",
+                    "plugin_key": source_type_field,
                 },
             )
         )
@@ -723,18 +691,14 @@ class VectorStore:
         cls,
         *,
         tenant_id: str,
-        reader_ids: list[str] | set[str] | None = None,
-        space_keys: list[str] | set[str] | None = None,
-        is_admin: bool = True,
+        collection_item_ids: Iterable[str],
         is_deleted_field: str = "is_deleted",
         tenant_id_field: str = "tenant_id",
     ) -> qmodels.Filter:
         return qmodels.Filter(
             must=cls.access_conditions(
                 tenant_id=tenant_id,
-                reader_ids=reader_ids or [],
-                space_keys=space_keys or [],
-                is_admin=is_admin,
+                collection_item_ids=collection_item_ids,
                 is_deleted_field=is_deleted_field,
                 tenant_id_field=tenant_id_field,
             )
@@ -745,8 +709,8 @@ class VectorStore:
         cls,
         params: Any | None,
         *,
-        source_type_field: str = "provider",
-        space_key_field: str = "parent_id",
+        source_type_field: str = "plugin_key",
+        space_key_field: str = "parent_item_id",
         ancestor_ids_field: str = "ancestor_ids",
     ) -> qmodels.Filter | None:
         conditions = cls._search_param_conditions(
@@ -764,9 +728,7 @@ class VectorStore:
         cls,
         *,
         tenant_id: str,
-        reader_ids: Iterable[str],
-        space_keys: Iterable[str] | None = None,
-        is_admin: bool = True,
+        collection_item_ids: Iterable[str],
         is_deleted_field: str = "is_deleted",
         tenant_id_field: str = "tenant_id",
     ) -> list[Any]:
@@ -786,11 +748,15 @@ class VectorStore:
                 match=qmodels.MatchValue(value=tenant_id),
             ),
         ]
-        if not is_admin:
-            all_ids = cls._normalise_reader_ids(
-                [*(reader_ids or []), *(space_keys or [])]
+        allowed_collections = cls._normalise_collection_ids(collection_item_ids)
+        if not allowed_collections:
+            allowed_collections = [_NO_COLLECTION_ID]
+        conditions.append(
+            qmodels.FieldCondition(
+                key="collection_item_id",
+                match=qmodels.MatchAny(any=allowed_collections),
             )
-            conditions.append(cls.acl_match_condition(all_ids))
+        )
         return conditions
 
     @staticmethod
@@ -808,37 +774,6 @@ class VectorStore:
             ]
         )
 
-    @classmethod
-    def acl_match_condition(cls, reader_ids: Iterable[str]) -> qmodels.Filter:
-        ids = cls._normalise_reader_ids(reader_ids)
-        if not ids:
-            ids = [NO_READER_IDS]
-        return qmodels.Filter(
-            should=[
-                qmodels.FieldCondition(
-                    key=ACL_FIELD,
-                    match=qmodels.MatchAny(any=ids),
-                ),
-            ],
-            must_not=[
-                qmodels.FieldCondition(
-                    key=DENIED_ACL_FIELD,
-                    match=qmodels.MatchAny(any=ids),
-                )
-            ],
-        )
-
-    @classmethod
-    def no_access_condition(cls) -> qmodels.Filter:
-        return cls.acl_match_condition({NO_READER_IDS})
-
-    @classmethod
-    def build_reader_ids_filter(
-        cls,
-        reader_ids: Iterable[str],
-    ) -> qmodels.Filter:
-        return qmodels.Filter(must=[cls.acl_match_condition(reader_ids)])
-
     @staticmethod
     def _search_param_conditions(
         params: Any | None,
@@ -848,20 +783,20 @@ class VectorStore:
         ancestor_ids_field: str,
     ) -> list[Any]:
         conditions: list[Any] = []
-        provider = getattr(params, "provider", None)
-        if provider:
+        plugin_key = getattr(params, "plugin_key", None)
+        if plugin_key:
             conditions.append(
                 qmodels.FieldCondition(
                     key=source_type_field,
-                    match=qmodels.MatchValue(value=provider),
+                    match=qmodels.MatchValue(value=plugin_key),
                 )
             )
-        parent_id = getattr(params, "parent_id", None)
-        if parent_id:
+        parent_item_id = getattr(params, "parent_item_id", None)
+        if parent_item_id:
             conditions.append(
                 qmodels.FieldCondition(
                     key=space_key_field,
-                    match=qmodels.MatchValue(value=parent_id),
+                    match=qmodels.MatchValue(value=parent_item_id),
                 )
             )
         ancestor_id = getattr(params, "ancestor_id", None)
@@ -891,7 +826,10 @@ class VectorStore:
                 key=tenant_id_field,
                 match=qmodels.MatchValue(value=_NO_TENANT_ID),
             ),
-            cls.no_access_condition(),
+            qmodels.FieldCondition(
+                key="collection_item_id",
+                match=qmodels.MatchValue(value=_NO_COLLECTION_ID),
+            ),
         ]
 
     @staticmethod
@@ -902,14 +840,12 @@ class VectorStore:
         )
 
     @staticmethod
-    def _normalise_reader_ids(reader_ids: Iterable[str]) -> list[str]:
+    def _normalise_collection_ids(collection_ids: Iterable[str]) -> list[str]:
         return sorted(
             {
-                reader_id
-                for reader_id in reader_ids
-                if isinstance(reader_id, str)
-                and reader_id
-                and reader_id != NO_READER_IDS
+                collection_id.strip()
+                for collection_id in collection_ids
+                if isinstance(collection_id, str) and collection_id.strip()
             }
         )
 
@@ -979,7 +915,6 @@ class QdrantDocumentIndex:
         *,
         access: AuthContext,
         embedding_model: str,
-        source_fingerprint: str,
     ) -> None:
         if access.tenant_id is None:
             raise ValueError("indexed chat documents require an active tenant")
@@ -995,12 +930,12 @@ class QdrantDocumentIndex:
                 chunk,
                 QdrantPayloadContext(
                     tenant_id=str(access.tenant_id),
-                    connector_id="upload",
-                    scope_id=(
-                        str(document.connector_scope_id)
-                        if document.connector_scope_id
-                        else None
-                    ),
+                    connection_id="native_upload",
+                    binding_id="native_upload",
+                    collection_item_id=str(document.parent_item_id),
+                    parent_item_id=str(document.parent_item_id),
+                    document_type=document.document_type or "plain_text",
+                    plugin_key="file",
                     embedding_model=embedding_model,
                 ),
             ).for_qdrant()
@@ -1033,7 +968,7 @@ class QdrantDocumentIndex:
             return ()
         base_filter = self._store.build_access_filter(
             tenant_id=str(access.tenant_id),
-            reader_ids={str(access.user_id)},
+            collection_item_ids={str(document.parent_item_id)},
         )
         query_filter = qmodels.Filter(
             must=[
@@ -1067,7 +1002,7 @@ class QdrantDocumentIndex:
                 or f"{document.id}:{int(payload.get('chunk_index') or 0)}"
             )
             source = SourceIdentity(
-                connector_id=str(payload.get("connector_id") or "upload"),
+                connector_id=str(payload.get("connection_id") or "native_upload"),
                 provider=SourceProvider.FILE,
                 external_id=str(payload.get("external_id") or document.id),
                 url=(
@@ -1089,16 +1024,15 @@ class QdrantDocumentIndex:
                         summary=_payload_text(payload, "context_summary"),
                     ),
                     title=str(payload.get("title") or document.title or document.id),
-                    document_kind=str(payload.get("document_kind") or "document"),
+                    document_type=str(payload.get("document_type") or "plain_text"),
+                    collection_item_id=_payload_text(payload, "collection_item_id"),
                     source=source,
                     hierarchy=Hierarchy(
-                        parent_id=_payload_text(payload, "parent_id"),
+                        parent_id=_payload_text(payload, "parent_item_id"),
                         root_id=_payload_text(payload, "root_id"),
                         ancestor_ids=_payload_strings(payload, "ancestor_ids"),
                     ),
-                    access=EffectiveAccess(
-                        reader_ids=_payload_strings(payload, "reader_ids"),
-                    ),
+                    access=EffectiveAccess(),
                     citation=_citation_from_payload(payload),
                     relevance_score=score,
                 )
@@ -1113,13 +1047,9 @@ class QdrantDocumentIndex:
     ) -> None:
         if access.tenant_id is None:
             raise ValueError("indexed chat documents require an active tenant")
-        await self._store.set_document_payload(
-            str(document_id),
-            {
-                "tenant_id": str(access.tenant_id),
-                "reader_ids": [str(access.user_id)],
-            },
-        )
+        # Durable Collection grants live in PostgreSQL and are never projected
+        # into Qdrant, so grant changes require no point rewrite.
+        del document_id
 
     async def soft_delete_document(self, document_id: UUID) -> None:
         await self._store.soft_delete_document_points(str(document_id))

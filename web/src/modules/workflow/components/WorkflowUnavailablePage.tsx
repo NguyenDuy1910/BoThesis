@@ -15,7 +15,7 @@ export function WorkflowUnavailablePage() {
         <span className="status-page__context">Workflow studio</span>
       </header>
       <UnavailableState
-        description="Workflow authoring and execution depend on backend contracts that are not available in this deployment. The route remains visible so the product structure stays predictable without creating local mock workflows."
+        description="Workflow authoring and execution depend on backend contracts that are not available in this deployment. The route remains visible so the product structure stays predictable without inventing unsupported workflows."
         details={[
           { label: "Authoring", value: "Backend required" },
           { label: "Execution", value: "Backend required" },

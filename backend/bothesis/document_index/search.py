@@ -67,9 +67,7 @@ class QdrantSearchIndex:
         *,
         limit: int,
         tenant_id: str,
-        reader_ids: tuple[str, ...],
-        connector_ids: tuple[int, ...] | None,
-        is_admin: bool,
+        collection_item_ids: tuple[str, ...],
     ) -> list[ContextualChunk]:
         """Return chunks after applying lifecycle and authenticated scope filters."""
 
@@ -83,17 +81,16 @@ class QdrantSearchIndex:
         )
         if not normalized_tenant_id:
             raise ValueError("tenant_id must not be empty")
-        if connector_ids == ():
+        if not collection_item_ids:
             return []
 
         query_filter = self._store.build_retrieval_filter(
             None,
             access_context=_RetrievalAccess(
                 tenant_id=normalized_tenant_id,
-                reader_ids=reader_ids,
-                is_admin=is_admin,
+                collection_item_ids=collection_item_ids,
             ),
-            payload_filters=_PayloadFilters(connector_ids=connector_ids),
+            payload_filters=_PayloadFilters(),
         )
 
         query_vector = await self._embedder.embed_query(normalized_query)
@@ -112,18 +109,14 @@ class _RetrievalAccess:
         self,
         *,
         tenant_id: str,
-        reader_ids: tuple[str, ...],
-        is_admin: bool,
+        collection_item_ids: tuple[str, ...],
     ) -> None:
         self.tenant_id = tenant_id
-        self.reader_ids = reader_ids
-        self.space_keys: tuple[str, ...] = ()
-        self.is_admin = is_admin
+        self.collection_item_ids = collection_item_ids
 
 
 class _PayloadFilters:
-    def __init__(self, *, connector_ids: tuple[int, ...] | None) -> None:
-        self.connector_ids = connector_ids
+    pass
 
 
 def _normalise_points(points: Sequence[object]) -> list[ContextualChunk]:
@@ -147,7 +140,7 @@ def _normalise_point(point: object) -> ContextualChunk | None:
     chunk_id = _payload_text(payload, "chunk_id")
     chunk_text = _payload_content(payload, "chunk_text")
     contextual_text = _payload_content(payload, "contextual_text")
-    provider_value = _payload_text(payload, "provider")
+    provider_value = _payload_text(payload, "plugin_key")
     external_id = _payload_text(payload, "external_id")
     if not all(
         (
@@ -181,19 +174,20 @@ def _normalise_point(point: object) -> ContextualChunk | None:
             summary=_payload_text(payload, "context_summary"),
         ),
         title=_payload_text(payload, "title"),
-        document_kind=_payload_text(payload, "document_kind") or "document",
+        document_type=_payload_text(payload, "document_type") or "plain_text",
+        collection_item_id=_payload_text(payload, "collection_item_id"),
         source=SourceIdentity(
-            connector_id=str(payload.get("connector_id") or "unknown"),
+            connector_id=str(payload.get("connection_id") or "unknown"),
             provider=provider,
             external_id=external_id,
             url=_payload_text(payload, "source_url"),
         ),
         hierarchy=Hierarchy(
-            parent_id=_payload_text(payload, "parent_id"),
+            parent_id=_payload_text(payload, "parent_item_id"),
             root_id=_payload_text(payload, "root_id"),
             ancestor_ids=_payload_strings(payload, "ancestor_ids"),
         ),
-        access=EffectiveAccess(reader_ids=_payload_strings(payload, "reader_ids")),
+        access=EffectiveAccess(),
         citation=CitationInfo(
             section=_payload_text(payload, "citation_section"),
             section_path=tuple(citation_section_path),

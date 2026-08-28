@@ -40,12 +40,10 @@ class AgentContext:
     user_id: str
     tenant_id: str
     roles: list[str]
-    reader_ids: tuple[str, ...] = ()
-    is_admin: bool = True
+    collection_item_ids: tuple[str, ...] = ()
     conversation_id: str | None = None
     request_id: str | None = None
     history: tuple[ConversationMessage, ...] = ()
-    connector_ids: tuple[int, ...] | None = None
     allowed_tool_names: tuple[str, ...] | None = None
     trace_step: int | None = None
     retrieval_round: int = 0

@@ -13,7 +13,7 @@
   "source_entities": {
     "items": ["collection", "document", "file"],
     "hierarchy": "parent_item_id",
-    "object_metadata": ["storage_key", "mime_type", "size_bytes", "content_sha256"],
+    "object_metadata": ["storage_key", "mime_type", "size_bytes"],
     "retrieval_acl": ["allowed_principal_tokens", "denied_principal_tokens"],
     "lifecycle": ["pending", "processing", "ready", "failed", "unsupported", "deleted"]
   },

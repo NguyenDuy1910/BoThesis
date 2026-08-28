@@ -9,7 +9,7 @@ connector development.
 - [uv](https://docs.astral.sh/uv/)
 - Docker and Docker Compose
 - Node.js 20 or newer with npm
-- An OpenAI API key for chat and an OpenRouter API key for embeddings
+- An OpenAI API key for chat and an OpenRouter API key for document vision and embeddings
 
 The Flutter app under `app/bothesis/` is optional. It needs a current Flutter
 SDK only when you are working on the mobile client.
@@ -28,15 +28,16 @@ make init
 
 1. Creates `backend/.env` and `web/.env.local` when missing.
 2. Writes local dependency endpoints and the development identity.
-3. Starts PostgreSQL, Qdrant, and MinIO.
+3. Starts PostgreSQL, Qdrant, MinIO, Temporal, and the Temporal UI.
 4. Creates the configured MinIO bucket.
 5. Rebuilds PostgreSQL from the current SQLAlchemy models.
 6. Seeds a deterministic local administrator and membership.
 7. Recreates the derived Qdrant collection with dense and BM25 vectors.
+8. Registers the Temporal Search Attributes used by ingestion visibility.
 
 The command is deliberately destructive to local derived and database state.
-It drops the PostgreSQL `public` schema and replaces the Qdrant collection.
-Never run it against retained data.
+It drops the PostgreSQL `public` schema, clears Temporal persistence, and
+replaces the Qdrant collection. Never run it against retained data.
 
 ## Configure providers
 
@@ -80,16 +81,28 @@ authentication mechanism for deployment.
 | Health | `http://127.0.0.1:8000/health` |
 | Qdrant | `http://127.0.0.1:6333` |
 | MinIO console | `http://127.0.0.1:9001` |
+| Temporal UI | `http://127.0.0.1:8080` |
 
 ## Useful reset boundaries
 
 ```bash
 make services     # dependencies only
+make reset-all    # all databases + Qdrant + current schema + admin seed
 make db-init      # PostgreSQL schema only; destructive
 make db-seed      # deterministic admin identity only
+make db-reset     # PostgreSQL schema plus deterministic admin identity
 make qdrant-init  # Qdrant collection only; destructive
 make status       # Compose status and API health
 ```
+
+Use `make db-reset` after changing SQLAlchemy models. It starts missing local
+services, rebuilds PostgreSQL from the current ORM metadata, and restores the
+development administrator without recreating Qdrant.
+
+Use `make reset-all` after changing the data design or Qdrant schema. It resets
+the application and Temporal databases plus the derived vector collection,
+applies the current SQLAlchemy schema, and restores the administrator. It does
+not delete raw MinIO objects.
 
 For the ownership implications of these resets, see
 [Architecture](architecture.md) and [Data schema](data.schema.md).

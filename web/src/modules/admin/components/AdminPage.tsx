@@ -32,9 +32,13 @@ import { PageHeader } from "@/components/ui/PageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { SearchInput } from "@/components/ui/SearchInput";
 import { Select } from "@/components/ui/Select";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useToast } from "@/components/ui/Toast";
 import { adminRequest, queryString, useAdminQuery } from "@/modules/admin/api";
 import { ConnectorRegistryPage } from "@/modules/admin/components/DataSourcesPage";
+import { KnowledgeBaseDetailPage } from "@/modules/knowledge-management/components/KnowledgeBaseDetailPage";
+import { KnowledgeBasePage } from "@/modules/knowledge-management/components/KnowledgeBasePage";
+import { SchedulesPage } from "@/modules/knowledge-management/components/SchedulesPage";
 
 type AdminRow = Record<string, any>;
 
@@ -46,11 +50,16 @@ interface PaginatedResult {
 }
 
 interface OverviewResult {
-  tenant: { id: string; code: string; name: string; status: string; updated_at: string };
-  metrics: Record<string, number>;
-  attention: Record<string, number>;
-  recent_activity: AdminRow[];
-  generated_at: string;
+  tenant?: { id: string; code: string; name: string; status: string; updated_at: string };
+  metrics?: {
+    active_users?: number;
+    active_plugin_connections?: number;
+    active_datasources?: number;
+    items?: number;
+  } | null;
+  attention?: Record<string, number | undefined> | null;
+  recent_activity?: AdminRow[] | null;
+  generated_at?: string;
 }
 
 interface SectionDefinition {
@@ -60,6 +69,7 @@ interface SectionDefinition {
   emptyTitle: string;
   createLabel?: string;
   statusOptions?: { value: string; label: string }[];
+  itemType?: "document" | "collection";
 }
 
 const PAGE_SIZE = 20;
@@ -77,6 +87,14 @@ const sections: Record<string, SectionDefinition> = {
     title: "Items",
     description: "Inspect canonical source hierarchy, processing state, and connector lineage.",
     emptyTitle: "No source Items persisted",
+    statusOptions: statusOptions("pending", "processing", "ready", "failed", "unsupported"),
+  },
+  documents: {
+    endpoint: "/items",
+    title: "Documents",
+    description: "Inspect processing, indexing, source lineage, and lifecycle state across knowledge bases.",
+    emptyTitle: "No governed documents found",
+    itemType: "document",
     statusOptions: statusOptions("pending", "processing", "ready", "failed", "unsupported"),
   },
   users: {
@@ -129,9 +147,15 @@ const sections: Record<string, SectionDefinition> = {
 
 export function AdminPage({ section }: { section: string }) {
   if (section === "overview" || !section) return <OverviewPage />;
-  if (section === "spaces") return <SpacesPage />;
-  if (section === "connectors") return <ConnectorRegistryPage />;
-  const definition = sections[section];
+  if (section === "spaces" || section === "workspace-settings") return <SpacesPage />;
+  if (section === "connectors" || section === "sources") return <ConnectorRegistryPage />;
+  if (section === "knowledge-bases") return <KnowledgeBasePage />;
+  if (section.startsWith("knowledge-bases/")) {
+    return <KnowledgeBaseDetailPage knowledgeBaseId={section.slice("knowledge-bases/".length)} />;
+  }
+  if (section === "schedules") return <SchedulesPage />;
+  const resourceSection = section === "sync-activity" ? "ingestion/jobs" : section === "people" ? "users" : section === "access-policies" ? "acl" : section === "all-items" ? "documents" : section;
+  const definition = sections[resourceSection];
   if (!definition) {
     return (
       <EmptyState
@@ -141,7 +165,7 @@ export function AdminPage({ section }: { section: string }) {
       />
     );
   }
-  return <ResourcePage definition={definition} section={section} />;
+  return <ResourcePage definition={definition} section={resourceSection} />;
 }
 
 function OverviewPage() {
@@ -150,30 +174,52 @@ function OverviewPage() {
   if (query.error || !query.data) {
     return <ErrorState description={query.error ?? "The overview response was empty."} actionLabel="Retry" onAction={query.reload} />;
   }
-  const { tenant, metrics, attention, recent_activity: recentActivity } = query.data;
+  const { tenant, generated_at: generatedAt } = query.data;
+  if (!tenant) {
+    return <ErrorState description="The overview response does not include tenant details." actionLabel="Retry" onAction={query.reload} />;
+  }
+  const metrics = query.data.metrics ?? {};
+  const attention = query.data.attention ?? {};
+  const recentActivity = Array.isArray(query.data.recent_activity) ? query.data.recent_activity : [];
+  const attentionEntries = Object.entries(attention).map(
+    ([key, value]) => [key, countMetric(value)] as const,
+  );
   const evidence = [
-    { label: "Active users", value: metrics.active_users, icon: Users },
-    { label: "Data sources", value: metrics.active_datasources, icon: Database },
-    { label: "Items", value: metrics.items, icon: FileText },
-    { label: "Open attention", value: Object.values(attention).reduce((sum, value) => sum + value, 0), icon: CircleAlert },
+    { label: "Active users", value: countMetric(metrics.active_users), icon: Users },
+    {
+      label: "Active connections",
+      value: countMetric(metrics.active_plugin_connections, metrics.active_datasources),
+      icon: Database,
+    },
+    { label: "Items", value: countMetric(metrics.items), icon: FileText },
+    { label: "Open attention", value: sumMetrics(Object.values(attention)), icon: CircleAlert },
   ];
   return (
     <div className="mx-auto min-w-0 w-full max-w-[88rem]">
       <PageHeader
         title={tenant.name}
         description="A tenant-scoped view of identity, source, ingestion, and access state. Every value comes from durable backend records."
-        metadata={<><span className="font-mono">{tenant.code}</span><StatusBadge status={tenant.status} /></>}
+        metadata={<><span className="font-mono">{tenant.code}</span><StatusBadge status={tenant.status} />{generatedAt && <span>Snapshot {formatDate(generatedAt)}</span>}</>}
+        actions={<Button icon={<RefreshCw aria-hidden="true" className="h-4 w-4" />} variant="secondary" onClick={query.reload}>Refresh</Button>}
       />
-      <div className="mb-5 grid border-y border-[var(--border)] bg-[var(--surface)] sm:grid-cols-2 xl:grid-cols-4">
+      <dl className="mb-5 grid overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--surface)] sm:grid-cols-2 xl:grid-cols-4">
         {evidence.map(({ label, value, icon: Icon }, index) => (
-          <div className={`flex min-h-24 items-center gap-3 px-4 py-3 ${index ? "border-t border-[var(--border)] sm:border-l sm:border-t-0" : ""}`} key={label}>
+          <div
+            className={`flex min-h-24 items-center gap-3 px-4 py-3 ${index ? "border-t border-[var(--border)] xl:border-l xl:border-t-0" : ""} ${index % 2 ? "sm:border-l" : ""} ${index >= 2 ? "sm:border-t" : "sm:border-t-0"}`}
+            key={label}
+          >
             <span className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-[var(--primary-soft)] text-[var(--brand-accent)] ring-1 ring-inset ring-[var(--border)]">
               <Icon aria-hidden="true" className="h-4 w-4" />
             </span>
-            <div><p className="font-mono text-2xl font-semibold text-[var(--text)]">{value.toLocaleString()}</p><p className="text-xs text-[var(--text-muted)]">{label}</p></div>
+            <div className="flex min-w-0 flex-col">
+              <dt className="order-2 text-xs text-[var(--text-muted)]">{label}</dt>
+              <dd className="order-1 font-mono text-2xl font-semibold text-[var(--text)]">
+                {value === undefined ? <span aria-label="Unavailable">—</span> : value.toLocaleString()}
+              </dd>
+            </div>
           </div>
         ))}
-      </div>
+      </dl>
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_22rem]">
         <Card>
           <CardHeader><h2 className="text-sm font-semibold text-[var(--text)]">Recent administration activity</h2></CardHeader>
@@ -186,10 +232,12 @@ function OverviewPage() {
         <Card>
           <CardHeader><h2 className="text-sm font-semibold text-[var(--text)]">Needs attention</h2></CardHeader>
           <CardBody className="space-y-1 p-0">
-            {Object.entries(attention).map(([key, value]) => (
+            {attentionEntries.map(([key, value]) => (
               <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3 last:border-b-0" key={key}>
                 <span className="text-sm text-[var(--text-secondary)]">{titleCase(key)}</span>
-                <Badge variant={value ? "warning" : "success"}>{value}</Badge>
+                <Badge variant={value === undefined ? "default" : value ? "warning" : "success"}>
+                  {value === undefined ? <span aria-label="Unavailable">—</span> : value.toLocaleString()}
+                </Badge>
               </div>
             ))}
           </CardBody>
@@ -244,7 +292,7 @@ function ResourcePage({ definition, section }: { definition: SectionDefinition; 
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
-  const path = `${definition.endpoint}${queryString({ page, page_size: PAGE_SIZE, search, status: statusFilter })}`;
+  const path = `${definition.endpoint}${queryString({ page, page_size: PAGE_SIZE, search, status: statusFilter, item_type: definition.itemType })}`;
   const query = useAdminQuery<PaginatedResult>(path);
   const onSearch = useCallback((value: string) => { setSearch(value); setPage(1); }, []);
   const metadata = query.data ? <span>{query.data.total.toLocaleString()} {query.data.total === 1 ? "record" : "records"}</span> : undefined;
@@ -298,8 +346,8 @@ function ResourceActions({ reload, row, section }: { reload: () => void; row: Ad
   if (section === "ingestion/jobs") {
     return <div className="flex justify-end gap-1">{["pending", "running"].includes(row.status) && action("Cancel", `/ingestion/jobs/${row.id}/cancel`, "POST", undefined, "danger")}{["failed", "cancelled"].includes(row.status) && action("Retry", `/ingestion/jobs/${row.id}/retry`)}</div>;
   }
-  if (section === "items") {
-    return <div className="flex justify-end gap-1">{row.status === "failed" && action("Retry", `/items/${row.id}/retry`)}{action("Delete", `/items/${row.id}`, "DELETE", undefined, "danger")}</div>;
+  if (section === "items" || section === "documents") {
+    return <div className="flex justify-end gap-1">{row.status === "failed" && action("Retry", `/items/${row.id}/retry`)}{action("Remove", `/items/${row.id}`, "DELETE", undefined, "danger")}</div>;
   }
   if (["users", "groups", "roles"].includes(section)) {
     const next = row.status === "active" ? "inactive" : "active";
@@ -389,20 +437,14 @@ function createPayload(section: string, form: FormData): { endpoint: string; pay
 
 function columnsFor(section: string): Column<AdminRow>[] {
   const id = { key: "id", label: "ID", width: 112, render: (row: AdminRow) => <code className="font-mono text-[0.6875rem] text-[var(--text-muted)]" title={row.id}>{shortId(row.id)}</code> };
-  if (section === "ingestion/jobs") return [{ key: "datasource", label: "Data source", render: (row) => <Identity primary={row.datasource?.display_name ?? "Unknown source"} secondary={row.scope?.display_name ?? "Unknown scope"} /> }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "progress", label: "Processed", render: (row) => `${row.processed_item_count}/${row.discovered_item_count}` }, { key: "written_chunk_count", label: "Chunks", align: "right" }, { key: "created_at", label: "Created", render: (row) => formatDate(row.created_at) }, id];
-  if (section === "items") return [{ key: "title", label: "Item", sortable: true, render: (row) => <Identity primary={row.title ?? "Untitled Item"} secondary={`${titleCase(row.item_type)}${row.document_kind ? ` · ${titleCase(row.document_kind)}` : ""} · ${formatBytes(row.size_bytes)}`} /> }, { key: "datasource", label: "Source", render: (row) => row.datasource?.display_name ?? "Tenant upload" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "indexed", label: "Indexed", render: (row) => row.indexed ? "Yes" : "No" }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
+  if (section === "ingestion/jobs") return [{ key: "connection", label: "Data source", render: (row) => <Identity primary={row.connection?.display_name ?? "Unknown source"} secondary={row.binding?.display_name ?? shortId(row.binding_id)} /> }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "progress", label: "Processed", render: (row) => `${row.processed_item_count}/${row.discovered_item_count}` }, { key: "written_chunk_count", label: "Chunks", align: "right" }, { key: "created_at", label: "Created", render: (row) => formatDate(row.created_at) }, id];
+  if (section === "items" || section === "documents") return [{ key: "title", label: "Item", sortable: true, render: (row) => <Identity primary={row.title ?? "Untitled Item"} secondary={`${titleCase(row.item_type)}${row.document_type ? ` · ${titleCase(row.document_type)}` : ""} · ${formatBytes(row.size_bytes)}`} /> }, { key: "source", label: "Source", render: (row) => row.origins?.[0]?.connection?.display_name ?? "Direct upload" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "indexed", label: "Indexed", render: (row) => row.indexed ? "Yes" : "No" }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
   if (section === "users") return [{ key: "display_name", label: "User", sortable: true, render: (row) => <Identity primary={row.display_name ?? row.email} secondary={row.display_name ? row.email : "No display name"} /> }, { key: "role", label: "Role", render: (row) => row.membership?.role?.display_name ?? "No role" }, { key: "groups", label: "Groups", render: (row) => row.groups?.length ? row.groups.map((group: AdminRow) => group.display_name).join(", ") : "None" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "last_login_at", label: "Last login", render: (row) => formatDate(row.last_login_at) }, id];
   if (section === "groups") return [{ key: "display_name", label: "Group", sortable: true, render: (row) => <Identity primary={row.display_name} secondary={row.principal_token} /> }, { key: "member_count", label: "Members", align: "right" }, { key: "permission_codes", label: "Permissions", render: (row) => row.permission_codes?.length ?? 0 }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
   if (section === "access-requests") return [{ key: "requester", label: "Requester", render: (row) => <Identity primary={row.requester?.display_name ?? row.requester?.email} secondary={row.requester?.email} /> }, { key: "resource_type", label: "Resource", render: (row) => <Identity primary={titleCase(row.resource_type)} secondary={shortId(row.resource_id)} /> }, { key: "access_type", label: "Access" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "created_at", label: "Requested", render: (row) => formatDate(row.created_at) }, id];
   if (section === "roles") return [{ key: "display_name", label: "Role", sortable: true, render: (row) => <Identity primary={row.display_name} secondary={row.code} /> }, { key: "member_count", label: "Members", align: "right" }, { key: "permission_codes", label: "Permissions", render: (row) => row.permission_codes?.length ? row.permission_codes.join(", ") : "None" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
   if (section === "acl") return [{ key: "name", label: "Policy", sortable: true, render: (row) => <Identity primary={row.name} secondary={row.resource_title ?? shortId(row.resource_id)} /> }, { key: "allowed", label: "Allow", align: "right", render: (row) => row.allowed_principal_tokens?.length ?? 0 }, { key: "denied", label: "Deny", align: "right", render: (row) => row.denied_principal_tokens?.length ?? 0 }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
   return [{ key: "created_at", label: "Time", render: (row) => formatDate(row.created_at) }, { key: "actor", label: "Actor", render: (row) => row.actor?.display_name ?? row.actor?.email ?? "System" }, { key: "action", label: "Action", render: (row) => titleCase(row.action) }, { key: "resource_type", label: "Resource", render: (row) => <Identity primary={titleCase(row.resource_type)} secondary={shortId(row.resource_id)} /> }, { key: "outcome", label: "Outcome", render: (row) => <StatusBadge status={row.outcome} /> }];
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const normalized = status?.toLowerCase() ?? "unknown";
-  const variant = ["active", "approved", "completed", "indexed", "success", "available"].includes(normalized) ? "success" : ["failed", "error", "denied", "unsupported"].includes(normalized) ? "danger" : ["pending", "running", "draft"].includes(normalized) ? "warning" : ["disabled", "inactive", "cancelled", "hidden", "retired", "none"].includes(normalized) ? "default" : "info";
-  return <Badge dot variant={variant}>{titleCase(normalized)}</Badge>;
 }
 
 function Identity({ primary, secondary }: { primary: string; secondary?: string }) {
@@ -425,6 +467,19 @@ function formatBytes(value?: number | null) {
   const units = ["B", "KB", "MB", "GB"];
   const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
   return `${(value / 1024 ** exponent).toFixed(exponent ? 1 : 0)} ${units[exponent]}`;
+}
+
+function countMetric(...values: unknown[]): number | undefined {
+  return values.find(
+    (value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0,
+  );
+}
+
+function sumMetrics(values: unknown[]): number | undefined {
+  const counts = values
+    .map((value) => countMetric(value))
+    .filter((value): value is number => value !== undefined);
+  return counts.length ? counts.reduce((sum, value) => sum + value, 0) : undefined;
 }
 
 function shortId(value?: string | null) {

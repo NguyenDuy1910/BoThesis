@@ -9,12 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import (
     AccessRequest,
-    Connector,
-    ConnectorScope,
     Item,
+    PluginConnection,
     Group,
     Role,
-    SyncRun,
     Tenant,
     TenantMembership,
     User,
@@ -72,10 +70,11 @@ class AdminService:
                     Group.deleted_at.is_(None),
                 )
             ),
-            "active_datasources": await self._count(
-                select(func.count()).select_from(Connector).where(
-                    Connector.tenant_id == tenant_id,
-                    Connector.status == ACTIVE_STATUS,
+            "active_plugin_connections": await self._count(
+                select(func.count()).select_from(PluginConnection).where(
+                    PluginConnection.tenant_id == tenant_id,
+                    PluginConnection.status == ACTIVE_STATUS,
+                    PluginConnection.deleted_at.is_(None),
                 )
             ),
             "items": await self._count(
@@ -99,32 +98,6 @@ class AdminService:
                     Item.tenant_id == tenant_id,
                     Item.status == "failed",
                     Item.deleted_at.is_(None),
-                )
-            ),
-            "failed_ingestion_runs": await self._count(
-                select(func.count())
-                .select_from(SyncRun)
-                .join(
-                    ConnectorScope,
-                    ConnectorScope.id == SyncRun.connector_scope_id,
-                )
-                .join(Connector, Connector.id == ConnectorScope.connector_id)
-                .where(
-                    Connector.tenant_id == tenant_id,
-                    SyncRun.status == "failed",
-                )
-            ),
-            "pending_ingestion_runs": await self._count(
-                select(func.count())
-                .select_from(SyncRun)
-                .join(
-                    ConnectorScope,
-                    ConnectorScope.id == SyncRun.connector_scope_id,
-                )
-                .join(Connector, Connector.id == ConnectorScope.connector_id)
-                .where(
-                    Connector.tenant_id == tenant_id,
-                    SyncRun.status.in_(("pending", "running")),
                 )
             ),
         }

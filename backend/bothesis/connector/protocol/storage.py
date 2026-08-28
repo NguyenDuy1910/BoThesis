@@ -24,12 +24,6 @@ class StorageObject(BaseModel):
     file_name: str | None = Field(default=None, min_length=1)
     size_bytes: int | None = Field(default=None, ge=0)
     content_type: str | None = Field(default=None, min_length=1)
-    checksum_sha256: str | None = Field(
-        default=None,
-        min_length=64,
-        max_length=64,
-        pattern=r"^[0-9a-fA-F]{64}$",
-    )
     etag: str | None = Field(default=None, min_length=1)
     version_id: str | None = Field(default=None, min_length=1)
 

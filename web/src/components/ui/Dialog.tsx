@@ -41,7 +41,24 @@ export function Dialog({
   useEffect(() => {
     if (!open) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
+    let backgroundElements: Array<{
+      element: HTMLElement;
+      ariaHidden: string | null;
+      inert: boolean;
+    }> = [];
     const frame = window.requestAnimationFrame(() => {
+      const overlayRoot = dialogRef.current?.parentElement;
+      backgroundElements = Array.from(document.body.children)
+        .filter((element): element is HTMLElement => element instanceof HTMLElement && element !== overlayRoot)
+        .map((element) => ({
+          element,
+          ariaHidden: element.getAttribute("aria-hidden"),
+          inert: element.inert,
+        }));
+      for (const { element } of backgroundElements) {
+        element.inert = true;
+        element.setAttribute("aria-hidden", "true");
+      }
       (initialFocusRef?.current ?? focusableElements(dialogRef.current)[0])?.focus();
     });
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -67,6 +84,11 @@ export function Dialog({
     return () => {
       window.cancelAnimationFrame(frame);
       document.removeEventListener("keydown", handleKeyDown);
+      for (const { element, ariaHidden, inert } of backgroundElements) {
+        element.inert = inert;
+        if (ariaHidden === null) element.removeAttribute("aria-hidden");
+        else element.setAttribute("aria-hidden", ariaHidden);
+      }
       previouslyFocused?.focus();
     };
   }, [initialFocusRef, open]);
@@ -77,7 +99,7 @@ export function Dialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button
         aria-label="Close dialog"
-        className="fixed inset-0 cursor-default bg-slate-950/40"
+        className="fixed inset-0 cursor-default bg-[var(--overlay-scrim)]"
         onClick={onClose}
         tabIndex={-1}
         type="button"
@@ -89,7 +111,7 @@ export function Dialog({
         aria-labelledby={titleId}
         className={cn(
           "relative z-10 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto overscroll-contain rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-[var(--shadow-lg)]",
-          "animate-in fade-in-0 zoom-in-95",
+          "ui-dialog-panel",
           className
         )}
       >
@@ -98,7 +120,7 @@ export function Dialog({
           <button
             aria-label="Close dialog"
             onClick={onClose}
-            className="rounded-md p-1.5 text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
             type="button"
           >
             <X aria-hidden="true" className="h-4 w-4" />

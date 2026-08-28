@@ -56,17 +56,27 @@ export function AdminSidebar({
               </span>
             </div>
           ) : (
-            <ProductMark decorative size="md" />
+            <button
+              aria-label="Expand admin navigation"
+              className="admin-sidebar__icon-button admin-sidebar__mark-button"
+              onClick={onToggle}
+              title="Expand navigation"
+              type="button"
+            >
+              <ProductMark decorative size="md" />
+            </button>
           )}
-          <button
-            aria-label={visuallyCollapsed ? "Expand admin navigation" : "Collapse admin navigation"}
-            className="admin-sidebar__icon-button admin-sidebar__collapse"
-            onClick={onToggle}
-            title={visuallyCollapsed ? "Expand navigation" : "Collapse navigation"}
-            type="button"
-          >
-            <ChevronLeft aria-hidden="true" className={cn(visuallyCollapsed && "rotate-180")} size={15} />
-          </button>
+          {!visuallyCollapsed && (
+            <button
+              aria-label="Collapse admin navigation"
+              className="admin-sidebar__icon-button admin-sidebar__collapse"
+              onClick={onToggle}
+              title="Collapse navigation"
+              type="button"
+            >
+              <ChevronLeft aria-hidden="true" size={15} />
+            </button>
+          )}
           <button
             aria-label="Close admin navigation"
             className="admin-sidebar__icon-button admin-sidebar__close"

@@ -20,6 +20,7 @@ Three things are genuinely OpenRouter-specific and are normalized here:
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any, cast
 
@@ -33,7 +34,7 @@ from openai.types.responses import (
 
 
 class OpenRouterTransport:
-    """Expose OpenRouter Responses and embeddings without normalization."""
+    """Expose OpenRouter Responses and embedding operations."""
 
     DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
     provider = "openrouter"
@@ -53,7 +54,9 @@ class OpenRouterTransport:
     ) -> None:
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
         self.model = model or os.getenv("OPENROUTER_MODEL")
-        self.embedding_model = embedding_model or os.getenv("EMBEDDING_MODEL")
+        self.embedding_model = (
+            embedding_model or os.getenv("EMBEDDING_MODEL") or ""
+        ).strip()
         if not self.api_key:
             raise ValueError("OpenRouter API key is required")
         if timeout <= 0:
@@ -153,6 +156,22 @@ class OpenRouterTransport:
             raise ValueError("OpenRouter returned a non-object response")
         return payload
 
+    async def embed_query(self, query: str) -> list[float]:
+        """Embed one non-empty query for document retrieval."""
+
+        normalized = query.strip()
+        if not normalized:
+            raise ValueError("query must not be empty")
+        return (await self._embed([normalized]))[0]
+
+    async def embed_documents(self, documents: list[str]) -> list[list[float]]:
+        """Embed non-empty document texts in provider response order."""
+
+        normalized = [document.strip() for document in documents]
+        if not normalized or any(not document for document in normalized):
+            raise ValueError("documents must contain non-empty text")
+        return await self._embed(normalized)
+
     async def aclose(self) -> None:
         """Close the internally-created clients when the app shuts down."""
 
@@ -166,6 +185,37 @@ class OpenRouterTransport:
         if not selected_model:
             raise ValueError("OpenRouter model is required")
         return selected_model
+
+    async def _embed(self, inputs: list[str]) -> list[list[float]]:
+        payload = await self.embeddings(
+            input=inputs[0] if len(inputs) == 1 else inputs,
+        )
+        data = payload.get("data")
+        if not isinstance(data, list) or len(data) != len(inputs):
+            raise ValueError("embedding response does not contain all vectors")
+        indexed: list[tuple[int, list[float]]] = []
+        for fallback_index, item in enumerate(data):
+            if not isinstance(item, dict):
+                raise ValueError("embedding response vector is invalid")
+            raw_vector = item.get("embedding")
+            if not isinstance(raw_vector, list) or not raw_vector:
+                raise ValueError("embedding response vector is invalid")
+            if any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in raw_vector
+            ):
+                raise ValueError("embedding response vector is invalid")
+            vector = [float(value) for value in raw_vector]
+            if any(not math.isfinite(value) for value in vector):
+                raise ValueError("embedding response vector is invalid")
+            raw_index = item.get("index", fallback_index)
+            if isinstance(raw_index, bool) or not isinstance(raw_index, int):
+                raise ValueError("embedding response index is invalid")
+            indexed.append((raw_index, vector))
+        indexed.sort(key=lambda item: item[0])
+        if [index for index, _ in indexed] != list(range(len(inputs))):
+            raise ValueError("embedding response indexes are invalid")
+        return [vector for _, vector in indexed]
 
 
 __all__ = ["OpenRouterTransport"]

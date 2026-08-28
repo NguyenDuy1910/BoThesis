@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -32,7 +32,8 @@ from bothesis.connector.protocol import (
     SourceProvider,
 )
 from bothesis.knowledge import Evidence
-from bothesis.services import AuthContext, DatasourceService
+from bothesis.document_index import DocumentProcessingError
+from bothesis.services import AuthContext, RequestIdentity
 
 
 def search_call(output_index: int = 0) -> list[Any]:
@@ -268,12 +269,168 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
             role_id=uuid4(),
             role_code="analyst",
             permission_codes=("admin", "knowledge.read"),
-            principal_tokens=("external_group:finance",),
+            group_ids=(),
         )
 
     monkeypatch.setattr(main._api_service, "_resolve_access", resolve_access)
     monkeypatch.setattr(main._api_service, "_session_factory", _SessionContext)
+    async def allowed_collections(*_: Any, **__: Any) -> tuple[UUID, ...]:
+        return (UUID(int=12), UUID(int=14))
+
+    monkeypatch.setattr(
+        "bothesis.services.api.CollectionAccessService.allowed_collection_ids",
+        allowed_collections,
+    )
     return user_id, tenant_id
+
+
+def test_collection_upload_route_accepts_multipart_without_a_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collection_id = uuid4()
+    tenant_id = uuid4()
+    user_id = uuid4()
+    now = datetime.now(UTC).isoformat()
+
+    async def upload_collection_document(
+        identity: RequestIdentity,
+        requested_collection_id: UUID,
+        **values: Any,
+    ) -> dict[str, Any]:
+        assert identity.tenant_id == str(tenant_id)
+        assert identity.user_id == str(user_id)
+        assert requested_collection_id == collection_id
+        assert values["idempotency_key"] == "upload-contract-1"
+        assert values["file_name"] == "policy.txt"
+        assert values["content_type"] == "text/plain"
+        assert await values["content"].read() == b"governed policy"
+        return {
+            "document": {
+                "id": str(uuid4()),
+                "parent_item_id": str(collection_id),
+                "file_name": "policy.txt",
+                "content_type": "text/plain",
+                "size_bytes": 15,
+                "status": "ready",
+                "indexed": True,
+                "upload_status": "available",
+                "created_at": now,
+                "uploaded_at": now,
+            },
+            "ingestion_status": "ready",
+            "created": True,
+        }
+
+    monkeypatch.setattr(
+        main._api_service,
+        "upload_collection_document",
+        upload_collection_document,
+    )
+    with TestClient(main.app) as client:
+        response = client.post(
+            f"/api/v1/collections/{collection_id}/documents/upload",
+            headers={
+                "Idempotency-Key": "upload-contract-1",
+                "X-Bothesis-Tenant-Id": str(tenant_id),
+                "X-Bothesis-User-Id": str(user_id),
+            },
+            files={"file": ("policy.txt", b"governed policy", "text/plain")},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["document"]["parent_item_id"] == str(collection_id)
+    assert response.json()["ingestion_status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_collection_upload_reports_ingestion_dispatch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = api_service_module.ApiService(
+        allow_insecure_development_identity=True,
+        qdrant_prefer_grpc=False,
+    )
+    user_id = uuid4()
+    tenant_id = uuid4()
+    collection_id = uuid4()
+    now = datetime.now(UTC)
+    upload_record = SimpleNamespace(status="available", uploaded_at=now)
+    document = SimpleNamespace(
+        id=uuid4(),
+        parent_item_id=collection_id,
+        title="policy.txt",
+        mime_type="text/plain",
+        size_bytes=15,
+        status="ready",
+        metadata_={"file_name": "policy.txt"},
+        upload=upload_record,
+        created_at=now,
+    )
+    access = AuthContext(
+        user_id=user_id,
+        email="editor@example.test",
+        display_name="Editor",
+        tenant_id=tenant_id,
+        role_id=uuid4(),
+        role_code="editor",
+        permission_codes=(),
+        group_ids=(),
+    )
+
+    class Uploads:
+        async def upload_to_collection(self, *_: Any, **__: Any) -> Any:
+            return SimpleNamespace(item=document, created=True)
+
+        async def get_document(self, *_: Any, **__: Any) -> Any:
+            return document
+
+    class Pipeline:
+        attempts = 0
+
+        async def index_document(self, *_: Any, **__: Any) -> Any:
+            self.attempts += 1
+            if self.attempts == 1:
+                document.status = "failed"
+                raise DocumentProcessingError("index dispatch failed")
+            document.status = "ready"
+            document.metadata_["processing"] = {"index_schema_version": "test"}
+            return document
+
+    async def resolve_access(*_: Any, **__: Any) -> AuthContext:
+        return access
+
+    async def record_audit(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_resolve_access", resolve_access)
+    monkeypatch.setattr(service, "_uploads", Uploads())
+    monkeypatch.setattr(service, "_pipeline", Pipeline())
+    monkeypatch.setattr(service, "_session_factory", _SessionContext)
+    monkeypatch.setattr(api_service_module.AuditService, "record", record_audit)
+
+    result = await service.upload_collection_document(
+        RequestIdentity(user_id=user_id, tenant_id=tenant_id),
+        collection_id,
+        idempotency_key="dispatch-failure",
+        file_name="policy.txt",
+        content_type="text/plain",
+        content=SimpleNamespace(read=lambda *_: b""),
+    )
+
+    assert result["created"] is True
+    assert result["ingestion_status"] == "failed"
+    assert result["document"]["status"] == "failed"
+    assert result["document"]["parent_item_id"] == str(collection_id)
+
+    retried = await service.retry_document_indexing(
+        RequestIdentity(user_id=user_id, tenant_id=tenant_id),
+        document.id,
+    )
+
+    assert retried["created"] is False
+    assert retried["ingestion_status"] == "ready"
+    assert retried["document"]["status"] == "ready"
+    assert retried["document"]["indexed"] is True
 
 
 def test_qdrant_citation_does_not_synthesize_element_ranges() -> None:
@@ -332,29 +489,6 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(main._api_service, "_agent", agent)
-    async def allow_selected_connectors(
-        _service: DatasourceService,
-        _actor: AuthContext,
-        *,
-        connector_ids: list[int],
-    ) -> dict[str, Any]:
-        assert connector_ids == [12]
-        return {
-            "items": [{
-                "id": "12",
-                "provider": "confluence",
-                "display_name": "Company Confluence",
-                "status": "active",
-                "capabilities": ["knowledge_search"],
-            }],
-            "total": 1,
-        }
-
-    monkeypatch.setattr(
-        DatasourceService,
-        "list_chat_connectors",
-        allow_selected_connectors,
-    )
     user_id, tenant_id = _install_access(monkeypatch)
     conversation_id = uuid4()
 
@@ -371,8 +505,8 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
                     {"role": "user", "content": "Recent scope question"},
                     {"role": "assistant", "content": "Recent scope answer"},
                 ],
-                "connector_mode": "selected",
-                "connector_ids": [12],
+                "knowledge_mode": "selected",
+                "collection_item_ids": [str(UUID(int=12))],
             },
         )
 
@@ -408,12 +542,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     assert annotation["citation"]["chunk_id"] == "chunk-1"
     assert annotation["citation"]["source"]["provider"] == "confluence"
     assert len(retriever.contexts) == 1
-    assert retriever.contexts[0].reader_ids == (
-        "email:person@example.test",
-        "external_group:finance",
-    )
-    assert retriever.contexts[0].is_admin is True
-    assert retriever.contexts[0].connector_ids == (12,)
+    assert len(retriever.contexts[0].collection_item_ids) == 1
     # ``/responses`` takes instructions as a request parameter, so the input is
     # items only — there is no synthetic leading system message.
     assert "<agent_instructions>" in transport.requests[0]["instructions"]
@@ -543,14 +672,14 @@ def test_chat_api_rejects_history_message_over_context_budget() -> None:
     assert response.status_code == 422
 
 
-def test_chat_request_requires_a_bounded_explicit_connector_selection() -> None:
-    with pytest.raises(ValueError, match="requires at least one connector"):
-        main.ChatRequest(message="hello", connector_mode="selected")
+def test_chat_request_requires_a_bounded_explicit_collection_selection() -> None:
+    with pytest.raises(ValueError, match="requires at least one Collection"):
+        main.ChatRequest(message="hello", knowledge_mode="selected")
 
     request = main.ChatRequest(
         message="hello",
-        connector_mode="selected",
-        connector_ids=[12, 14],
+        knowledge_mode="selected",
+        collection_item_ids=[UUID(int=12), UUID(int=14)],
     )
 
-    assert request.connector_ids == [12, 14]
+    assert request.collection_item_ids == [UUID(int=12), UUID(int=14)]

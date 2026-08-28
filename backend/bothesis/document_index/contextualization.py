@@ -24,7 +24,7 @@ class StructuralContextualizer:
         source: SourceIdentity,
         hierarchy: Hierarchy,
         access: AccessPolicy | EffectiveAccess,
-        document_kind: DocumentKind | str,
+        document_type: DocumentKind | str,
         document_summary: str | None = None,
         semantic_context: str | None = None,
     ) -> ContextualChunk:
@@ -46,7 +46,7 @@ class StructuralContextualizer:
             prefix.append(f"Context: {retrieval_context}")
         contextual_text = "\n".join(prefix)
         contextual_text = f"{contextual_text}\n\n{chunk.chunk_text}" if contextual_text else chunk.chunk_text
-        kind = document_kind.value if isinstance(document_kind, DocumentKind) else document_kind
+        kind = document_type.value if isinstance(document_type, DocumentKind) else document_type
         effective_access = access.effective if isinstance(access, AccessPolicy) else access
         return ContextualChunk(
             id=chunk.id,
@@ -57,7 +57,7 @@ class StructuralContextualizer:
             contextual_text=contextual_text,
             context=context,
             title=title,
-            document_kind=kind,
+            document_type=kind,
             source=source,
             hierarchy=hierarchy,
             access=effective_access,

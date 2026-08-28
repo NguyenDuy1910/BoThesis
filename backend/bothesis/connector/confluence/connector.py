@@ -95,7 +95,6 @@ def _attachment_storage_object(
         file_name=content.file_name,
         size_bytes=content.size_bytes,
         content_type=content.mime_type,
-        checksum_sha256=content.checksum_sha256,
     )
 
 

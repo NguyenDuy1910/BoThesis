@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import hashlib
 import tempfile
 from datetime import datetime
 from datetime import timedelta
@@ -65,7 +64,6 @@ class AttachmentProcessingResult(BaseModel):
     storage_region: str | None = None
     mime_type: str | None = None
     size_bytes: int | None = None
-    checksum_sha256: str | None = None
 
 
 def _safe_storage_part(value: str) -> str:
@@ -215,7 +213,6 @@ def process_attachment(
             safe_title = _safe_storage_part(attachment_title)
             with tempfile.TemporaryDirectory(prefix="bothesis-confluence-") as directory:
                 path = Path(directory) / safe_title
-                digest = hashlib.sha256()
                 downloaded_size = 0
                 with path.open("wb") as target:
                     for block in resp.iter_content(chunk_size=1024 * 1024):
@@ -230,7 +227,6 @@ def process_attachment(
                                     f"Attachment too large: {downloaded_size} bytes"
                                 ),
                             )
-                        digest.update(block)
                         target.write(block)
                 if downloaded_size == 0:
                     return AttachmentProcessingResult(
@@ -273,7 +269,6 @@ def process_attachment(
                 content=processed.item.content,
                 chunks=processed.chunks,
                 error=None,
-                checksum_sha256=digest.hexdigest(),
                 **_storage_metadata(
                     storage,
                     storage_key,

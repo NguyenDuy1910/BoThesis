@@ -8,9 +8,9 @@ const variantClasses: Record<BadgeVariant, string> = {
   default: "bg-[var(--bg-subtle)] text-[var(--text-secondary)] ring-[var(--border)]",
   primary: "bg-[var(--primary-soft)] text-[var(--brand-accent)] ring-[var(--border)]",
   success: "bg-[var(--success-soft)] text-[var(--success)] ring-[var(--success-border)]",
-  warning: "bg-[var(--warning-soft)] text-[var(--warning)] ring-[var(--warning-border)]",
-  danger: "bg-[var(--danger-soft)] text-[var(--danger)] ring-[var(--danger-border)]",
-  info: "bg-[var(--info-soft)] text-[var(--info)] ring-[var(--info-border)]",
+  warning: "bg-[var(--warning-soft)] text-[var(--warning-text)] ring-[var(--warning-border)]",
+  danger: "bg-[var(--danger-soft)] text-[var(--danger-text)] ring-[var(--danger-border)]",
+  info: "bg-[var(--info-soft)] text-[var(--info-text)] ring-[var(--info-border)]",
 };
 
 const dotClasses: Record<BadgeVariant, string> = {

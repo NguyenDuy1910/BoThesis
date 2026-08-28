@@ -9,6 +9,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from qdrant_client import models as qmodels
+from sqlalchemy import select
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext, ConversationMessage
 from bothesis.agent.tools import ToolRegistry
@@ -24,12 +25,13 @@ from bothesis.connector.protocol import (
 )
 from bothesis.connector.provider_cache import PostgresProviderFileCache
 from bothesis.db.engine import get_session_factory, session_scope
+from bothesis.db.models import Item
 from bothesis.document_index.indexer import (
     DEFAULT_DIRECT_MAX_BYTES,
     DEFAULT_PROCESSING_MAX_BYTES,
     DocumentPipeline,
 )
-from bothesis.document_index.openrouter_embedding import OpenRouterEmbeddingService
+from bothesis.document_index import DocumentProcessingError
 from bothesis.document_index.raw_storage import S3DocumentStorage
 from bothesis.document_index.search import QdrantSearchIndex
 from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
@@ -41,12 +43,15 @@ from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
     KNOWLEDGE_READ_PERMISSION,
+    AsyncUploadStream,
+    AuditService,
     AuthContext,
     ChatDocumentSourceService,
-    DatasourceService,
+    CollectionAccessService,
     DocumentNotFoundError,
     ItemService,
     RequestIdentity,
+    UploadConflictError,
     UploadService,
     require_tenant_permission,
 )
@@ -93,8 +98,8 @@ class ApiService:
         user_id: str | None,
         conversation_id: UUID | None,
         history: list[tuple[Literal["user", "assistant"], str]],
-        connector_mode: Literal["auto", "selected", "off"],
-        connector_ids: list[int],
+        knowledge_mode: Literal["auto", "selected", "off"],
+        collection_item_ids: list[UUID],
         is_disconnected: Callable[[], Awaitable[bool]],
     ) -> AsyncIterator[str]:
         access = await self._resolve_access(
@@ -103,28 +108,22 @@ class ApiService:
             tenant_id=tenant_id,
         )
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
-        selected_connector_ids: tuple[int, ...] | None = None
-        allowed_tool_names: tuple[str, ...] | None = (
-            () if connector_mode == "off" else None
-        )
-        if connector_mode == "selected":
-            async with session_scope(self._sessions()) as session:
-                authorized = await DatasourceService(session).list_chat_connectors(
-                    access,
-                    connector_ids=connector_ids,
-                )
-            selected_connector_ids = tuple(
-                int(item["id"]) for item in authorized["items"]
-            )
-            allowed_tool_names = tuple(
-                sorted(
-                    {
-                        capability
-                        for item in authorized["items"]
-                        for capability in item["capabilities"]
-                    }
-                )
-            )
+        async with session_scope(self._sessions()) as session:
+            allowed_ids = await CollectionAccessService(
+                session
+            ).allowed_collection_ids(access)
+        allowed_set = set(allowed_ids)
+        if knowledge_mode == "off":
+            selected_collection_ids: tuple[UUID, ...] = ()
+            allowed_tool_names: tuple[str, ...] | None = ()
+        elif knowledge_mode == "selected":
+            if not collection_item_ids or not set(collection_item_ids).issubset(allowed_set):
+                raise PermissionError("one or more selected Collections are unavailable")
+            selected_collection_ids = tuple(dict.fromkeys(collection_item_ids))
+            allowed_tool_names = None
+        else:
+            selected_collection_ids = allowed_ids
+            allowed_tool_names = None
         if access.tenant_id is None:
             raise PermissionError("an active tenant membership is required for chat")
         resolved_conversation_id = conversation_id or uuid4()
@@ -132,26 +131,13 @@ class ApiService:
             user_id=str(access.user_id),
             tenant_id=str(access.tenant_id),
             roles=[access.role_code] if access.role_code else [],
-            reader_ids=tuple(
-                sorted(
-                    {
-                        f"email:{access.email.strip().lower()}",
-                        *(
-                            token.strip().lower()
-                            for token in access.principal_tokens
-                            if token.strip()
-                        ),
-                    }
-                )
-            ),
-            is_admin=access.is_admin,
+            collection_item_ids=tuple(str(value) for value in selected_collection_ids),
             conversation_id=str(resolved_conversation_id),
             request_id=uuid4().hex,
             history=tuple(
                 ConversationMessage(role=role, content=content)
                 for role, content in history
             ),
-            connector_ids=selected_connector_ids,
             allowed_tool_names=allowed_tool_names,
         )
         agent = self._get_agent()
@@ -168,7 +154,7 @@ class ApiService:
 
         return event_stream()
 
-    async def list_chat_connectors(
+    async def list_chat_collections(
         self,
         identity: RequestIdentity,
     ) -> dict[str, Any]:
@@ -180,7 +166,29 @@ class ApiService:
                     self._allow_insecure_development_identity
                 ),
             )
-            return await DatasourceService(session).list_chat_connectors(access)
+            ids = await CollectionAccessService(session).allowed_collection_ids(access)
+            if not ids:
+                return {"items": [], "total": 0}
+            collections = list(
+                await session.scalars(
+                    select(Item)
+                    .where(Item.id.in_(ids))
+                    .order_by(Item.title, Item.id)
+                )
+            )
+            return {
+                "items": [
+                    {
+                        "id": str(item.id),
+                        "title": item.title,
+                        "parent_item_id": (
+                            str(item.parent_item_id) if item.parent_item_id else None
+                        ),
+                    }
+                    for item in collections
+                ],
+                "total": len(collections),
+            }
 
     async def start_document_upload(
         self,
@@ -213,6 +221,95 @@ class ApiService:
         access = await self._resolve_access(identity)
         document = await self._upload_service().complete_upload(access, document_id)
         return self._document_metadata(document)
+
+    async def upload_collection_document(
+        self,
+        identity: RequestIdentity,
+        collection_id: UUID,
+        *,
+        idempotency_key: str,
+        file_name: str,
+        content_type: str,
+        content: AsyncUploadStream,
+    ) -> dict[str, Any]:
+        """Store and index a native upload under one authorized collection."""
+
+        access = await self._resolve_access(identity)
+        upload = await self._upload_service().upload_to_collection(
+            access,
+            collection_id,
+            idempotency_key=idempotency_key,
+            file_name=file_name,
+            content_type=content_type,
+            content=content,
+        )
+        ingestion_status: Literal["ready", "failed"] = "ready"
+        document = upload.item
+        try:
+            document = await self._document_pipeline().index_document(
+                document.id,
+                access=access,
+            )
+        except DocumentProcessingError:
+            ingestion_status = "failed"
+            document = await self._upload_service().get_document(access, document.id)
+        async with session_scope(self._sessions()) as session:
+            await AuditService(session).record(
+                access,
+                action="document.uploaded",
+                resource_type="document",
+                resource_id=str(document.id),
+                details={
+                    "collection_id": str(collection_id),
+                    "created": upload.created,
+                    "ingestion_status": ingestion_status,
+                },
+            )
+        return {
+            "document": self._document_metadata(document),
+            "ingestion_status": ingestion_status,
+            "created": upload.created,
+        }
+
+    async def retry_document_indexing(
+        self,
+        identity: RequestIdentity,
+        document_id: UUID,
+    ) -> dict[str, Any]:
+        """Retry indexing from an already available native upload."""
+
+        access = await self._resolve_access(identity)
+        document = await self._upload_service().get_document(
+            access,
+            document_id,
+            minimum_role="editor",
+        )
+        if document.upload is None or document.upload.status != "available":
+            raise UploadConflictError(
+                "the original file is unavailable; upload the file again"
+            )
+        ingestion_status: Literal["ready", "failed"] = "ready"
+        try:
+            document = await self._document_pipeline().index_document(
+                document.id,
+                access=access,
+            )
+        except DocumentProcessingError:
+            ingestion_status = "failed"
+            document = await self._upload_service().get_document(access, document.id)
+        async with session_scope(self._sessions()) as session:
+            await AuditService(session).record(
+                access,
+                action="document.indexing.retried",
+                resource_type="document",
+                resource_id=str(document.id),
+                details={"ingestion_status": ingestion_status},
+            )
+        return {
+            "document": self._document_metadata(document),
+            "ingestion_status": ingestion_status,
+            "created": False,
+        }
 
     async def get_document(
         self,
@@ -252,8 +349,18 @@ class ApiService:
             item = await ItemService(session).get_item_by_canonical_id(
                 item_id, access=access
             )
+            assert access.tenant_id is not None
+            collection_id = await CollectionAccessService(
+                session
+            ).authorization_collection_id(item.id, tenant_id=access.tenant_id)
+            if collection_id is None:
+                raise DocumentNotFoundError("citation not found")
             payloads = await self._qdrant_item_payloads(
-                item_id=str(item.id), access=access, chunk_id=chunk_id, limit=1
+                item_id=str(item.id),
+                collection_item_id=str(collection_id),
+                access=access,
+                chunk_id=chunk_id,
+                limit=1,
             )
             if not payloads:
                 raise DocumentNotFoundError("citation not found")
@@ -289,8 +396,15 @@ class ApiService:
             item = await ItemService(session).get_item_by_canonical_id(
                 item_id, access=access
             )
+            assert access.tenant_id is not None
+            collection_id = await CollectionAccessService(
+                session
+            ).authorization_collection_id(item.id, tenant_id=access.tenant_id)
+            if collection_id is None:
+                raise DocumentNotFoundError("item not found")
             payloads = await self._qdrant_item_payloads(
                 item_id=str(item.id),
+                collection_item_id=str(collection_id),
                 access=access,
                 chunk_id=chunk_id,
                 limit=1 if chunk_id else 100,
@@ -330,6 +444,7 @@ class ApiService:
         self,
         *,
         item_id: str,
+        collection_item_id: str,
         access: AuthContext,
         chunk_id: str | None,
         limit: int,
@@ -345,13 +460,7 @@ class ApiService:
         )
         access_filter = store.build_access_filter(
             tenant_id=str(access.tenant_id),
-            reader_ids={
-                "public",
-                f"email:{access.email.strip().casefold()}",
-                *access.principal_tokens,
-                str(access.user_id),
-            },
-            is_admin=access.is_admin,
+            collection_item_ids={collection_item_id},
         )
         must = [
             *(access_filter.must or []),
@@ -386,6 +495,10 @@ class ApiService:
             await self._pipeline.aclose()
         if self._contextualization_transport is not None:
             await self._contextualization_transport.aclose()
+        if self._agent is not None:
+            close = getattr(self._agent.model, "aclose", None)
+            if close is not None:
+                await close()
         if self._storage is not None:
             await self._storage.aclose()
 
@@ -524,7 +637,7 @@ class ApiService:
                 "OPEN_ROUTER_BASE_URL",
                 OpenRouterTransport.DEFAULT_BASE_URL,
             )
-            embedder = OpenRouterEmbeddingService(base_url=base_url)
+            embedder = OpenRouterTransport(base_url=base_url)
             semantic_contextualizer = None
             if self._contextualization_enabled:
                 self._contextualization_transport = OpenRouterTransport(
@@ -586,6 +699,7 @@ class ApiService:
                 "OPEN_ROUTER_BASE_URL",
                 OpenRouterTransport.DEFAULT_BASE_URL,
             )
+            transport = OpenRouterTransport(base_url=base_url)
             retriever = DocumentIndexRetriever(
                 QdrantSearchIndex(
                     VectorStore(
@@ -595,14 +709,14 @@ class ApiService:
                         prefer_grpc=self._qdrant_prefer_grpc,
                         timeout=8,
                     ),
-                    OpenRouterEmbeddingService(base_url=base_url),
+                    transport,
                     candidate_limit=self._hybrid_candidate_limit,
                 )
             )
             tracing = create_langfuse_tracing()
             registry.register(KnowledgeSearch(retriever, tracing=tracing))
             self._agent = Agent(
-                model=OpenRouterTransport(base_url=base_url),
+                model=transport,
                 tools=registry,
                 config=AgentConfig(
                     max_model_turns=int(os.getenv("BOTHESIS_MAX_MODEL_TURNS", "3")),
@@ -651,8 +765,12 @@ class ApiService:
     @staticmethod
     def _document_metadata(document: Any) -> dict[str, Any]:
         upload = document.upload
+        processing = document.metadata_.get("processing")
         return {
             "id": str(document.id),
+            "parent_item_id": (
+                str(document.parent_item_id) if document.parent_item_id else None
+            ),
             "file_name": str(
                 document.metadata_.get("file_name")
                 or document.title
@@ -661,6 +779,8 @@ class ApiService:
             "content_type": document.mime_type or "application/octet-stream",
             "size_bytes": document.size_bytes or 0,
             "status": document.status,
+            "indexed": isinstance(processing, Mapping)
+            and processing.get("index_schema_version") is not None,
             "upload_status": upload.status if upload is not None else None,
             "created_at": document.created_at.isoformat(),
             "uploaded_at": (
@@ -822,7 +942,7 @@ class ApiService:
             connector_id="upload",
             provider=SourceProvider.FILE,
             external_id=str(document.id),
-            url=document.source_url,
+            url=None,
         )
 
 

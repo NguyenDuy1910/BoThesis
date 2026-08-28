@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import UUID
 
-INDEX_SCHEMA_VERSION = 6
+INDEX_SCHEMA_VERSION = 7
 DENSE_VECTOR_NAME = "content"
 SPARSE_VECTOR_NAME = "content_bm25"
 BM25_MODEL = "qdrant/bm25"
@@ -23,7 +23,6 @@ DEFAULT_HYBRID_CANDIDATE_LIMIT = 20
 
 from .contextualization import StructuralContextualizer  # noqa: E402
 from .semantic_contextualizer import SemanticContextualizer  # noqa: E402
-from .embedding import EmbeddingService, EmbeddingTokenizer, embedding_texts
 from .models import ChunkContext, ContextualChunk, IndexQuery, PreparedDocument
 from .payload import (
     IndexPayload,
@@ -56,6 +55,17 @@ class DocumentUnavailableError(DocumentProcessingError):
 
 
 @runtime_checkable
+class EmbeddingService(Protocol):
+    """Provider-neutral embedding operations used by document indexing."""
+
+    embedding_model: str
+
+    async def embed_query(self, query: str) -> list[float]: ...
+
+    async def embed_documents(self, documents: list[str]) -> list[list[float]]: ...
+
+
+@runtime_checkable
 class VectorIndex(Protocol):
     """Derived-index operations required by the document pipeline."""
 
@@ -67,7 +77,6 @@ class VectorIndex(Protocol):
         *,
         access: AuthContext,
         embedding_model: str,
-        source_fingerprint: str,
     ) -> None: ...
 
     async def search_document(
@@ -92,10 +101,9 @@ class VectorIndex(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class PreparedDocuments:
-    """Model-ready chat document contexts and their source fingerprints."""
+    """Model-ready chat document contexts."""
 
     contexts: tuple[PreparedDocument, ...]
-    source_fingerprints: Mapping[UUID, str]
 
 
 class DocumentIndex(Protocol):
@@ -107,9 +115,7 @@ class DocumentIndex(Protocol):
         *,
         limit: int,
         tenant_id: str,
-        reader_ids: tuple[str, ...],
-        connector_ids: tuple[int, ...] | None,
-        is_admin: bool,
+        collection_item_ids: tuple[str, ...],
     ) -> list[ContextualChunk]:
         """Return indexed chunks after applying the supplied access scope."""
 
@@ -119,12 +125,12 @@ __all__ = [
     "ContextualChunk", "DEFAULT_HYBRID_CANDIDATE_LIMIT", "DENSE_VECTOR_NAME",
     "DEFAULT_DIRECT_MAX_BYTES", "DIRECT_IMAGE_TYPES", "DocumentIndex",
     "DocumentProcessingError", "DocumentUnavailableError", "EmbeddingService",
-    "EmbeddingTokenizer", "IndexPayload", "IndexQuery",
+    "IndexPayload", "IndexQuery",
     "PARSER_VERSION", "PreparedDocument", "PreparedDocuments",
     "QdrantChunkPayload", "QdrantChunkRecord",
     "QdrantPayloadContext", "INDEX_SCHEMA_VERSION", "SPARSE_VECTOR_NAME",
     "SemanticContextualizer", "StructuralContextualizer",
     "build_contextual_chunks",
     "build_qdrant_records",
-    "VectorIndex", "embedding_texts",
+    "VectorIndex",
 ]

@@ -9,10 +9,9 @@ from .items import AnyItem
 
 
 class ChangeType(str, Enum):
-    UPSERT = "upsert"
-    DELETE = "delete"
-    MOVE = "move"
-    ACCESS_CHANGED = "access_changed"
+    CREATED = "created"
+    UPDATED = "updated"
+    DELETED = "deleted"
 
 
 class ItemChange(BaseModel):
@@ -21,4 +20,5 @@ class ItemChange(BaseModel):
     type: ChangeType
     item_id: str = Field(min_length=1)
     item: AnyItem | None = None
+    provider_version: str | None = Field(default=None, min_length=1)
     occurred_at: datetime | None = None

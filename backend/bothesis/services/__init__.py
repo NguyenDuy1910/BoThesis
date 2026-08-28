@@ -6,10 +6,10 @@ errors, and shared constants live here so callers use one stable boundary.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 from uuid import UUID
 
 from bothesis.db.models import Item, ItemUpload
@@ -97,7 +97,7 @@ class AuthContext:
     role_id: UUID | None
     role_code: str | None
     permission_codes: tuple[str, ...]
-    principal_tokens: tuple[str, ...]
+    group_ids: tuple[UUID, ...]
 
     @property
     def is_enterprise_user(self) -> bool:
@@ -127,7 +127,6 @@ class CanonicalDocumentContent:
 
     item: DocumentItem
     chunks: tuple[Chunk, ...]
-    source_fingerprint: str
 
 
 @runtime_checkable
@@ -176,6 +175,13 @@ class UploadValidationError(UploadServiceError):
     pass
 
 
+@runtime_checkable
+class AsyncUploadStream(Protocol):
+    """Framework-neutral async byte stream accepted by upload services."""
+
+    async def read(self, size: int = -1) -> bytes: ...
+
+
 @dataclass(frozen=True, slots=True)
 class UploadTarget:
     mode: Literal["presigned"]
@@ -188,6 +194,14 @@ class UploadStart:
     upload: ItemUpload
     upload_required: bool
     target: UploadTarget | None
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionUpload:
+    """A retry-safe upload record created under a governed collection."""
+
+    item: Item
+    created: bool
 
 
 def _permission_code(value: str) -> str:
@@ -254,38 +268,36 @@ def timestamp(value: datetime | None) -> str | None:
 # service modules import these contracts from this package during initialization.
 from bothesis.services.auth import AuthService  # noqa: E402
 from bothesis.services.item import ItemService  # noqa: E402
+from bothesis.services.collection_access import CollectionAccessService  # noqa: E402
 from bothesis.services.conversation import ConversationService  # noqa: E402
 from bothesis.services.upload import UploadService  # noqa: E402
 from bothesis.services.audit import AuditService  # noqa: E402
-from bothesis.services.connector_credential import ConnectorCredentialService  # noqa: E402
-from bothesis.services.datasources import DatasourceService  # noqa: E402
+from bothesis.services.plugin_credential import PluginCredentialService  # noqa: E402
+from bothesis.services.plugin import PluginService  # noqa: E402
 from bothesis.services.access_requests import AccessRequestService  # noqa: E402
-from bothesis.services.acl import AclService  # noqa: E402
 from bothesis.services.admin_items import AdminItemService  # noqa: E402
+from bothesis.services.admin import AdminService  # noqa: E402
 from bothesis.services.chat_document_source import ChatDocumentSourceService  # noqa: E402
 from bothesis.services.groups import GroupService  # noqa: E402
 from bothesis.services.roles import RoleService  # noqa: E402
 from bothesis.services.tenants import TenantService  # noqa: E402
 from bothesis.services.users import UserService  # noqa: E402
-from bothesis.services.admin import AdminService  # noqa: E402
-from bothesis.services.connector_sync import ConnectorSyncService  # noqa: E402
-from bothesis.services.admin_api import AdminApiService  # noqa: E402
 from bothesis.services.api import ApiService  # noqa: E402
+from bothesis.services.admin_api import AdminApiService  # noqa: E402
 
 __all__ = [
     "ACTIVE_STATUS",
     "ACCESS_MANAGE_PERMISSION",
+    "AccessRequestService",
     "ADMIN_PERMISSION_CATALOG",
     "ADMIN_PERMISSION",
     "AUDIT_READ_PERMISSION",
-    "AccessRequestService",
-    "AclService",
     "AdminConflictError",
+    "AdminApiService",
     "AdminItemService",
+    "AdminService",
     "AdminExternalUnavailableError",
     "AdminNotFoundError",
-    "AdminService",
-    "AdminApiService",
     "AdminServiceError",
     "AdminValidationError",
     "AuditService",
@@ -295,19 +307,19 @@ __all__ = [
     "AuthService",
     "AuthServiceError",
     "AuthorizationError",
+    "AsyncUploadStream",
     "CanonicalDocumentContent",
     "ChatDocumentSource",
     "ChatDocumentSourceService",
+    "CollectionAccessService",
+    "CollectionUpload",
     "ConversationService",
-    "ConnectorSyncService",
-    "ConnectorCredentialService",
     "DEFAULT_MAX_UPLOAD_BYTES",
     "DEFAULT_PROCESSING_MAX_BYTES",
     "DEFAULT_UPLOAD_URL_SECONDS",
     "DocumentNotFoundError",
     "DocumentServiceError",
     "ITEM_MANAGE_PERMISSION",
-    "DatasourceService",
     "GROUP_MANAGE_PERMISSION",
     "GroupService",
     "IdentityConflictError",
@@ -318,6 +330,8 @@ __all__ = [
     "ItemService",
     "KNOWLEDGE_READ_PERMISSION",
     "MESSAGE_ITEM_RELATIONS",
+    "PluginCredentialService",
+    "PluginService",
     "ROLE_MANAGE_PERMISSION",
     "RoleService",
     "SOURCE_MANAGE_PERMISSION",

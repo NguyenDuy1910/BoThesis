@@ -35,12 +35,15 @@ class ConversationService:
         normalized_content = content.strip()
         if not normalized_content:
             raise ValueError("message content must not be blank")
+        if access.tenant_id is None:
+            raise DocumentNotFoundError(f"conversation not found: {conversation_id}")
         async with self._session_factory.begin() as session:
             now = datetime.now(UTC)
             await session.execute(
                 insert(Conversation)
                 .values(
                     id=conversation_id,
+                    tenant_id=access.tenant_id,
                     user_id=access.user_id,
                     title=_title(normalized_content),
                     last_message_at=now,
@@ -54,6 +57,7 @@ class ConversationService:
             )
             if conversation is None or (
                 conversation.user_id != access.user_id
+                or conversation.tenant_id != access.tenant_id
                 or conversation.status != "active"
             ):
                 raise DocumentNotFoundError(
@@ -94,12 +98,15 @@ class ConversationService:
         normalized_content = content.strip()
         if not normalized_content:
             return None
+        if access.tenant_id is None:
+            raise DocumentNotFoundError(f"conversation not found: {conversation_id}")
         unique_references = list(dict.fromkeys(referenced_document_ids))
         async with self._session_factory.begin() as session:
             conversation = await session.scalar(
                 select(Conversation)
                 .where(
                     Conversation.id == conversation_id,
+                    Conversation.tenant_id == access.tenant_id,
                     Conversation.user_id == access.user_id,
                     Conversation.status == "active",
                 )

@@ -3,6 +3,8 @@ import type { ConnectorRegistryStatus } from "../types";
 
 const statusPresentation = {
   connected: { label: "Connected", variant: "success" },
+  syncing: { label: "Syncing", variant: "info" },
+  failed: { label: "Failed", variant: "danger" },
   available: { label: "Available", variant: "default" },
   disabled: { label: "Disabled", variant: "default" },
   needs_setup: { label: "Needs setup", variant: "warning" },

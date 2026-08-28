@@ -35,13 +35,6 @@ class StoredObject:
     content_type: str | None
     etag: str | None = None
     version_id: str | None = None
-    checksum_sha256: str | None = None
-
-    @property
-    def source_fingerprint(self) -> str:
-        return (
-            self.checksum_sha256 or self.version_id or self.etag or str(self.size_bytes)
-        )
 
 
 @runtime_checkable

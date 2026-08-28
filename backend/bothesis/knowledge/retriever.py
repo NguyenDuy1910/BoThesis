@@ -10,7 +10,7 @@ from bothesis.knowledge import (
     Reranker,
     RetrievalContext,
 )
-from bothesis.knowledge.filters import filter_visible_chunks, reader_ids_for
+from bothesis.knowledge.filters import filter_visible_chunks
 from bothesis.knowledge.reranker import ScoreReranker
 
 
@@ -37,21 +37,17 @@ class DocumentIndexRetriever:
     ) -> list[Evidence]:
         normalized_query = _validate_search(query, limit=limit)
         tenant_id = _validate_tenant_id(ctx.tenant_id)
-        reader_ids = reader_ids_for(ctx)
-        if ctx.connector_ids == ():
+        if not ctx.collection_item_ids:
             return []
         chunks = await self._index.search(
             normalized_query,
             limit=limit,
             tenant_id=tenant_id,
-            reader_ids=reader_ids,
-            connector_ids=ctx.connector_ids,
-            is_admin=ctx.is_admin,
+            collection_item_ids=ctx.collection_item_ids,
         )
         visible_chunks = filter_visible_chunks(
             chunks,
             context=ctx,
-            reader_ids=reader_ids,
         )
         reranked_chunks = self._reranker.rerank(visible_chunks, limit=limit)
         return [self._evidence_builder.build(chunk) for chunk in reranked_chunks]

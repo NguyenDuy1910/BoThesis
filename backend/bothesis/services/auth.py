@@ -3,7 +3,7 @@
 Authentication credentials and refresh-token sessions are intentionally not
 implemented here because the current database design does not contain those
 records. This module resolves durable users, tenant membership, roles,
-permissions, and effective enterprise principal tokens.
+permissions, and active group membership.
 """
 
 from __future__ import annotations
@@ -13,19 +13,17 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from bothesis.db.models import (
-    Connector,
     Group,
     GroupMembership,
     Role,
     Tenant,
     TenantMembership,
     User,
-    UserPrincipalToken,
 )
 from bothesis.services import (
     ACTIVE_STATUS,
@@ -296,102 +294,7 @@ class AuthService:
             return
         membership.status = INACTIVE_STATUS
         membership.deleted_at = datetime.now(UTC)
-        await self._soft_delete_principal_tokens(user_id, membership.tenant_id)
         await self._session.flush()
-
-    async def replace_principal_tokens(
-        self,
-        user_id: UUID,
-        principal_tokens: Iterable[str],
-        *,
-        tenant_id: UUID | None = None,
-        connector_id: int | None = None,
-    ) -> tuple[str, ...]:
-        context = await self.get_context(user_id, tenant_id=tenant_id)
-        if context.tenant_id is None:
-            raise AuthorizationError("an active tenant membership is required")
-        if connector_id is not None:
-            connector = await self._session.get(Connector, connector_id)
-            if connector is None:
-                raise IdentityNotFoundError(f"connector not found: {connector_id}")
-            if context.tenant_id is None or connector.tenant_id != context.tenant_id:
-                raise AuthorizationError("connector is outside the user's tenant")
-
-        tokens = tuple(_normalize_codes(principal_tokens, "principal token", 512))
-        if tokens:
-            conflict_statement = select(UserPrincipalToken.principal_token).where(
-                UserPrincipalToken.user_id == user_id,
-                UserPrincipalToken.tenant_id == context.tenant_id,
-                UserPrincipalToken.principal_token.in_(tokens),
-                UserPrincipalToken.deleted_at.is_(None),
-            )
-            if connector_id is None:
-                conflict_statement = conflict_statement.where(
-                    UserPrincipalToken.connector_id.is_not(None)
-                )
-            else:
-                conflict_statement = conflict_statement.where(
-                    or_(
-                        UserPrincipalToken.connector_id.is_(None),
-                        UserPrincipalToken.connector_id != connector_id,
-                    )
-                )
-            conflicting_tokens = list(await self._session.scalars(conflict_statement))
-            if conflicting_tokens:
-                conflicts = ", ".join(sorted(conflicting_tokens))
-                raise IdentityConflictError(
-                    f"principal tokens already belong to another source: {conflicts}"
-                )
-
-        scope_statement = select(UserPrincipalToken).where(
-            UserPrincipalToken.user_id == user_id,
-            UserPrincipalToken.tenant_id == context.tenant_id,
-        )
-        if connector_id is None:
-            scope_statement = scope_statement.where(
-                UserPrincipalToken.connector_id.is_(None)
-            )
-        else:
-            scope_statement = scope_statement.where(
-                UserPrincipalToken.connector_id == connector_id
-            )
-        scoped_records = list(
-            await self._session.scalars(scope_statement.with_for_update())
-        )
-        desired_tokens = set(tokens)
-        deleted_at = datetime.now(UTC)
-        for record in scoped_records:
-            if record.principal_token not in desired_tokens:
-                record.deleted_at = deleted_at
-
-        existing_by_token = {
-            record.principal_token: record
-            for record in await self._session.scalars(
-                select(UserPrincipalToken)
-                .where(
-                    UserPrincipalToken.user_id == user_id,
-                    UserPrincipalToken.tenant_id == context.tenant_id,
-                    UserPrincipalToken.principal_token.in_(tokens),
-                )
-                .with_for_update()
-            )
-        }
-        for token in tokens:
-            record = existing_by_token.get(token)
-            if record is None:
-                self._session.add(
-                    UserPrincipalToken(
-                        tenant_id=context.tenant_id,
-                        user_id=user_id,
-                        principal_token=token,
-                        connector_id=connector_id,
-                    )
-                )
-                continue
-            record.connector_id = connector_id
-            record.deleted_at = None
-        await self._session.flush()
-        return tokens
 
     async def get_context(
         self, user_id: UUID, *, tenant_id: UUID | None = None
@@ -430,7 +333,7 @@ class AuthService:
                 role_id=None,
                 role_code=None,
                 permission_codes=(),
-                principal_tokens=(),
+                group_ids=(),
             )
 
         if membership.status != ACTIVE_STATUS:
@@ -442,16 +345,9 @@ class AuthService:
         if membership.role.tenant_id != membership.tenant_id:
             raise AuthorizationError("membership role belongs to a different tenant")
 
-        principal_tokens = await self._session.scalars(
-            select(UserPrincipalToken.principal_token).where(
-                UserPrincipalToken.user_id == user_id,
-                UserPrincipalToken.tenant_id == membership.tenant_id,
-                UserPrincipalToken.deleted_at.is_(None),
-            )
-        )
-        group_rows = (
-            await self._session.execute(
-                select(Group.principal_token, Group.permission_codes)
+        group_ids = tuple(
+            await self._session.scalars(
+                select(Group.id)
                 .join(GroupMembership, GroupMembership.group_id == Group.id)
                 .where(
                     GroupMembership.user_id == user_id,
@@ -461,14 +357,9 @@ class AuthService:
                     Group.status == ACTIVE_STATUS,
                     Group.deleted_at.is_(None),
                 )
+                .order_by(Group.id)
             )
-        ).all()
-        group_principal_tokens = {row.principal_token for row in group_rows}
-        group_permission_codes = {
-            permission
-            for row in group_rows
-            for permission in row.permission_codes
-        }
+        )
 
         return AuthContext(
             user_id=user.id,
@@ -477,30 +368,8 @@ class AuthService:
             tenant_id=membership.tenant_id,
             role_id=membership.role_id,
             role_code=membership.role.code,
-            permission_codes=tuple(
-                sorted(
-                    {
-                        *membership.role.permission_codes,
-                        *group_permission_codes,
-                    }
-                )
-            ),
-            principal_tokens=tuple(
-                sorted({*principal_tokens, *group_principal_tokens})
-            ),
-        )
-
-    async def _soft_delete_principal_tokens(
-        self, user_id: UUID, tenant_id: UUID
-    ) -> None:
-        await self._session.execute(
-            update(UserPrincipalToken)
-            .where(
-                UserPrincipalToken.user_id == user_id,
-                UserPrincipalToken.tenant_id == tenant_id,
-                UserPrincipalToken.deleted_at.is_(None),
-            )
-            .values(deleted_at=datetime.now(UTC))
+            permission_codes=tuple(sorted(set(membership.role.permission_codes))),
+            group_ids=group_ids,
         )
 
     async def require_permissions(
