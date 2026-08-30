@@ -33,6 +33,7 @@ from bothesis.document_index.raw_storage import (
     ObjectStorageError,
     StoredObject,
 )
+from bothesis.services.preview import KnowledgePreviewService
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class UploadService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         object_storage: DocumentStorage,
+        preview_service: KnowledgePreviewService | None = None,
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
         upload_url_seconds: int = DEFAULT_UPLOAD_URL_SECONDS,
     ) -> None:
@@ -52,6 +54,7 @@ class UploadService:
             raise ValueError("upload limits must be greater than zero")
         self._session_factory = session_factory
         self._object_storage = object_storage
+        self._preview_service = preview_service
         self.max_upload_bytes = max_upload_bytes
         self._upload_url_seconds = upload_url_seconds
 
@@ -144,6 +147,7 @@ class UploadService:
                 raise UploadConflictError(str(exc)) from exc
 
             assert item.upload is not None
+            uploaded_now = False
             if item.upload.status != "available":
                 if not item.storage_key:
                     raise UploadConflictError(
@@ -186,6 +190,11 @@ class UploadService:
                             "version_id": stored.version_id,
                         },
                     )
+                uploaded_now = True
+            item = await self._with_preview(
+                item,
+                source_path=temporary_path if uploaded_now else None,
+            )
             return CollectionUpload(item=item, created=created)
         finally:
             temporary_path.unlink(missing_ok=True)
@@ -205,7 +214,7 @@ class UploadService:
             )
             assert item.upload is not None
             if item.upload.status == "available":
-                return item
+                return await self._with_preview(item)
             storage_key = item.storage_key
             expected_size = item.size_bytes
             expected_type = item.mime_type
@@ -233,7 +242,7 @@ class UploadService:
             )
             raise
         async with self._session_factory.begin() as session:
-            return await ItemService(session).mark_upload_available(
+            item = await ItemService(session).mark_upload_available(
                 document_id,
                 access.user_id,
                 access.tenant_id,
@@ -242,6 +251,7 @@ class UploadService:
                     "version_id": stored.version_id,
                 },
             )
+        return await self._with_preview(item)
 
     async def get_document(
         self,
@@ -294,6 +304,39 @@ class UploadService:
                 "upload failure state could not be persisted document_id=%s",
                 document_id,
             )
+
+    async def _with_preview(
+        self,
+        document: Item,
+        *,
+        source_path: Path | None = None,
+    ) -> Item:
+        if self._preview_service is None:
+            return document
+        try:
+            manifest = await self._preview_service.generate(
+                document,
+                source_path=source_path,
+            )
+        except Exception as exc:
+            log.warning(
+                "document preview generation failed document_id=%s error_type=%s",
+                document.id,
+                type(exc).__name__,
+            )
+            return document
+        if manifest is None:
+            return document
+        preview_metadata = manifest.model_dump(mode="json")
+        if document.metadata_.get("preview") == preview_metadata:
+            return document
+        async with self._session_factory.begin() as session:
+            await ItemService(session).merge_metadata(
+                document.id,
+                {"preview": preview_metadata},
+            )
+        document.metadata_ = {**dict(document.metadata_), "preview": preview_metadata}
+        return document
 
     async def _require_writable_collection(
         self,

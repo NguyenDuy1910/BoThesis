@@ -29,12 +29,12 @@ class QdrantPayloadContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tenant_id: str = Field(min_length=1)
-    connection_id: str
-    binding_id: str
+    integration_connection_id: str | None = None
+    ingestion_source_id: str | None = None
     collection_item_id: str = Field(min_length=1)
     parent_item_id: str | None = None
     document_type: str = Field(min_length=1)
-    plugin_key: str = Field(min_length=1)
+    connector_key: str = Field(min_length=1)
     is_deleted: bool = False
     embedding_model: str | None = None
 
@@ -58,8 +58,8 @@ class IndexPayload(BaseModel):
 
     schema_version: int = INDEX_SCHEMA_VERSION
     tenant_id: str = Field(min_length=1)
-    connection_id: str
-    binding_id: str
+    integration_connection_id: str | None = None
+    ingestion_source_id: str | None = None
     is_deleted: bool = False
 
     item_id: str = Field(min_length=1)
@@ -75,7 +75,7 @@ class IndexPayload(BaseModel):
     context_section_path: list[str] = Field(default_factory=list)
     context_summary: str | None = None
 
-    plugin_key: str = Field(min_length=1)
+    connector_key: str = Field(min_length=1)
     external_id: str = Field(min_length=1)
     root_id: str | None = None
     ancestor_ids: list[str] = Field(default_factory=list)
@@ -112,8 +112,8 @@ class IndexPayload(BaseModel):
     ) -> "IndexPayload":
         return cls(
             tenant_id=context.tenant_id,
-            connection_id=context.connection_id,
-            binding_id=context.binding_id,
+            integration_connection_id=context.integration_connection_id,
+            ingestion_source_id=context.ingestion_source_id,
             is_deleted=context.is_deleted,
             item_id=chunk.item_id,
             chunk_id=chunk.id,
@@ -127,7 +127,7 @@ class IndexPayload(BaseModel):
             contextual_text=chunk.contextual_text,
             context_section_path=chunk.context.section_path,
             context_summary=chunk.context.summary,
-            plugin_key=context.plugin_key,
+            connector_key=context.connector_key,
             external_id=chunk.source.external_id,
             root_id=chunk.hierarchy.root_id,
             ancestor_ids=chunk.hierarchy.ancestor_ids,

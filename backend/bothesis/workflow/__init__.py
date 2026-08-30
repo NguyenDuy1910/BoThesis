@@ -51,20 +51,20 @@ class TemporalSettings:
 
 @dataclass(frozen=True, slots=True)
 class IngestionWorkflowInput:
-    binding_id: str
+    source_id: str
     tenant_id: str
-    plugin_key: str
-    connection_id: str | None = None
+    connector_key: str
+    integration_connection_id: str | None = None
     trigger_type: str = "manual"
     test_connection: bool = True
 
     def __post_init__(self) -> None:
-        if not self.binding_id.strip():
-            raise ValueError("binding_id must not be blank")
+        if not self.source_id.strip():
+            raise ValueError("source_id must not be blank")
         if not self.tenant_id.strip():
             raise ValueError("tenant_id must not be blank")
-        if not self.plugin_key.strip():
-            raise ValueError("plugin_key must not be blank")
+        if not self.connector_key.strip():
+            raise ValueError("connector_key must not be blank")
         if self.trigger_type not in {"manual", "scheduled", "webhook", "initial"}:
             raise ValueError("unsupported ingestion trigger type")
 
@@ -81,7 +81,7 @@ class IngestionProgress:
 
 @dataclass(frozen=True, slots=True)
 class IngestionResult:
-    binding_id: str
+    source_id: str
     discovered_count: int
     processed_count: int
     indexed_count: int
@@ -95,17 +95,17 @@ class WorkflowExecutionNotFoundError(LookupError):
     """Raised when a Temporal workflow or schedule is not present."""
 
 
-def ingestion_workflow_id(binding_id: str) -> str:
-    normalized = binding_id.strip()
+def ingestion_workflow_id(source_id: str) -> str:
+    normalized = source_id.strip()
     if not normalized:
-        raise ValueError("binding_id must not be blank")
+        raise ValueError("source_id must not be blank")
     return f"ingestion:{normalized}"
 
 
-def ingestion_schedule_id(binding_id: str) -> str:
-    normalized = binding_id.strip()
+def ingestion_schedule_id(source_id: str) -> str:
+    normalized = source_id.strip()
     if not normalized:
-        raise ValueError("binding_id must not be blank")
+        raise ValueError("source_id must not be blank")
     return f"ingestion-schedule:{normalized}"
 
 

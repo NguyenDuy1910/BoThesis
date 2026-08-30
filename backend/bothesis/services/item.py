@@ -16,11 +16,11 @@ from bothesis.db.models import (
     CollectionAccess,
     Conversation,
     Item,
-    ItemOrigin,
+    ExternalResource,
     ItemUpload,
     Message,
     MessageItem,
-    PluginBinding,
+    IngestionSource,
 )
 from bothesis.services import (
     ACTIVE_STATUS,
@@ -36,15 +36,15 @@ _PARENT_RELATIONS = {"contains", "child", "attachment", "embedded"}
 
 
 class ItemService:
-    """Own canonical Items; ingestion details are represented by Item Origins."""
+    """Own canonical Items while external identity stays in the integration layer."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     @staticmethod
-    def origin_item_id(binding_id: UUID, identity_key: str) -> UUID:
+    def external_item_id(source_id: UUID, identity_key: str) -> UUID:
         normalized = _required_text(identity_key, "external identity")
-        return uuid5(NAMESPACE_URL, f"bothesis:item-origin:{binding_id}:{normalized}")
+        return uuid5(NAMESPACE_URL, f"bothesis:external-resource:{source_id}:{normalized}")
 
     @staticmethod
     def upload_collection_id(tenant_id: UUID, user_id: UUID) -> UUID:
@@ -327,7 +327,7 @@ class ItemService:
 
     async def upsert_ingested_item(
         self,
-        binding_id: UUID,
+        source_id: UUID,
         external_id: str,
         *,
         canonical_external_id: str | None = None,
@@ -346,29 +346,41 @@ class ItemService:
         storage_key: str | None = None,
         status: str = "ready",
     ) -> Item:
-        binding = await self._binding(binding_id)
+        source = await self._ingestion_source(source_id)
         normalized_external_id = _required_text(external_id, "external id")
         normalized_type = _item_type(item_type)
         identity_key = _required_text(
             canonical_external_id or normalized_external_id, "canonical external id"
         )
-        origin_metadata = dict(metadata or {})
-        origin_metadata["canonical_external_id"] = identity_key
+        resource_metadata = dict(metadata or {})
+        resource_metadata["canonical_external_id"] = identity_key
         now = datetime.now(UTC)
+        existing_resource = await self._session.scalar(
+            select(ExternalResource)
+            .where(
+                ExternalResource.ingestion_source_id == source.id,
+                ExternalResource.external_id == normalized_external_id,
+            )
+            .with_for_update()
+        )
 
         if normalized_type == "collection":
-            item = binding.target_item
+            item = source.target_item
         else:
-            parent_id = binding.target_item_id
+            parent_id = source.target_item_id
             if parent_external_id:
-                parent_origin = await self._origin_by_identity(
-                    binding.id, parent_external_id
+                parent_resource = await self._resource_by_identity(
+                    source.id, parent_external_id
                 )
-                if parent_origin is not None:
-                    parent_id = parent_origin.item_id
-            item_id = self.origin_item_id(binding.id, identity_key)
+                if parent_resource is not None:
+                    parent_id = parent_resource.item_id
+            item_id = (
+                existing_resource.item_id
+                if existing_resource is not None
+                else self.external_item_id(source.id, identity_key)
+            )
             values = {
-                "tenant_id": binding.connection.tenant_id,
+                "tenant_id": source.integration_connection.tenant_id,
                 "item_type": "document",
                 "parent_item_id": parent_id,
                 "parent_relation": _parent_relation(parent_relation or "child"),
@@ -382,7 +394,7 @@ class ItemService:
                 "deleted_at": None,
             }
             await self._validate_parent(
-                tenant_id=binding.connection.tenant_id,
+                tenant_id=source.integration_connection.tenant_id,
                 parent_item_id=parent_id,
                 child_type="document",
             )
@@ -395,60 +407,52 @@ class ItemService:
                     setattr(item, attribute, value)
             await self._session.flush()
 
-        existing_origin = await self._session.scalar(
-            select(ItemOrigin)
-            .where(
-                ItemOrigin.binding_id == binding.id,
-                ItemOrigin.external_id == normalized_external_id,
-            )
-            .with_for_update()
-        )
-        origin_values = {
+        resource_values = {
             "item_id": item.id,
             "external_version": _optional_text(external_version),
             "etag": _optional_text(etag),
             "external_updated_at": external_updated_at,
             "source_url": _optional_text(source_url),
-            "metadata_": origin_metadata,
+            "metadata_": resource_metadata,
             "last_seen_at": now,
             "deleted_at": None,
         }
-        if existing_origin is None:
+        if existing_resource is None:
             self._session.add(
-                ItemOrigin(
-                    binding_id=binding.id,
+                ExternalResource(
+                    ingestion_source_id=source.id,
                     external_id=normalized_external_id,
-                    **origin_values,
+                    **resource_values,
                 )
             )
         else:
-            for attribute, value in origin_values.items():
-                setattr(existing_origin, attribute, value)
+            for attribute, value in resource_values.items():
+                setattr(existing_resource, attribute, value)
         await self._session.flush()
         return item
 
-    async def soft_delete_origin(
-        self, binding_id: UUID, external_id: str
+    async def soft_delete_external_resource(
+        self, source_id: UUID, external_id: str
     ) -> Item | None:
-        origin = await self._session.scalar(
-            select(ItemOrigin)
-            .options(joinedload(ItemOrigin.item))
+        external_resource = await self._session.scalar(
+            select(ExternalResource)
+            .options(joinedload(ExternalResource.item))
             .where(
-                ItemOrigin.binding_id == binding_id,
-                ItemOrigin.external_id == _required_text(external_id, "external id"),
-                ItemOrigin.deleted_at.is_(None),
+                ExternalResource.ingestion_source_id == source_id,
+                ExternalResource.external_id == _required_text(external_id, "external id"),
+                ExternalResource.deleted_at.is_(None),
             )
             .with_for_update()
         )
-        if origin is None:
+        if external_resource is None:
             return None
         now = datetime.now(UTC)
-        origin.deleted_at = now
-        if origin.item.item_type == "document":
-            origin.item.status = "deleted"
-            origin.item.deleted_at = now
+        external_resource.deleted_at = now
+        if external_resource.item.item_type == "document":
+            external_resource.item.status = "deleted"
+            external_resource.item.deleted_at = now
         await self._session.flush()
-        return origin.item
+        return external_resource.item
 
     async def get_item(self, item_id: UUID, *, access: AuthContext) -> Item:
         from bothesis.services.collection_access import CollectionAccessService
@@ -694,42 +698,42 @@ class ItemService:
             raise DocumentNotFoundError(f"item not found: {item_id}")
         return item
 
-    async def _binding(self, binding_id: UUID) -> PluginBinding:
-        binding = await self._session.scalar(
-            select(PluginBinding)
+    async def _ingestion_source(self, source_id: UUID) -> IngestionSource:
+        source = await self._session.scalar(
+            select(IngestionSource)
             .options(
-                joinedload(PluginBinding.connection),
-                joinedload(PluginBinding.target_item),
+                joinedload(IngestionSource.integration_connection),
+                joinedload(IngestionSource.target_item),
             )
-            .where(PluginBinding.id == binding_id)
+            .where(IngestionSource.id == source_id)
         )
         unavailable = (
-            binding is None
-            or binding.status != ACTIVE_STATUS
-            or binding.deleted_at is not None
-            or binding.connection.status != ACTIVE_STATUS
-            or binding.connection.deleted_at is not None
-            or binding.target_item.item_type != "collection"
-            or binding.target_item.status == "deleted"
-            or binding.target_item.deleted_at is not None
-            or binding.target_item.tenant_id != binding.connection.tenant_id
+            source is None
+            or source.status != ACTIVE_STATUS
+            or source.deleted_at is not None
+            or source.integration_connection.status != ACTIVE_STATUS
+            or source.integration_connection.deleted_at is not None
+            or source.target_item.item_type != "collection"
+            or source.target_item.status == "deleted"
+            or source.target_item.deleted_at is not None
+            or source.target_item.tenant_id != source.integration_connection.tenant_id
         )
         if unavailable:
-            raise DocumentNotFoundError(f"active plugin binding not found: {binding_id}")
-        assert binding is not None
-        return binding
+            raise DocumentNotFoundError(f"active ingestion source not found: {source_id}")
+        assert source is not None
+        return source
 
-    async def _origin_by_identity(
-        self, binding_id: UUID, identity: str
-    ) -> ItemOrigin | None:
+    async def _resource_by_identity(
+        self, source_id: UUID, identity: str
+    ) -> ExternalResource | None:
         normalized = _required_text(identity, "parent external id")
         return await self._session.scalar(
-            select(ItemOrigin).where(
-                ItemOrigin.binding_id == binding_id,
-                ItemOrigin.deleted_at.is_(None),
+            select(ExternalResource).where(
+                ExternalResource.ingestion_source_id == source_id,
+                ExternalResource.deleted_at.is_(None),
                 or_(
-                    ItemOrigin.external_id == normalized,
-                    ItemOrigin.metadata_["canonical_external_id"].astext == normalized,
+                    ExternalResource.external_id == normalized,
+                    ExternalResource.metadata_["canonical_external_id"].astext == normalized,
                 ),
             )
         )

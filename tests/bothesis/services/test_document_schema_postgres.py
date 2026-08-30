@@ -38,9 +38,10 @@ async def test_final_source_storage_schema_contract() -> None:
                     'item_uploads',
                     'tenant_memberships',
                     'message_items',
-                    'user_principal_tokens',
-                    'connector_credentials',
-                    'connector_scopes'
+                    'integration_connections',
+                    'integration_credentials',
+                    'ingestion_sources',
+                    'external_resources'
                   )
                 """
             )
@@ -78,8 +79,10 @@ async def test_final_source_storage_schema_contract() -> None:
         "items",
         "item_uploads",
         "message_items",
-        "connector_credentials",
-        "connector_scopes",
+        "integration_connections",
+        "integration_credentials",
+        "ingestion_sources",
+        "external_resources",
     }.issubset(table_names)
     assert {
         "documents",
@@ -89,21 +92,35 @@ async def test_final_source_storage_schema_contract() -> None:
     }.isdisjoint(table_names)
     assert {
         "item_type",
-        "document_kind",
-        "collection_kind",
+        "document_type",
         "parent_item_id",
+        "parent_relation",
         "storage_key",
-        "allowed_principal_tokens",
-        "denied_principal_tokens",
         "status",
         "deleted_at",
     }.issubset(columns_by_table["items"])
-    assert "encrypted_payload" in columns_by_table["connector_credentials"]
-    assert column_types[("connector_credentials", "encrypted_payload")] == "text"
-    assert "sync_checkpoint" in columns_by_table["connector_scopes"]
-    assert "active_generation" not in columns_by_table["connector_scopes"]
+    assert {
+        "connector_key",
+        "config",
+        "status",
+    }.issubset(columns_by_table["integration_connections"])
+    assert "encrypted_payload" in columns_by_table["integration_credentials"]
+    assert column_types[("integration_credentials", "encrypted_payload")] == "text"
+    assert {
+        "integration_connection_id",
+        "target_item_id",
+        "checkpoint",
+        "last_ingested_at",
+    }.issubset(columns_by_table["ingestion_sources"])
+    assert {
+        "ingestion_source_id",
+        "item_id",
+        "external_id",
+        "external_version",
+        "etag",
+    }.issubset(columns_by_table["external_resources"])
     assert "ck_items_item_type_is_valid" in constraints
-    assert "ck_items_item_kind_matches_type" in constraints
+    assert "ck_items_item_document_type_matches_type" in constraints
     assert "ck_items_item_status_is_valid" in constraints
 
     assert binary_columns == set()

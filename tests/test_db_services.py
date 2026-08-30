@@ -17,12 +17,13 @@ from bothesis.db.models import (
     Base,
     Conversation,
     Item,
-    ItemOrigin,
+    ExternalResource,
     ItemUpload,
+    IngestionSource,
     Message,
     MessageItem,
-    PluginConnection,
-    PluginCredential,
+    IntegrationConnection,
+    IntegrationCredential,
 )
 from bothesis.services import (
     AccessRequestService,
@@ -33,8 +34,8 @@ from bothesis.services import (
     CollectionAccessService,
     DocumentNotFoundError,
     ItemService,
-    PluginCredentialService,
-    PluginService,
+    IntegrationCredentialService,
+    IntegrationService,
     UploadService,
     UploadTooLargeError,
     UploadValidationError,
@@ -179,7 +180,7 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
 
 
 @pytest.mark.asyncio
-async def test_plugin_credentials_are_encrypted_and_owner_models_are_explicit(
+async def test_integration_credentials_are_encrypted_and_owner_models_are_explicit(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
@@ -189,18 +190,18 @@ async def test_plugin_credentials_are_encrypted_and_owner_models_are_explicit(
         role = await auth.create_role(tenant.id, "member", "Member")
         await auth.assign_membership(owner.id, tenant.id, role.id)
 
-        personal = PluginConnection(
+        personal = IntegrationConnection(
             tenant_id=tenant.id,
             owner_type="user",
             owner_user_id=owner.id,
-            plugin_key="confluence",
+            connector_key="confluence",
             display_name="Owner Confluence",
             created_by_user_id=owner.id,
         )
-        tenant_owned = PluginConnection(
+        tenant_owned = IntegrationConnection(
             tenant_id=tenant.id,
             owner_type="tenant",
-            plugin_key="google_drive",
+            connector_key="google_drive",
             display_name="Company Drive",
             created_by_user_id=owner.id,
         )
@@ -208,7 +209,7 @@ async def test_plugin_credentials_are_encrypted_and_owner_models_are_explicit(
         await session.flush()
 
         encryption_key = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii")
-        credentials = PluginCredentialService(session, encryption_key)
+        credentials = IntegrationCredentialService(session, encryption_key)
         record = await credentials.store(
             personal.id,
             credential_type="oauth2",
@@ -225,21 +226,21 @@ async def test_plugin_credentials_are_encrypted_and_owner_models_are_explicit(
             "refresh_token": "refresh-secret",
         }
         assert await session.scalar(
-            select(PluginCredential).where(
-                PluginCredential.connection_id == personal.id
+            select(IntegrationCredential).where(
+                IntegrationCredential.integration_connection_id == personal.id
             )
         ) is record
 
 
-def test_plugin_encryption_key_accepts_unpadded_urlsafe_base64() -> None:
+def test_integration_encryption_key_accepts_unpadded_urlsafe_base64() -> None:
     expected = bytes(range(32))
     encryption_key = base64.urlsafe_b64encode(expected).decode("ascii").rstrip("=")
 
-    assert PluginCredentialService._decode_key(encryption_key) == expected
+    assert IntegrationCredentialService._decode_key(encryption_key) == expected
 
 
 @pytest.mark.asyncio
-async def test_plugin_list_eager_loads_optional_credentials(
+async def test_integration_list_eager_loads_optional_credentials(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
@@ -255,10 +256,10 @@ async def test_plugin_list_eager_loads_optional_credentials(
         await auth.assign_membership(owner.id, tenant.id, role.id)
         actor = await auth.get_context(owner.id, tenant_id=tenant.id)
         session.add(
-            PluginConnection(
+            IntegrationConnection(
                 tenant_id=tenant.id,
                 owner_type="tenant",
-                plugin_key="file",
+                connector_key="file",
                 display_name="Uploaded files",
                 status="draft",
                 created_by_user_id=owner.id,
@@ -266,12 +267,95 @@ async def test_plugin_list_eager_loads_optional_credentials(
         )
 
     async with session_factory.begin() as session:
-        result = await PluginService(session).list_connections(
+        result = await IntegrationService(session).list_connections(
             actor, page_size=100,
         )
 
     assert result["total"] == 1
     assert result["items"][0]["credential_configured"] is False
+
+
+@pytest.mark.asyncio
+async def test_external_resource_mapping_preserves_canonical_item_identity(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        tenant = await auth.create_tenant("source-map", "Source mapping")
+        owner = await auth.create_user("source-map@example.com")
+        role = await auth.create_role(tenant.id, "source-manager", "Source Manager")
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        collection = await ItemService(session).create_collection(
+            tenant_id=tenant.id,
+            title="External knowledge",
+            created_by_user_id=owner.id,
+        )
+        connection = IntegrationConnection(
+            tenant_id=tenant.id,
+            connector_key="confluence",
+            owner_type="tenant",
+            display_name="Company wiki",
+            status="active",
+            created_by_user_id=owner.id,
+        )
+        session.add(connection)
+        await session.flush()
+        source = IngestionSource(
+            integration_connection_id=connection.id,
+            target_item_id=collection.id,
+            checkpoint={},
+            status="active",
+            created_by_user_id=owner.id,
+        )
+        session.add(source)
+        await session.flush()
+
+        existing_item = Item(
+            id=uuid4(),
+            tenant_id=tenant.id,
+            item_type="document",
+            parent_item_id=collection.id,
+            parent_relation="child",
+            document_type="confluence_page",
+            title="Existing title",
+            status="ready",
+        )
+        session.add(existing_item)
+        await session.flush()
+        resource = ExternalResource(
+            item_id=existing_item.id,
+            ingestion_source_id=source.id,
+            external_id="page-42",
+            external_version="v1",
+        )
+        session.add(resource)
+        await session.flush()
+
+        updated = await ItemService(session).upsert_ingested_item(
+            source.id,
+            "page-42",
+            canonical_external_id="confluence:page-42",
+            item_type="document",
+            title="Updated title",
+            document_type="confluence_page",
+            external_version="v2",
+            etag="etag-v2",
+        )
+
+        assert updated.id == existing_item.id
+        assert updated.title == "Updated title"
+        stored_resources = list(
+            await session.scalars(
+                select(ExternalResource).where(
+                    ExternalResource.ingestion_source_id == source.id,
+                    ExternalResource.external_id == "page-42",
+                )
+            )
+        )
+        assert len(stored_resources) == 1
+        assert stored_resources[0].item_id == existing_item.id
+        assert stored_resources[0].external_version == "v2"
+        assert stored_resources[0].etag == "etag-v2"
 
 
 @pytest.mark.asyncio
@@ -516,8 +600,8 @@ async def test_collection_upload_is_authorized_parented_and_retry_safe(
     assert len(storage.uploads) == 2
     assert storage.uploads[0][1] == b"governed policy"
     async with session_factory() as session:
-        origin = await session.scalar(
-            select(ItemOrigin.id).where(ItemOrigin.item_id == first.item.id)
+        external_resource = await session.scalar(
+            select(ExternalResource.id).where(ExternalResource.item_id == first.item.id)
         )
         visible = await ItemService(session).get_upload_for_access(
             first.item.id,
@@ -529,7 +613,7 @@ async def test_collection_upload_is_authorized_parented_and_retry_safe(
                 viewer,
                 minimum_role="editor",
             )
-    assert origin is None
+    assert external_resource is None
     assert visible.id == first.item.id
 
 

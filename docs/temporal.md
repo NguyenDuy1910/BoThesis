@@ -29,7 +29,7 @@ target namespace.
 
 ## Concurrency and retry behavior
 
-Every binding uses `ingestion:<binding_id>` as its Workflow ID. Manual starts
+Every ingestion source uses `ingestion:<source_id>` as its Workflow ID. Manual starts
 fail on an open execution and return the existing run instead of starting a
 second writer. Temporal Schedules default to `SKIP`, so a scheduled tick is
 skipped while the previous scheduled execution is open. The Workflow ID also

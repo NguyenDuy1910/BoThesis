@@ -42,6 +42,7 @@ from bothesis.services import (
     DocumentNotFoundError,
     IdentityInactiveError,
     IdentityNotFoundError,
+    KnowledgePreview,
     RequestIdentity,
     UploadConflictError,
     UploadTooLargeError,
@@ -203,6 +204,7 @@ class DocumentMetadata(BaseModel):
     upload_status: Literal["pending", "available", "failed"] | None = None
     created_at: str
     uploaded_at: str | None = None
+    preview: KnowledgePreview | None = None
 
 
 class DocumentUploadStartResponse(BaseModel):
@@ -274,6 +276,7 @@ class KnowledgeItemViewer(BaseModel):
     content_type: str
     external_url: str | None = None
     document_url: str | None = None
+    preview: KnowledgePreview | None = None
     elements: list[ViewerElement]
     focus: ViewerFocus | None = None
 
@@ -287,6 +290,7 @@ class KnowledgeCitationResponse(BaseModel):
     content_type: str
     document_url: str | None = None
     external_url: str | None = None
+    preview: KnowledgePreview | None = None
     citation: CitationInfo
 
 
@@ -428,8 +432,8 @@ class GroupMembersUpdate(AdminRequest):
     user_ids: list[UUID]
 
 
-class PluginConnectionCreate(AdminRequest):
-    plugin_key: str = Field(min_length=1, max_length=64)
+class IntegrationConnectionCreate(AdminRequest):
+    connector_key: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=255)
     config: dict[str, Any] = Field(default_factory=dict)
     credentials: dict[str, Any] | None = Field(default=None, repr=False)
@@ -437,7 +441,7 @@ class PluginConnectionCreate(AdminRequest):
     owner_type: Literal["user", "tenant"] = "tenant"
 
 
-class PluginConnectionUpdate(AdminRequest):
+class IntegrationConnectionUpdate(AdminRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     config: dict[str, Any] | None = None
     credentials: dict[str, Any] | None = Field(default=None, repr=False)
@@ -453,14 +457,14 @@ class ScheduleInput(AdminRequest):
     overlap_policy: Literal["skip", "queue", "replace"] = "skip"
 
 
-class PluginBindingCreate(AdminRequest):
+class IngestionSourceCreate(AdminRequest):
     target_item_id: UUID
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     config: dict[str, Any] = Field(default_factory=dict)
     schedule: ScheduleInput | None = None
 
 
-class PluginBindingUpdate(AdminRequest):
+class IngestionSourceUpdate(AdminRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     config: dict[str, Any] | None = None
     status: Literal["active", "disabled", "error"] | None = None
@@ -1214,219 +1218,219 @@ async def admin_delete_group(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@admin_router.get("/plugins/capabilities")
-async def admin_plugin_capabilities(identity: AdminIdentity) -> dict[str, Any]:
-    return await _admin_service.plugin_capabilities(identity)
+@admin_router.get("/connectors/capabilities")
+async def admin_connector_capabilities(identity: AdminIdentity) -> dict[str, Any]:
+    return await _admin_service.connector_capabilities(identity)
 
 
-@admin_router.get("/plugin-connections")
-async def admin_list_plugin_connections(
+@admin_router.get("/integration-connections")
+async def admin_list_integration_connections(
     identity: AdminIdentity,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     search: str | None = None,
-    plugin_key: str | None = None,
+    connector_key: str | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
 ) -> dict[str, Any]:
-    return await _admin_service.list_plugin_connections(
+    return await _admin_service.list_integration_connections(
         identity,
         page=page,
         page_size=page_size,
         search=search,
-        plugin_key=plugin_key,
+        connector_key=connector_key,
         status=status_filter,
     )
 
 
-@admin_router.post("/plugin-connections", status_code=status.HTTP_201_CREATED)
-async def admin_create_plugin_connection(
-    body: PluginConnectionCreate, identity: AdminIdentity
+@admin_router.post("/integration-connections", status_code=status.HTTP_201_CREATED)
+async def admin_create_integration_connection(
+    body: IntegrationConnectionCreate, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.create_plugin_connection(identity, body.model_dump())
+    return await _admin_service.create_integration_connection(identity, body.model_dump())
 
 
-@admin_router.get("/plugin-connections/{connection_id}")
-async def admin_get_plugin_connection(
-    connection_id: UUID, identity: AdminIdentity
+@admin_router.get("/integration-connections/{integration_connection_id}")
+async def admin_get_integration_connection(
+    integration_connection_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.get_plugin_connection(identity, connection_id)
+    return await _admin_service.get_integration_connection(identity, integration_connection_id)
 
 
-@admin_router.patch("/plugin-connections/{connection_id}")
-async def admin_update_plugin_connection(
-    connection_id: UUID,
-    body: PluginConnectionUpdate,
+@admin_router.patch("/integration-connections/{integration_connection_id}")
+async def admin_update_integration_connection(
+    integration_connection_id: UUID,
+    body: IntegrationConnectionUpdate,
     identity: AdminIdentity,
 ) -> dict[str, Any]:
-    return await _admin_service.update_plugin_connection(
-        identity, connection_id, body.model_dump(exclude_unset=True)
+    return await _admin_service.update_integration_connection(
+        identity, integration_connection_id, body.model_dump(exclude_unset=True)
     )
 
 
 @admin_router.delete(
-    "/plugin-connections/{connection_id}",
+    "/integration-connections/{integration_connection_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def admin_delete_plugin_connection(
-    connection_id: UUID, identity: AdminIdentity
+async def admin_delete_integration_connection(
+    integration_connection_id: UUID, identity: AdminIdentity
 ) -> Response:
-    await _admin_service.delete_plugin_connection(identity, connection_id)
+    await _admin_service.delete_integration_connection(identity, integration_connection_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@admin_router.post("/plugin-connections/{connection_id}/validate")
-async def admin_validate_plugin_connection(
-    connection_id: UUID, identity: AdminIdentity
+@admin_router.post("/integration-connections/{integration_connection_id}/validate")
+async def admin_validate_integration_connection(
+    integration_connection_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.validate_plugin_connection(identity, connection_id)
+    return await _admin_service.validate_integration_connection(identity, integration_connection_id)
 
 
-@admin_router.get("/plugin-bindings")
-async def admin_list_plugin_bindings(
+@admin_router.get("/ingestion-sources")
+async def admin_list_ingestion_sources(
     identity: AdminIdentity,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
-    connection_id: UUID | None = None,
+    integration_connection_id: UUID | None = None,
     target_item_id: UUID | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
 ) -> dict[str, Any]:
-    return await _admin_service.list_plugin_bindings(
+    return await _admin_service.list_ingestion_sources(
         identity,
         page=page,
         page_size=page_size,
-        connection_id=connection_id,
+        integration_connection_id=integration_connection_id,
         target_item_id=target_item_id,
         status=status_filter,
     )
 
 
 @admin_router.post(
-    "/plugin-connections/{connection_id}/bindings",
+    "/integration-connections/{integration_connection_id}/sources",
     status_code=status.HTTP_201_CREATED,
 )
-async def admin_create_plugin_binding(
-    connection_id: UUID,
-    body: PluginBindingCreate,
+async def admin_create_ingestion_source(
+    integration_connection_id: UUID,
+    body: IngestionSourceCreate,
     identity: AdminIdentity,
 ) -> dict[str, Any]:
-    return await _admin_service.create_plugin_binding(
-        identity, connection_id, body.model_dump()
+    return await _admin_service.create_ingestion_source(
+        identity, integration_connection_id, body.model_dump()
     )
 
 
-@admin_router.get("/plugin-bindings/{binding_id}")
-async def admin_get_plugin_binding(
-    binding_id: UUID, identity: AdminIdentity
+@admin_router.get("/ingestion-sources/{source_id}")
+async def admin_get_ingestion_source(
+    source_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.get_plugin_binding(identity, binding_id)
+    return await _admin_service.get_ingestion_source(identity, source_id)
 
 
-@admin_router.patch("/plugin-bindings/{binding_id}")
-async def admin_update_plugin_binding(
-    binding_id: UUID,
-    body: PluginBindingUpdate,
+@admin_router.patch("/ingestion-sources/{source_id}")
+async def admin_update_ingestion_source(
+    source_id: UUID,
+    body: IngestionSourceUpdate,
     identity: AdminIdentity,
 ) -> dict[str, Any]:
-    return await _admin_service.update_plugin_binding(
-        identity, binding_id, body.model_dump(exclude_unset=True)
+    return await _admin_service.update_ingestion_source(
+        identity, source_id, body.model_dump(exclude_unset=True)
     )
 
 
 @admin_router.delete(
-    "/plugin-bindings/{binding_id}", status_code=status.HTTP_204_NO_CONTENT
+    "/ingestion-sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT
 )
-async def admin_delete_plugin_binding(
-    binding_id: UUID, identity: AdminIdentity
+async def admin_delete_ingestion_source(
+    source_id: UUID, identity: AdminIdentity
 ) -> Response:
-    await _admin_service.delete_plugin_binding(identity, binding_id)
+    await _admin_service.delete_ingestion_source(identity, source_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @admin_router.post(
-    "/plugin-bindings/{binding_id}/sync", status_code=status.HTTP_202_ACCEPTED
+    "/ingestion-sources/{source_id}/ingest", status_code=status.HTTP_202_ACCEPTED
 )
-async def admin_sync_plugin_binding(
-    binding_id: UUID, identity: AdminIdentity
+async def admin_ingest_source(
+    source_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.sync_plugin_binding(identity, binding_id)
+    return await _admin_service.ingest_source(identity, source_id)
 
 
-@admin_router.get("/plugin-bindings/{binding_id}/workflows")
-async def admin_list_binding_workflows(
-    binding_id: UUID,
+@admin_router.get("/ingestion-sources/{source_id}/workflows")
+async def admin_list_source_workflows(
+    source_id: UUID,
     identity: AdminIdentity,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
 ) -> dict[str, Any]:
-    return await _admin_service.list_binding_workflows(
+    return await _admin_service.list_source_workflows(
         identity,
-        binding_id,
+        source_id,
         page=page,
         page_size=page_size,
         status=status_filter,
     )
 
 
-@admin_router.get("/plugin-bindings/{binding_id}/workflows/{workflow_id}")
-async def admin_get_binding_workflow(
-    binding_id: UUID,
+@admin_router.get("/ingestion-sources/{source_id}/workflows/{workflow_id}")
+async def admin_get_source_workflow(
+    source_id: UUID,
     workflow_id: str,
     identity: AdminIdentity,
 ) -> dict[str, Any]:
-    return await _admin_service.get_binding_workflow(
-        identity, binding_id, workflow_id
+    return await _admin_service.get_source_workflow(
+        identity, source_id, workflow_id
     )
 
 
-@admin_router.get("/plugin-bindings/{binding_id}/status")
-async def admin_get_binding_status(
-    binding_id: UUID, identity: AdminIdentity
+@admin_router.get("/ingestion-sources/{source_id}/status")
+async def admin_get_source_status(
+    source_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.get_binding_status(identity, binding_id)
+    return await _admin_service.get_source_status(identity, source_id)
 
 
-@admin_router.get("/plugin-bindings/{binding_id}/schedule")
-async def admin_get_binding_schedule(
-    binding_id: UUID, identity: AdminIdentity
+@admin_router.get("/ingestion-sources/{source_id}/schedule")
+async def admin_get_source_schedule(
+    source_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.get_binding_schedule(identity, binding_id)
+    return await _admin_service.get_source_schedule(identity, source_id)
 
 
-@admin_router.put("/plugin-bindings/{binding_id}/schedule")
-async def admin_set_binding_schedule(
-    binding_id: UUID,
+@admin_router.put("/ingestion-sources/{source_id}/schedule")
+async def admin_set_source_schedule(
+    source_id: UUID,
     body: ScheduleInput,
     identity: AdminIdentity,
 ) -> dict[str, Any]:
-    return await _admin_service.set_binding_schedule(
-        identity, binding_id, body.model_dump()
+    return await _admin_service.set_source_schedule(
+        identity, source_id, body.model_dump()
     )
 
 
 @admin_router.delete(
-    "/plugin-bindings/{binding_id}/schedule",
+    "/ingestion-sources/{source_id}/schedule",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def admin_delete_binding_schedule(
-    binding_id: UUID, identity: AdminIdentity
+async def admin_delete_source_schedule(
+    source_id: UUID, identity: AdminIdentity
 ) -> Response:
-    await _admin_service.delete_binding_schedule(identity, binding_id)
+    await _admin_service.delete_source_schedule(identity, source_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@admin_router.post("/plugin-bindings/{binding_id}/schedule/pause")
-async def admin_pause_binding_schedule(
-    binding_id: UUID, identity: AdminIdentity
+@admin_router.post("/ingestion-sources/{source_id}/schedule/pause")
+async def admin_pause_source_schedule(
+    source_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.pause_binding_schedule(identity, binding_id)
+    return await _admin_service.pause_source_schedule(identity, source_id)
 
 
-@admin_router.post("/plugin-bindings/{binding_id}/schedule/resume")
-async def admin_resume_binding_schedule(
-    binding_id: UUID, identity: AdminIdentity
+@admin_router.post("/ingestion-sources/{source_id}/schedule/resume")
+async def admin_resume_source_schedule(
+    source_id: UUID, identity: AdminIdentity
 ) -> dict[str, Any]:
-    return await _admin_service.resume_binding_schedule(identity, binding_id)
+    return await _admin_service.resume_source_schedule(identity, source_id)
 
 
 @admin_router.get("/ingestion/jobs")
@@ -1435,16 +1439,16 @@ async def admin_list_ingestion_jobs(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
-    connection_id: UUID | None = None,
-    binding_id: UUID | None = None,
+    integration_connection_id: UUID | None = None,
+    source_id: UUID | None = None,
 ) -> dict[str, Any]:
     return await _admin_service.list_ingestion_jobs(
         identity,
         page=page,
         page_size=page_size,
         status=status_filter,
-        connection_id=connection_id,
-        binding_id=binding_id,
+        integration_connection_id=integration_connection_id,
+        source_id=source_id,
     )
 
 
@@ -1480,7 +1484,7 @@ async def admin_list_items(
     search: str | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
     item_type: str | None = None,
-    binding_id: UUID | None = None,
+    ingestion_source_id: UUID | None = None,
     created_by_user_id: UUID | None = None,
     sort: str = "updated_at",
     direction: str = "desc",
@@ -1492,7 +1496,7 @@ async def admin_list_items(
         search=search,
         status=status_filter,
         item_type=item_type,
-        binding_id=binding_id,
+        ingestion_source_id=ingestion_source_id,
         created_by_user_id=created_by_user_id,
         sort=sort,
         direction=direction,

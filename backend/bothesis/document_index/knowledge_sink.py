@@ -1,7 +1,8 @@
-"""Persist Plugin output as canonical Items and project Documents to Qdrant."""
+"""Persist connector output as canonical Items and project Documents to Qdrant."""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from uuid import UUID
 
@@ -11,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import joinedload
 
 from bothesis.connector.protocol import AnyItem, Chunk, CollectionItem, DocumentItem, DocumentKind
-from bothesis.db.models import Item, ItemOrigin, PluginBinding
+from bothesis.db.models import Item, ExternalResource, IngestionSource
 from bothesis.document_index import (
     BM25_MODEL,
     BM25_OPTIONS,
@@ -22,10 +23,13 @@ from bothesis.document_index import (
 from bothesis.document_index.payload import QdrantPayloadContext, build_qdrant_records
 from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
 from bothesis.document_index.vector_store import VectorStore
+from bothesis.services.preview import KnowledgePreviewService
+
+log = logging.getLogger(__name__)
 
 
 class QdrantKnowledgeSink:
-    """Ingestion sink at the Plugin-to-Knowledge-Core dependency boundary."""
+    """Ingestion sink at the connector-to-knowledge dependency boundary."""
 
     def __init__(
         self,
@@ -33,18 +37,20 @@ class QdrantKnowledgeSink:
         embedder: EmbeddingService,
         *,
         session_factory: async_sessionmaker[AsyncSession],
-        binding_id: UUID,
+        ingestion_source_id: UUID,
         embedding_batch_size: int = 32,
         semantic_contextualizer: SemanticContextualizer | None = None,
+        preview_service: KnowledgePreviewService | None = None,
     ) -> None:
         if embedding_batch_size < 1:
             raise ValueError("embedding_batch_size must be at least one")
         self._store = store
         self._embedder = embedder
         self._session_factory = session_factory
-        self._binding_id = binding_id
+        self._ingestion_source_id = ingestion_source_id
         self._embedding_batch_size = embedding_batch_size
         self._semantic_contextualizer = semantic_contextualizer
+        self._preview_service = preview_service
 
     async def write_item(
         self,
@@ -53,7 +59,7 @@ class QdrantKnowledgeSink:
         tenant_id: str,
         connector_id: str | int,
     ) -> UUID:
-        self._validate_source(item, tenant_id=tenant_id, connection_id=connector_id)
+        self._validate_source(item, tenant_id=tenant_id, integration_connection_id=connector_id)
         stored, _, _ = await self._persist_item(item)
         return stored.id
 
@@ -66,9 +72,10 @@ class QdrantKnowledgeSink:
         connector_id: str | int,
     ) -> int:
         normalized_tenant = self._validate_source(
-            item, tenant_id=tenant_id, connection_id=connector_id
+            item, tenant_id=tenant_id, integration_connection_id=connector_id
         )
-        stored, binding, origin = await self._persist_item(item, status="processing")
+        stored, source, _ = await self._persist_item(item, status="processing")
+        await self._persist_preview(stored)
         canonical_item, canonical_chunks = self._canonical_document(item, chunks, stored)
         records = (
             await build_qdrant_records(
@@ -76,12 +83,12 @@ class QdrantKnowledgeSink:
                 canonical_item,
                 QdrantPayloadContext(
                     tenant_id=normalized_tenant,
-                    connection_id=str(binding.connection_id),
-                    binding_id=str(binding.id),
-                    collection_item_id=str(binding.target_item_id),
+                    integration_connection_id=str(source.integration_connection_id),
+                    ingestion_source_id=str(source.id),
+                    collection_item_id=str(source.target_item_id),
                     parent_item_id=(str(stored.parent_item_id) if stored.parent_item_id else None),
                     document_type=stored.document_type or "plain_text",
-                    plugin_key=binding.connection.plugin_key,
+                    connector_key=source.integration_connection.connector_key,
                     embedding_model=self._embedder.embedding_model,
                 ),
                 semantic_contextualizer=self._semantic_contextualizer,
@@ -139,16 +146,18 @@ class QdrantKnowledgeSink:
         if not normalized_tenant:
             raise ValueError("tenant_id must not be blank")
         async with self._session_factory.begin() as session:
-            binding = await session.scalar(
-                select(PluginBinding)
-                .options(joinedload(PluginBinding.connection))
-                .where(PluginBinding.id == self._binding_id)
+            source = await session.scalar(
+                select(IngestionSource)
+                .options(joinedload(IngestionSource.integration_connection))
+                .where(IngestionSource.id == self._ingestion_source_id)
             )
-            if binding is None or str(binding.connection_id) != str(connector_id):
-                raise ValueError("Binding Connection does not match the delete request")
+            if source is None or str(source.integration_connection_id) != str(connector_id):
+                raise ValueError(
+                    "ingestion source connection does not match the delete request"
+                )
             from bothesis.services import ItemService
 
-            stored = await ItemService(session).soft_delete_origin(binding.id, item_id)
+            stored = await ItemService(session).soft_delete_external_resource(source.id, item_id)
             canonical_id = stored.id if stored is not None else None
         if canonical_id is not None:
             await self._soft_delete_points(
@@ -157,31 +166,44 @@ class QdrantKnowledgeSink:
 
     async def _persist_item(
         self, item: AnyItem, *, status: str | None = None
-    ) -> tuple[Item, PluginBinding, ItemOrigin]:
+    ) -> tuple[Item, IngestionSource, ExternalResource]:
         from bothesis.services import ItemService
 
         original = item.original if isinstance(item, DocumentItem) else None
         metadata = {
-            **dict(item.metadata),
+            **{
+                key: value
+                for key, value in item.metadata.items()
+                if key not in {"preview", "processing", "storage"}
+            },
             "source": item.source.model_dump(mode="json", exclude_none=True),
             "external_hierarchy": item.hierarchy.model_dump(mode="json", exclude_none=True),
         }
+        if original is not None:
+            metadata["storage"] = original.model_dump(mode="json", exclude_none=True)
         async with self._session_factory.begin() as session:
-            binding = await session.scalar(
-                select(PluginBinding)
-                .options(joinedload(PluginBinding.connection), joinedload(PluginBinding.target_item))
-                .where(PluginBinding.id == self._binding_id)
+            source = await session.scalar(
+                select(IngestionSource)
+                .options(
+                    joinedload(IngestionSource.integration_connection),
+                    joinedload(IngestionSource.target_item),
+                )
+                .where(IngestionSource.id == self._ingestion_source_id)
             )
-            if binding is None:
-                raise ValueError(f"Plugin Binding not found: {self._binding_id}")
+            if source is None:
+                raise ValueError(
+                    f"ingestion source not found: {self._ingestion_source_id}"
+                )
             stored = await ItemService(session).upsert_ingested_item(
-                binding.id,
+                source.id,
                 item.source.external_id,
                 canonical_external_id=item.id,
                 item_type=item.type,
                 title=item.title,
                 document_type=(
-                    self._document_type(item, binding.connection.plugin_key)
+                    self._document_type(
+                        item, source.integration_connection.connector_key
+                    )
                     if isinstance(item, DocumentItem)
                     else None
                 ),
@@ -199,18 +221,46 @@ class QdrantKnowledgeSink:
                 storage_key=original.key if original is not None else None,
                 status=status or "ready",
             )
-            origin = await session.scalar(
-                select(ItemOrigin).where(
-                    ItemOrigin.binding_id == binding.id,
-                    ItemOrigin.external_id == item.source.external_id,
+            external_resource = await session.scalar(
+                select(ExternalResource).where(
+                    ExternalResource.ingestion_source_id == source.id,
+                    ExternalResource.external_id == item.source.external_id,
                 )
             )
-            if origin is None:
-                raise RuntimeError("Item Origin was not stored")
+            if external_resource is None:
+                raise RuntimeError("external resource was not stored")
             session.expunge(stored)
-            session.expunge(binding)
-            session.expunge(origin)
-            return stored, binding, origin
+            session.expunge(source)
+            session.expunge(external_resource)
+            return stored, source, external_resource
+
+    async def _persist_preview(self, stored: Item) -> None:
+        if self._preview_service is None or not stored.storage_key:
+            return
+        try:
+            manifest = await self._preview_service.generate(stored)
+            if manifest is None:
+                return
+            preview_metadata = manifest.model_dump(mode="json")
+            if stored.metadata_.get("preview") == preview_metadata:
+                return
+            from bothesis.services import ItemService
+
+            async with self._session_factory.begin() as session:
+                await ItemService(session).merge_metadata(
+                    stored.id,
+                    {"preview": preview_metadata},
+                )
+            stored.metadata_ = {
+                **dict(stored.metadata_),
+                "preview": preview_metadata,
+            }
+        except Exception as exc:
+            log.warning(
+                "knowledge preview generation failed item_id=%s error_type=%s",
+                stored.id,
+                type(exc).__name__,
+            )
 
     async def _set_item_status(self, item_id: UUID, status: str) -> None:
         from bothesis.services import ItemService
@@ -260,19 +310,21 @@ class QdrantKnowledgeSink:
 
     @staticmethod
     def _validate_source(
-        item: AnyItem, *, tenant_id: str, connection_id: str | int
+        item: AnyItem, *, tenant_id: str, integration_connection_id: str | int
     ) -> str:
         normalized_tenant = tenant_id.strip()
         if not normalized_tenant:
             raise ValueError("tenant_id must not be blank")
-        if str(item.source.connector_id) != str(connection_id):
-            raise ValueError("item source Connection does not match the index request")
+        if str(item.source.connector_id) != str(integration_connection_id):
+            raise ValueError(
+                "item source integration connection does not match the index request"
+            )
         return normalized_tenant
 
     @staticmethod
-    def _document_type(item: DocumentItem, plugin_key: str) -> str:
+    def _document_type(item: DocumentItem, connector_key: str) -> str:
         if item.document_kind == DocumentKind.PAGE:
-            return "confluence_page" if plugin_key == "confluence" else "web_page"
+            return "confluence_page" if connector_key == "confluence" else "web_page"
         return {
             DocumentKind.PDF: "pdf",
             DocumentKind.DOCUMENT: "word_document",

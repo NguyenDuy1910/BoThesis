@@ -105,9 +105,9 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     group_memberships: Mapped[list[GroupMembership]] = relationship(
         back_populates="user"
     )
-    created_plugin_connections: Mapped[list[PluginConnection]] = relationship(
+    created_integration_connections: Mapped[list[IntegrationConnection]] = relationship(
         back_populates="created_by_user",
-        foreign_keys="PluginConnection.created_by_user_id",
+        foreign_keys="IntegrationConnection.created_by_user_id",
     )
     created_items: Mapped[list[Item]] = relationship(
         back_populates="created_by_user", foreign_keys="Item.created_by_user_id"
@@ -141,7 +141,7 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     groups: Mapped[list[Group]] = relationship(back_populates="tenant")
     conversations: Mapped[list[Conversation]] = relationship(back_populates="tenant")
     memories: Mapped[list[Memory]] = relationship(back_populates="tenant")
-    plugin_connections: Mapped[list[PluginConnection]] = relationship(
+    integration_connections: Mapped[list[IntegrationConnection]] = relationship(
         back_populates="tenant"
     )
     items: Mapped[list[Item]] = relationship(back_populates="tenant")
@@ -333,10 +333,10 @@ class Memory(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
-class PluginConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    __tablename__ = "plugin_connections"
+class IntegrationConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "integration_connections"
     __table_args__ = (
-        Index(None, "tenant_id", "plugin_key", "status"),
+        Index(None, "tenant_id", "connector_key", "status"),
         Index(None, "owner_user_id", "status"),
         UniqueConstraint("tenant_id", "display_name"),
         CheckConstraint(
@@ -349,7 +349,7 @@ class PluginConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     tenant_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
     )
-    plugin_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    connector_key: Mapped[str] = mapped_column(String(64), nullable=False)
     owner_type: Mapped[str] = mapped_column(
         String(16), nullable=False, default="tenant", server_default="tenant"
     )
@@ -366,23 +366,25 @@ class PluginConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    tenant: Mapped[Tenant] = relationship(back_populates="plugin_connections")
+    tenant: Mapped[Tenant] = relationship(back_populates="integration_connections")
     created_by_user: Mapped[User | None] = relationship(
-        back_populates="created_plugin_connections",
+        back_populates="created_integration_connections",
         foreign_keys=[created_by_user_id],
     )
-    credential: Mapped[PluginCredential | None] = relationship(
-        back_populates="connection", uselist=False
+    credential: Mapped[IntegrationCredential | None] = relationship(
+        back_populates="integration_connection", uselist=False
     )
-    bindings: Mapped[list[PluginBinding]] = relationship(back_populates="connection")
+    ingestion_sources: Mapped[list[IngestionSource]] = relationship(
+        back_populates="integration_connection"
+    )
 
 
-class PluginCredential(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    __tablename__ = "plugin_credentials"
+class IntegrationCredential(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "integration_credentials"
 
-    connection_id: Mapped[UUID] = mapped_column(
+    integration_connection_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("plugin_connections.id"),
+        ForeignKey("integration_connections.id"),
         nullable=False,
         unique=True,
     )
@@ -391,7 +393,9 @@ class PluginCredential(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     key_version: Mapped[str | None] = mapped_column(String(64))
 
-    connection: Mapped[PluginConnection] = relationship(back_populates="credential")
+    integration_connection: Mapped[IntegrationConnection] = relationship(
+        back_populates="credential"
+    )
 
 
 class Item(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -476,10 +480,12 @@ class Item(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="parent_item", foreign_keys=[parent_item_id]
     )
     access_grants: Mapped[list[CollectionAccess]] = relationship(back_populates="item")
-    targeted_bindings: Mapped[list[PluginBinding]] = relationship(
+    targeted_by_ingestion_sources: Mapped[list[IngestionSource]] = relationship(
         back_populates="target_item"
     )
-    origins: Mapped[list[ItemOrigin]] = relationship(back_populates="item")
+    external_resources: Mapped[list[ExternalResource]] = relationship(
+        back_populates="item"
+    )
     upload: Mapped[ItemUpload | None] = relationship(back_populates="item", uselist=False)
     message_links: Mapped[list[MessageItem]] = relationship(back_populates="item")
 
@@ -512,15 +518,15 @@ class CollectionAccess(TimestampMixin, Base):
     )
 
 
-class PluginBinding(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    __tablename__ = "plugin_bindings"
+class IngestionSource(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "ingestion_sources"
     __table_args__ = (
-        Index(None, "connection_id", "status"),
+        Index(None, "integration_connection_id", "status"),
         Index(None, "target_item_id", "status"),
     )
 
-    connection_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("plugin_connections.id"), nullable=False
+    integration_connection_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("integration_connections.id"), nullable=False
     )
     target_item_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("items.id"), nullable=False
@@ -531,31 +537,37 @@ class PluginBinding(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
     )
-    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id")
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    connection: Mapped[PluginConnection] = relationship(back_populates="bindings")
-    target_item: Mapped[Item] = relationship(back_populates="targeted_bindings")
-    origins: Mapped[list[ItemOrigin]] = relationship(back_populates="binding")
+    integration_connection: Mapped[IntegrationConnection] = relationship(
+        back_populates="ingestion_sources"
+    )
+    target_item: Mapped[Item] = relationship(
+        back_populates="targeted_by_ingestion_sources"
+    )
+    external_resources: Mapped[list[ExternalResource]] = relationship(
+        back_populates="ingestion_source"
+    )
 
 
-class ItemOrigin(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    __tablename__ = "item_origins"
+class ExternalResource(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "external_resources"
     __table_args__ = (
-        UniqueConstraint("binding_id", "external_id"),
+        UniqueConstraint("ingestion_source_id", "external_id"),
         Index(None, "item_id"),
-        Index(None, "binding_id", "last_seen_at"),
+        Index(None, "ingestion_source_id", "last_seen_at"),
     )
 
     item_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("items.id"), nullable=False
     )
-    binding_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("plugin_bindings.id"), nullable=False
+    ingestion_source_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("ingestion_sources.id"), nullable=False
     )
     external_id: Mapped[str] = mapped_column(Text, nullable=False)
     external_version: Mapped[str | None] = mapped_column(Text)
@@ -572,8 +584,10 @@ class ItemOrigin(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    item: Mapped[Item] = relationship(back_populates="origins")
-    binding: Mapped[PluginBinding] = relationship(back_populates="origins")
+    item: Mapped[Item] = relationship(back_populates="external_resources")
+    ingestion_source: Mapped[IngestionSource] = relationship(
+        back_populates="external_resources"
+    )
 
 
 class ItemUpload(TimestampMixin, Base):
@@ -766,47 +780,47 @@ _COLLECTION_ACCESS_TRIGGER_CREATE = DDL(
     FOR EACH ROW EXECUTE FUNCTION bothesis_validate_collection_access()"""
 ).execute_if(dialect="postgresql")
 
-_PLUGIN_BINDING_TRIGGER = DDL(
+_INGESTION_SOURCE_TRIGGER = DDL(
     """
-    CREATE OR REPLACE FUNCTION bothesis_validate_plugin_binding() RETURNS trigger AS $$
+    CREATE OR REPLACE FUNCTION bothesis_validate_ingestion_source() RETURNS trigger AS $$
     BEGIN
       IF NOT EXISTS (
-        SELECT 1 FROM plugin_connections c JOIN items i ON i.id = NEW.target_item_id
-        WHERE c.id = NEW.connection_id AND c.tenant_id = i.tenant_id
+        SELECT 1 FROM integration_connections c JOIN items i ON i.id = NEW.target_item_id
+        WHERE c.id = NEW.integration_connection_id AND c.tenant_id = i.tenant_id
         AND c.deleted_at IS NULL AND i.item_type = 'collection' AND i.deleted_at IS NULL
-      ) THEN RAISE EXCEPTION 'Binding target must be a Collection in the Connection tenant';
+      ) THEN RAISE EXCEPTION 'Ingestion Source target must be a Collection in the Integration Connection tenant';
       END IF;
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
     """
 ).execute_if(dialect="postgresql")
-_PLUGIN_BINDING_TRIGGER_CREATE = DDL(
-    """CREATE TRIGGER trg_plugin_bindings_validate
-    BEFORE INSERT OR UPDATE OF connection_id, target_item_id ON plugin_bindings
-    FOR EACH ROW EXECUTE FUNCTION bothesis_validate_plugin_binding()"""
+_INGESTION_SOURCE_TRIGGER_CREATE = DDL(
+    """CREATE TRIGGER trg_ingestion_sources_validate
+    BEFORE INSERT OR UPDATE OF integration_connection_id, target_item_id ON ingestion_sources
+    FOR EACH ROW EXECUTE FUNCTION bothesis_validate_ingestion_source()"""
 ).execute_if(dialect="postgresql")
 
-_ITEM_ORIGIN_TRIGGER = DDL(
+_EXTERNAL_RESOURCE_TRIGGER = DDL(
     """
-    CREATE OR REPLACE FUNCTION bothesis_validate_item_origin() RETURNS trigger AS $$
+    CREATE OR REPLACE FUNCTION bothesis_validate_external_resource() RETURNS trigger AS $$
     BEGIN
       IF NOT EXISTS (
         SELECT 1 FROM items i
-        JOIN plugin_bindings b ON b.id = NEW.binding_id
-        JOIN plugin_connections c ON c.id = b.connection_id
+        JOIN ingestion_sources s ON s.id = NEW.ingestion_source_id
+        JOIN integration_connections c ON c.id = s.integration_connection_id
         WHERE i.id = NEW.item_id AND i.tenant_id = c.tenant_id
-      ) THEN RAISE EXCEPTION 'Item Origin and Binding must belong to the same tenant';
+      ) THEN RAISE EXCEPTION 'External Resource and Ingestion Source must belong to the same tenant';
       END IF;
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
     """
 ).execute_if(dialect="postgresql")
-_ITEM_ORIGIN_TRIGGER_CREATE = DDL(
-    """CREATE TRIGGER trg_item_origins_validate
-    BEFORE INSERT OR UPDATE OF item_id, binding_id ON item_origins
-    FOR EACH ROW EXECUTE FUNCTION bothesis_validate_item_origin()"""
+_EXTERNAL_RESOURCE_TRIGGER_CREATE = DDL(
+    """CREATE TRIGGER trg_external_resources_validate
+    BEFORE INSERT OR UPDATE OF item_id, ingestion_source_id ON external_resources
+    FOR EACH ROW EXECUTE FUNCTION bothesis_validate_external_resource()"""
 ).execute_if(dialect="postgresql")
 
 event.listen(Item.__table__, "after_create", _ITEM_PARENT_TRIGGER)
@@ -815,10 +829,14 @@ event.listen(CollectionAccess.__table__, "after_create", _COLLECTION_ACCESS_TRIG
 event.listen(
     CollectionAccess.__table__, "after_create", _COLLECTION_ACCESS_TRIGGER_CREATE
 )
-event.listen(PluginBinding.__table__, "after_create", _PLUGIN_BINDING_TRIGGER)
-event.listen(PluginBinding.__table__, "after_create", _PLUGIN_BINDING_TRIGGER_CREATE)
-event.listen(ItemOrigin.__table__, "after_create", _ITEM_ORIGIN_TRIGGER)
-event.listen(ItemOrigin.__table__, "after_create", _ITEM_ORIGIN_TRIGGER_CREATE)
+event.listen(IngestionSource.__table__, "after_create", _INGESTION_SOURCE_TRIGGER)
+event.listen(
+    IngestionSource.__table__, "after_create", _INGESTION_SOURCE_TRIGGER_CREATE
+)
+event.listen(ExternalResource.__table__, "after_create", _EXTERNAL_RESOURCE_TRIGGER)
+event.listen(
+    ExternalResource.__table__, "after_create", _EXTERNAL_RESOURCE_TRIGGER_CREATE
+)
 
 
 __all__ = [
@@ -830,14 +848,14 @@ __all__ = [
     "Group",
     "GroupMembership",
     "Item",
-    "ItemOrigin",
+    "ExternalResource",
     "ItemUpload",
     "Memory",
     "Message",
     "MessageItem",
-    "PluginBinding",
-    "PluginConnection",
-    "PluginCredential",
+    "IngestionSource",
+    "IntegrationConnection",
+    "IntegrationCredential",
     "Role",
     "Tenant",
     "TenantMembership",

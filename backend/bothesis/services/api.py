@@ -39,6 +39,7 @@ from bothesis.document_index.vector_store import QdrantDocumentIndex, VectorStor
 from bothesis.knowledge import CitationResolver
 from bothesis.knowledge.retriever import DocumentIndexRetriever
 from bothesis.observability import create_langfuse_tracing
+from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
@@ -85,6 +86,7 @@ class ApiService:
         self._storage: Any | None = None
         self._storage_initialized = False
         self._uploads: UploadService | None = None
+        self._previews: KnowledgePreviewService | None = None
         self._pipeline: DocumentPipeline | None = None
         self._agent: Agent | None = None
         self._contextualization_transport: OpenRouterTransport | None = None
@@ -372,6 +374,7 @@ class ApiService:
                 "title": item.title,
                 "content_type": item.mime_type or "text/plain",
                 "document_url": self._presigned_document_url(item),
+                "preview": self._preview_payload(item),
                 "external_url": CitationResolver.original_url(
                     self._file_source(item), citation
                 ),
@@ -436,6 +439,7 @@ class ApiService:
                 "document_url": (
                     self._presigned_document_url(item) if chunk_id else None
                 ),
+                "preview": self._preview_payload(item),
                 "elements": elements,
                 "focus": focus,
             }
@@ -530,6 +534,7 @@ class ApiService:
             self._uploads = UploadService(
                 self._sessions(),
                 object_storage=self._object_storage(),
+                preview_service=self._preview_service(),
                 max_upload_bytes=int(
                     os.getenv(
                         "BOTHESIS_DOCUMENT_MAX_UPLOAD_BYTES",
@@ -544,6 +549,28 @@ class ApiService:
                 ),
             )
         return self._uploads
+
+    def _preview_service(self) -> KnowledgePreviewService:
+        if self._previews is None:
+            self._previews = KnowledgePreviewService(
+                self._object_storage(),
+                renderer=KnowledgePreviewRenderer(
+                    max_pages=int(os.getenv("BOTHESIS_PREVIEW_MAX_PAGES", "50")),
+                    max_dimension=int(
+                        os.getenv("BOTHESIS_PREVIEW_MAX_DIMENSION", "1600")
+                    ),
+                    webp_quality=int(
+                        os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")
+                    ),
+                ),
+                max_source_bytes=int(
+                    os.getenv(
+                        "BOTHESIS_PREVIEW_MAX_SOURCE_BYTES",
+                        str(DEFAULT_MAX_UPLOAD_BYTES),
+                    )
+                ),
+            )
+        return self._previews
 
     def _object_storage(self) -> Any:
         if self._storage_initialized:
@@ -762,8 +789,7 @@ class ApiService:
             log.exception("could not generate citation document URL")
             return None
 
-    @staticmethod
-    def _document_metadata(document: Any) -> dict[str, Any]:
+    def _document_metadata(self, document: Any) -> dict[str, Any]:
         upload = document.upload
         processing = document.metadata_.get("processing")
         return {
@@ -788,7 +814,30 @@ class ApiService:
                 if upload is not None and upload.uploaded_at
                 else None
             ),
+            "preview": self._preview_payload(document),
         }
+
+    def _preview_payload(self, document: Any) -> dict[str, Any] | None:
+        upload = getattr(document, "upload", None)
+        if upload is not None and getattr(upload, "status", None) != "available":
+            return None
+        if getattr(document, "status", None) == "deleted":
+            return None
+        try:
+            preview = self._preview_service().resolve(
+                document,
+                expires_seconds=max(
+                    1,
+                    min(
+                        600,
+                        int(os.getenv("BOTHESIS_PREVIEW_URL_SECONDS", "300")),
+                    ),
+                ),
+            )
+        except Exception:
+            log.exception("could not resolve knowledge preview")
+            return None
+        return preview.model_dump(mode="json") if preview is not None else None
 
     @staticmethod
     def _target_payload(target: Any | None) -> dict[str, Any] | None:

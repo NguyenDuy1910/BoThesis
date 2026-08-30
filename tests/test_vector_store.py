@@ -77,7 +77,7 @@ def test_collection_authorization_and_business_filters_are_deterministic() -> No
             tenant_id="tenant-1",
             collection_item_ids=("collection-2", "collection-1", "collection-2"),
         ),
-        payload_filters=SimpleNamespace(plugin_key=["jira"], item_id=["doc-1"]),
+        payload_filters=SimpleNamespace(connector_key=["jira"], item_id=["doc-1"]),
     )
 
     assert [
@@ -89,7 +89,7 @@ def test_collection_authorization_and_business_filters_are_deterministic() -> No
         "schema_version",
         "tenant_id",
         "collection_item_id",
-        "plugin_key",
+        "connector_key",
         "item_id",
         "ancestor_ids",
     ]

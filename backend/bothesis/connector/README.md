@@ -16,6 +16,11 @@ raw source → Docling → DocumentItem + Chunk[]
                   ContextualChunk → embedding → Qdrant
 ```
 
+The `bothesis.services.preview` service may derive bounded WebP presentation
+assets from the same durable original during ingestion. Preview generation is
+independent of Docling content extraction and never enters canonical chunks or
+Qdrant payloads.
+
 Standalone images use `DocumentItem(document_kind="image")`; they are indexed
 from captions, OCR, or descriptions rather than binary payloads.
 
@@ -41,5 +46,6 @@ ACL, source, and hierarchy filters before evidence is returned.
 Personal and collection-scoped uploads use the same Docling processor,
 canonical chunks, contextualization, and flat Qdrant projection as scheduled
 connectors. Collection uploads retain native upload lineage under their
-destination Item and never create a connector, credential, binding, or sync
-configuration. Indexed files remain tenant- and collection-permission filtered.
+destination Item and never create an Integration Connection, Integration
+Credential, Ingestion Source, or External Resource. Indexed files remain
+tenant- and collection-permission filtered.

@@ -135,10 +135,10 @@ Table message_items {
   indexes { (message_id, item_id, relation_type) [pk] }
 }
 
-Table plugin_connections {
+Table integration_connections {
   id uuid [pk]
   tenant_id uuid [not null]
-  plugin_key varchar(64) [not null]
+  connector_key varchar(64) [not null]
   owner_type varchar(16) [not null, note: 'user | tenant']
   owner_user_id uuid
   display_name varchar(255) [not null]
@@ -150,15 +150,15 @@ Table plugin_connections {
   updated_at timestamptz [not null]
   indexes {
     tenant_id
-    plugin_key
+    connector_key
     owner_user_id
     (tenant_id, display_name) [unique]
   }
 }
 
-Table plugin_credentials {
+Table integration_credentials {
   id uuid [pk]
-  connection_id uuid [not null, unique]
+  integration_connection_id uuid [not null, unique]
   credential_type varchar(64) [not null]
   encrypted_payload text [not null]
   expires_at timestamptz
@@ -167,30 +167,30 @@ Table plugin_credentials {
   updated_at timestamptz [not null]
 }
 
-Table plugin_bindings {
+Table ingestion_sources {
   id uuid [pk]
-  connection_id uuid [not null]
+  integration_connection_id uuid [not null]
   target_item_id uuid [not null, note: 'Must reference an Item with item_type=collection']
   display_name varchar(255)
-  config jsonb [not null, default: `{}`, note: 'Plugin-owned external scope']
+  config jsonb [not null, default: `{}`, note: 'Connector-owned external scope']
   checkpoint jsonb [not null, default: `{}`]
   status varchar(16) [not null, default: 'active']
-  last_synced_at timestamptz
+  last_ingested_at timestamptz
   last_indexed_at timestamptz
   created_by_user_id uuid
   deleted_at timestamptz
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
   indexes {
-    connection_id
+    integration_connection_id
     target_item_id
   }
 }
 
-Table item_origins {
+Table external_resources {
   id uuid [pk]
   item_id uuid [not null, note: 'Normally references a Document Item']
-  binding_id uuid [not null]
+  ingestion_source_id uuid [not null]
   external_id text [not null]
   external_version text
   etag text
@@ -202,7 +202,7 @@ Table item_origins {
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
   indexes {
-    (binding_id, external_id) [unique]
+    (ingestion_source_id, external_id) [unique]
     item_id
   }
 }
@@ -298,15 +298,15 @@ Ref: item_uploads.owner_user_id > users.id
 Ref: message_items.message_id > messages.id
 Ref: message_items.item_id > items.id
 
-Ref: plugin_connections.tenant_id > tenants.id
-Ref: plugin_connections.owner_user_id > users.id
-Ref: plugin_connections.created_by_user_id > users.id
-Ref: plugin_credentials.connection_id - plugin_connections.id
-Ref: plugin_bindings.connection_id > plugin_connections.id
-Ref: plugin_bindings.target_item_id > items.id
-Ref: plugin_bindings.created_by_user_id > users.id
-Ref: item_origins.item_id > items.id
-Ref: item_origins.binding_id > plugin_bindings.id
+Ref: integration_connections.tenant_id > tenants.id
+Ref: integration_connections.owner_user_id > users.id
+Ref: integration_connections.created_by_user_id > users.id
+Ref: integration_credentials.integration_connection_id - integration_connections.id
+Ref: ingestion_sources.integration_connection_id > integration_connections.id
+Ref: ingestion_sources.target_item_id > items.id
+Ref: ingestion_sources.created_by_user_id > users.id
+Ref: external_resources.item_id > items.id
+Ref: external_resources.ingestion_source_id > ingestion_sources.id
 Ref: conversations.tenant_id > tenants.id
 Ref: conversations.user_id > users.id
 Ref: messages.conversation_id > conversations.id

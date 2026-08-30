@@ -140,7 +140,7 @@ def _normalise_point(point: object) -> ContextualChunk | None:
     chunk_id = _payload_text(payload, "chunk_id")
     chunk_text = _payload_content(payload, "chunk_text")
     contextual_text = _payload_content(payload, "contextual_text")
-    provider_value = _payload_text(payload, "plugin_key")
+    provider_value = _payload_text(payload, "connector_key")
     external_id = _payload_text(payload, "external_id")
     if not all(
         (
@@ -177,7 +177,7 @@ def _normalise_point(point: object) -> ContextualChunk | None:
         document_type=_payload_text(payload, "document_type") or "plain_text",
         collection_item_id=_payload_text(payload, "collection_item_id"),
         source=SourceIdentity(
-            connector_id=str(payload.get("connection_id") or "unknown"),
+            connector_id=str(payload.get("integration_connection_id") or "native_upload"),
             provider=provider,
             external_id=external_id,
             url=_payload_text(payload, "source_url"),

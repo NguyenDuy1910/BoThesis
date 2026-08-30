@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import UUID
 
-INDEX_SCHEMA_VERSION = 7
+INDEX_SCHEMA_VERSION = 8
 DENSE_VECTOR_NAME = "content"
 SPARSE_VECTOR_NAME = "content_bm25"
 BM25_MODEL = "qdrant/bm25"

@@ -56,11 +56,11 @@ def _chunk() -> Chunk:
 def _context() -> QdrantPayloadContext:
     return QdrantPayloadContext(
         tenant_id="tenant-1",
-        connection_id="connection-1",
-        binding_id="binding-1",
+        integration_connection_id="connection-1",
+        ingestion_source_id="source-1",
         collection_item_id="collection-1",
         document_type="jira_issue",
-        plugin_key="jira",
+        connector_key="jira",
         embedding_model="embed-v1",
     )
 
@@ -77,9 +77,9 @@ async def test_index_projection_is_bounded_and_collection_scoped() -> None:
     record = (await build_qdrant_records([source_chunk], document, _context()))[0]
     payload = record.payload
     assert payload.collection_item_id == "collection-1"
-    assert payload.connection_id == "connection-1"
-    assert payload.binding_id == "binding-1"
-    assert payload.plugin_key == "jira"
+    assert payload.integration_connection_id == "connection-1"
+    assert payload.ingestion_source_id == "source-1"
+    assert payload.connector_key == "jira"
     assert payload.schema_version == INDEX_SCHEMA_VERSION
     serialized = json.dumps(payload.for_qdrant())
     assert "RAW-CONTENT-MUST-NOT-BE-INDEXED" not in serialized

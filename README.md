@@ -62,8 +62,8 @@ boundary.
 
 | System | Owns |
 | --- | --- |
-| PostgreSQL | identities, tenants, connectors, encrypted credentials, Items, ACL state, chat state, sync history, and audit records |
-| S3 / Cloudflare R2 / MinIO | original document bytes |
+| PostgreSQL | identities, tenants, connectors, encrypted credentials, Items, ACL state, chat state, ingestion history, and audit records |
+| S3 / Cloudflare R2 / MinIO | original document bytes and derived preview objects |
 | Docling | conversion, normalization, provenance, and chunking |
 | Qdrant | searchable contextual chunks, vectors, and retrieval filter payload |
 | `knowledge` | permission filtering, retrieval, reranking, and evidence |
@@ -78,8 +78,8 @@ Read the full design in [Architecture](docs/architecture.md) and
 backend/
 ├── main.py                    FastAPI routes and HTTP dependencies
 └── bothesis/
-    ├── services/              Application use cases and transactions
-    ├── connector/             Confluence/file adapters, Docling, sync pipeline
+    ├── services/              Application use cases, transactions, and previews
+    ├── connector/             Confluence/file adapters, Docling, ingestion pipeline
     ├── document_index/        Contextualization, embeddings, Qdrant projection
     ├── knowledge/             Retrieval, ACL filtering, evidence, reranking
     ├── agent/                 Conversation loop, tools, model transports
@@ -91,6 +91,11 @@ deployment/                    Local PostgreSQL, Qdrant, and MinIO Compose stack
 docs/                          Architecture, setup, operations, and reference docs
 tests/                         Backend and integration tests
 ```
+
+Service-module convention: each `backend/bothesis/services/<name>.py` module
+defines only its primary service class. Shared contexts, DTOs, errors, and
+package constants belong in `backend/bothesis/services/__init__.py` and are
+imported through `bothesis.services`.
 
 ## Quick start
 
@@ -132,9 +137,9 @@ OPENROUTER_API_KEY=...
 ```
 
 The local dependency endpoints, object-storage settings, development identity,
-and generated plugin-credential encryption key are configured by `make init`. See
-[Configuration and operations](docs/operations.md) for every setting and for
-S3 or Cloudflare R2 deployments.
+and generated integration-credential encryption key are configured by
+`make init`. See [Configuration and operations](docs/operations.md) for every
+setting and for S3 or Cloudflare R2 deployments.
 
 ### 3. Start the API and WebUI
 

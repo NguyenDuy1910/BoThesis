@@ -45,7 +45,7 @@ TOOL_CONTEXT = ToolContext(agent_context=CONTEXT)
 def _chunk(
     *,
     chunk_id: str = "chunk-1",
-    connection_id: str = "connection-1",
+    integration_connection_id: str = "connection-1",
     collection_item_id: str = "collection-1",
     score: float = 0.91,
 ) -> ContextualChunk:
@@ -64,7 +64,7 @@ def _chunk(
         document_type="plain_text",
         collection_item_id=collection_item_id,
         source=SourceIdentity(
-            connector_id=connection_id,
+            connector_id=integration_connection_id,
             provider=SourceProvider.CONFLUENCE,
             external_id="doc-1",
             url="https://knowledge.example/leave-policy",
@@ -270,8 +270,8 @@ class StubSemanticVectorStore:
                     "content_type": "text",
                     "chunk_text": " Employees receive 20 days of annual leave.\n",
                     "contextual_text": "Document: Leave policy\nSection: Annual leave\n\n Employees receive 20 days of annual leave.\n",
-                    "plugin_key": "confluence",
-                    "connection_id": "connection-1",
+                    "connector_key": "confluence",
+                    "integration_connection_id": "connection-1",
                     "external_id": "doc-1",
                     "source_url": "https://knowledge.example/leave-policy",
                     "context_section_path": ["Annual leave"],

@@ -55,7 +55,7 @@ class VectorStoreFilterBuilder:
     # A tuple makes generated filters deterministic, which helps auditing and
     # makes equivalent retrieval requests easier to compare in tests/logs.
     FILTERABLE_LIST_FIELDS: tuple[str, ...] = (
-        "plugin_key",
+        "connector_key",
         "document_type",
         "content_type",
         "item_id",
@@ -66,8 +66,8 @@ class VectorStoreFilterBuilder:
         "root_id",
         "ancestor_ids",
         "collection_item_id",
-        "connection_id",
-        "binding_id",
+        "integration_connection_id",
+        "ingestion_source_id",
     )
 
     @classmethod
@@ -624,7 +624,7 @@ class VectorStore:
         is_deleted_field: str = "is_deleted",
         tenant_id_field: str = "tenant_id",
         document_id_field: str = "item_id",
-        source_type_field: str = "plugin_key",
+        source_type_field: str = "connector_key",
         space_key_field: str = "parent_item_id",
         ancestor_ids_field: str = "ancestor_ids",
     ) -> qmodels.Filter:
@@ -653,7 +653,7 @@ class VectorStore:
                 payload_filters,
                 field_map={
                     "item_id": document_id_field,
-                    "plugin_key": source_type_field,
+                    "connector_key": source_type_field,
                 },
             )
         )
@@ -709,7 +709,7 @@ class VectorStore:
         cls,
         params: Any | None,
         *,
-        source_type_field: str = "plugin_key",
+        source_type_field: str = "connector_key",
         space_key_field: str = "parent_item_id",
         ancestor_ids_field: str = "ancestor_ids",
     ) -> qmodels.Filter | None:
@@ -783,12 +783,12 @@ class VectorStore:
         ancestor_ids_field: str,
     ) -> list[Any]:
         conditions: list[Any] = []
-        plugin_key = getattr(params, "plugin_key", None)
-        if plugin_key:
+        connector_key = getattr(params, "connector_key", None)
+        if connector_key:
             conditions.append(
                 qmodels.FieldCondition(
                     key=source_type_field,
-                    match=qmodels.MatchValue(value=plugin_key),
+                    match=qmodels.MatchValue(value=connector_key),
                 )
             )
         parent_item_id = getattr(params, "parent_item_id", None)
@@ -930,12 +930,10 @@ class QdrantDocumentIndex:
                 chunk,
                 QdrantPayloadContext(
                     tenant_id=str(access.tenant_id),
-                    connection_id="native_upload",
-                    binding_id="native_upload",
                     collection_item_id=str(document.parent_item_id),
                     parent_item_id=str(document.parent_item_id),
                     document_type=document.document_type or "plain_text",
-                    plugin_key="file",
+                    connector_key="file",
                     embedding_model=embedding_model,
                 ),
             ).for_qdrant()
@@ -1002,7 +1000,7 @@ class QdrantDocumentIndex:
                 or f"{document.id}:{int(payload.get('chunk_index') or 0)}"
             )
             source = SourceIdentity(
-                connector_id=str(payload.get("connection_id") or "native_upload"),
+                connector_id=str(payload.get("integration_connection_id") or "native_upload"),
                 provider=SourceProvider.FILE,
                 external_id=str(payload.get("external_id") or document.id),
                 url=(

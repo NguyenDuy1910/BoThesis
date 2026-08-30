@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import Literal, Protocol, runtime_checkable
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from bothesis.db.models import Item, ItemUpload
 from bothesis.document_index.raw_storage import PresignedRequest
 from bothesis.connector.protocol import Chunk, DocumentItem
@@ -44,6 +46,14 @@ ADMIN_PERMISSION_CATALOG = (
 DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 DEFAULT_UPLOAD_URL_SECONDS = 600
 DEFAULT_PROCESSING_MAX_BYTES = 100 * 1024 * 1024
+PREVIEW_SCHEMA_VERSION = 1
+PREVIEW_RENDERER_VERSION = "webp-v1"
+DEFAULT_PREVIEW_MAX_SOURCE_BYTES = 100 * 1024 * 1024
+DEFAULT_PREVIEW_MAX_PAGES = 50
+DEFAULT_PREVIEW_MAX_DIMENSION = 1_600
+DEFAULT_PREVIEW_WEBP_QUALITY = 80
+
+PreviewRepresentation = Literal["original", "image", "pages"]
 
 
 class AuthServiceError(Exception):
@@ -175,6 +185,10 @@ class UploadValidationError(UploadServiceError):
     pass
 
 
+class PreviewGenerationError(RuntimeError):
+    """Raised when a supported source cannot produce a valid preview."""
+
+
 @runtime_checkable
 class AsyncUploadStream(Protocol):
     """Framework-neutral async byte stream accepted by upload services."""
@@ -202,6 +216,111 @@ class CollectionUpload:
 
     item: Item
     created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedPreviewAsset:
+    """An in-memory WebP rendition awaiting durable storage."""
+
+    data: bytes
+    content_type: str
+    width: int
+    height: int
+    page: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedPreview:
+    """Bounded preview assets produced from one original source."""
+
+    representation: PreviewRepresentation
+    assets: tuple[RenderedPreviewAsset, ...] = ()
+    page_count: int | None = None
+    truncated: bool = False
+
+
+class PreviewAsset(BaseModel):
+    """Durable metadata for one derived presentation object."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    key: str = Field(min_length=1)
+    content_type: str = Field(min_length=1)
+    size_bytes: int = Field(ge=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    page: int | None = Field(default=None, ge=1)
+
+
+class PreviewManifest(BaseModel):
+    """Versioned internal record of renditions derived from one original."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: int = PREVIEW_SCHEMA_VERSION
+    renderer_version: str = PREVIEW_RENDERER_VERSION
+    source_version: str = Field(min_length=1)
+    representation: PreviewRepresentation
+    assets: tuple[PreviewAsset, ...] = ()
+    page_count: int | None = Field(default=None, ge=1)
+    truncated: bool = False
+
+    @model_validator(mode="after")
+    def _validate_assets(self) -> "PreviewManifest":
+        pages = [asset.page for asset in self.assets if asset.page is not None]
+        if len(pages) != len(set(pages)):
+            raise ValueError("preview asset pages must be unique")
+        if self.representation == "original" and self.assets:
+            raise ValueError("original previews cannot contain derived assets")
+        if self.representation != "original" and not self.assets:
+            raise ValueError("derived previews require at least one asset")
+        if self.page_count is not None and any(
+            page > self.page_count for page in pages
+        ):
+            raise ValueError("preview asset page exceeds the source page count")
+        return self
+
+
+class PreviewOriginal(BaseModel):
+    """Permission-checked access to the authoritative source object."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+    file_name: str
+    content_type: str
+    size_bytes: int = Field(ge=0)
+
+
+class ResolvedPreviewAsset(BaseModel):
+    """Short-lived, client-facing access to one derived rendition."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+    content_type: str
+    size_bytes: int = Field(ge=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    page: int | None = Field(default=None, ge=1)
+
+
+class KnowledgePreview(BaseModel):
+    """Consistent UX representation for an authorized knowledge asset.
+
+    Citation spans use the same one-based ``page`` values as assets and
+    normalized top-left bounding boxes, allowing the UI to highlight a cited
+    region without adding presentation data to chunks or the vector index.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    representation: PreviewRepresentation
+    original: PreviewOriginal
+    assets: tuple[ResolvedPreviewAsset, ...] = ()
+    page_count: int | None = Field(default=None, ge=1)
+    truncated: bool = False
+    coordinate_space: Literal["normalized_top_left"] = "normalized_top_left"
 
 
 def _permission_code(value: str) -> str:
@@ -272,8 +391,8 @@ from bothesis.services.collection_access import CollectionAccessService  # noqa:
 from bothesis.services.conversation import ConversationService  # noqa: E402
 from bothesis.services.upload import UploadService  # noqa: E402
 from bothesis.services.audit import AuditService  # noqa: E402
-from bothesis.services.plugin_credential import PluginCredentialService  # noqa: E402
-from bothesis.services.plugin import PluginService  # noqa: E402
+from bothesis.services.integration_credential import IntegrationCredentialService  # noqa: E402
+from bothesis.services.integration import IntegrationService  # noqa: E402
 from bothesis.services.access_requests import AccessRequestService  # noqa: E402
 from bothesis.services.admin_items import AdminItemService  # noqa: E402
 from bothesis.services.admin import AdminService  # noqa: E402
@@ -284,6 +403,10 @@ from bothesis.services.tenants import TenantService  # noqa: E402
 from bothesis.services.users import UserService  # noqa: E402
 from bothesis.services.api import ApiService  # noqa: E402
 from bothesis.services.admin_api import AdminApiService  # noqa: E402
+from bothesis.services.preview import (  # noqa: E402
+    KnowledgePreviewRenderer,
+    KnowledgePreviewService,
+)
 
 __all__ = [
     "ACTIVE_STATUS",
@@ -315,6 +438,10 @@ __all__ = [
     "CollectionUpload",
     "ConversationService",
     "DEFAULT_MAX_UPLOAD_BYTES",
+    "DEFAULT_PREVIEW_MAX_DIMENSION",
+    "DEFAULT_PREVIEW_MAX_PAGES",
+    "DEFAULT_PREVIEW_MAX_SOURCE_BYTES",
+    "DEFAULT_PREVIEW_WEBP_QUALITY",
     "DEFAULT_PROCESSING_MAX_BYTES",
     "DEFAULT_UPLOAD_URL_SECONDS",
     "DocumentNotFoundError",
@@ -329,11 +456,24 @@ __all__ = [
     "InvalidDocumentStateError",
     "ItemService",
     "KNOWLEDGE_READ_PERMISSION",
+    "KnowledgePreview",
+    "KnowledgePreviewRenderer",
+    "KnowledgePreviewService",
     "MESSAGE_ITEM_RELATIONS",
-    "PluginCredentialService",
-    "PluginService",
+    "IntegrationCredentialService",
+    "IntegrationService",
+    "PREVIEW_RENDERER_VERSION",
+    "PREVIEW_SCHEMA_VERSION",
+    "PreviewAsset",
+    "PreviewGenerationError",
+    "PreviewManifest",
+    "PreviewOriginal",
+    "PreviewRepresentation",
     "ROLE_MANAGE_PERMISSION",
     "RoleService",
+    "RenderedPreview",
+    "RenderedPreviewAsset",
+    "ResolvedPreviewAsset",
     "SOURCE_MANAGE_PERMISSION",
     "TENANT_MANAGE_PERMISSION",
     "TenantService",

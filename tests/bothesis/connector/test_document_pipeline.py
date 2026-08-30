@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import ast
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
 import pytest
+from PIL import Image
 from qdrant_client import models as qmodels
 
 from bothesis.connector.file import FileProcessingError
@@ -48,6 +50,7 @@ from bothesis.document_index.raw_storage import (
     StoredObject,
 )
 from bothesis.document_index.vector_store import QdrantDocumentIndex
+from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
 import bothesis.document_index.indexer as document_indexer
 
 
@@ -745,6 +748,8 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
     )
     assert payload["tenant_id"] == str(tenant_id)
     assert payload["collection_item_id"] == str(document.parent_item_id)
+    assert "integration_connection_id" not in payload
+    assert "ingestion_source_id" not in payload
     assert payload["item_id"] == str(document.id)
     assert payload["chunk_id"] == f"{document.id}:0"
     assert payload["chunk_text"] == "grounded content"
@@ -769,3 +774,145 @@ def test_provider_cache_expiry_uses_utc() -> None:
     )
 
     assert entry.is_expired
+
+
+class _PreviewStorage:
+    def __init__(self, source: bytes, *, content_type: str) -> None:
+        self.source = source
+        self.content_type = content_type
+        self.downloads = 0
+        self.puts: dict[str, tuple[bytes, str | None]] = {}
+
+    async def head(self, key: str) -> StoredObject:
+        assert key == "tenants/t/items/i/raw"
+        return StoredObject(
+            size_bytes=len(self.source),
+            content_type=self.content_type,
+            etag="source-etag",
+        )
+
+    async def download_to_path(
+        self,
+        key: str,
+        path: Path,
+        *,
+        max_bytes: int,
+    ) -> StoredObject:
+        assert key == "tenants/t/items/i/raw"
+        assert len(self.source) <= max_bytes
+        self.downloads += 1
+        path.write_bytes(self.source)
+        return await self.head(key)
+
+    def put_bytes(
+        self,
+        data: bytes,
+        key: str,
+        *,
+        content_type: str | None = None,
+    ) -> StoredObject:
+        self.puts[key] = (data, content_type)
+        return StoredObject(size_bytes=len(data), content_type=content_type)
+
+    def presign_download(self, key: str, *, expires_seconds: int) -> PresignedRequest:
+        return PresignedRequest(
+            url=f"https://objects.example.test/{key}?expires={expires_seconds}",
+            method="GET",
+            headers={},
+            expires_at=datetime.now(UTC),
+        )
+
+
+def _preview_document(content_type: str, source: bytes, *, file_name: str) -> Item:
+    document = _document(content_type, size_bytes=len(source))
+    document.storage_key = "tenants/t/items/i/raw"
+    document.metadata_ = {"file_name": file_name}
+    return document
+
+
+@pytest.mark.asyncio
+async def test_preview_service_derives_versioned_webp_without_replacing_original(
+    tmp_path: Path,
+) -> None:
+    source_buffer = BytesIO()
+    Image.new("RGB", (2_400, 1_200), "navy").save(source_buffer, "PNG")
+    source = source_buffer.getvalue()
+    source_path = tmp_path / "source.png"
+    source_path.write_bytes(source)
+    storage = _PreviewStorage(source, content_type="image/png")
+    service = KnowledgePreviewService(
+        cast(Any, storage),
+        renderer=KnowledgePreviewRenderer(max_dimension=800),
+    )
+    document = _preview_document("image/png", source, file_name="photo.png")
+
+    manifest = await service.generate(document, source_path=source_path)
+
+    assert manifest is not None
+    assert manifest.representation == "image"
+    assert manifest.page_count == 1
+    assert len(manifest.assets) == 1
+    asset = manifest.assets[0]
+    assert asset.page == 1
+    assert (asset.width, asset.height) == (800, 400)
+    assert asset.content_type == "image/webp"
+    assert asset.key.endswith("/page-0001.webp")
+    assert storage.source == source
+    rendered, rendered_type = storage.puts[asset.key]
+    assert rendered_type == "image/webp"
+    with Image.open(BytesIO(rendered)) as preview:
+        assert preview.format == "WEBP"
+
+    document.metadata_["preview"] = manifest.model_dump(mode="json")
+    assert await service.generate(document, source_path=source_path) == manifest
+    assert len(storage.puts) == 1
+
+    resolved = service.resolve(document, expires_seconds=300)
+    assert resolved is not None
+    assert resolved.original.content_type == "image/png"
+    assert resolved.assets[0].page == 1
+    assert resolved.coordinate_space == "normalized_top_left"
+
+
+@pytest.mark.asyncio
+async def test_office_preview_uses_the_consistent_original_representation() -> None:
+    source = b"office source remains authoritative"
+    content_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    storage = _PreviewStorage(source, content_type=content_type)
+    service = KnowledgePreviewService(cast(Any, storage))
+    document = _preview_document(content_type, source, file_name="report.docx")
+
+    manifest = await service.generate(document)
+
+    assert manifest is not None
+    assert manifest.representation == "original"
+    assert manifest.assets == ()
+    assert storage.downloads == 0
+    assert storage.puts == {}
+
+
+def test_pdf_preview_pages_are_bounded_and_keep_one_based_page_mapping(
+    tmp_path: Path,
+) -> None:
+    pdf_path = tmp_path / "report.pdf"
+    first = Image.new("RGB", (400, 600), "white")
+    second = Image.new("RGB", (600, 400), "gray")
+    try:
+        first.save(pdf_path, "PDF", save_all=True, append_images=[second])
+    finally:
+        first.close()
+        second.close()
+
+    preview = KnowledgePreviewRenderer(max_pages=1, max_dimension=600).render(
+        pdf_path,
+        file_name="report.pdf",
+        content_type="application/pdf",
+    )
+
+    assert preview.representation == "pages"
+    assert preview.page_count == 2
+    assert preview.truncated is True
+    assert [asset.page for asset in preview.assets] == [1]
+    assert preview.assets[0].content_type == "image/webp"
