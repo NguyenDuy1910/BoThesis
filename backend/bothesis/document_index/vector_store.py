@@ -11,9 +11,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
-from uuid import NAMESPACE_URL, UUID, uuid5
+from collections.abc import Iterable
+from typing import Any
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client import models as qmodels
@@ -24,75 +23,15 @@ from bothesis.document_index import (
     DEFAULT_HYBRID_CANDIDATE_LIMIT,
     DENSE_VECTOR_NAME,
     INDEX_SCHEMA_VERSION,
-    IndexedChunk,
-    IndexingContext,
     SPARSE_VECTOR_NAME,
 )
-from bothesis.connector.protocol import (
-    CitationInfo,
-    EffectiveAccess,
-    Hierarchy,
-    SourceIdentity,
-    SourceProvider,
-)
-from bothesis.document_index.models import ChunkContext, ContextualChunk
-from bothesis.db.models import Item
-
-if TYPE_CHECKING:
-    from bothesis.services import AuthContext
+from bothesis.document_index.vector_filter import VectorStoreFilterBuilder
 
 log = logging.getLogger(__name__)
 
 _NO_TENANT_ID = "__no_tenant_id__"
 _NO_COLLECTION_ID = "__no_collection_id__"
 _SEARCH_RETRY_DELAYS = (0.5, 1.0)
-
-
-class VectorStoreFilterBuilder:
-    # A tuple makes generated filters deterministic, which helps auditing and
-    # makes equivalent retrieval requests easier to compare in tests/logs.
-    FILTERABLE_LIST_FIELDS: tuple[str, ...] = (
-        "connector_key",
-        "document_type",
-        "content_type",
-        "item_id",
-        "chunk_id",
-        "section",
-        "external_id",
-        "parent_item_id",
-        "ancestor_ids",
-        "collection_item_id",
-    )
-
-    @classmethod
-    def build_request_filter(cls, request: Any) -> qmodels.Filter:
-        return VectorStore.build_retrieval_filter(
-            None,
-            access_context=getattr(request, "access", None),
-            payload_filters=getattr(request, "filters", None),
-        )
-
-    @classmethod
-    def business_conditions(
-        cls,
-        filters: Any,
-        *,
-        field_map: dict[str, str] | None = None,
-    ) -> list[Any]:
-        conditions: list[Any] = []
-        resolved_field_map = {"section": "section_path", **(field_map or {})}
-        for logical_name in cls.FILTERABLE_LIST_FIELDS:
-            values = getattr(filters, logical_name, [])
-            if not values:
-                continue
-            qdrant_field = resolved_field_map.get(logical_name, logical_name)
-            conditions.append(
-                qmodels.FieldCondition(
-                    key=qdrant_field,
-                    match=qmodels.MatchAny(any=values),
-                )
-            )
-        return conditions
 
 
 class VectorStore:
@@ -203,10 +142,28 @@ class VectorStore:
         self,
         document_id: str,
         *,
+        tenant_id: str | None = None,
         document_id_field: str = "item_id",
         is_deleted_field: str = "is_deleted",
         collection_name: str | None = None,
     ) -> Any:
+        if tenant_id is not None:
+            return await self.set_payload(
+                collection_name=collection_name,
+                payload={is_deleted_field: True},
+                points=qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key="tenant_id",
+                            match=qmodels.MatchValue(value=tenant_id),
+                        ),
+                        qmodels.FieldCondition(
+                            key=document_id_field,
+                            match=qmodels.MatchValue(value=document_id),
+                        ),
+                    ]
+                ),
+            )
         return await self.set_document_payload(
             document_id,
             {is_deleted_field: True},
@@ -887,199 +844,7 @@ class VectorStore:
         return value
 
 
-class QdrantDocumentIndex:
-    """Store processing output directly in the derived Qdrant index."""
-
-    def __init__(
-        self,
-        store: VectorStore,
-        *,
-        candidate_limit: int = DEFAULT_HYBRID_CANDIDATE_LIMIT,
-    ) -> None:
-        if candidate_limit < 1:
-            raise ValueError("candidate_limit must be at least one")
-        self._store = store
-        self._candidate_limit = candidate_limit
-
-    async def replace_document(
-        self,
-        document: Item,
-        chunks: Sequence[ContextualChunk],
-        vectors: Sequence[Sequence[float]],
-        *,
-        access: AuthContext,
-    ) -> None:
-        if access.tenant_id is None:
-            raise ValueError("indexed chat documents require an active tenant")
-        if len(chunks) != len(vectors) or not chunks:
-            raise ValueError("every canonical chunk requires one embedding")
-
-        await self._store.soft_delete_document_points(str(document.id))
-        points = []
-        for chunk, vector in zip(chunks, vectors, strict=True):
-            if chunk.item_id != str(document.id):
-                raise ValueError("contextual chunk belongs to a different document")
-            payload = IndexedChunk.from_contextual_chunk(
-                chunk,
-                IndexingContext(
-                    tenant_id=str(access.tenant_id),
-                    collection_item_id=str(document.parent_item_id),
-                    parent_item_id=str(document.parent_item_id),
-                    document_type=document.document_type or "plain_text",
-                    connector_key="file",
-                ),
-            ).to_payload()
-            points.append(
-                qmodels.PointStruct(
-                    id=_document_point_id(document.id, chunk.chunk_index),
-                    vector={
-                        DENSE_VECTOR_NAME: list(vector),
-                        SPARSE_VECTOR_NAME: qmodels.Document(
-                            text=chunk.contextual_text,
-                            model=BM25_MODEL,
-                            options=BM25_OPTIONS,
-                        ),
-                    },
-                    payload=payload,
-                )
-            )
-        await self._store.upsert_points(points)
-
-    async def search_document(
-        self,
-        document: Item,
-        query: str,
-        query_vector: list[float],
-        *,
-        access: AuthContext,
-        limit: int,
-    ) -> tuple[ContextualChunk, ...]:
-        if access.tenant_id is None:
-            return ()
-        base_filter = self._store.build_access_filter(
-            tenant_id=str(access.tenant_id),
-            collection_item_ids={str(document.parent_item_id)},
-        )
-        query_filter = qmodels.Filter(
-            must=[
-                *(base_filter.must or []),
-                qmodels.FieldCondition(
-                    key="item_id",
-                    match=qmodels.MatchValue(value=str(document.id)),
-                ),
-            ]
-        )
-        points = await self._store.semantic_search(
-            query_vector,
-            query_text=query.strip(),
-            query_filter=query_filter,
-            limit=limit,
-            candidate_limit=max(limit, self._candidate_limit),
-            log_label="uploaded-document-search",
-        )
-        chunks: list[ContextualChunk] = []
-        for point in points:
-            payload = getattr(point, "payload", None)
-            if not isinstance(payload, dict):
-                continue
-            content = payload.get("chunk_text")
-            if not isinstance(content, str) or not content.strip():
-                continue
-            raw_score = getattr(point, "score", None)
-            score = float(raw_score) if isinstance(raw_score, (int, float)) else None
-            chunk_id = str(
-                payload.get("chunk_id")
-                or f"{document.id}:{int(payload.get('chunk_index') or 0)}"
-            )
-            source = SourceIdentity(
-                connector_id=str(payload.get("connector_key") or "file"),
-                provider=SourceProvider.FILE,
-                external_id=str(payload.get("external_id") or document.id),
-                url=(
-                    str(payload["source_url"])
-                    if payload.get("source_url") is not None
-                    else None
-                ),
-            )
-            chunks.append(
-                ContextualChunk(
-                    id=chunk_id,
-                    item_id=str(document.id),
-                    chunk_index=int(payload.get("chunk_index") or 0),
-                    content_type=str(payload.get("content_type") or "text"),
-                    chunk_text=content,
-                    contextual_text=str(payload.get("contextual_text") or content),
-                    context=ChunkContext(
-                        section_path=_payload_strings(payload, "section_path"),
-                    ),
-                    title=str(payload.get("title") or document.title or document.id),
-                    document_type=str(payload.get("document_type") or "plain_text"),
-                    collection_item_id=_payload_text(payload, "collection_item_id"),
-                    source=source,
-                    hierarchy=Hierarchy(
-                        parent_id=_payload_text(payload, "parent_item_id"),
-                        ancestor_ids=_payload_strings(payload, "ancestor_ids"),
-                    ),
-                    access=EffectiveAccess(),
-                    citation=_citation_from_payload(payload),
-                    relevance_score=score,
-                )
-            )
-        return tuple(chunks)
-
-    async def update_document_access(
-        self,
-        document_id: UUID,
-        *,
-        access: AuthContext,
-    ) -> None:
-        if access.tenant_id is None:
-            raise ValueError("indexed chat documents require an active tenant")
-        # Durable Collection grants live in PostgreSQL and are never projected
-        # into Qdrant, so grant changes require no point rewrite.
-        del document_id
-
-    async def soft_delete_document(self, document_id: UUID) -> None:
-        await self._store.soft_delete_document_points(str(document_id))
-
-    async def aclose(self) -> None:
-        await self._store.aclose()
+from bothesis.document_index.qdrant_index import QdrantDocumentIndex  # noqa: E402
 
 
-def _document_point_id(document_id: UUID, chunk_index: int) -> str:
-    return str(uuid5(NAMESPACE_URL, f"bothesis:document:{document_id}:{chunk_index}"))
-
-
-def _citation_from_payload(payload: dict[str, Any]) -> CitationInfo:
-    section_path = tuple(_payload_strings(payload, "section_path"))
-    return CitationInfo(
-        section=section_path[-1] if section_path else None,
-        section_path=section_path,
-        anchor=_payload_text(payload, "citation_anchor"),
-        page_start=_payload_int(payload, "page_start"),
-        page_end=_payload_int(payload, "page_end"),
-    )
-
-
-def _payload_text(payload: Mapping[str, Any], key: str) -> str | None:
-    value = payload.get(key)
-    return value.strip() if isinstance(value, str) and value.strip() else None
-
-
-def _payload_strings(payload: Mapping[str, Any], key: str) -> list[str]:
-    value = payload.get(key)
-    if not isinstance(value, (list, tuple)):
-        return []
-    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
-
-
-def _payload_int(payload: Mapping[str, Any], key: str) -> int | None:
-    value = payload.get(key)
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value)
-    return None
-
+__all__ = ["QdrantDocumentIndex", "VectorStore", "VectorStoreFilterBuilder"]

@@ -30,6 +30,7 @@ def test_prompt_set_contains_only_the_runtime_roles() -> None:
         "capability_base",
         "contextual_rag",
         "conversation_compression",
+        "retrieval_rerank",
     }
     assert "relevant conversation" in load_prompt("agent_base")
 

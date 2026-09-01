@@ -39,11 +39,15 @@ class EvidenceBuilder:
             id=chunk.id,
             item_id=chunk.item_id,
             chunk_id=chunk.id,
+            collection_item_id=chunk.collection_item_id,
             title=chunk.title or chunk.item_id,
             content=chunk.chunk_text,
             source=chunk.source,
             citation=chunk.citation,
+            section_path=tuple(chunk.context.section_path),
+            contextual_text=chunk.contextual_text,
             relevance_score=chunk.relevance_score,
+            rerank_score=chunk.rerank_score,
         )
 
 

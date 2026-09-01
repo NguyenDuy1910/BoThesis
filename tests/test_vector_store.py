@@ -146,6 +146,28 @@ async def test_soft_delete_only_updates_derived_lifecycle_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_soft_delete_can_be_scoped_to_the_document_tenant() -> None:
+    client = RecordingClient()
+    store = VectorStore(client=client, collection_name="chunks")
+
+    await store.soft_delete_document_points("doc-1", tenant_id="tenant-1")
+
+    point_filter = client.set_payload_calls[0]["points"]
+    assert point_filter == qmodels.Filter(
+        must=[
+            qmodels.FieldCondition(
+                key="tenant_id",
+                match=qmodels.MatchValue(value="tenant-1"),
+            ),
+            qmodels.FieldCondition(
+                key="item_id",
+                match=qmodels.MatchValue(value="doc-1"),
+            ),
+        ]
+    )
+
+
+@pytest.mark.asyncio
 async def test_contextual_hybrid_search_uses_filtered_bm25_and_rrf() -> None:
     client = RecordingClient()
     store = VectorStore(client=client, collection_name="chunks")

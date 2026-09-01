@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
+from bothesis import ModelResponseClient
 from bothesis.agent.protocol import ResponseRequest, ResponseStreamEvent
 
 
@@ -36,6 +37,9 @@ class ResponseStream(Protocol):
     ) -> AsyncIterator[ResponseStreamEvent]:
         """Yield canonical events for one sampling request, as they arrive."""
         ...
+
+
+ResponseClient = ModelResponseClient
 
 
 # The adapter is imported after the contract it implements exists.
@@ -70,6 +74,7 @@ __all__ = [
     "RESPONSES_PROVIDERS",
     "OpenAITransport",
     "OpenRouterTransport",
+    "ResponseClient",
     "ResponseStream",
     "ResponsesStream",
     "response_stream",

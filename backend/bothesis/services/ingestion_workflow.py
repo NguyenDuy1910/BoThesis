@@ -36,9 +36,8 @@ if TYPE_CHECKING:
 
     from bothesis.connector import ConnectorPipelineConfig
     from bothesis.connector.file.file_connector import FileConnector
-    from bothesis.document_index import EmbeddingService
+    from bothesis.document_index import ChunkContextGenerator, EmbeddingService
     from bothesis.document_index.raw_storage import DocumentStorage
-    from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
     from bothesis.document_index.vector_store import VectorStore
     from bothesis.connector.registry import ConnectorRegistry
     from bothesis.services.preview import KnowledgePreviewService
@@ -68,7 +67,7 @@ class IngestionWorkflow:
         credential_encryption_key: str | None = None,
         pipeline_config: ConnectorPipelineConfig | None = None,
         embedding_batch_size: int = 32,
-        semantic_contextualizer: SemanticContextualizer | None = None,
+        semantic_contextualizer: ChunkContextGenerator | None = None,
         preview_service: KnowledgePreviewService | None = None,
     ) -> None:
         # Temporal constructs a dependency-free instance for deterministic

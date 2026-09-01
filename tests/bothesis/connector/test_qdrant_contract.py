@@ -18,7 +18,9 @@ from bothesis.connector.protocol import (
 )
 from bothesis.document_index import (
     INDEX_SCHEMA_VERSION,
+    ContextualChunkBuilder,
     IndexingContext,
+    StructuralContextualizer,
     build_contextual_chunks,
     build_index_records,
 )
@@ -64,6 +66,26 @@ def _context() -> IndexingContext:
         document_type="jira_issue",
         connector_key="jira",
     )
+
+
+def test_contextual_chunk_builder_preserves_the_legacy_public_name() -> None:
+    assert StructuralContextualizer is ContextualChunkBuilder
+
+
+def test_indexing_context_normalizes_required_identifiers() -> None:
+    context = IndexingContext(
+        tenant_id=" tenant-1 ",
+        collection_item_id=" collection-1 ",
+        parent_item_id=" ",
+        document_type=" plain_text ",
+        connector_key=" file ",
+    )
+
+    assert context.tenant_id == "tenant-1"
+    assert context.collection_item_id == "collection-1"
+    assert context.parent_item_id is None
+    assert context.document_type == "plain_text"
+    assert context.connector_key == "file"
 
 
 @pytest.mark.asyncio
@@ -118,3 +140,50 @@ async def test_index_boundary_rejects_chunks_from_another_document() -> None:
             [_chunk().model_copy(update={"item_id": "another-item"})],
             _document(),
         )
+
+
+class _SemanticContextualizer:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[dict[str, object]] = []
+
+    async def describe(self, chunk: Chunk, **kwargs: object) -> str:
+        self.calls.append({"chunk": chunk, **kwargs})
+        if self.fail:
+            raise RuntimeError("semantic provider failed")
+        return "The chunk describes the BANK-42 approved lending policy."
+
+
+@pytest.mark.asyncio
+async def test_semantic_contextualization_enriches_retrieval_not_evidence() -> None:
+    contextualizer = _SemanticContextualizer()
+    source = _chunk()
+
+    contextual = await build_contextual_chunks(
+        [source],
+        _document(),
+        semantic_contextualizer=contextualizer,  # type: ignore[arg-type]
+    )
+
+    assert len(contextualizer.calls) == 1
+    call = contextualizer.calls[0]
+    assert "Document: Story: Lending policy" in str(call["document_context"])
+    assert "RAW-CONTENT-MUST-NOT-BE-INDEXED" not in str(call["document_context"])
+    assert contextual[0].chunk_text == "connector evidence"
+    assert "BANK-42 approved lending policy" in contextual[0].contextual_text
+    assert contextual[0].contextual_text.endswith(source.chunk_text)
+
+
+@pytest.mark.asyncio
+async def test_semantic_contextualization_failure_uses_structural_fallback() -> None:
+    contextualizer = _SemanticContextualizer(fail=True)
+
+    contextual = await build_contextual_chunks(
+        [_chunk()],
+        _document(),
+        semantic_contextualizer=contextualizer,  # type: ignore[arg-type]
+    )
+
+    assert len(contextualizer.calls) == 1
+    assert contextual[0].chunk_text == "connector evidence"
+    assert "Explains the approved lending policy." in contextual[0].contextual_text

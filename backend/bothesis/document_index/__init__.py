@@ -9,7 +9,9 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-INDEX_SCHEMA_VERSION = 10
+from bothesis.connector.protocol import Chunk
+
+INDEX_SCHEMA_VERSION = 11
 DENSE_VECTOR_NAME = "content"
 SPARSE_VECTOR_NAME = "content_bm25"
 BM25_MODEL = "qdrant/bm25"
@@ -34,22 +36,56 @@ class IndexingContext(BaseModel):
     document_type: str = Field(min_length=1)
     connector_key: str = Field(min_length=1)
 
-    @field_validator("tenant_id")
+    @field_validator(
+        "tenant_id",
+        "collection_item_id",
+        "document_type",
+        "connector_key",
+    )
     @classmethod
-    def _strip_tenant_id(cls, value: str) -> str:
+    def _strip_required_text(cls, value: str) -> str:
         value = value.strip()
         if not value:
-            raise ValueError("tenant_id must not be blank")
+            raise ValueError("indexing context values must not be blank")
         return value
 
+    @field_validator("parent_item_id")
+    @classmethod
+    def _strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
-from .contextualization import StructuralContextualizer  # noqa: E402
+
+@runtime_checkable
+class ChunkContextGenerator(Protocol):
+    """Optional semantic context generation used before chunk embedding."""
+
+    @property
+    def model_name(self) -> str | None: ...
+
+    async def describe(
+        self,
+        chunk: Chunk,
+        *,
+        document_context: str,
+        title: str | None = None,
+        section_path: Sequence[str] = (),
+    ) -> str | None: ...
+
+
+from .contextualization import (  # noqa: E402
+    ContextualChunkBuilder,
+    StructuralContextualizer,
+    build_contextual_chunks,
+)
 from .semantic_contextualizer import SemanticContextualizer  # noqa: E402
 from .models import ChunkContext, ContextualChunk, IndexQuery, PreparedDocument
 from .payload import (
     IndexedChunk,
-    build_contextual_chunks,
     build_index_records,
+    contextual_chunk_from_point,
 )
 
 
@@ -80,7 +116,6 @@ class IndexedChunkRecord(BaseModel):
 
 if TYPE_CHECKING:
     from bothesis.db.models import Item
-    from bothesis.services import AuthContext
 
 
 DEFAULT_DIRECT_MAX_BYTES = 20 * 1024 * 1024
@@ -105,8 +140,6 @@ class EmbeddingService(Protocol):
 
     embedding_model: str
 
-    async def embed_query(self, query: str) -> list[float]: ...
-
     async def embed_documents(self, documents: list[str]) -> list[list[float]]: ...
 
 
@@ -120,27 +153,17 @@ class VectorIndex(Protocol):
         chunks: Sequence[ContextualChunk],
         vectors: Sequence[Sequence[float]],
         *,
-        access: AuthContext,
+        context: IndexingContext,
     ) -> None: ...
 
-    async def search_document(
-        self,
-        document: Item,
-        query: str,
-        query_vector: list[float],
-        *,
-        access: AuthContext,
-        limit: int,
-    ) -> tuple[ContextualChunk, ...]: ...
-
-    async def update_document_access(
+    async def soft_delete_document(
         self,
         document_id: UUID,
         *,
-        access: AuthContext,
+        tenant_id: str | None = None,
     ) -> None: ...
 
-    async def soft_delete_document(self, document_id: UUID) -> None: ...
+    async def aclose(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,15 +188,34 @@ class DocumentIndex(Protocol):
 
 
 __all__ = [
-    "BM25_MODEL", "BM25_OPTIONS", "CHUNKER_VERSION", "ChunkContext",
-    "ContextualChunk", "DEFAULT_HYBRID_CANDIDATE_LIMIT", "DENSE_VECTOR_NAME",
-    "DEFAULT_DIRECT_MAX_BYTES", "DIRECT_IMAGE_TYPES", "DocumentIndex",
-    "DocumentProcessingError", "DocumentUnavailableError", "EmbeddingService",
-    "IndexedChunk", "IndexedChunkRecord", "IndexingContext", "IndexQuery",
-    "PARSER_VERSION", "PreparedDocument", "PreparedDocuments",
-    "INDEX_SCHEMA_VERSION", "SPARSE_VECTOR_NAME",
-    "SemanticContextualizer", "StructuralContextualizer",
+    "BM25_MODEL",
+    "BM25_OPTIONS",
+    "CHUNKER_VERSION",
+    "ChunkContext",
+    "ChunkContextGenerator",
+    "ContextualChunk",
+    "ContextualChunkBuilder",
+    "DEFAULT_DIRECT_MAX_BYTES",
+    "DEFAULT_HYBRID_CANDIDATE_LIMIT",
+    "DENSE_VECTOR_NAME",
+    "DIRECT_IMAGE_TYPES",
+    "DocumentIndex",
+    "DocumentProcessingError",
+    "DocumentUnavailableError",
+    "EmbeddingService",
+    "INDEX_SCHEMA_VERSION",
+    "IndexedChunk",
+    "IndexedChunkRecord",
+    "IndexingContext",
+    "IndexQuery",
+    "PARSER_VERSION",
+    "PreparedDocument",
+    "PreparedDocuments",
+    "SPARSE_VECTOR_NAME",
+    "SemanticContextualizer",
+    "StructuralContextualizer",
+    "VectorIndex",
     "build_contextual_chunks",
     "build_index_records",
-    "VectorIndex",
+    "contextual_chunk_from_point",
 ]

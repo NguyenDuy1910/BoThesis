@@ -12,11 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bothesis.connector.file import FinxFileExtensions
 from bothesis.db.models import Item
+from bothesis.document_index import DocumentProcessingError
+from bothesis.document_index.indexer import DocumentPipeline
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
     AsyncUploadStream,
     AuthContext,
+    ChatDocumentSource,
     CollectionAccessService,
     CollectionUpload,
     DocumentNotFoundError,
@@ -46,6 +49,8 @@ class UploadService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         object_storage: DocumentStorage,
+        pipeline: DocumentPipeline,
+        document_source: ChatDocumentSource,
         preview_service: KnowledgePreviewService | None = None,
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
         upload_url_seconds: int = DEFAULT_UPLOAD_URL_SECONDS,
@@ -54,6 +59,8 @@ class UploadService:
             raise ValueError("upload limits must be greater than zero")
         self._session_factory = session_factory
         self._object_storage = object_storage
+        self._pipeline = pipeline
+        self._document_source = document_source
         self._preview_service = preview_service
         self.max_upload_bytes = max_upload_bytes
         self._upload_url_seconds = upload_url_seconds
@@ -89,6 +96,7 @@ class UploadService:
 
         assert item.upload is not None
         if item.upload.status == "available":
+            item = await self._index_available(item, access=access)
             return UploadStart(item=item, upload=item.upload, upload_required=False, target=None)
         if item.upload.status not in {"pending", "failed"}:
             raise UploadConflictError("item is not in an uploadable state")
@@ -195,6 +203,7 @@ class UploadService:
                 item,
                 source_path=temporary_path if uploaded_now else None,
             )
+            item = await self._index_available(item, access=access)
             return CollectionUpload(item=item, created=created)
         finally:
             temporary_path.unlink(missing_ok=True)
@@ -214,7 +223,8 @@ class UploadService:
             )
             assert item.upload is not None
             if item.upload.status == "available":
-                return await self._with_preview(item)
+                item = await self._with_preview(item)
+                return await self._index_available(item, access=access)
             storage_key = item.storage_key
             expected_size = item.size_bytes
             expected_type = item.mime_type
@@ -251,7 +261,31 @@ class UploadService:
                     "version_id": stored.version_id,
                 },
             )
-        return await self._with_preview(item)
+        item = await self._with_preview(item)
+        return await self._index_available(item, access=access)
+
+    async def retry_indexing(
+        self,
+        access: AuthContext,
+        document_id: UUID,
+    ) -> Item:
+        document = await self.get_document(
+            access,
+            document_id,
+            minimum_role="editor",
+        )
+        if document.upload is None or document.upload.status != "available":
+            raise UploadConflictError(
+                "the original file is unavailable; upload the file again"
+            )
+        return await self._index_available(document, access=access)
+
+    async def delete_document(
+        self,
+        access: AuthContext,
+        document_id: UUID,
+    ) -> None:
+        await self._pipeline.delete_upload(document_id, access=access)
 
     async def get_document(
         self,
@@ -304,6 +338,21 @@ class UploadService:
                 "upload failure state could not be persisted document_id=%s",
                 document_id,
             )
+
+    async def _index_available(
+        self,
+        document: Item,
+        *,
+        access: AuthContext,
+    ) -> Item:
+        try:
+            return await self._pipeline.index_upload(
+                document.id,
+                access=access,
+                source=self._document_source,
+            )
+        except DocumentProcessingError:
+            return await self.get_document(access, document.id)
 
     async def _with_preview(
         self,

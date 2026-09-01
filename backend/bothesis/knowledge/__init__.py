@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from typing import Protocol, runtime_checkable
 
 from bothesis.document_index.models import ContextualChunk
 
 from .evidence import CitationResolver, EvidenceBuilder
-from .models import Evidence, KnowledgeQuery, RetrievalContext
+from .models import Evidence, EvidenceContext, KnowledgeQuery, RetrievalContext
+from .context_builder import EvidenceContextBuilder
+from .semantic_reranker import SemanticReranker
 
 
 @runtime_checkable
@@ -33,16 +35,28 @@ class Reranker(Protocol):
         chunks: Sequence[ContextualChunk],
         *,
         limit: int,
-    ) -> list[ContextualChunk]:
+        query: str = "",
+    ) -> list[ContextualChunk] | Awaitable[list[ContextualChunk]]:
         """Return at most ``limit`` chunks in relevance order."""
+
+
+class ContextBuilder(Protocol):
+    """Build bounded model context from ranked canonical evidence."""
+
+    def build(self, evidence: Sequence[Evidence]) -> EvidenceContext:
+        """Return context plus only the evidence actually represented."""
 
 
 __all__ = [
     "CitationResolver",
     "Evidence",
+    "EvidenceContext",
+    "EvidenceContextBuilder",
     "EvidenceBuilder",
+    "ContextBuilder",
     "KnowledgeQuery",
     "KnowledgeRetriever",
     "Reranker",
     "RetrievalContext",
+    "SemanticReranker",
 ]

@@ -18,7 +18,7 @@ from temporalio.worker.workflow_sandbox import (
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.db.engine import get_session_factory
 from bothesis.document_index.raw_storage import S3DocumentStorage
-from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
+from bothesis.document_index import SemanticContextualizer
 from bothesis.document_index.vector_store import VectorStore
 from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
 from bothesis.services.ingestion_workflow import IngestionWorkflow
@@ -82,7 +82,7 @@ class TemporalWorker:
             )
         )
         semantic_contextualizer = None
-        if _environment_boolean("BOTHESIS_CONTEXTUALIZATION_ENABLED"):
+        if _environment_boolean("BOTHESIS_CONTEXTUALIZATION_ENABLED", default=True):
             model = os.getenv("BOTHESIS_CONTEXTUALIZATION_MODEL") or None
             self._contextualization_transport = OpenRouterTransport(
                 base_url=os.getenv(

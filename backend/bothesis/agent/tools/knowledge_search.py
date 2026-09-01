@@ -9,7 +9,12 @@ from typing import Any
 
 from bothesis.agent.models import ToolContext, ToolOutput
 from bothesis.agent.tools import Tool, ToolDefinition
-from bothesis.knowledge import Evidence, KnowledgeRetriever
+from bothesis.knowledge import (
+    ContextBuilder,
+    Evidence,
+    EvidenceContextBuilder,
+    KnowledgeRetriever,
+)
 from bothesis.observability import LangfuseTracing
 
 
@@ -27,6 +32,7 @@ class KnowledgeSearch(Tool):
         timeout_seconds: float = 8.0,
         max_context_characters: int = 8_000,
         max_evidence_characters: int = 1_600,
+        context_builder: ContextBuilder | None = None,
         tracing: LangfuseTracing | None = None,
     ) -> None:
         if result_limit < 1:
@@ -42,8 +48,10 @@ class KnowledgeSearch(Tool):
         self._result_limit = result_limit
         self._max_queries = max_queries
         self._timeout_seconds = timeout_seconds
-        self._max_context_characters = max_context_characters
-        self._max_evidence_characters = max_evidence_characters
+        self._context_builder = context_builder or EvidenceContextBuilder(
+            max_characters=max_context_characters,
+            max_evidence_characters=max_evidence_characters,
+        )
         self._tracing = tracing
 
     @property
@@ -156,12 +164,13 @@ class KnowledgeSearch(Tool):
                 },
             )
 
+        context = self._context_builder.build(evidence)
         return ToolOutput(
-            content=self._context_from_evidence(evidence),
-            evidence=evidence,
+            content=context.text,
+            evidence=list(context.evidence),
             metadata={
                 "outcome": "partial_success" if failures else "success",
-                "result_count": len(evidence),
+                "result_count": len(context.evidence),
                 "success_criteria_met": True,
                 "duration_ms": duration_ms,
             },
@@ -253,33 +262,6 @@ class KnowledgeSearch(Tool):
                 seen_queries.add(query_key)
                 queries.append(query)
         return queries, None
-
-    def _context_from_evidence(self, evidence: list[Evidence]) -> str:
-        blocks: list[str] = []
-        remaining_characters = self._max_context_characters
-        for item in evidence:
-            prefix = f"[{item.id}] {item.title or item.item_id}"
-            if item.source is not None:
-                prefix += f"\nSource: {item.source.provider.value}"
-                if item.source.url:
-                    prefix += f"\nSource URL: {item.source.url}"
-            prefix += "\nExcerpt: "
-            available_content = min(
-                remaining_characters - len(prefix) - 2,
-                self._max_evidence_characters,
-            )
-            if available_content <= 0:
-                break
-            block = f"{prefix}{self._clip(item.content, available_content)}"
-            blocks.append(block)
-            remaining_characters -= len(block) + 2
-        return "Retrieved access-permitted enterprise evidence:\n\n" + "\n\n".join(blocks)
-
-    @staticmethod
-    def _clip(text: str, limit: int) -> str:
-        if len(text) <= limit:
-            return text
-        return f"{text[: max(1, limit - 1)].rstrip()}…"
 
     @staticmethod
     def _duration_ms(started_at: float) -> int:

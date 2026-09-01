@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 from qdrant_client import models as qmodels
 from sqlalchemy import select
+
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext, ConversationMessage
 from bothesis.agent.tools import ToolRegistry
@@ -21,25 +22,21 @@ from bothesis.connector.protocol import (
     SourceIdentity,
     SourceProvider,
 )
-from bothesis.connector.provider_cache import PostgresProviderFileCache
 from bothesis.db.engine import get_session_factory, session_scope
 from bothesis.db.models import Item
-from bothesis.document_index.indexer import (
-    DEFAULT_DIRECT_MAX_BYTES,
-    DEFAULT_PROCESSING_MAX_BYTES,
-    DocumentPipeline,
-)
-from bothesis.document_index import DocumentProcessingError
+from bothesis.document_index import SemanticContextualizer
+from bothesis.document_index.indexer import DocumentPipeline
+from bothesis.document_index.qdrant_index import QdrantDocumentIndex
 from bothesis.document_index.raw_storage import S3DocumentStorage
 from bothesis.document_index.search import VectorSearchIndex
-from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
-from bothesis.document_index.vector_store import QdrantDocumentIndex, VectorStore
-from bothesis.knowledge import CitationResolver
+from bothesis.document_index.vector_store import VectorStore
+from bothesis.knowledge import CitationResolver, SemanticReranker
 from bothesis.knowledge.retriever import DocumentIndexRetriever
 from bothesis.observability import create_langfuse_tracing
 from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
+    DEFAULT_PROCESSING_MAX_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
     KNOWLEDGE_READ_PERMISSION,
     AsyncUploadStream,
@@ -51,7 +48,6 @@ from bothesis.services import (
     DocumentNotFoundError,
     ItemService,
     RequestIdentity,
-    UploadConflictError,
     UploadService,
     require_tenant_permission,
 )
@@ -68,12 +64,20 @@ class ApiService:
         *,
         allow_insecure_development_identity: bool,
         qdrant_prefer_grpc: bool,
-        contextualization_enabled: bool = False,
+        contextualization_enabled: bool = True,
         contextualization_model: str | None = None,
         hybrid_candidate_limit: int = 20,
+        final_retrieval_top_k: int = 6,
+        reranking_enabled: bool = True,
+        reranker_model: str | None = None,
+        retrieval_context_characters: int = 8_000,
     ) -> None:
-        if hybrid_candidate_limit < 1:
-            raise ValueError("hybrid_candidate_limit must be at least one")
+        if min(
+            hybrid_candidate_limit,
+            final_retrieval_top_k,
+            retrieval_context_characters,
+        ) < 1:
+            raise ValueError("retrieval limits must be at least one")
         self._allow_insecure_development_identity = (
             allow_insecure_development_identity
         )
@@ -81,6 +85,10 @@ class ApiService:
         self._contextualization_enabled = contextualization_enabled
         self._contextualization_model = contextualization_model
         self._hybrid_candidate_limit = hybrid_candidate_limit
+        self._final_retrieval_top_k = final_retrieval_top_k
+        self._reranking_enabled = reranking_enabled
+        self._reranker_model = reranker_model
+        self._retrieval_context_characters = retrieval_context_characters
         self._session_factory: Any | None = None
         self._storage: Any | None = None
         self._storage_initialized = False
@@ -88,6 +96,8 @@ class ApiService:
         self._previews: KnowledgePreviewService | None = None
         self._pipeline: DocumentPipeline | None = None
         self._agent: Agent | None = None
+        self._agent_transport: OpenRouterTransport | None = None
+        self._retriever: DocumentIndexRetriever | None = None
         self._contextualization_transport: OpenRouterTransport | None = None
 
     async def chat_events(
@@ -121,10 +131,10 @@ class ApiService:
             if not collection_item_ids or not set(collection_item_ids).issubset(allowed_set):
                 raise PermissionError("one or more selected Collections are unavailable")
             selected_collection_ids = tuple(dict.fromkeys(collection_item_ids))
-            allowed_tool_names = None
+            allowed_tool_names = ("knowledge_search",)
         else:
             selected_collection_ids = allowed_ids
-            allowed_tool_names = None
+            allowed_tool_names = ("knowledge_search",)
         if access.tenant_id is None:
             raise PermissionError("an active tenant membership is required for chat")
         resolved_conversation_id = conversation_id or uuid4()
@@ -191,6 +201,69 @@ class ApiService:
                 "total": len(collections),
             }
 
+    async def search_documents(
+        self,
+        identity: RequestIdentity,
+        *,
+        query: str,
+        top_k: int,
+        collection_item_ids: list[UUID] | None,
+    ) -> dict[str, Any]:
+        """Search only authorized Collections through the agent retrieval path."""
+
+        access = await self._resolve_access(identity)
+        require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
+        async with session_scope(self._sessions()) as session:
+            allowed_ids = await CollectionAccessService(
+                session
+            ).allowed_collection_ids(access)
+        allowed_set = set(allowed_ids)
+        requested_ids = tuple(dict.fromkeys(collection_item_ids or allowed_ids))
+        if not set(requested_ids).issubset(allowed_set):
+            raise PermissionError("one or more selected Collections are unavailable")
+        if access.tenant_id is None or not requested_ids:
+            return {"results": [], "total": 0}
+        context = AgentContext(
+            user_id=str(access.user_id),
+            tenant_id=str(access.tenant_id),
+            roles=[access.role_code] if access.role_code else [],
+            collection_item_ids=tuple(str(value) for value in requested_ids),
+        )
+        evidence = await self._knowledge_retriever().search(
+            query,
+            limit=top_k,
+            ctx=context,
+        )
+        results = [
+            {
+                "id": item.item_id,
+                "collection_item_id": item.collection_item_id,
+                "title": item.title,
+                "excerpt": item.content,
+                "score": (
+                    item.rerank_score
+                    if item.rerank_score is not None
+                    else item.relevance_score or 0.0
+                ),
+                "url": item.source.url if item.source is not None else None,
+                "metadata": {
+                    "chunk_id": item.chunk_id,
+                    "section_path": list(item.section_path),
+                    "citation": item.citation.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                    "source": (
+                        item.source.model_dump(mode="json", exclude_none=True)
+                        if item.source is not None
+                        else None
+                    ),
+                },
+            }
+            for item in evidence
+            if item.collection_item_id is not None
+        ]
+        return {"results": results, "total": len(results)}
+
     async def start_document_upload(
         self,
         identity: RequestIdentity,
@@ -244,16 +317,10 @@ class ApiService:
             content_type=content_type,
             content=content,
         )
-        ingestion_status: Literal["ready", "failed"] = "ready"
         document = upload.item
-        try:
-            document = await self._document_pipeline().index_document(
-                document.id,
-                access=access,
-            )
-        except DocumentProcessingError:
-            ingestion_status = "failed"
-            document = await self._upload_service().get_document(access, document.id)
+        ingestion_status: Literal["ready", "failed"] = (
+            "ready" if document.status == "ready" else "failed"
+        )
         async with session_scope(self._sessions()) as session:
             await AuditService(session).record(
                 access,
@@ -280,24 +347,10 @@ class ApiService:
         """Retry indexing from an already available native upload."""
 
         access = await self._resolve_access(identity)
-        document = await self._upload_service().get_document(
-            access,
-            document_id,
-            minimum_role="editor",
+        document = await self._upload_service().retry_indexing(access, document_id)
+        ingestion_status: Literal["ready", "failed"] = (
+            "ready" if document.status == "ready" else "failed"
         )
-        if document.upload is None or document.upload.status != "available":
-            raise UploadConflictError(
-                "the original file is unavailable; upload the file again"
-            )
-        ingestion_status: Literal["ready", "failed"] = "ready"
-        try:
-            document = await self._document_pipeline().index_document(
-                document.id,
-                access=access,
-            )
-        except DocumentProcessingError:
-            ingestion_status = "failed"
-            document = await self._upload_service().get_document(access, document.id)
         async with session_scope(self._sessions()) as session:
             await AuditService(session).record(
                 access,
@@ -327,10 +380,7 @@ class ApiService:
         document_id: UUID,
     ) -> None:
         access = await self._resolve_access(identity)
-        await self._document_pipeline().soft_delete_document(
-            document_id,
-            access=access,
-        )
+        await self._upload_service().delete_document(access, document_id)
 
     async def get_knowledge_citation(
         self,
@@ -522,8 +572,8 @@ class ApiService:
             await self._pipeline.aclose()
         if self._contextualization_transport is not None:
             await self._contextualization_transport.aclose()
-        if self._agent is not None:
-            close = getattr(self._agent.model, "aclose", None)
+        if self._agent_transport is not None:
+            close = getattr(self._agent_transport, "aclose", None)
             if close is not None:
                 await close()
         if self._storage is not None:
@@ -554,9 +604,21 @@ class ApiService:
 
     def _upload_service(self) -> UploadService:
         if self._uploads is None:
+            processing_max_bytes = int(
+                os.getenv(
+                    "BOTHESIS_DOCUMENT_MAX_PROCESSING_BYTES",
+                    str(DEFAULT_PROCESSING_MAX_BYTES),
+                )
+            )
             self._uploads = UploadService(
                 self._sessions(),
                 object_storage=self._object_storage(),
+                pipeline=self._document_pipeline(),
+                document_source=ChatDocumentSourceService(
+                    object_storage=self._object_storage(),
+                    processor=FileProcessor(max_file_bytes=processing_max_bytes),
+                    max_processing_bytes=processing_max_bytes,
+                ),
                 preview_service=self._preview_service(),
                 max_upload_bytes=int(
                     os.getenv(
@@ -698,19 +760,8 @@ class ApiService:
                     self._contextualization_transport,
                     model_name=self._contextualization_model,
                 )
-            processing_max_bytes = int(
-                os.getenv(
-                    "BOTHESIS_DOCUMENT_MAX_PROCESSING_BYTES",
-                    str(DEFAULT_PROCESSING_MAX_BYTES),
-                )
-            )
             self._pipeline = DocumentPipeline(
                 self._sessions(),
-                document_source=ChatDocumentSourceService(
-                    object_storage=self._object_storage(),
-                    processor=FileProcessor(max_file_bytes=processing_max_bytes),
-                    max_processing_bytes=processing_max_bytes,
-                ),
                 embedder=embedder,
                 vector_index=QdrantDocumentIndex(
                     VectorStore(
@@ -720,23 +771,9 @@ class ApiService:
                         prefer_grpc=self._qdrant_prefer_grpc,
                         timeout=20,
                     ),
-                    candidate_limit=self._hybrid_candidate_limit,
-                ),
-                provider_cache=PostgresProviderFileCache(self._sessions()),
-                direct_max_bytes=int(
-                    os.getenv(
-                        "BOTHESIS_DOCUMENT_DIRECT_MAX_BYTES",
-                        str(DEFAULT_DIRECT_MAX_BYTES),
-                    )
-                ),
-                retrieval_limit=int(
-                    os.getenv("BOTHESIS_DOCUMENT_RETRIEVAL_LIMIT", "6")
                 ),
                 embedding_batch_size=int(
                     os.getenv("BOTHESIS_DOCUMENT_EMBEDDING_BATCH_SIZE", "32")
-                ),
-                download_url_seconds=int(
-                    os.getenv("BOTHESIS_DOCUMENT_DOWNLOAD_URL_SECONDS", "300")
                 ),
                 semantic_contextualizer=semantic_contextualizer,
             )
@@ -745,26 +782,17 @@ class ApiService:
     def _get_agent(self) -> Agent:
         if self._agent is None:
             registry = ToolRegistry()
-            base_url = os.getenv(
-                "OPEN_ROUTER_BASE_URL",
-                OpenRouterTransport.DEFAULT_BASE_URL,
-            )
-            transport = OpenRouterTransport(base_url=base_url)
-            retriever = DocumentIndexRetriever(
-                VectorSearchIndex(
-                    VectorStore(
-                        collection_name=os.getenv("QDRANT_COLLECTION"),
-                        url=os.getenv("QDRANT_URL"),
-                        api_key=os.getenv("QDRANT_API_KEY") or None,
-                        prefer_grpc=self._qdrant_prefer_grpc,
-                        timeout=8,
-                    ),
-                    transport,
-                    candidate_limit=self._hybrid_candidate_limit,
+            transport = self._model_transport()
+            retriever = self._knowledge_retriever()
+            tracing = create_langfuse_tracing()
+            registry.register(
+                KnowledgeSearch(
+                    retriever,
+                    result_limit=self._final_retrieval_top_k,
+                    max_context_characters=self._retrieval_context_characters,
+                    tracing=tracing,
                 )
             )
-            tracing = create_langfuse_tracing()
-            registry.register(KnowledgeSearch(retriever, tracing=tracing))
             self._agent = Agent(
                 model=transport,
                 tools=registry,
@@ -788,6 +816,42 @@ class ApiService:
                 tracing=tracing,
             )
         return self._agent
+
+    def _model_transport(self) -> OpenRouterTransport:
+        if self._agent_transport is None:
+            self._agent_transport = OpenRouterTransport(
+                base_url=os.getenv(
+                    "OPEN_ROUTER_BASE_URL",
+                    OpenRouterTransport.DEFAULT_BASE_URL,
+                )
+            )
+        return self._agent_transport
+
+    def _knowledge_retriever(self) -> DocumentIndexRetriever:
+        if self._retriever is None:
+            transport = self._model_transport()
+            reranker = (
+                SemanticReranker(transport, model_name=self._reranker_model)
+                if self._reranking_enabled
+                else None
+            )
+            self._retriever = DocumentIndexRetriever(
+                VectorSearchIndex(
+                    VectorStore(
+                        collection_name=os.getenv("QDRANT_COLLECTION"),
+                        url=os.getenv("QDRANT_URL"),
+                        api_key=os.getenv("QDRANT_API_KEY") or None,
+                        prefer_grpc=self._qdrant_prefer_grpc,
+                        timeout=8,
+                    ),
+                    transport,
+                    candidate_limit=self._hybrid_candidate_limit,
+                ),
+                reranker=reranker,
+                candidate_count=self._hybrid_candidate_limit,
+                reranking_enabled=self._reranking_enabled,
+            )
+        return self._retriever
 
     def _presigned_document_url(self, document: Any) -> str | None:
         if not document.storage_key:

@@ -19,7 +19,9 @@ from bothesis.knowledge import (
     CitationResolver,
     Evidence,
     EvidenceBuilder,
+    EvidenceContextBuilder,
     KnowledgeRetriever,
+    SemanticReranker,
 )
 from bothesis.knowledge.retriever import DocumentIndexRetriever
 from bothesis.knowledge.reranker import ScoreReranker
@@ -350,7 +352,7 @@ async def test_collection_scoped_retrieval_filters_before_reranking() -> None:
     assert index.calls == [
         {
             "query": "annual leave",
-            "limit": 3,
+            "limit": 20,
             "tenant_id": "tenant-1",
             "collection_item_ids": ("collection-7",),
         }
@@ -449,7 +451,8 @@ async def test_knowledge_search_returns_bounded_evidence_and_source_metadata() -
     assert retriever.calls == [("annual leave", 3)]
     assert result.error is None
     assert result.metadata["result_count"] == 1
-    assert "[chunk-1] Leave policy" in result.content
+    assert "Evidence ID: chunk-1" in result.content
+    assert "Chunk ID: chunk-1" in result.content
     assert len(result.evidence) == 1
     evidence = result.evidence[0]
     assert evidence is EVIDENCE
@@ -532,3 +535,76 @@ def test_tool_registry_exposes_declarations_through_the_protocol() -> None:
     definition = registry.definitions()[0]
     assert definition.activity_label == "Search knowledge base"
     assert definition.activity_category == "retrieval"
+
+
+class StubRerankTransport:
+    model = "reranker-test"
+
+    def __init__(self, output_text: str) -> None:
+        self.output_text = output_text
+        self.calls: list[dict[str, object]] = []
+
+    async def responses(self, **kwargs: object) -> object:
+        self.calls.append(dict(kwargs))
+        return SimpleNamespace(output_text=self.output_text)
+
+
+@pytest.mark.asyncio
+async def test_semantic_reranker_uses_structured_order_and_preserves_scores() -> None:
+    lower = _chunk(chunk_id="lower", score=0.8)
+    higher = _chunk(chunk_id="higher", score=0.7)
+    transport = StubRerankTransport('{"chunk_ids":["higher","lower"]}')
+
+    ranked = await SemanticReranker(transport).rerank(  # type: ignore[arg-type]
+        [lower, higher],
+        query="annual leave policy",
+        limit=2,
+    )
+
+    assert [chunk.id for chunk in ranked] == ["higher", "lower"]
+    assert [chunk.relevance_score for chunk in ranked] == [0.7, 0.8]
+    assert [chunk.rerank_score for chunk in ranked] == [1.0, 0.5]
+    assert transport.calls[0]["temperature"] == 0
+
+
+class FailingReranker:
+    async def rerank(
+        self,
+        chunks: Sequence[ContextualChunk],
+        *,
+        limit: int,
+        query: str = "",
+    ) -> list[ContextualChunk]:
+        del chunks, limit, query
+        raise RuntimeError("reranker unavailable")
+
+
+@pytest.mark.asyncio
+async def test_reranking_failure_falls_back_to_candidate_order() -> None:
+    first = _chunk(chunk_id="first", score=0.2)
+    second = _chunk(chunk_id="second", score=0.9)
+    index = StubDocumentIndex([first, second])
+    retriever = DocumentIndexRetriever(
+        index,
+        reranker=FailingReranker(),  # type: ignore[arg-type]
+        candidate_count=7,
+    )
+
+    results = await retriever.search("annual leave", limit=1, ctx=CONTEXT)
+
+    assert index.calls[0]["limit"] == 7
+    assert [item.chunk_id for item in results] == ["first"]
+
+
+def test_context_builder_is_bounded_deduplicated_and_canonical() -> None:
+    evidence = EvidenceBuilder().build(DOCUMENT)
+    built = EvidenceContextBuilder(
+        max_characters=600,
+        max_evidence_characters=200,
+    ).build([evidence, evidence])
+
+    assert len(built.text) <= 600
+    assert built.evidence == (evidence,)
+    assert built.text.count("Evidence ID: chunk-1") == 1
+    assert evidence.content in built.text
+    assert "Document: Leave policy\nSection:" not in built.text

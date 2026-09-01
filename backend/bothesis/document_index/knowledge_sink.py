@@ -6,23 +6,25 @@ import logging
 from collections.abc import Sequence
 from uuid import UUID
 
-from qdrant_client import models as qmodels
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import joinedload
 
-from bothesis.connector.protocol import AnyItem, Chunk, CollectionItem, DocumentItem, DocumentKind
+from bothesis.connector.protocol import (
+    AnyItem,
+    Chunk,
+    CollectionItem,
+    DocumentItem,
+    DocumentKind,
+)
 from bothesis.db.models import Item, ExternalResource, IngestionSource
 from bothesis.document_index import (
-    BM25_MODEL,
-    BM25_OPTIONS,
-    DENSE_VECTOR_NAME,
+    ChunkContextGenerator,
     EmbeddingService,
     IndexingContext,
-    SPARSE_VECTOR_NAME,
-    build_index_records,
 )
-from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
+from bothesis.document_index.indexer import DocumentPipeline
+from bothesis.document_index.qdrant_index import QdrantDocumentIndex
 from bothesis.document_index.vector_store import VectorStore
 from bothesis.services.preview import KnowledgePreviewService
 
@@ -40,18 +42,20 @@ class QdrantKnowledgeSink:
         session_factory: async_sessionmaker[AsyncSession],
         ingestion_source_id: UUID,
         embedding_batch_size: int = 32,
-        semantic_contextualizer: SemanticContextualizer | None = None,
+        semantic_contextualizer: ChunkContextGenerator | None = None,
         preview_service: KnowledgePreviewService | None = None,
     ) -> None:
-        if embedding_batch_size < 1:
-            raise ValueError("embedding_batch_size must be at least one")
-        self._store = store
-        self._embedder = embedder
         self._session_factory = session_factory
         self._ingestion_source_id = ingestion_source_id
-        self._embedding_batch_size = embedding_batch_size
-        self._semantic_contextualizer = semantic_contextualizer
         self._preview_service = preview_service
+        self._vector_index = QdrantDocumentIndex(store)
+        self._pipeline = DocumentPipeline(
+            session_factory,
+            embedder=embedder,
+            vector_index=self._vector_index,
+            embedding_batch_size=embedding_batch_size,
+            semantic_contextualizer=semantic_contextualizer,
+        )
 
     async def write_item(
         self,
@@ -60,7 +64,11 @@ class QdrantKnowledgeSink:
         tenant_id: str,
         connector_id: str | int,
     ) -> UUID:
-        self._validate_source(item, tenant_id=tenant_id, integration_connection_id=connector_id)
+        self._validate_source(
+            item,
+            tenant_id=tenant_id,
+            integration_connection_id=connector_id,
+        )
         stored, _, _ = await self._persist_item(item)
         return stored.id
 
@@ -77,62 +85,25 @@ class QdrantKnowledgeSink:
         )
         stored, source, _ = await self._persist_item(item, status="processing")
         await self._persist_preview(stored)
-        canonical_item, canonical_chunks = self._canonical_document(item, chunks, stored)
-        await self._replace_citations(stored.id, canonical_chunks)
-        records = (
-            await build_index_records(
-                canonical_chunks,
-                canonical_item,
-                IndexingContext(
-                    tenant_id=normalized_tenant,
-                    collection_item_id=str(source.target_item_id),
-                    parent_item_id=(str(stored.parent_item_id) if stored.parent_item_id else None),
-                    document_type=stored.document_type or "plain_text",
-                    connector_key=source.integration_connection.connector_key,
-                ),
-                semantic_contextualizer=self._semantic_contextualizer,
-            )
-            if canonical_chunks
-            else []
+        canonical_item, canonical_chunks = self._canonical_document(
+            item,
+            chunks,
+            stored,
         )
-        await self._soft_delete_points(tenant_id=normalized_tenant, item_id=str(stored.id))
-        if not records:
-            await self._set_item_status(stored.id, "ready")
-            return 0
-        vectors: list[list[float]] = []
-        texts = [record.payload.contextual_text for record in records]
-        for start in range(0, len(texts), self._embedding_batch_size):
-            vectors.extend(
-                await self._embedder.embed_documents(
-                    texts[start : start + self._embedding_batch_size]
-                )
-            )
-        if len(vectors) != len(records) or any(not vector for vector in vectors):
-            await self._set_item_status(stored.id, "failed")
-            raise ValueError("every contextual chunk requires one embedding")
-        try:
-            await self._store.upsert_points(
-                [
-                    qmodels.PointStruct(
-                        id=record.point_id,
-                        vector={
-                            DENSE_VECTOR_NAME: vector,
-                            SPARSE_VECTOR_NAME: qmodels.Document(
-                                text=record.payload.contextual_text,
-                                model=BM25_MODEL,
-                                options=BM25_OPTIONS,
-                            ),
-                        },
-                        payload=record.payload.to_payload(),
-                    )
-                    for record, vector in zip(records, vectors, strict=True)
-                ]
-            )
-        except Exception:
-            await self._set_item_status(stored.id, "failed")
-            raise
-        await self._set_item_status(stored.id, "ready")
-        return len(records)
+        return await self._pipeline.index_document(
+            stored,
+            canonical_item,
+            canonical_chunks,
+            context=IndexingContext(
+                tenant_id=normalized_tenant,
+                collection_item_id=str(source.target_item_id),
+                parent_item_id=(
+                    str(stored.parent_item_id) if stored.parent_item_id else None
+                ),
+                document_type=stored.document_type or "plain_text",
+                connector_key=source.integration_connection.connector_key,
+            ),
+        )
 
     async def soft_delete_item(
         self,
@@ -141,8 +112,7 @@ class QdrantKnowledgeSink:
         connector_id: str | int,
         item_id: str,
     ) -> None:
-        normalized_tenant = tenant_id.strip()
-        if not normalized_tenant:
+        if not tenant_id.strip():
             raise ValueError("tenant_id must not be blank")
         async with self._session_factory.begin() as session:
             source = await session.scalar(
@@ -150,21 +120,27 @@ class QdrantKnowledgeSink:
                 .options(joinedload(IngestionSource.integration_connection))
                 .where(IngestionSource.id == self._ingestion_source_id)
             )
-            if source is None or str(source.integration_connection_id) != str(connector_id):
+            if source is None or str(source.integration_connection_id) != str(
+                connector_id
+            ):
                 raise ValueError(
                     "ingestion source connection does not match the delete request"
                 )
             from bothesis.services import ItemService
 
-            stored = await ItemService(session).soft_delete_external_resource(source.id, item_id)
+            stored = await ItemService(session).soft_delete_external_resource(
+                source.id,
+                item_id,
+            )
             canonical_id = stored.id if stored is not None else None
             if canonical_id is not None:
                 from bothesis.services import CitationService
 
                 await CitationService(session).replace_for_item(canonical_id, ())
         if canonical_id is not None:
-            await self._soft_delete_points(
-                tenant_id=normalized_tenant, item_id=str(canonical_id)
+            await self._vector_index.soft_delete_document(
+                canonical_id,
+                tenant_id=tenant_id.strip(),
             )
 
     async def _persist_item(
@@ -265,41 +241,6 @@ class QdrantKnowledgeSink:
                 type(exc).__name__,
             )
 
-    async def _set_item_status(self, item_id: UUID, status: str) -> None:
-        from bothesis.services import ItemService
-
-        async with self._session_factory.begin() as session:
-            service = ItemService(session)
-            if status == "ready":
-                await service.mark_ready(item_id)
-            else:
-                await service.mark_failed(item_id)
-
-    async def _replace_citations(
-        self,
-        item_id: UUID,
-        chunks: Sequence[Chunk],
-    ) -> None:
-        from bothesis.services import CitationService
-
-        async with self._session_factory.begin() as session:
-            await CitationService(session).replace_for_item(item_id, chunks)
-
-    async def _soft_delete_points(self, *, tenant_id: str, item_id: str) -> None:
-        await self._store.set_payload(
-            payload={"is_deleted": True},
-            points=qmodels.Filter(
-                must=[
-                    qmodels.FieldCondition(
-                        key="tenant_id", match=qmodels.MatchValue(value=tenant_id)
-                    ),
-                    qmodels.FieldCondition(
-                        key="item_id", match=qmodels.MatchValue(value=item_id)
-                    ),
-                ]
-            ),
-        )
-
     @staticmethod
     def _canonical_document(
         item: DocumentItem, chunks: Sequence[Chunk], stored: Item
@@ -374,7 +315,7 @@ class QdrantKnowledgeSink:
         return "child"
 
     async def aclose(self) -> None:
-        await self._store.aclose()
+        await self._vector_index.aclose()
 
 
 __all__ = ["QdrantKnowledgeSink"]

@@ -34,22 +34,22 @@ from bothesis.services import (
     UploadTooLargeError,
 )
 from bothesis.services.chat_document_source import ChatDocumentSourceService
-from bothesis.document_index.indexer import (
-    DocumentProcessingError,
-    DocumentPipeline,
-    INDEX_SCHEMA_VERSION,
-    PARSER_VERSION,
-    CHUNKER_VERSION,
-)
+from bothesis.document_index.indexer import DocumentPipeline
 from bothesis.document_index.models import ChunkContext, ContextualChunk
-from bothesis.document_index import BM25_MODEL, BM25_OPTIONS, SPARSE_VECTOR_NAME
+from bothesis.document_index import (
+    BM25_MODEL,
+    BM25_OPTIONS,
+    DocumentProcessingError,
+    IndexingContext,
+    SPARSE_VECTOR_NAME,
+)
 from bothesis.document_index.raw_storage import (
     ObjectStorageError,
     PresignedRequest,
     S3DocumentStorage,
     StoredObject,
 )
-from bothesis.document_index.vector_store import QdrantDocumentIndex
+from bothesis.document_index.qdrant_index import QdrantDocumentIndex
 from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
 import bothesis.document_index.indexer as document_indexer
 
@@ -68,82 +68,109 @@ class _NoopVectorIndex:
     async def replace_document(self, *args: Any, **kwargs: Any) -> None:
         return None
 
-    async def search_document(self, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
-        return ()
-
-    async def update_document_access(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    async def soft_delete_document(self, document_id: Any) -> None:
+    async def soft_delete_document(self, document_id: Any, **kwargs: Any) -> None:
         return None
 
 
-class _NoopProviderCache:
-    async def get(self, *args: Any, **kwargs: Any) -> None:
-        return None
+@pytest.mark.asyncio
+async def test_document_pipeline_owns_the_source_neutral_indexing_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
 
-    async def put(self, *args: Any, **kwargs: Any) -> None:
-        return None
+    class SessionFactory:
+        def begin(self) -> SessionFactory:
+            return self
 
-    async def invalidate(self, *args: Any, **kwargs: Any) -> None:
-        return None
+        async def __aenter__(self) -> object:
+            return object()
 
-    async def clear(self, *args: Any, **kwargs: Any) -> None:
-        return None
+        async def __aexit__(self, *_: Any) -> None:
+            return None
 
+    class Items:
+        def __init__(self, _: object) -> None:
+            pass
 
-class _CachedProviderFile(_NoopProviderCache):
-    def __init__(self, entry: ProviderCacheEntry | None = None) -> None:
-        self.entry = entry
+        async def mark_processing(self, _: Any) -> None:
+            events.append("processing")
 
-    async def get(self, *args: Any, **kwargs: Any) -> ProviderCacheEntry | None:
-        return self.entry
+        async def merge_metadata(self, _: Any, values: dict[str, Any]) -> None:
+            assert values["processing"]["source"] == "test"
+            events.append("metadata")
 
+        async def mark_ready(self, _: Any) -> None:
+            events.append("ready")
 
-class _SignedStorage:
-    def __init__(self) -> None:
-        self.downloads = 0
+        async def mark_failed(self, _: Any) -> None:
+            events.append("failed")
 
-    def presign_download(self, key: str, *, expires_seconds: int) -> PresignedRequest:
-        self.downloads += 1
-        return PresignedRequest(
-            url=f"https://objects.example.test/{key}?expires={expires_seconds}",
-            method="GET",
-            headers={},
-            expires_at=datetime.now(UTC),
-        )
+    class Citations:
+        def __init__(self, _: object) -> None:
+            pass
 
+        async def replace_for_item(self, _: Any, chunks: Any) -> None:
+            assert len(chunks) == 1
+            events.append("citations")
 
-class _EmptyProcessor:
-    def process_bytes(self, raw_bytes: bytes, **kwargs: Any) -> object:
-        file_name = str(kwargs.get("file_name") or "document")
-        del raw_bytes
-        raise FileProcessingError(f"no text in {file_name}")
+    class VectorIndex:
+        async def replace_document(
+            self,
+            _: Item,
+            chunks: Any,
+            vectors: Any,
+            *,
+            context: IndexingContext,
+        ) -> None:
+            assert len(chunks) == len(vectors) == 1
+            assert context.connector_key == "file"
+            events.append("vectors")
 
-    def process_path(self, path: Path, **kwargs: Any) -> object:
-        file_name = str(kwargs.get("file_name") or path.name)
-        raise FileProcessingError(f"no text in {file_name}")
-
-
-class _NoopDocumentSource:
-    async def canonicalize(self, *args: Any, **kwargs: Any) -> object:
-        raise AssertionError("canonical source was not expected")
-
-    async def direct_file_data(self, *args: Any, **kwargs: Any) -> str:
-        raise AssertionError("direct source was not expected")
-
-    async def soft_delete_raw(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-def _processor(*, direct_max_bytes: int = 20 * 1024 * 1024) -> DocumentPipeline:
-    return DocumentPipeline(
-        cast(Any, None),
-        document_source=cast(Any, _NoopDocumentSource()),
-        embedder=_Embedder(),
-        vector_index=_NoopVectorIndex(),
-        provider_cache=_NoopProviderCache(),
-        direct_max_bytes=direct_max_bytes,
+    monkeypatch.setattr(document_indexer, "ItemService", Items)
+    monkeypatch.setattr(document_indexer, "CitationService", Citations)
+    stored = _document("text/plain")
+    canonical = DocumentItem(
+        id=str(stored.id),
+        title=stored.title or "sample",
+        document_kind=DocumentKind.NOTE,
+        source=SourceIdentity(
+            connector_id="upload",
+            provider=SourceProvider.FILE,
+            external_id=str(stored.id),
+        ),
+        hierarchy=Hierarchy(parent_id=str(stored.parent_item_id)),
+        access=AccessPolicy(),
     )
+    chunk = Chunk(
+        id=f"{stored.id}:0",
+        item_id=str(stored.id),
+        chunk_index=0,
+        chunk_text="grounded content",
+        content_type="text",
+        citation=CitationInfo(),
+    )
+    pipeline = DocumentPipeline(
+        cast(Any, SessionFactory()),
+        embedder=_Embedder(),
+        vector_index=cast(Any, VectorIndex()),
+    )
+
+    count = await pipeline.index_document(
+        stored,
+        canonical,
+        [chunk],
+        context=IndexingContext(
+            tenant_id=str(stored.tenant_id),
+            collection_item_id=str(stored.parent_item_id),
+            parent_item_id=str(stored.parent_item_id),
+            document_type=stored.document_type or "plain_text",
+            connector_key="file",
+        ),
+        processing_metadata={"source": "test"},
+    )
+
+    assert count == 1
+    assert events == ["processing", "citations", "vectors", "metadata", "ready"]
 
 
 def _access(user_id: Any, tenant_id: Any | None = None) -> AuthContext:
@@ -193,122 +220,12 @@ def _document(
     return document
 
 
-def test_routing_precedence_prefers_images_then_current_index_then_small_pdf() -> None:
-    processor = _processor()
-    tenant_id = uuid4()
-
-    def route(document: Item, *, current: bool = False) -> str:
-        if current:
-            document.status = "ready"
-            document.metadata_["provider_version"] = "v1"
-            document.metadata_["processing"] = {
-                "provider_version": "v1",
-                "parser_version": PARSER_VERSION,
-                "chunker_version": CHUNKER_VERSION,
-                "embedding_model": _Embedder.embedding_model,
-                "index_schema_version": INDEX_SCHEMA_VERSION,
-                "tenant_id": str(tenant_id),
-                "owner_user_id": str(document.upload.owner_user_id),
-            }
-        return processor._route(document)
-
-    assert route(_document("image/png"), current=True) == "direct"
-    assert route(_document("application/pdf"), current=True) == "indexed"
-    assert route(_document("application/pdf")) == "direct"
-    assert route(_document("application/pdf", size_bytes=21 * 1024 * 1024)) == "indexed"
-    assert (
-        route(
-            _document(
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-        )
-        == "indexed"
-    )
-
-
-@pytest.mark.asyncio
-async def test_index_document_reloads_the_visible_upload_after_indexing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    processor = _processor()
-    access = _access(uuid4(), uuid4())
-    indexed = _document("text/plain")
-    visible = _document("text/plain")
-    calls: list[str] = []
-
-    async def ensure_indexed(*_: Any, **__: Any) -> Item:
-        calls.append("indexed")
-        return indexed
-
-    async def load_visible(*_: Any, **__: Any) -> Item:
-        calls.append("reloaded")
-        return visible
-
-    monkeypatch.setattr(processor, "_ensure_indexed", ensure_indexed)
-    monkeypatch.setattr(processor, "_load_visible_document", load_visible)
-
-    result = await processor.index_document(indexed.id, access=access)
-
-    assert result is visible
-    assert result.upload is not None
-    assert calls == ["indexed", "reloaded"]
-
-
-@pytest.mark.asyncio
-async def test_direct_inputs_use_signed_urls_and_replay_cached_pdf_annotations() -> (
-    None
-):
-    storage = _SignedStorage()
-    cache = _CachedProviderFile()
-    processor = DocumentPipeline(
-        cast(Any, None),
-        document_source=ChatDocumentSourceService(
-            object_storage=cast(Any, storage),
-            processor=cast(Any, _EmptyProcessor()),
-        ),
-        embedder=_Embedder(),
-        vector_index=_NoopVectorIndex(),
-        provider_cache=cache,
-    )
-    image = _document("image/png")
-    image.storage_key = "users/u/documents/image/raw"
-
-    context = await processor._prepare_direct(image)
-
-    assert context.content_block == {
-        "type": "image_url",
-        "image_url": {
-            "url": "https://objects.example.test/users/u/documents/image/raw?expires=300"
-        },
-    }
-    assert storage.downloads == 1
-
-    annotation = {
-        "type": "file",
-        "file": {
-            "hash": "provider-hash",
-            "content": [{"type": "text", "text": "cached"}],
-        },
-    }
-    cache.entry = ProviderCacheEntry(
-        provider="openrouter",
-        provider_version="v1",
-        reference={"annotations": [annotation]},
-    )
-    pdf = _document("application/pdf")
-    pdf.storage_key = "users/u/documents/pdf/raw"
-
-    context = await processor._prepare_direct(pdf)
-
-    assert context.content_block is None
-    assert context.provider_annotations == (annotation,)
-    assert storage.downloads == 1
-
-
 def test_upload_limits_reject_oversize_objects() -> None:
     uploads = UploadService(
         cast(Any, None),
-        object_storage=cast(Any, _SignedStorage()),
+        object_storage=cast(Any, SimpleNamespace()),
+        pipeline=cast(Any, SimpleNamespace()),
+        document_source=cast(Any, SimpleNamespace()),
         max_upload_bytes=100,
     )
 
@@ -688,11 +605,18 @@ async def test_s3_download_to_path_streams_content(tmp_path: Path) -> None:
 class _RecordingVectorStore:
     def __init__(self) -> None:
         self.deleted: list[str] = []
+        self.deleted_tenants: list[str | None] = []
         self.batches: list[list[Any]] = []
         self.access_updates: list[tuple[str, dict[str, Any]]] = []
 
-    async def soft_delete_document_points(self, document_id: str) -> None:
+    async def soft_delete_document_points(
+        self,
+        document_id: str,
+        *,
+        tenant_id: str | None = None,
+    ) -> None:
         self.deleted.append(document_id)
+        self.deleted_tenants.append(tenant_id)
 
     async def upsert_points(self, points: list[Any]) -> None:
         self.batches.append(points)
@@ -753,16 +677,29 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
         document,
         chunks,
         [[0.1, 0.2]],
-        access=access,
+        context=IndexingContext(
+            tenant_id=str(tenant_id),
+            collection_item_id=str(document.parent_item_id),
+            parent_item_id=str(document.parent_item_id),
+            document_type=document.document_type or "plain_text",
+            connector_key="file",
+        ),
     )
     await index.replace_document(
         document,
         chunks,
         [[0.3, 0.4]],
-        access=access,
+        context=IndexingContext(
+            tenant_id=str(tenant_id),
+            collection_item_id=str(document.parent_item_id),
+            parent_item_id=str(document.parent_item_id),
+            document_type=document.document_type or "plain_text",
+            connector_key="file",
+        ),
     )
 
     assert store.deleted == [str(document.id), str(document.id)]
+    assert store.deleted_tenants == [str(tenant_id), str(tenant_id)]
     assert store.batches[0][0].id == store.batches[1][0].id
     payload = store.batches[0][0].payload
     vectors = store.batches[0][0].vector

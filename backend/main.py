@@ -223,10 +223,17 @@ class CollectionDocumentUploadResponse(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    query: str
-    top_k: int = 10
-    collection_item_ids: list[UUID] | None = None
-    filters: dict[str, Any] = {}
+    query: str = Field(min_length=1, max_length=512)
+    top_k: int = Field(default=6, ge=1, le=20)
+    collection_item_ids: list[UUID] | None = Field(default=None, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_collection_ids(self) -> SearchRequest:
+        if self.collection_item_ids is not None and len(
+            self.collection_item_ids
+        ) != len(set(self.collection_item_ids)):
+            raise ValueError("Collection IDs must be unique")
+        return self
 
 
 class DocumentResult(BaseModel):
@@ -651,11 +658,24 @@ _api_service = ApiService(
     allow_insecure_development_identity=_allow_insecure_development_identity,
     qdrant_prefer_grpc=_environment_boolean("QDRANT_PREFER_GRPC"),
     contextualization_enabled=_environment_boolean(
-        "BOTHESIS_CONTEXTUALIZATION_ENABLED"
+        "BOTHESIS_CONTEXTUALIZATION_ENABLED", default=True
     ),
     contextualization_model=os.getenv("BOTHESIS_CONTEXTUALIZATION_MODEL") or None,
     hybrid_candidate_limit=int(
-        os.getenv("BOTHESIS_HYBRID_CANDIDATE_LIMIT", "20")
+        os.getenv(
+            "BOTHESIS_RETRIEVAL_CANDIDATE_COUNT",
+            os.getenv("BOTHESIS_HYBRID_CANDIDATE_LIMIT", "20"),
+        )
+    ),
+    final_retrieval_top_k=int(
+        os.getenv("BOTHESIS_FINAL_RETRIEVAL_TOP_K", "6")
+    ),
+    reranking_enabled=_environment_boolean(
+        "BOTHESIS_RERANKING_ENABLED", default=True
+    ),
+    reranker_model=os.getenv("BOTHESIS_RERANKER_MODEL") or None,
+    retrieval_context_characters=int(
+        os.getenv("BOTHESIS_RETRIEVAL_CONTEXT_CHARACTERS", "8000")
     ),
 )
 _admin_service = AdminApiService(
@@ -893,10 +913,18 @@ async def retry_document_indexing(
 
 @documents_router.post("/search", response_model=SearchResponse)
 async def search_documents(
-    body: SearchRequest, current_user: UserProfile = Depends(get_current_user)
+    body: SearchRequest,
+    request: Request,
 ) -> SearchResponse:
     """Permission-filtered semantic search across all indexed sources."""
-    raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED)
+    return SearchResponse.model_validate(
+        await _api_service.search_documents(
+            _request_identity(request),
+            query=body.query,
+            top_k=body.top_k,
+            collection_item_ids=body.collection_item_ids,
+        )
+    )
 
 
 @documents_router.post(
