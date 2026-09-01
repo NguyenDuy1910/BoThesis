@@ -14,7 +14,7 @@ from bothesis.agent.models import AgentContext, ToolContext
 from bothesis.agent.protocol import FunctionTool
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
-from bothesis.document_index.search import QdrantSearchIndex
+from bothesis.document_index.search import VectorSearchIndex
 from bothesis.knowledge import (
     CitationResolver,
     Evidence,
@@ -271,22 +271,21 @@ class StubSemanticVectorStore:
                     "chunk_text": " Employees receive 20 days of annual leave.\n",
                     "contextual_text": "Document: Leave policy\nSection: Annual leave\n\n Employees receive 20 days of annual leave.\n",
                     "connector_key": "confluence",
-                    "integration_connection_id": "connection-1",
                     "external_id": "doc-1",
                     "source_url": "https://knowledge.example/leave-policy",
-                    "context_section_path": ["Annual leave"],
-                    "citation_section_path": ["Annual leave"],
-                    "citation_section": "Annual leave",
+                    "section_path": ["Annual leave"],
+                    "page_start": 2,
+                    "page_end": 3,
                 },
             )
         ]
 
 
 @pytest.mark.asyncio
-async def test_qdrant_search_index_embeds_and_rebuilds_contextual_chunks() -> None:
+async def test_vector_search_index_embeds_and_rebuilds_contextual_chunks() -> None:
     store = StubSemanticVectorStore()
     embedder = StubEmbedder()
-    index = QdrantSearchIndex(store, embedder)  # type: ignore[arg-type]
+    index = VectorSearchIndex(store, embedder)  # type: ignore[arg-type]
 
     results = await index.search(
         " annual leave ",
@@ -312,6 +311,9 @@ async def test_qdrant_search_index_embeds_and_rebuilds_contextual_chunks() -> No
     assert document.relevance_score == 0.91
     assert document.citation.section == "Annual leave"
     assert document.citation.section_path == ("Annual leave",)
+    assert document.citation.page_start == 2
+    assert document.citation.page_end == 3
+    assert document.citation.spans == ()
     assert document.chunk_text == " Employees receive 20 days of annual leave.\n"
     assert document.contextual_text.endswith(" annual leave.\n")
 
@@ -419,10 +421,10 @@ async def test_collection_retrieval_remains_tenant_scoped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_qdrant_search_index_rejects_a_missing_tenant_scope() -> None:
+async def test_vector_search_index_rejects_a_missing_tenant_scope() -> None:
     store = StubSemanticVectorStore()
     embedder = StubEmbedder()
-    index = QdrantSearchIndex(store, embedder)  # type: ignore[arg-type]
+    index = VectorSearchIndex(store, embedder)  # type: ignore[arg-type]
 
     with pytest.raises(ValueError, match="tenant_id must not be empty"):
         await index.search(

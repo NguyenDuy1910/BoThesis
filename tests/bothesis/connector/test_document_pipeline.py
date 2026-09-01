@@ -227,6 +227,34 @@ def test_routing_precedence_prefers_images_then_current_index_then_small_pdf() -
 
 
 @pytest.mark.asyncio
+async def test_index_document_reloads_the_visible_upload_after_indexing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processor = _processor()
+    access = _access(uuid4(), uuid4())
+    indexed = _document("text/plain")
+    visible = _document("text/plain")
+    calls: list[str] = []
+
+    async def ensure_indexed(*_: Any, **__: Any) -> Item:
+        calls.append("indexed")
+        return indexed
+
+    async def load_visible(*_: Any, **__: Any) -> Item:
+        calls.append("reloaded")
+        return visible
+
+    monkeypatch.setattr(processor, "_ensure_indexed", ensure_indexed)
+    monkeypatch.setattr(processor, "_load_visible_document", load_visible)
+
+    result = await processor.index_document(indexed.id, access=access)
+
+    assert result is visible
+    assert result.upload is not None
+    assert calls == ["indexed", "reloaded"]
+
+
+@pytest.mark.asyncio
 async def test_direct_inputs_use_signed_urls_and_replay_cached_pdf_annotations() -> (
     None
 ):
@@ -726,14 +754,12 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
         chunks,
         [[0.1, 0.2]],
         access=access,
-        embedding_model="embedding-v1",
     )
     await index.replace_document(
         document,
         chunks,
         [[0.3, 0.4]],
         access=access,
-        embedding_model="embedding-v1",
     )
 
     assert store.deleted == [str(document.id), str(document.id)]
@@ -750,11 +776,19 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
     assert payload["collection_item_id"] == str(document.parent_item_id)
     assert "integration_connection_id" not in payload
     assert "ingestion_source_id" not in payload
+    assert "embedding_model" not in payload
+    assert "root_id" not in payload
+    assert "context_section_path" not in payload
+    assert "citation_section_path" not in payload
+    assert "citation_section" not in payload
+    assert "context_summary" not in payload
+    assert "citation_spans" not in payload
     assert payload["item_id"] == str(document.id)
     assert payload["chunk_id"] == f"{document.id}:0"
     assert payload["chunk_text"] == "grounded content"
     assert "Document: sample" in payload["contextual_text"]
     assert payload["content_type"] == "text"
+    assert payload["section_path"] == ["Summary"]
     assert "access" not in payload
     assert "storage" not in payload
 

@@ -32,11 +32,9 @@ from bothesis.document_index import (  # noqa: E402
     BM25_MODEL,
     BM25_OPTIONS,
     DENSE_VECTOR_NAME,
+    IndexingContext,
     SPARSE_VECTOR_NAME,
-)
-from bothesis.document_index.payload import (  # noqa: E402
-    QdrantPayloadContext,
-    build_qdrant_records,
+    build_index_records,
 )
 from bothesis.document_index.vector_store import VectorStore  # noqa: E402
 
@@ -64,16 +62,6 @@ def _parse_args() -> argparse.Namespace:
         "--collection-item-id",
         default="file-e2e-root",
         help="Synthetic parent collection lineage for this isolated E2E run",
-    )
-    parser.add_argument(
-        "--integration-connection-id",
-        default="file-e2e-connection",
-        help="Synthetic file connection lineage",
-    )
-    parser.add_argument(
-        "--ingestion-source-id",
-        default="file-e2e-source",
-        help="Synthetic ingestion-source lineage",
     )
     parser.add_argument(
         "--item-id",
@@ -173,17 +161,7 @@ async def _run(args: argparse.Namespace) -> None:
     tenant_id = args.tenant_id.strip()
     collection_name = args.collection.strip()
     collection_item_id = args.collection_item_id.strip()
-    integration_connection_id = args.integration_connection_id.strip()
-    ingestion_source_id = args.ingestion_source_id.strip()
-    if not all(
-        (
-            tenant_id,
-            collection_name,
-            collection_item_id,
-            integration_connection_id,
-            ingestion_source_id,
-        )
-    ):
+    if not all((tenant_id, collection_name, collection_item_id)):
         raise ValueError("tenant and lineage values must not be blank")
 
     content_sha256 = _content_sha256(source_path)
@@ -191,7 +169,7 @@ async def _run(args: argparse.Namespace) -> None:
         uuid5(NAMESPACE_URL, source_path.as_uri())
     )
     source = SourceIdentity(
-        connector_id=integration_connection_id,
+        connector_id="file-e2e",
         provider=SourceProvider.FILE,
         external_id=item_id,
         external_version=content_sha256,
@@ -242,18 +220,15 @@ async def _run(args: argparse.Namespace) -> None:
 
     try:
         print(f"[2/5] Building bounded payloads with tenant={tenant_id}")
-        records = await build_qdrant_records(
+        records = await build_index_records(
             processed.chunks,
             processed.item,
-            QdrantPayloadContext(
+            IndexingContext(
                 tenant_id=tenant_id,
-                integration_connection_id=integration_connection_id,
-                ingestion_source_id=ingestion_source_id,
                 collection_item_id=collection_item_id,
                 parent_item_id=collection_item_id,
                 document_type=processed.item.document_kind.value,
                 connector_key=SourceProvider.FILE.value,
-                embedding_model=embedder.embedding_model,
             ),
         )
 
@@ -306,7 +281,7 @@ async def _run(args: argparse.Namespace) -> None:
                         options=BM25_OPTIONS,
                     ),
                 },
-                payload=record.payload.for_qdrant(),
+                payload=record.payload.to_payload(),
             )
             for record, vector in zip(records, vectors, strict=True)
         ]
@@ -330,8 +305,7 @@ async def _run(args: argparse.Namespace) -> None:
             if (
                 payload.get("tenant_id") != tenant_id
                 or payload.get("item_id") != item_id
-                or payload.get("integration_connection_id") != integration_connection_id
-                or payload.get("ingestion_source_id") != ingestion_source_id
+                or payload.get("connector_key") != SourceProvider.FILE.value
                 or payload.get("is_deleted") is not False
             ):
                 raise RuntimeError(f"Qdrant lineage verification failed: {point.id}")

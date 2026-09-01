@@ -11,9 +11,11 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
+from bothesis.connector.adapter import CheckpointedSourceConnectorAdapter
 from bothesis.connector.base import StaticCredentialsProvider
 from bothesis.connector.confluence.connector import ConfluenceConnector
 from bothesis.connector.file.file_connector import FileConnector
+from bothesis.connector.protocol import ConnectorScope
 from bothesis.db.models import (
     Item,
     IngestionSource,
@@ -654,7 +656,7 @@ class IntegrationService:
         connection: Mapping[str, Any],
         source: Mapping[str, Any],
         credentials: Mapping[str, Any],
-    ) -> ConfluenceConnector:
+    ) -> CheckpointedSourceConnectorAdapter:
         config = {**dict(connection), **dict(source)}
         wiki_base = str(config.get("wiki_base") or "").strip()
         if not wiki_base:
@@ -679,7 +681,21 @@ class IntegrationService:
                 credentials=dict(credentials),
             )
         )
-        return runtime
+        page_id = str(config.get("page_id") or "").strip()
+        space = str(config.get("space") or "").strip()
+        scope_type = "page" if page_id else "space" if space else "site"
+        scope_value = page_id or space or "confluence"
+        return CheckpointedSourceConnectorAdapter(
+            source="confluence",
+            connector=runtime,
+            scopes=[
+                ConnectorScope(
+                    scope_type=scope_type,
+                    scope_value=scope_value,
+                    display_name=space or page_id or "Confluence",
+                )
+            ],
+        )
 
     @staticmethod
     def _config_bool(config: Mapping[str, Any], key: str, default: bool) -> bool:

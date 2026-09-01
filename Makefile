@@ -71,16 +71,20 @@ config: ## Create missing local environment files and enforce local dependency e
 	update_env backend/.env BOTHESIS_S3_ADDRESSING_STYLE path; \
 	update_env backend/.env AWS_ACCESS_KEY_ID bothesis; \
 	update_env backend/.env AWS_SECRET_ACCESS_KEY bothesis; \
-	plugin_key="$$(sed -n 's/^BOTHESIS_PLUGIN_ENCRYPTION_KEY=//p' backend/.env | tail -n 1)"; \
-	legacy_key="$$(sed -n 's/^BOTHESIS_CONNECTOR_ENCRYPTION_KEY=//p' backend/.env | tail -n 1)"; \
-	if [[ ! "$$plugin_key" =~ ^[A-Za-z0-9_-]{43}=?$$ ]]; then \
-		if [[ "$$legacy_key" =~ ^[A-Za-z0-9_-]{43}=?$$ ]]; then \
-			plugin_key="$$legacy_key"; \
+	integration_key="$$(sed -n 's/^BOTHESIS_INTEGRATION_ENCRYPTION_KEY=//p' backend/.env | tail -n 1)"; \
+	legacy_plugin_key="$$(sed -n 's/^BOTHESIS_PLUGIN_ENCRYPTION_KEY=//p' backend/.env | tail -n 1)"; \
+	legacy_connector_key="$$(sed -n 's/^BOTHESIS_CONNECTOR_ENCRYPTION_KEY=//p' backend/.env | tail -n 1)"; \
+	if [[ ! "$$integration_key" =~ ^[A-Za-z0-9_-]{43}=?$$ ]]; then \
+		if [[ "$$legacy_plugin_key" =~ ^[A-Za-z0-9_-]{43}=?$$ ]]; then \
+			integration_key="$$legacy_plugin_key"; \
+		elif [[ "$$legacy_connector_key" =~ ^[A-Za-z0-9_-]{43}=?$$ ]]; then \
+			integration_key="$$legacy_connector_key"; \
 		else \
-			plugin_key="$$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')"; \
+			integration_key="$$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '\n')"; \
 		fi; \
-		update_env backend/.env BOTHESIS_PLUGIN_ENCRYPTION_KEY "$$plugin_key"; \
+		update_env backend/.env BOTHESIS_INTEGRATION_ENCRYPTION_KEY "$$integration_key"; \
 	fi; \
+	remove_env backend/.env BOTHESIS_PLUGIN_ENCRYPTION_KEY; \
 	remove_env backend/.env BOTHESIS_CONNECTOR_ENCRYPTION_KEY; \
 	update_env backend/.env BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY true; \
 	update_env web/.env.local NEXT_PUBLIC_BOTHESIS_API_URL http://127.0.0.1:8000

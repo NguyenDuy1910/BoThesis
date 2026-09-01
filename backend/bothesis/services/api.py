@@ -17,9 +17,7 @@ from bothesis.agent.tools.knowledge_search import KnowledgeSearch
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.connector.file import FileProcessor
 from bothesis.connector.protocol import (
-    BoundingBox,
     CitationInfo,
-    CitationSpan,
     SourceIdentity,
     SourceProvider,
 )
@@ -33,7 +31,7 @@ from bothesis.document_index.indexer import (
 )
 from bothesis.document_index import DocumentProcessingError
 from bothesis.document_index.raw_storage import S3DocumentStorage
-from bothesis.document_index.search import QdrantSearchIndex
+from bothesis.document_index.search import VectorSearchIndex
 from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
 from bothesis.document_index.vector_store import QdrantDocumentIndex, VectorStore
 from bothesis.knowledge import CitationResolver
@@ -48,6 +46,7 @@ from bothesis.services import (
     AuditService,
     AuthContext,
     ChatDocumentSourceService,
+    CitationService,
     CollectionAccessService,
     DocumentNotFoundError,
     ItemService,
@@ -367,10 +366,16 @@ class ApiService:
             if not payloads:
                 raise DocumentNotFoundError("citation not found")
             payload = payloads[0]
-            citation = self._payload_citation(payload)
+            resolved_chunk_id = str(payload.get("chunk_id") or chunk_id)
+            citation = await CitationService(session).get(
+                item.id,
+                resolved_chunk_id,
+            )
+            if citation is None:
+                raise DocumentNotFoundError("citation not found")
             return {
                 "item_id": str(item.id),
-                "chunk_id": str(payload.get("chunk_id") or chunk_id),
+                "chunk_id": resolved_chunk_id,
                 "title": item.title,
                 "content_type": item.mime_type or "text/plain",
                 "document_url": self._presigned_document_url(item),
@@ -412,22 +417,40 @@ class ApiService:
                 chunk_id=chunk_id,
                 limit=1 if chunk_id else 100,
             )
-            elements, chunks_by_id = self._viewer_elements(str(item.id), payloads)
+            canonical_citations = await CitationService(session).get_for_chunks(
+                item.id,
+                [
+                    str(
+                        payload.get("chunk_id")
+                        or f"{item.id}:{int(payload.get('chunk_index') or 0)}"
+                    )
+                    for payload in payloads
+                ],
+            )
+            elements, chunks_by_id = self._viewer_elements(
+                str(item.id),
+                payloads,
+                canonical_citations,
+            )
             focus = None
+            focus_citation = CitationInfo()
             if chunk_id:
                 payload = chunks_by_id.get(chunk_id)
                 if payload is None:
                     raise DocumentNotFoundError("citation not found")
+                resolved_chunk_id = str(
+                    payload.get("chunk_id")
+                    or f"{item.id}:{int(payload.get('chunk_index') or 0)}"
+                )
+                canonical_citation = canonical_citations.get(resolved_chunk_id)
+                if canonical_citation is None:
+                    raise DocumentNotFoundError("citation not found")
                 focus = {
                     "chunk_id": chunk_id,
                     "chunk_text": str(payload.get("chunk_text") or ""),
-                    "citation": self._payload_citation(payload),
+                    "citation": canonical_citation,
                 }
-            focus_citation = (
-                self._payload_citation(chunks_by_id[chunk_id])
-                if chunk_id in chunks_by_id
-                else CitationInfo()
-            )
+                focus_citation = canonical_citation
             return {
                 "item_id": str(item.id),
                 "title": item.title,
@@ -728,7 +751,7 @@ class ApiService:
             )
             transport = OpenRouterTransport(base_url=base_url)
             retriever = DocumentIndexRetriever(
-                QdrantSearchIndex(
+                VectorSearchIndex(
                     VectorStore(
                         collection_name=os.getenv("QDRANT_COLLECTION"),
                         url=os.getenv("QDRANT_URL"),
@@ -857,6 +880,7 @@ class ApiService:
         cls,
         item_id: str,
         payloads: list[dict[str, Any]],
+        citations: Mapping[str, CitationInfo],
     ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         groups: dict[str, dict[str, Any] | None] = {}
         chunks_by_id: dict[str, dict[str, Any]] = {}
@@ -868,27 +892,13 @@ class ApiService:
             cls._add_citation_content(
                 groups,
                 str(payload.get("chunk_text") or ""),
-                cls._payload_citation(payload),
+                citations.get(chunk_id, cls._payload_citation(payload)),
             )
         return [value for value in groups.values() if value is not None], chunks_by_id
 
     @staticmethod
     def _viewer_text(metadata: Mapping[str, Any], key: str) -> str | None:
         value = metadata.get(key)
-        return value.strip() if isinstance(value, str) and value.strip() else None
-
-    @staticmethod
-    def _viewer_bbox(value: object) -> BoundingBox | None:
-        if not isinstance(value, Mapping):
-            return None
-        try:
-            return BoundingBox.model_validate(value)
-        except ValueError:
-            return None
-
-    @staticmethod
-    def _payload_text(payload: Mapping[str, Any], key: str) -> str | None:
-        value = payload.get(key)
         return value.strip() if isinstance(value, str) and value.strip() else None
 
     @staticmethod
@@ -904,44 +914,19 @@ class ApiService:
 
     @classmethod
     def _payload_citation(cls, payload: Mapping[str, Any]) -> CitationInfo:
-        spans = cls._citation_spans(payload.get("citation_spans"))
-        raw_section_path = payload.get("citation_section_path")
+        raw_section_path = payload.get("section_path")
         section_path = tuple(
             value.strip()
             for value in raw_section_path or ()
             if isinstance(value, str) and value.strip()
         )
         return CitationInfo(
-            section=(
-                cls._viewer_text(payload, "citation_section")
-                or (section_path[-1] if section_path else None)
-            ),
+            section=section_path[-1] if section_path else None,
             section_path=section_path,
             anchor=cls._viewer_text(payload, "citation_anchor"),
-            spans=tuple(spans),
+            page_start=cls._payload_int(payload, "page_start"),
+            page_end=cls._payload_int(payload, "page_end"),
         )
-
-    @classmethod
-    def _citation_spans(cls, value: object) -> list[CitationSpan]:
-        if not isinstance(value, (list, tuple)):
-            return []
-        output: list[CitationSpan] = []
-        for raw in value:
-            if not isinstance(raw, Mapping):
-                continue
-            try:
-                output.append(
-                    CitationSpan(
-                        page=cls._payload_int(raw, "page"),
-                        element_id=cls._payload_text(raw, "element_id"),
-                        start_offset=cls._payload_int(raw, "start_offset"),
-                        end_offset=cls._payload_int(raw, "end_offset"),
-                        bounding_box=cls._viewer_bbox(raw.get("bounding_box")),
-                    )
-                )
-            except ValueError:
-                continue
-        return output
 
     @staticmethod
     def _add_citation_content(

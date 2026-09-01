@@ -30,14 +30,15 @@ from bothesis.document_index import (
     EmbeddingService,
     PreparedDocuments,
     VectorIndex,
+    build_contextual_chunks,
 )
 from bothesis.document_index.models import ContextualChunk, PreparedDocument
-from bothesis.document_index.payload import build_contextual_chunks
 from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
 from bothesis.db.models import Item
 from bothesis.services import (
     AuthContext,
     ChatDocumentSource,
+    CitationService,
     DEFAULT_PROCESSING_MAX_BYTES,
     ItemService,
 )
@@ -178,7 +179,8 @@ class DocumentPipeline:
     ) -> Item:
         """Parse and index an available native upload with retry-safe locking."""
 
-        return await self._ensure_indexed(document_id, access=access)
+        await self._ensure_indexed(document_id, access=access)
+        return await self._load_visible_document(document_id, access=access)
 
     async def soft_delete_document(
         self,
@@ -246,6 +248,7 @@ class DocumentPipeline:
                 access.tenant_id,
                 include_deleted=True,
             )
+            await CitationService(session).replace_for_item(document_id, ())
             await items.soft_delete_item(document_id, actor=access)
 
     async def _load_visible_document(
@@ -481,6 +484,11 @@ class DocumentPipeline:
                 canonical_item,
                 semantic_contextualizer=self._semantic_contextualizer,
             )
+            async with self._session_factory.begin() as session:
+                await CitationService(session).replace_for_item(
+                    document.id,
+                    canonical_chunks,
+                )
             vectors: list[list[float]] = []
             for start in range(0, len(contextual_chunks), self._embedding_batch_size):
                 batch = contextual_chunks[start : start + self._embedding_batch_size]
@@ -494,7 +502,6 @@ class DocumentPipeline:
                 contextual_chunks,
                 vectors,
                 access=access,
-                embedding_model=self._embedder.embedding_model,
             )
             async with self._session_factory.begin() as session:
                 items = ItemService(session)

@@ -22,6 +22,7 @@ from bothesis.connector.protocol import (
     TablePart,
     TextPart,
 )
+from bothesis.services import IntegrationService
 
 
 def test_confluence_cql_escapes_configured_values() -> None:
@@ -36,6 +37,56 @@ def test_confluence_cql_escapes_configured_values() -> None:
 
     assert "space='BANK\\'OPS'" in query
     assert "label != 'do\\'not-index'" in query
+
+
+@pytest.mark.asyncio
+async def test_integration_factory_adapts_confluence_to_the_async_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validated: list[bool] = []
+    configured_storage: list[object] = []
+    monkeypatch.setattr(
+        ConfluenceConnector,
+        "set_credentials_provider",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(
+        ConfluenceConnector,
+        "validate_connector_settings",
+        lambda *_: validated.append(True),
+    )
+    monkeypatch.setattr(
+        ConfluenceConnector,
+        "set_storage",
+        lambda _self, storage: configured_storage.append(storage),
+    )
+
+    connector = IntegrationService._confluence_factory(
+        {
+            "wiki_base": "https://example.atlassian.net/wiki",
+            "is_cloud": True,
+            "space": "RISK",
+        },
+        {},
+        {
+            "confluence_username": "person@example.test",
+            "confluence_access_token": "secret",
+        },
+    )
+    storage = object()
+
+    assert await connector.test_connection() is True
+    assert connector.source == "confluence"
+    assert connector.checkpoint_model is ConfluenceCheckpoint
+    assert (await connector.list_scopes())[0].model_dump() == {
+        "scope_type": "space",
+        "scope_value": "RISK",
+        "display_name": "RISK",
+        "metadata": {},
+    }
+    connector.set_storage(storage)  # type: ignore[arg-type]
+    assert validated == [True]
+    assert configured_storage == [storage]
 
 
 def test_confluence_checkpoint_bounds_the_next_incremental_query() -> None:

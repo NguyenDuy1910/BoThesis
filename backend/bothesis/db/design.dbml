@@ -97,6 +97,25 @@ Table items {
   Note: 'Only Collections may be roots. Parent and parent_relation are both null or both set; self-parenting is rejected. Collection children are allowed only under Collections. Document children may be Documents. Database constraints/triggers enforce same-tenant parentage, prevent cycles, and reject Document -> Collection.'
 }
 
+Table citations {
+  id uuid [pk]
+  item_id uuid [not null, note: 'References the canonical Document Item']
+  chunk_id text [not null, note: 'Stable bridge to the corresponding indexed chunk']
+  section_path text[] [not null, default: `{}`]
+  anchor text
+  page_start int
+  page_end int
+  spans jsonb [not null, default: `[]`, note: 'Detailed offsets and normalized 0..1 visual regions']
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (item_id, chunk_id) [unique]
+    (item_id, deleted_at)
+  }
+  Note: 'One canonical citation per chunk. Re-ingestion tombstones stale rows and reactivates matching chunk identities.'
+}
+
 Table collection_access {
   item_id uuid [not null, note: 'Must reference an Item with item_type=collection']
   principal_type varchar(16) [not null, note: 'user | group']
@@ -290,6 +309,7 @@ Ref: group_memberships.user_id > users.id
 Ref: items.tenant_id > tenants.id
 Ref: items.parent_item_id > items.id
 Ref: items.created_by_user_id > users.id
+Ref: citations.item_id > items.id
 Ref: collection_access.item_id > items.id
 Ref: collection_access.created_by_user_id > users.id
 Ref: item_uploads.item_id - items.id

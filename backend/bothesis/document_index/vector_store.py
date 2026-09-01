@@ -24,15 +24,12 @@ from bothesis.document_index import (
     DEFAULT_HYBRID_CANDIDATE_LIMIT,
     DENSE_VECTOR_NAME,
     INDEX_SCHEMA_VERSION,
+    IndexedChunk,
+    IndexingContext,
     SPARSE_VECTOR_NAME,
-)
-from bothesis.document_index.payload import (
-    QdrantChunkPayload,
-    QdrantPayloadContext,
 )
 from bothesis.connector.protocol import (
     CitationInfo,
-    CitationSpan,
     EffectiveAccess,
     Hierarchy,
     SourceIdentity,
@@ -63,11 +60,8 @@ class VectorStoreFilterBuilder:
         "section",
         "external_id",
         "parent_item_id",
-        "root_id",
         "ancestor_ids",
         "collection_item_id",
-        "integration_connection_id",
-        "ingestion_source_id",
     )
 
     @classmethod
@@ -86,7 +80,7 @@ class VectorStoreFilterBuilder:
         field_map: dict[str, str] | None = None,
     ) -> list[Any]:
         conditions: list[Any] = []
-        resolved_field_map = {"section": "citation_section", **(field_map or {})}
+        resolved_field_map = {"section": "section_path", **(field_map or {})}
         for logical_name in cls.FILTERABLE_LIST_FIELDS:
             values = getattr(filters, logical_name, [])
             if not values:
@@ -914,7 +908,6 @@ class QdrantDocumentIndex:
         vectors: Sequence[Sequence[float]],
         *,
         access: AuthContext,
-        embedding_model: str,
     ) -> None:
         if access.tenant_id is None:
             raise ValueError("indexed chat documents require an active tenant")
@@ -926,17 +919,16 @@ class QdrantDocumentIndex:
         for chunk, vector in zip(chunks, vectors, strict=True):
             if chunk.item_id != str(document.id):
                 raise ValueError("contextual chunk belongs to a different document")
-            payload = QdrantChunkPayload.from_contextual_chunk(
+            payload = IndexedChunk.from_contextual_chunk(
                 chunk,
-                QdrantPayloadContext(
+                IndexingContext(
                     tenant_id=str(access.tenant_id),
                     collection_item_id=str(document.parent_item_id),
                     parent_item_id=str(document.parent_item_id),
                     document_type=document.document_type or "plain_text",
                     connector_key="file",
-                    embedding_model=embedding_model,
                 ),
-            ).for_qdrant()
+            ).to_payload()
             points.append(
                 qmodels.PointStruct(
                     id=_document_point_id(document.id, chunk.chunk_index),
@@ -1000,7 +992,7 @@ class QdrantDocumentIndex:
                 or f"{document.id}:{int(payload.get('chunk_index') or 0)}"
             )
             source = SourceIdentity(
-                connector_id=str(payload.get("integration_connection_id") or "native_upload"),
+                connector_id=str(payload.get("connector_key") or "file"),
                 provider=SourceProvider.FILE,
                 external_id=str(payload.get("external_id") or document.id),
                 url=(
@@ -1018,8 +1010,7 @@ class QdrantDocumentIndex:
                     chunk_text=content,
                     contextual_text=str(payload.get("contextual_text") or content),
                     context=ChunkContext(
-                        section_path=_payload_strings(payload, "context_section_path"),
-                        summary=_payload_text(payload, "context_summary"),
+                        section_path=_payload_strings(payload, "section_path"),
                     ),
                     title=str(payload.get("title") or document.title or document.id),
                     document_type=str(payload.get("document_type") or "plain_text"),
@@ -1027,7 +1018,6 @@ class QdrantDocumentIndex:
                     source=source,
                     hierarchy=Hierarchy(
                         parent_id=_payload_text(payload, "parent_item_id"),
-                        root_id=_payload_text(payload, "root_id"),
                         ancestor_ids=_payload_strings(payload, "ancestor_ids"),
                     ),
                     access=EffectiveAccess(),
@@ -1061,11 +1051,13 @@ def _document_point_id(document_id: UUID, chunk_index: int) -> str:
 
 
 def _citation_from_payload(payload: dict[str, Any]) -> CitationInfo:
+    section_path = tuple(_payload_strings(payload, "section_path"))
     return CitationInfo(
-        section=_payload_text(payload, "citation_section"),
-        section_path=tuple(_payload_strings(payload, "citation_section_path")),
+        section=section_path[-1] if section_path else None,
+        section_path=section_path,
         anchor=_payload_text(payload, "citation_anchor"),
-        spans=tuple(_payload_citation_spans(payload.get("citation_spans"))),
+        page_start=_payload_int(payload, "page_start"),
+        page_end=_payload_int(payload, "page_end"),
     )
 
 
@@ -1091,35 +1083,3 @@ def _payload_int(payload: Mapping[str, Any], key: str) -> int | None:
         return int(value)
     return None
 
-
-def _payload_bbox(value: object) -> Any:
-    from bothesis.connector.protocol import BoundingBox
-
-    if not isinstance(value, Mapping):
-        return None
-    try:
-        return BoundingBox.model_validate(value)
-    except ValueError:
-        return None
-
-
-def _payload_citation_spans(value: object) -> list[CitationSpan]:
-    if not isinstance(value, (list, tuple)):
-        return []
-    spans: list[CitationSpan] = []
-    for raw in value:
-        if not isinstance(raw, Mapping):
-            continue
-        try:
-            spans.append(
-                CitationSpan(
-                    page=_payload_int(raw, "page"),
-                    element_id=_payload_text(raw, "element_id"),
-                    start_offset=_payload_int(raw, "start_offset"),
-                    end_offset=_payload_int(raw, "end_offset"),
-                    bounding_box=_payload_bbox(raw.get("bounding_box")),
-                )
-            )
-        except ValueError:
-            continue
-    return spans

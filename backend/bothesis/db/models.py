@@ -488,6 +488,48 @@ class Item(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     upload: Mapped[ItemUpload | None] = relationship(back_populates="item", uselist=False)
     message_links: Mapped[list[MessageItem]] = relationship(back_populates="item")
+    citations: Mapped[list[Citation]] = relationship(back_populates="item")
+
+
+class Citation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Canonical chunk citation geometry for one durable Item."""
+
+    __tablename__ = "citations"
+    __table_args__ = (
+        UniqueConstraint("item_id", "chunk_id"),
+        Index(None, "item_id", "deleted_at"),
+        CheckConstraint(
+            "page_start IS NULL OR page_start >= 1",
+            name="page_start_is_valid",
+        ),
+        CheckConstraint(
+            "page_end IS NULL OR page_end >= 1",
+            name="page_end_is_valid",
+        ),
+        CheckConstraint(
+            "page_start IS NULL OR page_end IS NULL OR page_end >= page_start",
+            name="page_range_is_valid",
+        ),
+        CheckConstraint("jsonb_typeof(spans) = 'array'", name="spans_is_array"),
+    )
+
+    item_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("items.id"), nullable=False
+    )
+    chunk_id: Mapped[str] = mapped_column(Text, nullable=False)
+    section_path: Mapped[list[str]] = _text_array_column()
+    anchor: Mapped[str | None] = mapped_column(Text)
+    page_start: Mapped[int | None] = mapped_column(Integer)
+    page_end: Mapped[int | None] = mapped_column(Integer)
+    spans: Mapped[list[JsonObject]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    item: Mapped[Item] = relationship(back_populates="citations")
 
 
 class CollectionAccess(TimestampMixin, Base):
@@ -843,6 +885,7 @@ __all__ = [
     "AccessRequest",
     "AuditLog",
     "Base",
+    "Citation",
     "CollectionAccess",
     "Conversation",
     "Group",

@@ -35,6 +35,7 @@ async def test_final_source_storage_schema_contract() -> None:
                 WHERE table_schema = current_schema()
                   AND table_name IN (
                     'items',
+                    'citations',
                     'item_uploads',
                     'tenant_memberships',
                     'message_items',
@@ -77,6 +78,7 @@ async def test_final_source_storage_schema_contract() -> None:
 
     assert {
         "items",
+        "citations",
         "item_uploads",
         "message_items",
         "integration_connections",
@@ -99,6 +101,16 @@ async def test_final_source_storage_schema_contract() -> None:
         "status",
         "deleted_at",
     }.issubset(columns_by_table["items"])
+    assert {
+        "item_id",
+        "chunk_id",
+        "section_path",
+        "anchor",
+        "page_start",
+        "page_end",
+        "spans",
+        "deleted_at",
+    }.issubset(columns_by_table["citations"])
     assert {
         "connector_key",
         "config",

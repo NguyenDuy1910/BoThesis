@@ -5,9 +5,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
-INDEX_SCHEMA_VERSION = 8
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+INDEX_SCHEMA_VERSION = 10
 DENSE_VECTOR_NAME = "content"
 SPARSE_VECTOR_NAME = "content_bm25"
 BM25_MODEL = "qdrant/bm25"
@@ -21,17 +23,60 @@ BM25_OPTIONS: dict[str, Any] = {
 DEFAULT_HYBRID_CANDIDATE_LIMIT = 20
 
 
+class IndexingContext(BaseModel):
+    """Index-scoped values that are not part of a connector chunk."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tenant_id: str = Field(min_length=1)
+    collection_item_id: str = Field(min_length=1)
+    parent_item_id: str | None = None
+    document_type: str = Field(min_length=1)
+    connector_key: str = Field(min_length=1)
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _strip_tenant_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("tenant_id must not be blank")
+        return value
+
+
 from .contextualization import StructuralContextualizer  # noqa: E402
 from .semantic_contextualizer import SemanticContextualizer  # noqa: E402
 from .models import ChunkContext, ContextualChunk, IndexQuery, PreparedDocument
 from .payload import (
-    IndexPayload,
-    QdrantChunkPayload,
-    QdrantChunkRecord,
-    QdrantPayloadContext,
+    IndexedChunk,
     build_contextual_chunks,
-    build_qdrant_records,
+    build_index_records,
 )
+
+
+class IndexedChunkRecord(BaseModel):
+    """A deterministic point identifier paired with its indexed chunk."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    point_id: str = Field(min_length=1)
+    payload: IndexedChunk
+
+    @classmethod
+    def from_contextual_chunk(
+        cls,
+        chunk: ContextualChunk,
+        context: IndexingContext,
+    ) -> "IndexedChunkRecord":
+        return cls(
+            point_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"{context.tenant_id}:{chunk.item_id}:{chunk.chunk_index}",
+                )
+            ),
+            payload=IndexedChunk.from_contextual_chunk(chunk, context),
+        )
+
 
 if TYPE_CHECKING:
     from bothesis.db.models import Item
@@ -76,7 +121,6 @@ class VectorIndex(Protocol):
         vectors: Sequence[Sequence[float]],
         *,
         access: AuthContext,
-        embedding_model: str,
     ) -> None: ...
 
     async def search_document(
@@ -125,12 +169,11 @@ __all__ = [
     "ContextualChunk", "DEFAULT_HYBRID_CANDIDATE_LIMIT", "DENSE_VECTOR_NAME",
     "DEFAULT_DIRECT_MAX_BYTES", "DIRECT_IMAGE_TYPES", "DocumentIndex",
     "DocumentProcessingError", "DocumentUnavailableError", "EmbeddingService",
-    "IndexPayload", "IndexQuery",
+    "IndexedChunk", "IndexedChunkRecord", "IndexingContext", "IndexQuery",
     "PARSER_VERSION", "PreparedDocument", "PreparedDocuments",
-    "QdrantChunkPayload", "QdrantChunkRecord",
-    "QdrantPayloadContext", "INDEX_SCHEMA_VERSION", "SPARSE_VECTOR_NAME",
+    "INDEX_SCHEMA_VERSION", "SPARSE_VECTOR_NAME",
     "SemanticContextualizer", "StructuralContextualizer",
     "build_contextual_chunks",
-    "build_qdrant_records",
+    "build_index_records",
     "VectorIndex",
 ]

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from bothesis.db.models import (
     AuditLog,
     Base,
+    Citation,
     Conversation,
     Item,
     ExternalResource,
@@ -25,6 +26,7 @@ from bothesis.db.models import (
     IntegrationConnection,
     IntegrationCredential,
 )
+from bothesis.connector.protocol import BoundingBox, Chunk, CitationInfo, CitationSpan
 from bothesis.services import (
     AccessRequestService,
     AdminItemService,
@@ -32,6 +34,7 @@ from bothesis.services import (
     AuthService,
     AuthorizationError,
     CollectionAccessService,
+    CitationService,
     DocumentNotFoundError,
     ItemService,
     IntegrationCredentialService,
@@ -177,6 +180,88 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
         assert await session.scalar(
             select(MessageItem).where(MessageItem.item_id == item.id)
         )
+
+
+@pytest.mark.asyncio
+async def test_citations_replace_geometry_by_stable_chunk_identity(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        tenant = await auth.create_tenant("citations", "Citations")
+        owner = await auth.create_user("citations@example.com")
+        collection = await ItemService(session).create_collection(
+            tenant_id=tenant.id,
+            title="Policies",
+            created_by_user_id=owner.id,
+        )
+        document = await ItemService(session).create_document(
+            tenant_id=tenant.id,
+            parent_item_id=collection.id,
+            title="Policy",
+            document_type="pdf",
+            created_by_user_id=owner.id,
+        )
+        chunks = (
+            Chunk(
+                id=f"{document.id}:0",
+                item_id=str(document.id),
+                chunk_index=0,
+                chunk_text="First policy paragraph",
+                content_type="text",
+                section_path=["Policy", "Eligibility"],
+                citation=CitationInfo(
+                    anchor="eligibility",
+                    spans=(
+                        CitationSpan(
+                            page=2,
+                            element_id="p002_para_001",
+                            start_offset=0,
+                            end_offset=22,
+                            bounding_box=BoundingBox(
+                                x=0.1,
+                                y=0.2,
+                                width=0.3,
+                                height=0.1,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            Chunk(
+                id=f"{document.id}:1",
+                item_id=str(document.id),
+                chunk_index=1,
+                chunk_text="Second policy paragraph",
+                content_type="text",
+                citation=CitationInfo(spans=(CitationSpan(page=4),)),
+            ),
+        )
+
+        citations = CitationService(session)
+        await citations.replace_for_item(document.id, chunks)
+        first = await citations.get(document.id, chunks[0].id)
+        assert first is not None
+        assert first.section_path == ("Policy", "Eligibility")
+        assert first.section == "Eligibility"
+        assert first.page_start == 2
+        assert first.page_end == 2
+        assert first.spans[0].bounding_box == BoundingBox(
+            x=0.1,
+            y=0.2,
+            width=0.3,
+            height=0.1,
+        )
+
+        await citations.replace_for_item(document.id, chunks[:1])
+        assert await citations.get(document.id, chunks[1].id) is None
+        stale = await session.scalar(
+            select(Citation).where(
+                Citation.item_id == document.id,
+                Citation.chunk_id == chunks[1].id,
+            )
+        )
+        assert stale is not None and stale.deleted_at is not None
 
 
 @pytest.mark.asyncio

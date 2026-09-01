@@ -33,7 +33,7 @@ import type {
   DirectoryUser,
   KnowledgeItem,
   Paginated,
-  PluginBinding,
+  IngestionSource,
 } from "@/modules/knowledge-management/types";
 
 type SortOption = "updated_desc" | "updated_asc" | "name_asc";
@@ -68,7 +68,7 @@ export function KnowledgeBasePage() {
     })}`,
   );
   const documents = useAdminQuery<Paginated<KnowledgeItem>>("/items?page_size=100&item_type=document");
-  const bindings = useAdminQuery<Paginated<PluginBinding>>("/plugin-bindings?page_size=100");
+  const sources = useAdminQuery<Paginated<IngestionSource>>("/ingestion-sources?page_size=100");
   const users = useAdminQuery<Paginated<DirectoryUser>>("/users?page_size=100&status=active");
 
   const updateFilter = useCallback((key: "q" | "owner" | "sort", value: string) => {
@@ -91,11 +91,11 @@ export function KnowledgeBasePage() {
       return {
         ...collection,
         documentCount: collection.item_count ?? (documents.data?.items ?? []).filter((document) => document.parent_item_id === collection.id).length,
-        sourceCount: collection.source_count ?? (bindings.data?.items ?? []).filter((binding) => binding.target_item_id === collection.id).length,
+        sourceCount: collection.source_count ?? (sources.data?.items ?? []).filter((source) => source.target_item_id === collection.id).length,
         ownerName: creator?.display_name || creator?.email || "Workspace owner",
       };
     }).filter((collection) => !owner || collection.created_by_user_id === owner);
-  }, [bindings.data?.items, collections.data?.items, documents.data?.items, owner, users.data?.items]);
+  }, [sources.data?.items, collections.data?.items, documents.data?.items, owner, users.data?.items]);
 
   const ownerOptions = useMemo(() => [
     { value: "", label: "All owners" },
@@ -262,7 +262,7 @@ export function KnowledgeBasePage() {
         </div>
       )}
 
-      {(documents.error || bindings.error || users.error) && !collections.error && (
+      {(documents.error || sources.error || users.error) && !collections.error && (
         <p className="mt-3 text-xs leading-5 text-[var(--warning-text)]" role="status">
           Some item, source, or owner details are unavailable. Knowledge bases remain openable.
         </p>

@@ -437,9 +437,10 @@ def test_qdrant_citation_does_not_synthesize_element_ranges() -> None:
     payload = {
         "chunk_index": 4,
         "chunk_text": "Projected chunk evidence",
-        "citation_section": "Canonical section",
-        "citation_section_path": ["Policy", "Canonical section"],
+        "section_path": ["Policy", "Canonical section"],
         "citation_anchor": "canonical-section",
+        "page_start": 3,
+        "page_end": 4,
     }
 
     citation = main._api_service._payload_citation(payload)
@@ -448,30 +449,38 @@ def test_qdrant_citation_does_not_synthesize_element_ranges() -> None:
     assert citation.section == "Canonical section"
     assert citation.section_path == ("Policy", "Canonical section")
     assert citation.anchor == "canonical-section"
+    assert citation.page_start == 3
+    assert citation.page_end == 4
 
 
-def test_qdrant_viewer_does_not_split_multispan_chunk_projection() -> None:
+def test_viewer_uses_canonical_multispan_citation_geometry() -> None:
     payload = {
         "chunk_id": "chunk-multi",
         "chunk_index": 0,
         "chunk_text": "First element\n\nSecond element",
-        "citation_section_path": ["Policy"],
-        "citation_spans": [
-            {"page": 1, "element_id": "p001_para_001"},
-            {"page": 2, "element_id": "p002_para_001"},
-        ],
+        "section_path": ["Policy"],
     }
+    citation = CitationInfo(
+        section="Policy",
+        section_path=("Policy",),
+        page_start=1,
+        page_end=2,
+        spans=(
+            CitationSpan(page=1, element_id="p001_para_001"),
+            CitationSpan(page=2, element_id="p002_para_001"),
+        ),
+    )
 
     elements, chunks_by_id = main._api_service._viewer_elements(
-        "doc-1", [payload]
+        "doc-1",
+        [payload],
+        {"chunk-multi": citation},
     )
 
     assert elements == []
     assert chunks_by_id["chunk-multi"] is payload
-    assert main._api_service._payload_citation(payload).spans == (
-        CitationSpan(page=1, element_id="p001_para_001"),
-        CitationSpan(page=2, element_id="p002_para_001"),
-    )
+    assert citation.spans[0].element_id == "p001_para_001"
+    assert main._api_service._payload_citation(payload).spans == ()
 
 
 def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:

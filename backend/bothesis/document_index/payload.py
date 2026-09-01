@@ -1,4 +1,4 @@
-"""Projection of connector-produced chunks into the derived Qdrant index."""
+"""Flat retrieval projection of connector-produced chunks."""
 
 from __future__ import annotations
 
@@ -6,12 +6,11 @@ import logging
 from collections.abc import Sequence
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
-from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from bothesis.connector.protocol import Chunk, CitationInfo, CitationSpan, DocumentItem
-from bothesis.document_index import INDEX_SCHEMA_VERSION
+from bothesis.connector.protocol import Chunk, CitationInfo, DocumentItem
+from bothesis.document_index import INDEX_SCHEMA_VERSION, IndexingContext
 from bothesis.document_index.contextualization import StructuralContextualizer
 from bothesis.document_index.models import ContextualChunk
 from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
@@ -23,31 +22,7 @@ _DOCUMENT_CONTEXT_METADATA_MAX_CHARACTERS = 3_000
 _DOCUMENT_CONTEXT_CHUNK_MAX_CHARACTERS = 2_000
 
 
-class QdrantPayloadContext(BaseModel):
-    """Tenant-owned values that are not part of a connector chunk."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    tenant_id: str = Field(min_length=1)
-    integration_connection_id: str | None = None
-    ingestion_source_id: str | None = None
-    collection_item_id: str = Field(min_length=1)
-    parent_item_id: str | None = None
-    document_type: str = Field(min_length=1)
-    connector_key: str = Field(min_length=1)
-    is_deleted: bool = False
-    embedding_model: str | None = None
-
-    @field_validator("tenant_id")
-    @classmethod
-    def _strip_tenant_id(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("tenant_id must not be blank")
-        return value
-
-
-class IndexPayload(BaseModel):
+class IndexedChunk(BaseModel):
     """Bounded retrieval projection of a :class:`ContextualChunk`.
 
     Raw content parts, complete access policies, storage objects, and arbitrary
@@ -58,44 +33,37 @@ class IndexPayload(BaseModel):
 
     schema_version: int = INDEX_SCHEMA_VERSION
     tenant_id: str = Field(min_length=1)
-    integration_connection_id: str | None = None
-    ingestion_source_id: str | None = None
     is_deleted: bool = False
 
+    collection_item_id: str = Field(min_length=1)
     item_id: str = Field(min_length=1)
     chunk_id: str = Field(min_length=1)
     chunk_index: int = Field(ge=0)
     title: str | None = None
-    collection_item_id: str = Field(min_length=1)
-    parent_item_id: str | None = None
     document_type: str = Field(min_length=1)
     content_type: str = Field(min_length=1)
+
     chunk_text: str = Field(min_length=1)
     contextual_text: str = Field(min_length=1)
-    context_section_path: list[str] = Field(default_factory=list)
-    context_summary: str | None = None
+    section_path: list[str] = Field(default_factory=list)
+
+    parent_item_id: str | None = None
+    ancestor_ids: list[str] = Field(default_factory=list)
 
     connector_key: str = Field(min_length=1)
     external_id: str = Field(min_length=1)
-    root_id: str | None = None
-    ancestor_ids: list[str] = Field(default_factory=list)
-
     source_url: str | None = None
-    citation_section: str | None = None
-    citation_section_path: list[str] = Field(default_factory=list)
     citation_anchor: str | None = None
-    citation_spans: tuple[CitationSpan, ...] = ()
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
-    embedding_model: str | None = None
 
-    @field_validator("ancestor_ids", "context_section_path")
+    @field_validator("ancestor_ids", "section_path")
     @classmethod
     def _normalise_paths(cls, value: list[str]) -> list[str]:
         return [item.strip() for item in value if item.strip()]
 
     @model_validator(mode="after")
-    def _validate_page_range(self) -> "IndexPayload":
+    def _validate_page_range(self) -> "IndexedChunk":
         if (
             self.page_start is not None
             and self.page_end is not None
@@ -108,70 +76,32 @@ class IndexPayload(BaseModel):
     def from_contextual_chunk(
         cls,
         chunk: ContextualChunk,
-        context: QdrantPayloadContext,
-    ) -> "IndexPayload":
+        context: IndexingContext,
+    ) -> "IndexedChunk":
         return cls(
             tenant_id=context.tenant_id,
-            integration_connection_id=context.integration_connection_id,
-            ingestion_source_id=context.ingestion_source_id,
-            is_deleted=context.is_deleted,
+            collection_item_id=context.collection_item_id,
             item_id=chunk.item_id,
             chunk_id=chunk.id,
             chunk_index=chunk.chunk_index,
             title=chunk.title,
-            collection_item_id=context.collection_item_id,
-            parent_item_id=context.parent_item_id,
             document_type=context.document_type,
             content_type=chunk.content_type,
             chunk_text=chunk.chunk_text,
             contextual_text=chunk.contextual_text,
-            context_section_path=chunk.context.section_path,
-            context_summary=chunk.context.summary,
+            section_path=_section_path(chunk),
+            parent_item_id=context.parent_item_id,
+            ancestor_ids=chunk.hierarchy.ancestor_ids,
             connector_key=context.connector_key,
             external_id=chunk.source.external_id,
-            root_id=chunk.hierarchy.root_id,
-            ancestor_ids=chunk.hierarchy.ancestor_ids,
             source_url=_persisted_source_url(chunk.source.url),
-            citation_section=chunk.citation.section,
-            citation_section_path=list(chunk.citation.section_path),
             citation_anchor=chunk.citation.anchor,
-            citation_spans=chunk.citation.spans,
             page_start=_citation_page_start(chunk.citation),
             page_end=_citation_page_end(chunk.citation),
-            embedding_model=context.embedding_model,
         )
 
-    def for_qdrant(self) -> dict[str, Any]:
+    def to_payload(self) -> dict[str, Any]:
         return self.model_dump(mode="json", exclude_none=True)
-
-
-class QdrantChunkRecord(BaseModel):
-    """A deterministic Qdrant point paired with its bounded payload."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    point_id: str = Field(min_length=1)
-    payload: IndexPayload
-
-    @classmethod
-    def from_contextual_chunk(
-        cls,
-        chunk: ContextualChunk,
-        context: QdrantPayloadContext,
-    ) -> "QdrantChunkRecord":
-        point_id = str(
-            uuid5(
-                NAMESPACE_URL,
-                f"{context.tenant_id}:{chunk.item_id}:{chunk.chunk_index}",
-            )
-        )
-        return cls(
-            point_id=point_id,
-            payload=IndexPayload.from_contextual_chunk(chunk, context),
-        )
-
-
-QdrantChunkPayload = IndexPayload
 
 
 async def build_contextual_chunks(
@@ -226,14 +156,16 @@ async def build_contextual_chunks(
     return contextual
 
 
-async def build_qdrant_records(
+async def build_index_records(
     chunks: Sequence[Chunk],
     item: DocumentItem,
-    context: QdrantPayloadContext,
+    context: IndexingContext,
     *,
     semantic_contextualizer: SemanticContextualizer | None = None,
-) -> list[QdrantChunkRecord]:
-    """Contextualize canonical chunks and project deterministic Qdrant points."""
+) -> list[IndexedChunkRecord]:
+    """Contextualize canonical chunks and build deterministic index records."""
+
+    from bothesis.document_index import IndexedChunkRecord
 
     contextual_chunks = await build_contextual_chunks(
         chunks,
@@ -241,7 +173,7 @@ async def build_qdrant_records(
         semantic_contextualizer=semantic_contextualizer,
     )
     return [
-        QdrantChunkRecord.from_contextual_chunk(chunk, context)
+        IndexedChunkRecord.from_contextual_chunk(chunk, context)
         for chunk in contextual_chunks
     ]
 
@@ -354,13 +286,27 @@ def _metadata_scalar(metadata: dict[str, str | list[str]], key: str) -> str | No
 
 
 def _citation_page_start(citation: CitationInfo) -> int | None:
+    if citation.page_start is not None:
+        return citation.page_start
     pages = [span.page for span in citation.spans if span.page is not None]
     return min(pages) if pages else None
 
 
 def _citation_page_end(citation: CitationInfo) -> int | None:
+    if citation.page_end is not None:
+        return citation.page_end
     pages = [span.page for span in citation.spans if span.page is not None]
     return max(pages) if pages else None
+
+
+def _section_path(chunk: ContextualChunk) -> list[str]:
+    if chunk.context.section_path:
+        return list(chunk.context.section_path)
+    if chunk.citation.section_path:
+        return list(chunk.citation.section_path)
+    if chunk.citation.section and chunk.citation.section.strip():
+        return [chunk.citation.section]
+    return []
 
 
 def _persisted_source_url(value: str | None) -> str | None:
@@ -391,10 +337,7 @@ def _persisted_source_url(value: str | None) -> str | None:
 
 __all__ = [
     "ContextualChunk",
-    "IndexPayload",
-    "QdrantChunkPayload",
-    "QdrantChunkRecord",
-    "QdrantPayloadContext",
+    "IndexedChunk",
     "build_contextual_chunks",
-    "build_qdrant_records",
+    "build_index_records",
 ]

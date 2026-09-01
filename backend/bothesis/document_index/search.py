@@ -1,4 +1,4 @@
-"""Read-only Qdrant search adapter for contextual document chunks."""
+"""Read-only vector search adapter for contextual document chunks."""
 
 from __future__ import annotations
 
@@ -6,9 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from bothesis.connector.protocol import (
-    BoundingBox,
     CitationInfo,
-    CitationSpan,
     EffectiveAccess,
     Hierarchy,
     SourceIdentity,
@@ -45,8 +43,8 @@ class _QueryEmbedder(Protocol):
         """Embed a non-empty retrieval query."""
 
 
-class QdrantSearchIndex:
-    """Embed queries, search Qdrant, and rebuild canonical indexed chunks."""
+class VectorSearchIndex:
+    """Embed queries, search the vector store, and rebuild indexed chunks."""
 
     def __init__(
         self,
@@ -160,8 +158,7 @@ def _normalise_point(point: object) -> ContextualChunk | None:
 
     point_score = getattr(point, "score", None)
     score = float(point_score) if isinstance(point_score, (int, float)) else None
-    section_path = _payload_strings(payload, "context_section_path")
-    citation_section_path = _payload_strings(payload, "citation_section_path")
+    section_path = _payload_strings(payload, "section_path")
     return ContextualChunk(
         id=chunk_id,
         item_id=item_id,
@@ -171,28 +168,27 @@ def _normalise_point(point: object) -> ContextualChunk | None:
         contextual_text=contextual_text,
         context=ChunkContext(
             section_path=section_path,
-            summary=_payload_text(payload, "context_summary"),
         ),
         title=_payload_text(payload, "title"),
         document_type=_payload_text(payload, "document_type") or "plain_text",
         collection_item_id=_payload_text(payload, "collection_item_id"),
         source=SourceIdentity(
-            connector_id=str(payload.get("integration_connection_id") or "native_upload"),
+            connector_id=provider_value,
             provider=provider,
             external_id=external_id,
             url=_payload_text(payload, "source_url"),
         ),
         hierarchy=Hierarchy(
             parent_id=_payload_text(payload, "parent_item_id"),
-            root_id=_payload_text(payload, "root_id"),
             ancestor_ids=_payload_strings(payload, "ancestor_ids"),
         ),
         access=EffectiveAccess(),
         citation=CitationInfo(
-            section=_payload_text(payload, "citation_section"),
-            section_path=tuple(citation_section_path),
+            section=section_path[-1] if section_path else None,
+            section_path=tuple(section_path),
             anchor=_payload_text(payload, "citation_anchor"),
-            spans=tuple(_payload_spans(payload.get("citation_spans"))),
+            page_start=_payload_int(payload, "page_start"),
+            page_end=_payload_int(payload, "page_end"),
         ),
         relevance_score=score,
     )
@@ -236,35 +232,4 @@ def _payload_int(
     return default
 
 
-def _payload_bbox(value: object) -> BoundingBox | None:
-    if not isinstance(value, Mapping):
-        return None
-    try:
-        return BoundingBox.model_validate(value)
-    except ValueError:
-        return None
-
-
-def _payload_spans(value: object) -> list[CitationSpan]:
-    if not isinstance(value, (list, tuple)):
-        return []
-    spans: list[CitationSpan] = []
-    for raw_span in value:
-        if not isinstance(raw_span, Mapping):
-            continue
-        try:
-            spans.append(
-                CitationSpan(
-                    page=_payload_int(raw_span, "page"),
-                    element_id=_payload_text(raw_span, "element_id"),
-                    start_offset=_payload_int(raw_span, "start_offset"),
-                    end_offset=_payload_int(raw_span, "end_offset"),
-                    bounding_box=_payload_bbox(raw_span.get("bounding_box")),
-                )
-            )
-        except ValueError:
-            continue
-    return spans
-
-
-__all__ = ["QdrantSearchIndex"]
+__all__ = ["VectorSearchIndex"]

@@ -50,9 +50,9 @@ import type {
   DirectoryUser,
   KnowledgeItem,
   Paginated,
-  PluginBinding,
-  PluginConnection,
-  SyncRun,
+  IngestionSource,
+  IntegrationConnection,
+  IngestionRun,
 } from "@/modules/knowledge-management/types";
 
 type DetailTab = "items" | "sources" | "activity" | "settings";
@@ -71,9 +71,9 @@ export function KnowledgeBaseDetailPage({ knowledgeBaseId }: { knowledgeBaseId: 
   const [removing, setRemoving] = useState<KnowledgeItem | null>(null);
   const item = useAdminQuery<KnowledgeItem>(`/items/${knowledgeBaseId}`);
   const documentsQuery = useAdminQuery<Paginated<KnowledgeItem>>("/items?page_size=100&item_type=document");
-  const bindingsQuery = useAdminQuery<Paginated<PluginBinding>>(`/plugin-bindings?page_size=100&target_item_id=${knowledgeBaseId}`);
-  const runsQuery = useAdminQuery<Paginated<SyncRun>>("/ingestion/jobs?page_size=100");
-  const connectionsQuery = useAdminQuery<Paginated<PluginConnection>>("/plugin-connections?page_size=100");
+  const sourcesQuery = useAdminQuery<Paginated<IngestionSource>>(`/ingestion-sources?page_size=100&target_item_id=${knowledgeBaseId}`);
+  const runsQuery = useAdminQuery<Paginated<IngestionRun>>("/ingestion/jobs?page_size=100");
+  const connectionsQuery = useAdminQuery<Paginated<IntegrationConnection>>("/integration-connections?page_size=100");
   const grantsQuery = useAdminQuery<Paginated<CollectionGrant>>(`/collections/${knowledgeBaseId}/access?page_size=100`);
   const usersQuery = useAdminQuery<Paginated<DirectoryUser>>("/users?page_size=100");
   const groupsQuery = useAdminQuery<Paginated<DirectoryGroup>>("/groups?page_size=100");
@@ -81,11 +81,11 @@ export function KnowledgeBaseDetailPage({ knowledgeBaseId }: { knowledgeBaseId: 
     () => (documentsQuery.data?.items ?? []).filter((document) => document.parent_item_id === knowledgeBaseId),
     [documentsQuery.data?.items, knowledgeBaseId],
   );
-  const bindings = bindingsQuery.data?.items ?? [];
-  const bindingIds = useMemo(() => new Set(bindings.map((binding) => binding.id)), [bindings]);
+  const sources = sourcesQuery.data?.items ?? [];
+  const sourceIds = useMemo(() => new Set(sources.map((source) => source.id)), [sources]);
   const runs = useMemo(
-    () => (runsQuery.data?.items ?? []).filter((run) => bindingIds.has(run.binding_id)),
-    [bindingIds, runsQuery.data?.items],
+    () => (runsQuery.data?.items ?? []).filter((run) => sourceIds.has(run.source_id)),
+    [sourceIds, runsQuery.data?.items],
   );
   const connections = new Map((connectionsQuery.data?.items ?? []).map((connection) => [connection.id, connection]));
   const grants = grantsQuery.data?.items ?? [];
@@ -97,7 +97,7 @@ export function KnowledgeBaseDetailPage({ knowledgeBaseId }: { knowledgeBaseId: 
   function reloadWorkspace() {
     item.reload();
     documentsQuery.reload();
-    bindingsQuery.reload();
+    sourcesQuery.reload();
     runsQuery.reload();
     grantsQuery.reload();
   }
@@ -110,10 +110,10 @@ export function KnowledgeBaseDetailPage({ knowledgeBaseId }: { knowledgeBaseId: 
     router.replace(`${pathname}${params.size ? `?${params.toString()}` : ""}`, { scroll: false });
   }
 
-  async function runSync(bindingId: string) {
-    setAction(`sync:${bindingId}`);
+  async function runIngestion(sourceId: string) {
+    setAction(`ingest:${sourceId}`);
     try {
-      await adminRequest(`/plugin-bindings/${bindingId}/sync`, { method: "POST" });
+      await adminRequest(`/ingestion-sources/${sourceId}/ingest`, { method: "POST" });
       toast({ title: "Import requested", description: "The source run is queued.", variant: "success" });
       runsQuery.reload();
     } catch (cause) {
@@ -177,7 +177,7 @@ export function KnowledgeBaseDetailPage({ knowledgeBaseId }: { knowledgeBaseId: 
   const additionalMembers = Math.max(0, grants.length - ownerGrants.length);
   const tabs = [
     { id: "items", label: "Items", count: documents.length },
-    { id: "sources", label: "Sources", count: bindings.length },
+    { id: "sources", label: "Sources", count: sources.length },
     { id: "activity", label: "Activity", count: runs.length },
     { id: "settings", label: "Settings" },
   ];
@@ -248,14 +248,14 @@ export function KnowledgeBaseDetailPage({ knowledgeBaseId }: { knowledgeBaseId: 
         {tab === "sources" && (
           <SourcesTab
             action={action}
-            bindings={bindings}
+            sources={sources}
             connections={connections}
-            error={bindingsQuery.error ?? connectionsQuery.error}
+            error={sourcesQuery.error ?? connectionsQuery.error}
             onConnect={() => setConnectOpen(true)}
-            onRunSync={runSync}
+            onRunIngestion={runIngestion}
           />
         )}
-        {tab === "activity" && <ActivityTab action={action} bindings={bindings} error={runsQuery.error} knowledgeBaseId={knowledgeBaseId} onReload={runsQuery.reload} onRunSync={runSync} runs={runs} />}
+        {tab === "activity" && <ActivityTab action={action} sources={sources} error={runsQuery.error} knowledgeBaseId={knowledgeBaseId} onReload={runsQuery.reload} onRunIngestion={runIngestion} runs={runs} />}
         {tab === "settings" && (
           <SettingsTab
             action={action}
@@ -273,7 +273,7 @@ export function KnowledgeBaseDetailPage({ knowledgeBaseId }: { knowledgeBaseId: 
 
       {connectOpen && (
         <ConnectSourceDialog
-          bindings={bindings}
+          sources={sources}
           connections={connectionsQuery.data?.items ?? []}
           error={connectionsQuery.error}
           initialConnectionId={searchParams.get("connect")}
@@ -354,7 +354,7 @@ function ItemsTab({
 }) {
   const columns: Column<KnowledgeItem>[] = [
     { key: "title", label: "Item", minWidth: 280, sortable: true, render: (row) => <div><p className="font-medium text-[var(--text)]">{row.title}</p><p className="mt-0.5 text-xs text-[var(--text-muted)]">{titleCase(row.document_type ?? "document")} · {formatBytes(row.size_bytes)}</p></div> },
-    { key: "source", label: "Source", render: (row) => row.origins[0]?.connection?.display_name ?? "Direct upload" },
+    { key: "source", label: "Source", render: (row) => row.external_resources?.[0]?.integration_connection.display_name ?? "Direct upload" },
     { key: "status", label: "Processing", render: (row) => <StatusBadge status={row.status} /> },
     { key: "indexed", label: "Searchable", render: (row) => row.indexed ? "Yes" : "No" },
     { key: "updated_at", label: "Updated", minWidth: 170, render: (row) => formatDate(row.updated_at) },
@@ -393,9 +393,9 @@ function ItemsTab({
   );
 }
 
-function SourcesTab({ action, bindings, connections, error, onConnect, onRunSync }: { action: string | null; bindings: PluginBinding[]; connections: Map<string, PluginConnection>; error: string | null; onConnect: () => void; onRunSync: (id: string) => void }) {
+function SourcesTab({ action, sources, connections, error, onConnect, onRunIngestion }: { action: string | null; sources: IngestionSource[]; connections: Map<string, IntegrationConnection>; error: string | null; onConnect: () => void; onRunIngestion: (id: string) => void }) {
   if (error) return <ErrorState description={error} title="Sources are unavailable" />;
-  if (!bindings.length) {
+  if (!sources.length) {
     return (
       <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)]">
         <EmptyState action={<Button icon={<Plug aria-hidden="true" className="h-4 w-4" />} onClick={onConnect}>Connect source</Button>} description="Choose an existing validated connection or connect a new source without changing this knowledge base." icon={<Link2 className="h-5 w-5" />} title="No sources connected" />
@@ -405,17 +405,17 @@ function SourcesTab({ action, bindings, connections, error, onConnect, onRunSync
   return (
     <div className="space-y-3">
       <div className="flex justify-end"><Button icon={<Plug aria-hidden="true" className="h-4 w-4" />} onClick={onConnect} variant="secondary">Connect another source</Button></div>
-      {bindings.map((binding) => {
-        const connection = connections.get(binding.connection_id);
+      {sources.map((source) => {
+        const connection = connections.get(source.integration_connection_id);
         return (
-          <Card key={binding.id}>
+          <Card key={source.id}>
             <CardBody className="flex flex-col gap-4 sm:flex-row sm:items-center">
-              <ConnectorLogo provider={connection?.plugin_key ?? "file"} size="md" />
+              <ConnectorLogo provider={connection?.connector_key ?? "file"} size="md" />
               <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold text-[var(--text)]">{connection?.display_name ?? binding.display_name ?? "Source binding"}</h3><StatusBadge status={binding.status} /></div>
-                <p className="mt-1 text-xs text-[var(--text-muted)]">{scopeSummary(binding)} · Last imported {formatDate(binding.last_synced_at)}</p>
+                <div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold text-[var(--text)]">{connection?.display_name ?? source.display_name ?? "Ingestion source"}</h3><StatusBadge status={source.status} /></div>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">{scopeSummary(source)} · Last imported {formatDate(source.last_ingested_at)}</p>
               </div>
-              <Button icon={<RefreshCw aria-hidden="true" className="h-4 w-4" />} loading={action === `sync:${binding.id}`} onClick={() => onRunSync(binding.id)} variant="secondary">Import now</Button>
+              <Button icon={<RefreshCw aria-hidden="true" className="h-4 w-4" />} loading={action === `ingest:${source.id}`} onClick={() => onRunIngestion(source.id)} variant="secondary">Import now</Button>
             </CardBody>
           </Card>
         );
@@ -424,16 +424,19 @@ function SourcesTab({ action, bindings, connections, error, onConnect, onRunSync
   );
 }
 
-function ActivityTab({ action, bindings, error, knowledgeBaseId, onReload, onRunSync, runs }: { action: string | null; bindings: PluginBinding[]; error: string | null; knowledgeBaseId: string; onReload: () => void; onRunSync: (id: string) => void; runs: SyncRun[] }) {
-  const scheduledCount = bindings.filter((binding) => binding.schedule).length;
-  const columns: Column<SyncRun>[] = [
-    { key: "created_at", label: "Requested", minWidth: 170, render: (row) => formatDate(row.created_at) },
-    { key: "connection", label: "Source", render: (row) => row.connection.display_name },
-    { key: "trigger_type", label: "Trigger", render: (row) => titleCase(row.trigger_type) },
+function ActivityTab({ action, sources, error, knowledgeBaseId, onReload, onRunIngestion, runs }: { action: string | null; sources: IngestionSource[]; error: string | null; knowledgeBaseId: string; onReload: () => void; onRunIngestion: (id: string) => void; runs: IngestionRun[] }) {
+  const scheduledCount = sources.filter((source) => source.schedule).length;
+  const sourceNames = new Map(sources.map((source) => [
+    source.id,
+    source.integration_connection.display_name || source.display_name || "Unknown source",
+  ]));
+  const columns: Column<IngestionRun>[] = [
+    { key: "started_at", label: "Requested", minWidth: 170, render: (row) => formatDate(row.started_at) },
+    { key: "source_id", label: "Source", render: (row) => sourceNames.get(row.source_id) ?? titleCase(row.connector_key || "Unknown source") },
+    { key: "trigger_type", label: "Trigger", render: (row) => titleCase(row.trigger_type ?? "unknown") },
     { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> },
-    { key: "processed_item_count", label: "Processed", align: "right", render: (row) => `${row.processed_item_count}/${row.discovered_item_count}` },
-    { key: "written_chunk_count", label: "Chunks", align: "right" },
-    { key: "error_message", label: "Result", minWidth: 220, render: (row) => row.error_message ?? (row.status === "completed" ? "Completed" : "—") },
+    { key: "history_length", label: "Events", align: "right" },
+    { key: "finished_at", label: "Finished", minWidth: 170, render: (row) => formatDate(row.finished_at) },
   ];
   if (error) return <ErrorState actionLabel="Retry" description={error} onAction={onReload} title="Activity is unavailable" />;
   return (
@@ -442,7 +445,7 @@ function ActivityTab({ action, bindings, error, knowledgeBaseId, onReload, onRun
         <p>{scheduledCount ? `Updated by ${scheduledCount} schedule${scheduledCount === 1 ? "" : "s"}.` : "No automation schedule is configured for this knowledge base."}</p>
         <div className="flex flex-wrap gap-2">
           <Link className="knowledge-secondary-link" href={`/admin/schedules?knowledgeBase=${knowledgeBaseId}`}><CalendarClock aria-hidden="true" />Manage schedules</Link>
-          {bindings.map((binding) => <Button icon={<RefreshCw aria-hidden="true" className="h-4 w-4" />} key={binding.id} loading={action === `sync:${binding.id}`} onClick={() => onRunSync(binding.id)} variant="secondary">Run {binding.display_name ?? "source"}</Button>)}
+          {sources.map((source) => <Button icon={<RefreshCw aria-hidden="true" className="h-4 w-4" />} key={source.id} loading={action === `ingest:${source.id}`} onClick={() => onRunIngestion(source.id)} variant="secondary">Run {source.display_name ?? "source"}</Button>)}
         </div>
       </div>
       {runs.length ? <DataTable columns={columns} data={runs} density="dense" /> : <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)]"><EmptyState description="Connect a source and start an import to build activity history." icon={<RefreshCw className="h-5 w-5" />} title="No import activity" /></div>}
@@ -480,10 +483,10 @@ function Detail({ label, mono, value }: { label: string; mono?: boolean; value: 
   return <div><dt className="text-xs font-medium text-[var(--text-muted)]">{label}</dt><dd className={`mt-1 break-words text-sm font-medium text-[var(--text)] ${mono ? "font-mono text-xs" : ""}`}>{value}</dd></div>;
 }
 
-function scopeSummary(binding: PluginBinding) {
-  const included = Array.isArray(binding.config.include_scopes) ? binding.config.include_scopes.length : 0;
-  const excluded = Array.isArray(binding.config.exclude_scopes) ? binding.config.exclude_scopes.length : 0;
-  return binding.config.scope_mode === "all" ? "Saved connection scope" : `${included} included · ${excluded} excluded`;
+function scopeSummary(source: IngestionSource) {
+  const included = Array.isArray(source.config.include_scopes) ? source.config.include_scopes.length : 0;
+  const excluded = Array.isArray(source.config.exclude_scopes) ? source.config.exclude_scopes.length : 0;
+  return source.config.scope_mode === "all" ? "Saved connection scope" : `${included} included · ${excluded} excluded`;
 }
 
 function detailTab(value: string | null): DetailTab {

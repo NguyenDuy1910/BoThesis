@@ -18,9 +18,10 @@ from bothesis.document_index import (
     BM25_OPTIONS,
     DENSE_VECTOR_NAME,
     EmbeddingService,
+    IndexingContext,
     SPARSE_VECTOR_NAME,
+    build_index_records,
 )
-from bothesis.document_index.payload import QdrantPayloadContext, build_qdrant_records
 from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
 from bothesis.document_index.vector_store import VectorStore
 from bothesis.services.preview import KnowledgePreviewService
@@ -77,19 +78,17 @@ class QdrantKnowledgeSink:
         stored, source, _ = await self._persist_item(item, status="processing")
         await self._persist_preview(stored)
         canonical_item, canonical_chunks = self._canonical_document(item, chunks, stored)
+        await self._replace_citations(stored.id, canonical_chunks)
         records = (
-            await build_qdrant_records(
+            await build_index_records(
                 canonical_chunks,
                 canonical_item,
-                QdrantPayloadContext(
+                IndexingContext(
                     tenant_id=normalized_tenant,
-                    integration_connection_id=str(source.integration_connection_id),
-                    ingestion_source_id=str(source.id),
                     collection_item_id=str(source.target_item_id),
                     parent_item_id=(str(stored.parent_item_id) if stored.parent_item_id else None),
                     document_type=stored.document_type or "plain_text",
                     connector_key=source.integration_connection.connector_key,
-                    embedding_model=self._embedder.embedding_model,
                 ),
                 semantic_contextualizer=self._semantic_contextualizer,
             )
@@ -124,7 +123,7 @@ class QdrantKnowledgeSink:
                                 options=BM25_OPTIONS,
                             ),
                         },
-                        payload=record.payload.for_qdrant(),
+                        payload=record.payload.to_payload(),
                     )
                     for record, vector in zip(records, vectors, strict=True)
                 ]
@@ -159,6 +158,10 @@ class QdrantKnowledgeSink:
 
             stored = await ItemService(session).soft_delete_external_resource(source.id, item_id)
             canonical_id = stored.id if stored is not None else None
+            if canonical_id is not None:
+                from bothesis.services import CitationService
+
+                await CitationService(session).replace_for_item(canonical_id, ())
         if canonical_id is not None:
             await self._soft_delete_points(
                 tenant_id=normalized_tenant, item_id=str(canonical_id)
@@ -271,6 +274,16 @@ class QdrantKnowledgeSink:
                 await service.mark_ready(item_id)
             else:
                 await service.mark_failed(item_id)
+
+    async def _replace_citations(
+        self,
+        item_id: UUID,
+        chunks: Sequence[Chunk],
+    ) -> None:
+        from bothesis.services import CitationService
+
+        async with self._session_factory.begin() as session:
+            await CitationService(session).replace_for_item(item_id, chunks)
 
     async def _soft_delete_points(self, *, tenant_id: str, item_id: str) -> None:
         await self._store.set_payload(

@@ -7,6 +7,7 @@ import pytest
 from bothesis.connector.protocol import (
     AccessPolicy,
     CitationInfo,
+    CitationSpan,
     Chunk,
     DocumentItem,
     DocumentKind,
@@ -15,13 +16,13 @@ from bothesis.connector.protocol import (
     SourceProvider,
     TextPart,
 )
-from bothesis.document_index import INDEX_SCHEMA_VERSION
-from bothesis.document_index.models import ContextualChunk
-from bothesis.document_index.payload import (
-    QdrantPayloadContext,
+from bothesis.document_index import (
+    INDEX_SCHEMA_VERSION,
+    IndexingContext,
     build_contextual_chunks,
-    build_qdrant_records,
+    build_index_records,
 )
+from bothesis.document_index.models import ContextualChunk
 
 
 def _document() -> DocumentItem:
@@ -49,19 +50,19 @@ def _chunk() -> Chunk:
         chunk_index=0,
         chunk_text="connector evidence",
         content_type="mixed",
-        citation=CitationInfo(section="Replication"),
+        citation=CitationInfo(
+            section="Replication",
+            spans=(CitationSpan(page=2), CitationSpan(page=4)),
+        ),
     )
 
 
-def _context() -> QdrantPayloadContext:
-    return QdrantPayloadContext(
+def _context() -> IndexingContext:
+    return IndexingContext(
         tenant_id="tenant-1",
-        integration_connection_id="connection-1",
-        ingestion_source_id="source-1",
         collection_item_id="collection-1",
         document_type="jira_issue",
         connector_key="jira",
-        embedding_model="embed-v1",
     )
 
 
@@ -74,21 +75,34 @@ async def test_index_projection_is_bounded_and_collection_scoped() -> None:
     assert isinstance(contextual[0], ContextualChunk)
     assert contextual[0].chunk_text == source_chunk.chunk_text
     assert "RAW-CONTENT-MUST-NOT-BE-INDEXED" not in contextual[0].contextual_text
-    record = (await build_qdrant_records([source_chunk], document, _context()))[0]
+    record = (await build_index_records([source_chunk], document, _context()))[0]
     payload = record.payload
     assert payload.collection_item_id == "collection-1"
-    assert payload.integration_connection_id == "connection-1"
-    assert payload.ingestion_source_id == "source-1"
     assert payload.connector_key == "jira"
+    assert payload.section_path == ["Replication"]
+    assert payload.page_start == 2
+    assert payload.page_end == 4
     assert payload.schema_version == INDEX_SCHEMA_VERSION
-    serialized = json.dumps(payload.for_qdrant())
+    serialized_payload = payload.to_payload()
+    assert {
+        "integration_connection_id",
+        "ingestion_source_id",
+        "embedding_model",
+        "root_id",
+        "context_section_path",
+        "citation_section_path",
+        "citation_section",
+        "context_summary",
+        "citation_spans",
+    }.isdisjoint(serialized_payload)
+    serialized = json.dumps(serialized_payload)
     assert "RAW-CONTENT-MUST-NOT-BE-INDEXED" not in serialized
 
 
 @pytest.mark.asyncio
 async def test_qdrant_point_ids_are_deterministic() -> None:
-    first = await build_qdrant_records([_chunk()], _document(), _context())
-    second = await build_qdrant_records([_chunk()], _document(), _context())
+    first = await build_index_records([_chunk()], _document(), _context())
+    second = await build_index_records([_chunk()], _document(), _context())
     assert first[0].point_id == second[0].point_id
 
 

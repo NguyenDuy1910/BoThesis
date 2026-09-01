@@ -14,6 +14,7 @@ EXPECTED_TABLES = {
     "audit_logs",
     "collection_access",
     "conversations",
+    "citations",
     "group_memberships",
     "groups",
     "item_uploads",

@@ -386,6 +386,7 @@ def timestamp(value: datetime | None) -> str | None:
 # Import primary service classes only after their contracts are defined. The
 # service modules import these contracts from this package during initialization.
 from bothesis.services.auth import AuthService  # noqa: E402
+from bothesis.services.citation import CitationService  # noqa: E402
 from bothesis.services.item import ItemService  # noqa: E402
 from bothesis.services.collection_access import CollectionAccessService  # noqa: E402
 from bothesis.services.conversation import ConversationService  # noqa: E402
@@ -432,6 +433,7 @@ __all__ = [
     "AuthorizationError",
     "AsyncUploadStream",
     "CanonicalDocumentContent",
+    "CitationService",
     "ChatDocumentSource",
     "ChatDocumentSourceService",
     "CollectionAccessService",
