@@ -10,7 +10,14 @@ from bothesis.document_index.models import ContextualChunk
 class ScoreReranker:
     """Stable score ordering; provider-specific rerankers can implement this contract."""
 
-    def rerank(self, chunks: Sequence[ContextualChunk], *, limit: int) -> list[ContextualChunk]:
+    def rerank(
+        self,
+        chunks: Sequence[ContextualChunk],
+        *,
+        limit: int,
+        query: str = "",
+    ) -> list[ContextualChunk]:
+        del query
         if limit < 1:
             raise ValueError("limit must be at least one")
         return sorted(

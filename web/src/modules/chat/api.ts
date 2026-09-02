@@ -5,7 +5,6 @@ import type {
   ConversationDocument,
   ResponseStreamEvent,
 } from "./types";
-import type { ChatConnector, ChatConnectorMode } from "@/modules/connectors/types";
 
 const uploadIdempotencyKeys = new WeakMap<File, string>();
 
@@ -23,8 +22,6 @@ export async function streamAgentResponse(
     conversationId?: string | null;
     history: AgentHistoryMessage[];
     documentIds?: string[];
-    connectorMode: ChatConnectorMode;
-    connectorIds: string[];
     signal: AbortSignal;
     onEvent: (event: ResponseStreamEvent) => void;
   }
@@ -44,10 +41,8 @@ export async function streamAgentResponse(
       conversation_id: options.conversationId ?? null,
       history: options.history,
       document_ids: options.documentIds ?? [],
-      connector_mode: options.connectorMode,
-      connector_ids: options.connectorMode === "selected"
-        ? options.connectorIds.map((id) => Number(id))
-        : [],
+      knowledge_mode: "auto",
+      collection_item_ids: [],
     }),
   });
   if (!response.ok || !response.body) {
@@ -81,21 +76,6 @@ export async function streamAgentResponse(
     }
     if (done) break;
   }
-}
-
-export async function getAvailableChatConnectors(
-  signal?: AbortSignal,
-): Promise<ChatConnector[]> {
-  const configuration = getBothesisChatConfiguration();
-  if (!configuration) throw new ChatConfigurationError();
-  const response = await fetch(`${configuration.apiUrl}/api/v1/agent/connectors`, {
-    cache: "no-store",
-    headers: developmentIdentityHeaders(configuration),
-    signal,
-  });
-  if (!response.ok) throw await responseError(response, "Could not load permitted connectors.");
-  const payload = await response.json() as { items?: ChatConnector[] };
-  return Array.isArray(payload.items) ? payload.items : [];
 }
 
 interface DocumentUploadStartResponse {

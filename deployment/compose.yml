@@ -84,7 +84,7 @@ services:
           --namespace "$$TEMPORAL_NAMESPACE" >/dev/null 2>&1; do sleep 1; done
         until temporal operator search-attribute list \
           --namespace "$$TEMPORAL_NAMESPACE" >/dev/null 2>&1; do sleep 1; done
-        for attribute in TenantId BindingId ConnectionId PluginKey WorkflowCategory TriggerType; do
+        for attribute in TenantId IngestionSourceId IntegrationConnectionId ConnectorKey WorkflowCategory TriggerType; do
           output="$$(temporal operator search-attribute create \
             --namespace "$$TEMPORAL_NAMESPACE" \
             --name "$$attribute" \

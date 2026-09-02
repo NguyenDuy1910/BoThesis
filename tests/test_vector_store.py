@@ -77,7 +77,11 @@ def test_collection_authorization_and_business_filters_are_deterministic() -> No
             tenant_id="tenant-1",
             collection_item_ids=("collection-2", "collection-1", "collection-2"),
         ),
-        payload_filters=SimpleNamespace(plugin_key=["jira"], item_id=["doc-1"]),
+        payload_filters=SimpleNamespace(
+            connector_key=["jira"],
+            item_id=["doc-1"],
+            section=["Annual leave"],
+        ),
     )
 
     assert [
@@ -89,8 +93,9 @@ def test_collection_authorization_and_business_filters_are_deterministic() -> No
         "schema_version",
         "tenant_id",
         "collection_item_id",
-        "plugin_key",
+        "connector_key",
         "item_id",
+        "section_path",
         "ancestor_ids",
     ]
     collection_condition = (query_filter.must or [])[3]
@@ -138,6 +143,28 @@ async def test_soft_delete_only_updates_derived_lifecycle_state() -> None:
 
     assert client.set_payload_calls[0]["payload"] == {"is_deleted": True}
     assert client.set_payload_calls[0]["points"] == VectorStore.document_filter("doc-1")
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_can_be_scoped_to_the_document_tenant() -> None:
+    client = RecordingClient()
+    store = VectorStore(client=client, collection_name="chunks")
+
+    await store.soft_delete_document_points("doc-1", tenant_id="tenant-1")
+
+    point_filter = client.set_payload_calls[0]["points"]
+    assert point_filter == qmodels.Filter(
+        must=[
+            qmodels.FieldCondition(
+                key="tenant_id",
+                match=qmodels.MatchValue(value="tenant-1"),
+            ),
+            qmodels.FieldCondition(
+                key="item_id",
+                match=qmodels.MatchValue(value="doc-1"),
+            ),
+        ]
+    )
 
 
 @pytest.mark.asyncio

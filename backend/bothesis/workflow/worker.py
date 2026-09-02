@@ -18,8 +18,9 @@ from temporalio.worker.workflow_sandbox import (
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.db.engine import get_session_factory
 from bothesis.document_index.raw_storage import S3DocumentStorage
-from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
+from bothesis.document_index import SemanticContextualizer
 from bothesis.document_index.vector_store import VectorStore
+from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
 from bothesis.services.ingestion_workflow import IngestionWorkflow
 from bothesis.workflow import TemporalSettings
 from bothesis.workflow.client import TemporalClientProvider
@@ -81,7 +82,7 @@ class TemporalWorker:
             )
         )
         semantic_contextualizer = None
-        if _environment_boolean("BOTHESIS_CONTEXTUALIZATION_ENABLED"):
+        if _environment_boolean("BOTHESIS_CONTEXTUALIZATION_ENABLED", default=True):
             model = os.getenv("BOTHESIS_CONTEXTUALIZATION_MODEL") or None
             self._contextualization_transport = OpenRouterTransport(
                 base_url=os.getenv(
@@ -100,12 +101,27 @@ class TemporalWorker:
             self._embedder,
             self._storage,
             credential_encryption_key=(
-                os.getenv("BOTHESIS_PLUGIN_ENCRYPTION_KEY") or None
+                os.getenv("BOTHESIS_INTEGRATION_ENCRYPTION_KEY") or None
             ),
             embedding_batch_size=int(
                 os.getenv("BOTHESIS_DOCUMENT_EMBEDDING_BATCH_SIZE", "32")
             ),
             semantic_contextualizer=semantic_contextualizer,
+            preview_service=KnowledgePreviewService(
+                self._storage,
+                renderer=KnowledgePreviewRenderer(
+                    max_pages=int(os.getenv("BOTHESIS_PREVIEW_MAX_PAGES", "50")),
+                    max_dimension=int(
+                        os.getenv("BOTHESIS_PREVIEW_MAX_DIMENSION", "1600")
+                    ),
+                    webp_quality=int(
+                        os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")
+                    ),
+                ),
+                max_source_bytes=int(
+                    os.getenv("BOTHESIS_PREVIEW_MAX_SOURCE_BYTES", "104857600")
+                ),
+            ),
         )
 
     async def _close(self) -> None:

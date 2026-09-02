@@ -69,15 +69,18 @@ Connectors normalize source ACLs into principal tokens. The Item ACL is
 projected into Qdrant for pre-retrieval filtering and is defensively checked
 again before evidence reaches the agent.
 
-## Synchronization semantics
+## Ingestion semantics
 
-- A connector row represents one configured connection instance, not a generic
-  provider type.
-- A connector scope is one independently synchronized source unit, such as a
-  Confluence space or a managed-file source.
-- `sync_checkpoint` advances only after the complete scope succeeds.
-- `sync_runs` records operational history; it does not represent an index
-  generation.
+- An `integration_connections` row is reusable provider configuration and
+  optional credentials, not canonical knowledge.
+- An `ingestion_sources` row is one independently checkpointed external scope
+  targeting a canonical Collection Item.
+- An `external_resources` row preserves the unique
+  `(ingestion_source_id, external_id) -> item_id` mapping plus provider version,
+  ETag, source URL, and last-seen state.
+- `checkpoint` advances only after the complete ingestion source succeeds.
+- Temporal owns schedules and execution history; PostgreSQL retains only domain
+  checkpoint and last-ingested/indexed state.
 - Updated Items replace their deterministic Qdrant points. Deleted Items are
   tombstoned; normal reads exclude tombstones.
 

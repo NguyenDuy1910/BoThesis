@@ -1,4 +1,4 @@
-"""Plugin Connection and independently checkpointed Binding administration."""
+"""Integration Connection and independently checkpointed Ingestion Source administration."""
 
 from __future__ import annotations
 
@@ -11,16 +11,18 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
+from bothesis.connector.adapter import CheckpointedSourceConnectorAdapter
 from bothesis.connector.base import StaticCredentialsProvider
 from bothesis.connector.confluence.connector import ConfluenceConnector
 from bothesis.connector.file.file_connector import FileConnector
+from bothesis.connector.protocol import ConnectorScope
 from bothesis.db.models import (
     Item,
-    PluginBinding,
-    PluginConnection,
+    IngestionSource,
+    IntegrationConnection,
 )
-from bothesis.plugin import PluginDefinition
-from bothesis.plugin.registry import PluginRegistry
+from bothesis.connector import ConnectorDefinition
+from bothesis.connector.registry import ConnectorRegistry
 from bothesis.services import (
     ACTIVE_STATUS,
     SOURCE_MANAGE_PERMISSION,
@@ -30,7 +32,7 @@ from bothesis.services import (
     AdminValidationError,
     AuditService,
     AuthContext,
-    PluginCredentialService,
+    IntegrationCredentialService,
     normalize_page,
     normalize_required_text,
     require_tenant_permission,
@@ -41,14 +43,14 @@ _CONNECTION_STATUSES = {"draft", "active", "disabled", "error"}
 _SECRET_KEY_TERMS = {"access_key", "api_key", "authorization", "password", "secret", "token"}
 
 
-class PluginService:
-    """Manage reusable Connections and independently checkpointed Bindings."""
+class IntegrationService:
+    """Manage reusable Connections and independently checkpointed Ingestion Sources."""
 
     def __init__(
         self,
         session: AsyncSession,
         *,
-        registry: PluginRegistry | None = None,
+        registry: ConnectorRegistry | None = None,
         credential_encryption_key: str | None = None,
         audit: AuditService | None = None,
     ) -> None:
@@ -58,22 +60,22 @@ class PluginService:
         self._audit = audit or AuditService(session)
 
     @staticmethod
-    def default_registry() -> PluginRegistry:
-        return PluginRegistry(
+    def default_registry() -> ConnectorRegistry:
+        return ConnectorRegistry(
             (
-                PluginDefinition(
+                ConnectorDefinition(
                     key="confluence",
                     display_name="Confluence",
                     authentication_type="credentials",
                     capabilities=("knowledge_ingestion",),
-                    factory=PluginService._confluence_factory,
+                    factory=IntegrationService._confluence_factory,
                 ),
-                PluginDefinition(
+                ConnectorDefinition(
                     key="file",
                     display_name="Managed files",
                     authentication_type="none",
                     capabilities=("knowledge_ingestion", "file_upload"),
-                    factory=PluginService._file_factory,
+                    factory=IntegrationService._file_factory,
                 ),
             )
         )
@@ -81,9 +83,9 @@ class PluginService:
     async def capabilities(self, actor: AuthContext) -> dict[str, Any]:
         require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
         return {
-            "plugins": [
+            "connectors": [
                 {
-                    "plugin_key": definition.key,
+                    "connector_key": definition.key,
                     "display_name": definition.display_name,
                     "authentication_type": definition.authentication_type,
                     "capabilities": list(definition.capabilities),
@@ -96,7 +98,7 @@ class PluginService:
         self,
         actor: AuthContext,
         *,
-        plugin_key: str,
+        connector_key: str,
         display_name: str,
         config: Mapping[str, Any],
         credentials: Mapping[str, Any] | None = None,
@@ -104,26 +106,26 @@ class PluginService:
         owner_type: str = "tenant",
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        normalized_key = normalize_required_text(plugin_key, "plugin key", 64).casefold()
+        normalized_key = normalize_required_text(connector_key, "connector key", 64).casefold()
         definition = self._definition(normalized_key)
         normalized_name = normalize_required_text(display_name, "connection display name", 255)
         normalized_owner = owner_type.strip().casefold()
         if normalized_owner not in {"tenant", "user"}:
             raise AdminValidationError("connection owner_type must be user or tenant")
         duplicate = await self._session.scalar(
-            select(PluginConnection.id).where(
-                PluginConnection.tenant_id == tenant_id,
-                PluginConnection.display_name == normalized_name,
-                PluginConnection.deleted_at.is_(None),
+            select(IntegrationConnection.id).where(
+                IntegrationConnection.tenant_id == tenant_id,
+                IntegrationConnection.display_name == normalized_name,
+                IntegrationConnection.deleted_at.is_(None),
             )
         )
         if duplicate is not None:
             raise AdminConflictError("connection display name already exists")
         if definition.authentication_type != "none" and not credentials:
             raise AdminValidationError(f"{definition.display_name} credentials are required")
-        connection = PluginConnection(
+        connection = IntegrationConnection(
             tenant_id=tenant_id,
-            plugin_key=normalized_key,
+            connector_key=normalized_key,
             owner_type=normalized_owner,
             owner_user_id=actor.user_id if normalized_owner == "user" else None,
             display_name=normalized_name,
@@ -141,37 +143,37 @@ class PluginService:
             )
         await self._audit.record(
             actor,
-            action="plugin.connection.created",
-            resource_type="plugin_connection",
+            action="integration.connection.created",
+            resource_type="integration_connection",
             resource_id=str(connection.id),
-            details={"plugin_key": normalized_key},
+            details={"connector_key": normalized_key},
         )
         return await self.get_connection(actor, connection.id)
 
     async def get_connection(
-        self, actor: AuthContext, connection_id: UUID
+        self, actor: AuthContext, integration_connection_id: UUID
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
         connection = await self._session.scalar(
-            select(PluginConnection)
+            select(IntegrationConnection)
             .options(
-                selectinload(PluginConnection.bindings),
-                joinedload(PluginConnection.credential),
+                selectinload(IntegrationConnection.ingestion_sources),
+                joinedload(IntegrationConnection.credential),
             )
             .where(
-                PluginConnection.id == connection_id,
-                PluginConnection.tenant_id == tenant_id,
-                PluginConnection.deleted_at.is_(None),
+                IntegrationConnection.id == integration_connection_id,
+                IntegrationConnection.tenant_id == tenant_id,
+                IntegrationConnection.deleted_at.is_(None),
             )
         )
         if connection is None:
-            raise AdminNotFoundError(f"plugin Connection not found: {connection_id}")
+            raise AdminNotFoundError(f"integration connection not found: {integration_connection_id}")
         return self._connection_payload(connection)
 
     async def update_connection(
         self,
         actor: AuthContext,
-        connection_id: UUID,
+        integration_connection_id: UUID,
         *,
         display_name: str | None = None,
         config: Mapping[str, Any] | None = None,
@@ -180,17 +182,17 @@ class PluginService:
         status: str | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        connection = await self._connection(tenant_id, connection_id)
+        connection = await self._connection(tenant_id, integration_connection_id)
         if display_name is not None:
             normalized_name = normalize_required_text(
                 display_name, "connection display name", 255
             )
             duplicate = await self._session.scalar(
-                select(PluginConnection.id).where(
-                    PluginConnection.tenant_id == tenant_id,
-                    PluginConnection.display_name == normalized_name,
-                    PluginConnection.id != connection.id,
-                    PluginConnection.deleted_at.is_(None),
+                select(IntegrationConnection.id).where(
+                    IntegrationConnection.tenant_id == tenant_id,
+                    IntegrationConnection.display_name == normalized_name,
+                    IntegrationConnection.id != connection.id,
+                    IntegrationConnection.deleted_at.is_(None),
                 )
             )
             if duplicate is not None:
@@ -206,56 +208,56 @@ class PluginService:
         if credentials is not None:
             await self._credentials().store(
                 connection.id,
-                credential_type=credential_type or connection.plugin_key,
+                credential_type=credential_type or connection.connector_key,
                 payload=credentials,
             )
         await self._session.flush()
         await self._audit.record(
             actor,
-            action="plugin.connection.updated",
-            resource_type="plugin_connection",
+            action="integration.connection.updated",
+            resource_type="integration_connection",
             resource_id=str(connection.id),
         )
         return await self.get_connection(actor, connection.id)
 
     async def delete_connection(
-        self, actor: AuthContext, connection_id: UUID
+        self, actor: AuthContext, integration_connection_id: UUID
     ) -> None:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        connection = await self._connection(tenant_id, connection_id)
+        connection = await self._connection(tenant_id, integration_connection_id)
         now = datetime.now(UTC)
-        bindings = list(
+        ingestion_sources = list(
             await self._session.scalars(
-                select(PluginBinding).where(
-                    PluginBinding.connection_id == connection.id,
-                    PluginBinding.deleted_at.is_(None),
+                select(IngestionSource).where(
+                    IngestionSource.integration_connection_id == connection.id,
+                    IngestionSource.deleted_at.is_(None),
                 )
             )
         )
-        for binding in bindings:
-            binding.status = "disabled"
-            binding.deleted_at = now
+        for source in ingestion_sources:
+            source.status = "disabled"
+            source.deleted_at = now
         connection.status = "disabled"
         connection.deleted_at = now
         await self._session.flush()
         await self._audit.record(
             actor,
-            action="plugin.connection.deleted",
-            resource_type="plugin_connection",
+            action="integration.connection.deleted",
+            resource_type="integration_connection",
             resource_id=str(connection.id),
         )
 
-    async def create_binding(
+    async def create_source(
         self,
         actor: AuthContext,
-        connection_id: UUID,
+        integration_connection_id: UUID,
         *,
         target_item_id: UUID,
         display_name: str | None,
         config: Mapping[str, Any],
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        connection = await self._connection(tenant_id, connection_id)
+        connection = await self._connection(tenant_id, integration_connection_id)
         target = await self._session.scalar(
             select(Item).where(
                 Item.id == target_item_id,
@@ -267,11 +269,11 @@ class PluginService:
         )
         if target is None:
             raise AdminNotFoundError(f"target Collection not found: {target_item_id}")
-        binding = PluginBinding(
-            connection_id=connection.id,
+        source = IngestionSource(
+            integration_connection_id=connection.id,
             target_item_id=target.id,
             display_name=(
-                normalize_required_text(display_name, "binding display name", 255)
+                normalize_required_text(display_name, "source display name", 255)
                 if display_name is not None
                 else None
             ),
@@ -280,19 +282,19 @@ class PluginService:
             status=ACTIVE_STATUS,
             created_by_user_id=actor.user_id,
         )
-        self._session.add(binding)
+        self._session.add(source)
         await self._session.flush()
         await self._audit.record(
             actor,
-            action="plugin.binding.created",
-            resource_type="plugin_binding",
-            resource_id=str(binding.id),
+            action="ingestion.source.created",
+            resource_type="ingestion_source",
+            resource_id=str(source.id),
             details={
-                "connection_id": str(connection.id),
+                "integration_connection_id": str(connection.id),
                 "target_item_id": str(target.id),
             },
         )
-        return await self.get_binding(actor, binding.id)
+        return await self.get_source(actor, source.id)
 
     async def list_connections(
         self,
@@ -300,45 +302,45 @@ class PluginService:
         *,
         page: int = 1,
         page_size: int = 20,
-        plugin_key: str | None = None,
+        connector_key: str | None = None,
         status: str | None = None,
         search: str | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
         page, page_size, offset = normalize_page(page, page_size)
         filters = [
-            PluginConnection.tenant_id == tenant_id,
-            PluginConnection.deleted_at.is_(None),
+            IntegrationConnection.tenant_id == tenant_id,
+            IntegrationConnection.deleted_at.is_(None),
         ]
-        if plugin_key:
-            filters.append(PluginConnection.plugin_key == plugin_key.strip().casefold())
+        if connector_key:
+            filters.append(IntegrationConnection.connector_key == connector_key.strip().casefold())
         if status:
             normalized = status.strip().casefold()
             if normalized not in _CONNECTION_STATUSES:
                 raise AdminValidationError("unsupported connection status")
-            filters.append(PluginConnection.status == normalized)
+            filters.append(IntegrationConnection.status == normalized)
         if search and search.strip():
             term = f"%{search.strip()}%"
             filters.append(
                 or_(
-                    PluginConnection.display_name.ilike(term),
-                    PluginConnection.plugin_key.ilike(term),
+                    IntegrationConnection.display_name.ilike(term),
+                    IntegrationConnection.connector_key.ilike(term),
                 )
             )
         total = await self._session.scalar(
             select(func.count()).select_from(
-                select(PluginConnection.id).where(*filters).subquery()
+                select(IntegrationConnection.id).where(*filters).subquery()
             )
         )
         connections = list(
             await self._session.scalars(
-                select(PluginConnection)
+                select(IntegrationConnection)
                 .options(
-                    selectinload(PluginConnection.bindings),
-                    joinedload(PluginConnection.credential),
+                    selectinload(IntegrationConnection.ingestion_sources),
+                    joinedload(IntegrationConnection.credential),
                 )
                 .where(*filters)
-                .order_by(PluginConnection.display_name, PluginConnection.id)
+                .order_by(IntegrationConnection.display_name, IntegrationConnection.id)
                 .limit(page_size)
                 .offset(offset)
             )
@@ -350,125 +352,125 @@ class PluginService:
             "page_size": page_size,
         }
 
-    async def list_bindings(
+    async def list_sources(
         self,
         actor: AuthContext,
         *,
         page: int = 1,
         page_size: int = 20,
-        connection_id: UUID | None = None,
+        integration_connection_id: UUID | None = None,
         target_item_id: UUID | None = None,
         status: str | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
         page, page_size, offset = normalize_page(page, page_size)
         filters = [
-            PluginConnection.tenant_id == tenant_id,
-            PluginConnection.deleted_at.is_(None),
-            PluginBinding.deleted_at.is_(None),
+            IntegrationConnection.tenant_id == tenant_id,
+            IntegrationConnection.deleted_at.is_(None),
+            IngestionSource.deleted_at.is_(None),
         ]
-        if connection_id is not None:
-            filters.append(PluginBinding.connection_id == connection_id)
+        if integration_connection_id is not None:
+            filters.append(IngestionSource.integration_connection_id == integration_connection_id)
         if target_item_id is not None:
-            filters.append(PluginBinding.target_item_id == target_item_id)
+            filters.append(IngestionSource.target_item_id == target_item_id)
         if status is not None:
-            filters.append(PluginBinding.status == status.strip().casefold())
+            filters.append(IngestionSource.status == status.strip().casefold())
         query = (
-            select(PluginBinding)
-            .join(PluginConnection, PluginConnection.id == PluginBinding.connection_id)
+            select(IngestionSource)
+            .join(IntegrationConnection, IntegrationConnection.id == IngestionSource.integration_connection_id)
             .options(
-                joinedload(PluginBinding.connection),
-                joinedload(PluginBinding.target_item),
+                joinedload(IngestionSource.integration_connection),
+                joinedload(IngestionSource.target_item),
             )
             .where(*filters)
         )
         total = await self._session.scalar(
-            select(func.count()).select_from(query.with_only_columns(PluginBinding.id).subquery())
+            select(func.count()).select_from(query.with_only_columns(IngestionSource.id).subquery())
         )
-        bindings = list(
+        ingestion_sources = list(
             await self._session.scalars(
-                query.order_by(PluginBinding.created_at.desc(), PluginBinding.id)
+                query.order_by(IngestionSource.created_at.desc(), IngestionSource.id)
                 .limit(page_size)
                 .offset(offset)
             )
         )
         return {
-            "items": [self._binding_payload(value) for value in bindings],
+            "items": [self._source_payload(value) for value in ingestion_sources],
             "total": int(total or 0),
             "page": page,
             "page_size": page_size,
         }
 
-    async def get_binding(self, actor: AuthContext, binding_id: UUID) -> dict[str, Any]:
+    async def get_source(self, actor: AuthContext, source_id: UUID) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        binding = await self._session.scalar(
-            select(PluginBinding)
-            .join(PluginConnection, PluginConnection.id == PluginBinding.connection_id)
+        source = await self._session.scalar(
+            select(IngestionSource)
+            .join(IntegrationConnection, IntegrationConnection.id == IngestionSource.integration_connection_id)
             .options(
-                joinedload(PluginBinding.connection),
-                joinedload(PluginBinding.target_item),
+                joinedload(IngestionSource.integration_connection),
+                joinedload(IngestionSource.target_item),
             )
             .where(
-                PluginBinding.id == binding_id,
-                PluginBinding.deleted_at.is_(None),
-                PluginConnection.tenant_id == tenant_id,
-                PluginConnection.deleted_at.is_(None),
+                IngestionSource.id == source_id,
+                IngestionSource.deleted_at.is_(None),
+                IntegrationConnection.tenant_id == tenant_id,
+                IntegrationConnection.deleted_at.is_(None),
             )
         )
-        if binding is None:
-            raise AdminNotFoundError(f"plugin Binding not found: {binding_id}")
-        return self._binding_payload(binding)
+        if source is None:
+            raise AdminNotFoundError(f"ingestion source not found: {source_id}")
+        return self._source_payload(source)
 
-    async def update_binding(
+    async def update_source(
         self,
         actor: AuthContext,
-        binding_id: UUID,
+        source_id: UUID,
         *,
         display_name: str | None = None,
         config: Mapping[str, Any] | None = None,
         status: str | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        binding = await self._binding(tenant_id, binding_id, for_update=True)
+        source = await self._source(tenant_id, source_id, for_update=True)
         if display_name is not None:
-            binding.display_name = normalize_required_text(
-                display_name, "binding display name", 255
+            source.display_name = normalize_required_text(
+                display_name, "source display name", 255
             )
         if config is not None:
-            binding.config = self._non_secret_mapping(config)
+            source.config = self._non_secret_mapping(config)
         if status is not None:
             normalized_status = status.strip().casefold()
             if normalized_status not in {"active", "disabled", "error"}:
-                raise AdminValidationError("unsupported Binding status")
-            binding.status = normalized_status
+                raise AdminValidationError("unsupported Ingestion Source status")
+            source.status = normalized_status
         await self._session.flush()
         await self._audit.record(
             actor,
-            action="plugin.binding.updated",
-            resource_type="plugin_binding",
-            resource_id=str(binding.id),
+            action="ingestion.source.updated",
+            resource_type="ingestion_source",
+            resource_id=str(source.id),
         )
-        return await self.get_binding(actor, binding.id)
+        return await self.get_source(actor, source.id)
 
-    async def delete_binding(self, actor: AuthContext, binding_id: UUID) -> None:
+    async def delete_source(self, actor: AuthContext, source_id: UUID) -> None:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        binding = await self._binding(tenant_id, binding_id, for_update=True)
+        source = await self._source(tenant_id, source_id, for_update=True)
         now = datetime.now(UTC)
-        binding.status = "disabled"
-        binding.deleted_at = now
+        source.status = "disabled"
+        source.deleted_at = now
         await self._session.flush()
         await self._audit.record(
             actor,
-            action="plugin.binding.deleted",
-            resource_type="plugin_binding",
-            resource_id=str(binding.id),
+            action="ingestion.source.deleted",
+            resource_type="ingestion_source",
+            resource_id=str(source.id),
         )
 
     async def validate_connection(
-        self, actor: AuthContext, connection_id: UUID
+        self, actor: AuthContext, integration_connection_id: UUID
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
-        connection = await self._connection(tenant_id, connection_id)
+        connection = await self._connection(tenant_id, integration_connection_id)
         credentials = await self._resolved_credentials(connection)
         runtime = self._runtime(connection, config={}, credentials=credentials)
         try:
@@ -476,112 +478,112 @@ class PluginService:
         except Exception as exc:
             connection.status = "error"
             raise AdminExternalUnavailableError(
-                f"{connection.plugin_key} connection validation failed"
+                f"{connection.connector_key} connection validation failed"
             ) from exc
         if not connected:
             connection.status = "error"
             raise AdminExternalUnavailableError(
-                f"{connection.plugin_key} connection validation failed"
+                f"{connection.connector_key} connection validation failed"
             )
         connection.status = ACTIVE_STATUS
         await self._session.flush()
         await self._audit.record(
             actor,
-            action="plugin.connection.validated",
-            resource_type="plugin_connection",
+            action="integration.connection.validated",
+            resource_type="integration_connection",
             resource_id=str(connection.id),
         )
         return {"valid": True, "status": connection.status}
 
-    async def runtime_for_binding(self, binding_id: UUID) -> tuple[PluginBinding, Any]:
-        binding = await self._session.scalar(
-            select(PluginBinding)
-            .options(joinedload(PluginBinding.connection), joinedload(PluginBinding.target_item))
-            .where(PluginBinding.id == binding_id)
+    async def runtime_for_source(self, source_id: UUID) -> tuple[IngestionSource, Any]:
+        source = await self._session.scalar(
+            select(IngestionSource)
+            .options(joinedload(IngestionSource.integration_connection), joinedload(IngestionSource.target_item))
+            .where(IngestionSource.id == source_id)
         )
         if (
-            binding is None
-            or binding.status != ACTIVE_STATUS
-            or binding.deleted_at is not None
-            or binding.connection.status != ACTIVE_STATUS
-            or binding.connection.deleted_at is not None
+            source is None
+            or source.status != ACTIVE_STATUS
+            or source.deleted_at is not None
+            or source.integration_connection.status != ACTIVE_STATUS
+            or source.integration_connection.deleted_at is not None
         ):
-            raise AdminNotFoundError(f"active plugin Binding not found: {binding_id}")
-        credentials = await self._resolved_credentials(binding.connection)
-        return binding, self._runtime(
-            binding.connection, config=binding.config, credentials=credentials
+            raise AdminNotFoundError(f"active ingestion source not found: {source_id}")
+        credentials = await self._resolved_credentials(source.integration_connection)
+        return source, self._runtime(
+            source.integration_connection, config=source.config, credentials=credentials
         )
 
     async def _connection(
-        self, tenant_id: UUID, connection_id: UUID
-    ) -> PluginConnection:
+        self, tenant_id: UUID, integration_connection_id: UUID
+    ) -> IntegrationConnection:
         connection = await self._session.scalar(
-            select(PluginConnection)
-            .options(joinedload(PluginConnection.credential))
+            select(IntegrationConnection)
+            .options(joinedload(IntegrationConnection.credential))
             .where(
-                PluginConnection.id == connection_id,
-                PluginConnection.tenant_id == tenant_id,
-                PluginConnection.deleted_at.is_(None),
+                IntegrationConnection.id == integration_connection_id,
+                IntegrationConnection.tenant_id == tenant_id,
+                IntegrationConnection.deleted_at.is_(None),
             )
         )
         if connection is None:
-            raise AdminNotFoundError(f"plugin Connection not found: {connection_id}")
+            raise AdminNotFoundError(f"integration connection not found: {integration_connection_id}")
         return connection
 
-    async def _binding(
-        self, tenant_id: UUID, binding_id: UUID, *, for_update: bool = False
-    ) -> PluginBinding:
+    async def _source(
+        self, tenant_id: UUID, source_id: UUID, *, for_update: bool = False
+    ) -> IngestionSource:
         statement = (
-            select(PluginBinding)
-            .options(joinedload(PluginBinding.connection), joinedload(PluginBinding.target_item))
-            .join(PluginConnection, PluginConnection.id == PluginBinding.connection_id)
+            select(IngestionSource)
+            .options(joinedload(IngestionSource.integration_connection), joinedload(IngestionSource.target_item))
+            .join(IntegrationConnection, IntegrationConnection.id == IngestionSource.integration_connection_id)
             .where(
-                PluginBinding.id == binding_id,
-                PluginBinding.deleted_at.is_(None),
-                PluginConnection.tenant_id == tenant_id,
-                PluginConnection.deleted_at.is_(None),
+                IngestionSource.id == source_id,
+                IngestionSource.deleted_at.is_(None),
+                IntegrationConnection.tenant_id == tenant_id,
+                IntegrationConnection.deleted_at.is_(None),
             )
         )
         if for_update:
-            statement = statement.with_for_update(of=PluginBinding)
-        binding = await self._session.scalar(statement)
-        if binding is None:
-            raise AdminNotFoundError(f"plugin Binding not found: {binding_id}")
-        return binding
+            statement = statement.with_for_update(of=IngestionSource)
+        source = await self._session.scalar(statement)
+        if source is None:
+            raise AdminNotFoundError(f"ingestion source not found: {source_id}")
+        return source
 
-    def _definition(self, key: str) -> PluginDefinition:
+    def _definition(self, key: str) -> ConnectorDefinition:
         try:
             return self._registry.get(key)
         except LookupError as exc:
             raise AdminValidationError(str(exc)) from exc
 
-    def _credentials(self) -> PluginCredentialService:
+    def _credentials(self) -> IntegrationCredentialService:
         if not self._credential_encryption_key:
             raise AdminExternalUnavailableError(
-                "BOTHESIS_PLUGIN_ENCRYPTION_KEY is not configured"
+                "BOTHESIS_INTEGRATION_ENCRYPTION_KEY is not configured"
             )
-        return PluginCredentialService(self._session, self._credential_encryption_key)
+        return IntegrationCredentialService(self._session, self._credential_encryption_key)
 
     async def _resolved_credentials(
-        self, connection: PluginConnection
+        self, connection: IntegrationConnection
     ) -> Mapping[str, Any]:
-        definition = self._definition(connection.plugin_key)
+        definition = self._definition(connection.connector_key)
         if definition.authentication_type == "none":
             return {}
         return await self._credentials().resolve(connection.id)
 
     def _runtime(
         self,
-        connection: PluginConnection,
+        connection: IntegrationConnection,
         *,
         config: Mapping[str, Any],
         credentials: Mapping[str, Any],
     ) -> Any:
-        definition = self._definition(connection.plugin_key)
+        definition = self._definition(connection.connector_key)
         connection_config = {
             **dict(connection.config),
             "_tenant_id": str(connection.tenant_id),
-            "_connection_id": str(connection.id),
+            "_integration_connection_id": str(connection.id),
             "connector_id": str(connection.id),
         }
         return definition.factory(connection_config, config, credentials)
@@ -589,53 +591,53 @@ class PluginService:
     @staticmethod
     def _non_secret_mapping(values: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(values, Mapping):
-            raise AdminValidationError("plugin config must be a JSON object")
+            raise AdminValidationError("integration config must be a JSON object")
         result = dict(values)
         for key, value in result.items():
             normalized_key = str(key).casefold()
             if any(term in normalized_key for term in _SECRET_KEY_TERMS):
                 raise AdminValidationError(
-                    "secret values must use Plugin Credentials, not config"
+                    "secret values must use Integration Credentials, not config"
                 )
             if isinstance(value, Mapping):
-                PluginService._non_secret_mapping(value)
+                IntegrationService._non_secret_mapping(value)
         return result
 
     @staticmethod
-    def _connection_payload(connection: PluginConnection) -> dict[str, Any]:
-        bindings = connection.__dict__.get("bindings", ())
+    def _connection_payload(connection: IntegrationConnection) -> dict[str, Any]:
+        ingestion_sources = connection.__dict__.get("ingestion_sources", ())
         credential = connection.__dict__.get("credential")
         return {
             "id": str(connection.id),
             "tenant_id": str(connection.tenant_id),
-            "plugin_key": connection.plugin_key,
+            "connector_key": connection.connector_key,
             "display_name": connection.display_name,
             "config": dict(connection.config),
             "credential_configured": credential is not None,
             "owner_type": connection.owner_type,
             "owner_user_id": str(connection.owner_user_id) if connection.owner_user_id else None,
             "status": connection.status,
-            "binding_count": len(bindings),
+            "source_count": len(ingestion_sources),
             "created_at": timestamp(connection.created_at),
             "updated_at": timestamp(connection.updated_at),
         }
 
     @staticmethod
-    def _binding_payload(binding: PluginBinding) -> dict[str, Any]:
+    def _source_payload(source: IngestionSource) -> dict[str, Any]:
         return {
-            "id": str(binding.id),
-            "connection_id": str(binding.connection_id),
-            "target_item_id": str(binding.target_item_id),
-            "display_name": binding.display_name,
-            "config": dict(binding.config),
-            "checkpoint": dict(binding.checkpoint),
-            "status": binding.status,
-            "last_synced_at": timestamp(binding.last_synced_at),
-            "last_indexed_at": timestamp(binding.last_indexed_at),
-            "connection": {
-                "id": str(binding.connection.id),
-                "display_name": binding.connection.display_name,
-                "plugin_key": binding.connection.plugin_key,
+            "id": str(source.id),
+            "integration_connection_id": str(source.integration_connection_id),
+            "target_item_id": str(source.target_item_id),
+            "display_name": source.display_name,
+            "config": dict(source.config),
+            "checkpoint": dict(source.checkpoint),
+            "status": source.status,
+            "last_ingested_at": timestamp(source.last_ingested_at),
+            "last_indexed_at": timestamp(source.last_indexed_at),
+            "integration_connection": {
+                "id": str(source.integration_connection.id),
+                "display_name": source.integration_connection.display_name,
+                "connector_key": source.integration_connection.connector_key,
             },
             "schedule": None,
         }
@@ -643,28 +645,28 @@ class PluginService:
     @staticmethod
     def _file_factory(
         connection: Mapping[str, Any],
-        binding: Mapping[str, Any],
+        source: Mapping[str, Any],
         credentials: Mapping[str, Any],
     ) -> FileConnector:
         del credentials
-        return FileConnector({**dict(connection), **dict(binding)})
+        return FileConnector({**dict(connection), **dict(source)})
 
     @staticmethod
     def _confluence_factory(
         connection: Mapping[str, Any],
-        binding: Mapping[str, Any],
+        source: Mapping[str, Any],
         credentials: Mapping[str, Any],
-    ) -> ConfluenceConnector:
-        config = {**dict(connection), **dict(binding)}
+    ) -> CheckpointedSourceConnectorAdapter:
+        config = {**dict(connection), **dict(source)}
         wiki_base = str(config.get("wiki_base") or "").strip()
         if not wiki_base:
             raise AdminValidationError("Confluence wiki_base is required")
         runtime = ConfluenceConnector(
             wiki_base,
-            is_cloud=PluginService._config_bool(config, "is_cloud", True),
+            is_cloud=IntegrationService._config_bool(config, "is_cloud", True),
             space=str(config.get("space") or ""),
             page_id=str(config.get("page_id") or ""),
-            index_recursively=PluginService._config_bool(
+            index_recursively=IntegrationService._config_bool(
                 config, "index_recursively", False
             ),
             cql_query=(str(config["cql_query"]) if config.get("cql_query") else None),
@@ -675,11 +677,25 @@ class PluginService:
         runtime.set_credentials_provider(
             StaticCredentialsProvider(
                 tenant_id=str(config.get("_tenant_id") or "default"),
-                provider_key=str(config.get("_connection_id") or "confluence"),
+                provider_key=str(config.get("_integration_connection_id") or "confluence"),
                 credentials=dict(credentials),
             )
         )
-        return runtime
+        page_id = str(config.get("page_id") or "").strip()
+        space = str(config.get("space") or "").strip()
+        scope_type = "page" if page_id else "space" if space else "site"
+        scope_value = page_id or space or "confluence"
+        return CheckpointedSourceConnectorAdapter(
+            source="confluence",
+            connector=runtime,
+            scopes=[
+                ConnectorScope(
+                    scope_type=scope_type,
+                    scope_value=scope_value,
+                    display_name=space or page_id or "Confluence",
+                )
+            ],
+        )
 
     @staticmethod
     def _config_bool(config: Mapping[str, Any], key: str, default: bool) -> bool:
@@ -689,4 +705,4 @@ class PluginService:
         return value
 
 
-__all__ = ["PluginService"]
+__all__ = ["IntegrationService"]

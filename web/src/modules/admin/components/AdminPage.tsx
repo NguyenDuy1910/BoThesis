@@ -53,7 +53,7 @@ interface OverviewResult {
   tenant?: { id: string; code: string; name: string; status: string; updated_at: string };
   metrics?: {
     active_users?: number;
-    active_plugin_connections?: number;
+    active_integration_connections?: number;
     active_datasources?: number;
     items?: number;
   } | null;
@@ -188,7 +188,7 @@ function OverviewPage() {
     { label: "Active users", value: countMetric(metrics.active_users), icon: Users },
     {
       label: "Active connections",
-      value: countMetric(metrics.active_plugin_connections, metrics.active_datasources),
+      value: countMetric(metrics.active_integration_connections, metrics.active_datasources),
       icon: Database,
     },
     { label: "Items", value: countMetric(metrics.items), icon: FileText },
@@ -437,8 +437,8 @@ function createPayload(section: string, form: FormData): { endpoint: string; pay
 
 function columnsFor(section: string): Column<AdminRow>[] {
   const id = { key: "id", label: "ID", width: 112, render: (row: AdminRow) => <code className="font-mono text-[0.6875rem] text-[var(--text-muted)]" title={row.id}>{shortId(row.id)}</code> };
-  if (section === "ingestion/jobs") return [{ key: "connection", label: "Data source", render: (row) => <Identity primary={row.connection?.display_name ?? "Unknown source"} secondary={row.binding?.display_name ?? shortId(row.binding_id)} /> }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "progress", label: "Processed", render: (row) => `${row.processed_item_count}/${row.discovered_item_count}` }, { key: "written_chunk_count", label: "Chunks", align: "right" }, { key: "created_at", label: "Created", render: (row) => formatDate(row.created_at) }, id];
-  if (section === "items" || section === "documents") return [{ key: "title", label: "Item", sortable: true, render: (row) => <Identity primary={row.title ?? "Untitled Item"} secondary={`${titleCase(row.item_type)}${row.document_type ? ` · ${titleCase(row.document_type)}` : ""} · ${formatBytes(row.size_bytes)}`} /> }, { key: "source", label: "Source", render: (row) => row.origins?.[0]?.connection?.display_name ?? "Direct upload" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "indexed", label: "Indexed", render: (row) => row.indexed ? "Yes" : "No" }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
+  if (section === "ingestion/jobs") return [{ key: "connector_key", label: "Data source", render: (row) => <Identity primary={titleCase(row.connector_key ?? "Unknown source")} secondary={row.source_id ? shortId(row.source_id) : "Unknown source"} /> }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "trigger_type", label: "Trigger", render: (row) => titleCase(row.trigger_type ?? "unknown") }, { key: "history_length", label: "Events", align: "right" }, { key: "started_at", label: "Started", render: (row) => formatDate(row.started_at) }, id];
+  if (section === "items" || section === "documents") return [{ key: "title", label: "Item", sortable: true, render: (row) => <Identity primary={row.title ?? "Untitled Item"} secondary={`${titleCase(row.item_type)}${row.document_type ? ` · ${titleCase(row.document_type)}` : ""} · ${formatBytes(row.size_bytes)}`} /> }, { key: "source", label: "Source", render: (row) => row.external_resources?.[0]?.integration_connection?.display_name ?? "Direct upload" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "indexed", label: "Indexed", render: (row) => row.indexed ? "Yes" : "No" }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
   if (section === "users") return [{ key: "display_name", label: "User", sortable: true, render: (row) => <Identity primary={row.display_name ?? row.email} secondary={row.display_name ? row.email : "No display name"} /> }, { key: "role", label: "Role", render: (row) => row.membership?.role?.display_name ?? "No role" }, { key: "groups", label: "Groups", render: (row) => row.groups?.length ? row.groups.map((group: AdminRow) => group.display_name).join(", ") : "None" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "last_login_at", label: "Last login", render: (row) => formatDate(row.last_login_at) }, id];
   if (section === "groups") return [{ key: "display_name", label: "Group", sortable: true, render: (row) => <Identity primary={row.display_name} secondary={row.principal_token} /> }, { key: "member_count", label: "Members", align: "right" }, { key: "permission_codes", label: "Permissions", render: (row) => row.permission_codes?.length ?? 0 }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "updated_at", label: "Updated", render: (row) => formatDate(row.updated_at) }, id];
   if (section === "access-requests") return [{ key: "requester", label: "Requester", render: (row) => <Identity primary={row.requester?.display_name ?? row.requester?.email} secondary={row.requester?.email} /> }, { key: "resource_type", label: "Resource", render: (row) => <Identity primary={titleCase(row.resource_type)} secondary={shortId(row.resource_id)} /> }, { key: "access_type", label: "Access" }, { key: "status", label: "Status", render: (row) => <StatusBadge status={row.status} /> }, { key: "created_at", label: "Requested", render: (row) => formatDate(row.created_at) }, id];

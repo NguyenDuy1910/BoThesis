@@ -49,15 +49,15 @@ import type { ConnectorRegistryStatus } from "@/modules/connectors/types";
 type AdminRow = Record<string, any>;
 type RegistryFilter = "all" | "installed" | "available" | "disabled" | ConnectorCategory;
 
-interface PluginCapability {
-  plugin_key: string;
+interface ConnectorCapability {
+  connector_key: string;
   display_name: string;
   authentication_type: string;
   capabilities: string[];
 }
 
 interface ConnectorCapabilities {
-  plugins: PluginCapability[];
+  connectors: ConnectorCapability[];
 }
 
 interface PaginatedResult {
@@ -82,17 +82,17 @@ export function ConnectorRegistryPage() {
   const [filter, setFilter] = useState<RegistryFilter>("all");
   const [selected, setSelected] = useState<ConnectorDefinition | null>(null);
   const [setupKey, setSetupKey] = useState(0);
-  const connections = useAdminQuery<PaginatedResult>("/plugin-connections?page_size=100");
-  const capabilities = useAdminQuery<ConnectorCapabilities>("/plugins/capabilities");
+  const connections = useAdminQuery<PaginatedResult>("/integration-connections?page_size=100");
+  const capabilities = useAdminQuery<ConnectorCapabilities>("/connectors/capabilities");
 
   const availableProviders = useMemo(
-    () => new Set(capabilities.data?.plugins.map((item) => item.plugin_key) ?? []),
+    () => new Set(capabilities.data?.connectors.map((item) => item.connector_key) ?? []),
     [capabilities.data],
   );
   const instancesByProvider = useMemo(() => {
     const result = new Map<string, AdminRow[]>();
     for (const connection of connections.data?.items ?? []) {
-      result.set(connection.plugin_key, [...(result.get(connection.plugin_key) ?? []), connection]);
+      result.set(connection.connector_key, [...(result.get(connection.connector_key) ?? []), connection]);
     }
     return result;
   }, [connections.data?.items]);
@@ -319,19 +319,19 @@ function ConnectionsSkeleton() {
 
 function ConnectionRow({ connection, onChanged }: { connection: AdminRow; onChanged: () => void }) {
   const { toast } = useToast();
-  const [action, setAction] = useState<"validate" | "sync" | null>(null);
+  const [action, setAction] = useState<"validate" | null>(null);
   const presentation = connectionPresentation(connection);
-  const provider = String(connection.plugin_key);
+  const provider = String(connection.connector_key);
 
-  async function run(actionName: "validate" | "sync") {
-    setAction(actionName);
+  async function run() {
+    setAction("validate");
     try {
-      const path = `/plugin-connections/${connection.id}/validate`;
+      const path = `/integration-connections/${connection.id}/validate`;
       await adminRequest(path, { method: "POST" });
       toast({ title: "Connection verified", description: "Bind it to a knowledge base to start ingestion.", variant: "success" });
       onChanged();
     } catch (cause) {
-      toast({ title: actionName === "validate" ? "Connection test failed" : "Could not start ingestion", description: errorMessage(cause), variant: "error" });
+      toast({ title: "Connection test failed", description: errorMessage(cause), variant: "error" });
     } finally {
       setAction(null);
     }
@@ -347,7 +347,7 @@ function ConnectionRow({ connection, onChanged }: { connection: AdminRow; onChan
       <div className="flex items-center gap-2 sm:justify-end">
         <ConnectionStatus {...presentation} />
         {(connection.status === "draft" || connection.status === "error") && (
-          <Button icon={<ShieldCheck aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "validate"} onClick={() => run("validate")} size="sm" variant="secondary">Test</Button>
+          <Button icon={<ShieldCheck aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "validate"} onClick={run} size="sm" variant="secondary">Test</Button>
         )}
         {connection.status === "active" && <Badge variant="primary">Bind in a knowledge base</Badge>}
       </div>
@@ -467,18 +467,18 @@ function ConnectionManagementList({ connections, onChanged }: { connections: Adm
 
 function ConnectionInstanceCard({ connection, onChanged }: { connection: AdminRow; onChanged: () => void }) {
   const { toast } = useToast();
-  const [action, setAction] = useState<"sync" | "test" | "toggle" | "delete" | null>(null);
+  const [action, setAction] = useState<"test" | "toggle" | "delete" | null>(null);
   const presentation = connectionPresentation(connection);
   const scopes = configuredScopeLabels(connection.config);
 
-  async function run(nextAction: "sync" | "test" | "toggle" | "delete") {
+  async function run(nextAction: "test" | "toggle" | "delete") {
     if (nextAction === "delete" && !window.confirm(`Delete ${connection.display_name}? Indexed records remain governed by their lifecycle policy.`)) return;
     setAction(nextAction);
     try {
-      if (nextAction === "sync" || nextAction === "test") await adminRequest(`/plugin-connections/${connection.id}/validate`, { method: "POST" });
-      if (nextAction === "toggle") await adminRequest(`/plugin-connections/${connection.id}`, { method: "PATCH", body: JSON.stringify({ status: connection.status === "disabled" ? "active" : "disabled" }) });
-      if (nextAction === "delete") await adminRequest(`/plugin-connections/${connection.id}`, { method: "DELETE" });
-      toast({ title: nextAction === "sync" || nextAction === "test" ? "Connection verified" : nextAction === "delete" ? "Connection removed" : connection.status === "disabled" ? "Connection enabled" : "Connection disabled", variant: "success" });
+      if (nextAction === "test") await adminRequest(`/integration-connections/${connection.id}/validate`, { method: "POST" });
+      if (nextAction === "toggle") await adminRequest(`/integration-connections/${connection.id}`, { method: "PATCH", body: JSON.stringify({ status: connection.status === "disabled" ? "active" : "disabled" }) });
+      if (nextAction === "delete") await adminRequest(`/integration-connections/${connection.id}`, { method: "DELETE" });
+      toast({ title: nextAction === "test" ? "Connection verified" : nextAction === "delete" ? "Connection removed" : connection.status === "disabled" ? "Connection enabled" : "Connection disabled", variant: "success" });
       onChanged();
     } catch (cause) {
       toast({ title: "Connection action failed", description: errorMessage(cause), variant: "error" });
@@ -497,7 +497,7 @@ function ConnectionInstanceCard({ connection, onChanged }: { connection: AdminRo
         <ConnectionStatus {...presentation} />
       </div>
       <div className="mt-3 flex flex-wrap gap-1.5">
-        <Button icon={<ShieldCheck aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "test" || action === "sync"} onClick={() => run("test")} size="sm" variant="secondary">Test</Button>
+        <Button icon={<ShieldCheck aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "test"} onClick={() => run("test")} size="sm" variant="secondary">Test</Button>
         <Button icon={<Power aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "toggle"} onClick={() => run("toggle")} size="sm" variant="ghost">{connection.status === "disabled" ? "Enable" : "Disable"}</Button>
         <Button icon={<Trash2 aria-hidden="true" className="h-3.5 w-3.5" />} loading={action === "delete"} onClick={() => run("delete")} size="sm" variant="ghost">Delete</Button>
       </div>
@@ -565,10 +565,10 @@ function ConfluenceConnectionSetup({
     setSubmitting(true);
     setError(null);
     try {
-      const connectorId = createdId ?? String((await adminRequest<AdminRow>("/plugin-connections", {
+      const connectorId = createdId ?? String((await adminRequest<AdminRow>("/integration-connections", {
         method: "POST",
         body: JSON.stringify({
-          plugin_key: "confluence",
+          connector_key: "confluence",
           display_name: connectionName.trim(),
           config: {
             wiki_base: siteUrl.trim(),
@@ -584,7 +584,7 @@ function ConfluenceConnectionSetup({
         }),
       })).id);
       setCreatedId(connectorId);
-      await adminRequest(`/plugin-connections/${connectorId}/validate`, { method: "POST" });
+      await adminRequest(`/integration-connections/${connectorId}/validate`, { method: "POST" });
       toast({ title: "Confluence connected", description: "It is ready to bind to a knowledge base.", variant: "success" });
       onCreated(connectorId);
     } catch (cause) {
@@ -650,12 +650,12 @@ function FileConnectionSetup({
     setSubmitting(true);
     setError(null);
     try {
-      const connectorId = createdId ?? String((await adminRequest<AdminRow>("/plugin-connections", {
+      const connectorId = createdId ?? String((await adminRequest<AdminRow>("/integration-connections", {
         method: "POST",
-        body: JSON.stringify({ plugin_key: "file", display_name: connectionName.trim(), config: {} }),
+        body: JSON.stringify({ connector_key: "file", display_name: connectionName.trim(), config: {} }),
       })).id);
       setCreatedId(connectorId);
-      await adminRequest(`/plugin-connections/${connectorId}/validate`, { method: "POST" });
+      await adminRequest(`/integration-connections/${connectorId}/validate`, { method: "POST" });
       toast({ title: "Managed files connected", description: "It is ready to bind to a knowledge base.", variant: "success" });
       onCreated(connectorId);
     } catch (cause) {
@@ -740,7 +740,7 @@ function connectionPresentation(connection: AdminRow): { label: string; variant:
 function connectionScopeSummary(connection: AdminRow) {
   const scopes = configuredScopeLabels(connection.config);
   const scopeLabel = scopes.length === 1 ? scopes[0] : scopes.length ? `${scopes.length} scopes` : "Scope set when bound";
-  return `${providerLabel(connection.plugin_key)} · ${scopeLabel}`;
+  return `${providerLabel(connection.connector_key)} · ${scopeLabel}`;
 }
 
 function configuredScopeLabels(config: unknown): string[] {

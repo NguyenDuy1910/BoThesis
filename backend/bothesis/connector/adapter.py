@@ -16,6 +16,7 @@ from bothesis.connector.protocol import (
     ChangeType,
     DocumentItem,
     ItemChange,
+    RawObjectStore,
 )
 
 
@@ -55,6 +56,13 @@ class CheckpointedSourceConnectorAdapter(BaseSourceConnector):
 
     async def list_scopes(self) -> list[ConnectorScope]:
         return [scope.model_copy(deep=True) for scope in self.scopes]
+
+    def set_storage(self, storage: RawObjectStore) -> None:
+        """Forward object storage to crawlers that persist original content."""
+
+        setter = getattr(self.connector, "set_storage", None)
+        if setter is not None:
+            setter(storage)
 
     async def discover_changes(
         self,

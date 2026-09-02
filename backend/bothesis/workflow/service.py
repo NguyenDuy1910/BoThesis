@@ -47,9 +47,9 @@ from bothesis.workflow import (
 from bothesis.workflow.client import TemporalClientProvider
 
 _TENANT_ID = SearchAttributeKey.for_keyword("TenantId")
-_BINDING_ID = SearchAttributeKey.for_keyword("BindingId")
-_CONNECTION_ID = SearchAttributeKey.for_keyword("ConnectionId")
-_PLUGIN_KEY = SearchAttributeKey.for_keyword("PluginKey")
+_INGESTION_SOURCE_ID = SearchAttributeKey.for_keyword("IngestionSourceId")
+_INTEGRATION_CONNECTION_ID = SearchAttributeKey.for_keyword("IntegrationConnectionId")
+_CONNECTOR_KEY = SearchAttributeKey.for_keyword("ConnectorKey")
 _WORKFLOW_CATEGORY = SearchAttributeKey.for_keyword("WorkflowCategory")
 _TRIGGER_TYPE = SearchAttributeKey.for_keyword("TriggerType")
 
@@ -84,7 +84,7 @@ class TemporalWorkflowService:
         self, input: IngestionWorkflowInput
     ) -> dict[str, Any]:
         client = await self._provider.get()
-        workflow_id = ingestion_workflow_id(input.binding_id)
+        workflow_id = ingestion_workflow_id(input.source_id)
         try:
             handle = await client.start_workflow(
                 INGESTION_WORKFLOW_NAME,
@@ -95,7 +95,7 @@ class TemporalWorkflowService:
                 id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
                 id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
                 search_attributes=self._search_attributes(input),
-                static_summary=f"Ingest {input.plugin_key} binding {input.binding_id}",
+                static_summary=f"Ingest {input.connector_key} source {input.source_id}",
             )
             description = await handle.describe()
             payload = self._execution_payload(description)
@@ -105,7 +105,7 @@ class TemporalWorkflowService:
             description = await client.get_workflow_handle(workflow_id).describe()
             payload = self._execution_payload(description)
             payload["started"] = False
-            payload["conflict"] = "binding_ingestion_already_running"
+            payload["conflict"] = "source_ingestion_already_running"
             return payload
 
     async def list_ingestions(
@@ -115,16 +115,16 @@ class TemporalWorkflowService:
         page: int = 1,
         page_size: int = 20,
         status: str | None = None,
-        binding_id: str | None = None,
-        connection_id: str | None = None,
+        source_id: str | None = None,
+        integration_connection_id: str | None = None,
     ) -> dict[str, Any]:
         if page < 1 or not 1 <= page_size <= 100:
             raise ValueError("invalid workflow page")
         query = self._visibility_query(
             tenant_id=tenant_id,
             status=status,
-            binding_id=binding_id,
-            connection_id=connection_id,
+            source_id=source_id,
+            integration_connection_id=integration_connection_id,
         )
         client = await self._provider.get()
         offset = (page - 1) * page_size
@@ -170,11 +170,11 @@ class TemporalWorkflowService:
         return payload
 
     async def latest_ingestion(
-        self, *, tenant_id: str, binding_id: str
+        self, *, tenant_id: str, source_id: str
     ) -> dict[str, Any] | None:
         result = await self.list_ingestions(
             tenant_id=tenant_id,
-            binding_id=binding_id,
+            source_id=source_id,
             page=1,
             page_size=1,
         )
@@ -200,7 +200,7 @@ class TemporalWorkflowService:
     ) -> dict[str, Any]:
         scheduled_input = replace(input, trigger_type="scheduled")
         schedule = self._schedule(scheduled_input, values)
-        schedule_id = ingestion_schedule_id(input.binding_id)
+        schedule_id = ingestion_schedule_id(input.source_id)
         client = await self._provider.get()
         try:
             handle = await client.create_schedule(
@@ -220,9 +220,9 @@ class TemporalWorkflowService:
             await handle.update(update)
         return self._schedule_payload(await handle.describe())
 
-    async def describe_schedule(self, binding_id: str) -> dict[str, Any] | None:
+    async def describe_schedule(self, source_id: str) -> dict[str, Any] | None:
         client = await self._provider.get()
-        handle = client.get_schedule_handle(ingestion_schedule_id(binding_id))
+        handle = client.get_schedule_handle(ingestion_schedule_id(source_id))
         try:
             return self._schedule_payload(await handle.describe())
         except RPCError as exc:
@@ -230,33 +230,33 @@ class TemporalWorkflowService:
                 return None
             raise
 
-    async def pause_schedule(self, binding_id: str) -> dict[str, Any]:
+    async def pause_schedule(self, source_id: str) -> dict[str, Any]:
         handle = (await self._provider.get()).get_schedule_handle(
-            ingestion_schedule_id(binding_id)
+            ingestion_schedule_id(source_id)
         )
         try:
             await handle.pause(note="Paused by BoThesis administrator")
             return self._schedule_payload(await handle.describe())
         except RPCError as exc:
             if exc.status == RPCStatusCode.NOT_FOUND:
-                raise WorkflowExecutionNotFoundError(binding_id) from exc
+                raise WorkflowExecutionNotFoundError(source_id) from exc
             raise
 
-    async def resume_schedule(self, binding_id: str) -> dict[str, Any]:
+    async def resume_schedule(self, source_id: str) -> dict[str, Any]:
         handle = (await self._provider.get()).get_schedule_handle(
-            ingestion_schedule_id(binding_id)
+            ingestion_schedule_id(source_id)
         )
         try:
             await handle.unpause(note="Resumed by BoThesis administrator")
             return self._schedule_payload(await handle.describe())
         except RPCError as exc:
             if exc.status == RPCStatusCode.NOT_FOUND:
-                raise WorkflowExecutionNotFoundError(binding_id) from exc
+                raise WorkflowExecutionNotFoundError(source_id) from exc
             raise
 
-    async def delete_schedule(self, binding_id: str) -> None:
+    async def delete_schedule(self, source_id: str) -> None:
         handle = (await self._provider.get()).get_schedule_handle(
-            ingestion_schedule_id(binding_id)
+            ingestion_schedule_id(source_id)
         )
         try:
             await handle.delete()
@@ -300,10 +300,10 @@ class TemporalWorkflowService:
             action=ScheduleActionStartWorkflow(
                 INGESTION_WORKFLOW_NAME,
                 input,
-                id=ingestion_workflow_id(input.binding_id),
+                id=ingestion_workflow_id(input.source_id),
                 task_queue=self._settings.task_queue,
                 typed_search_attributes=self._search_attributes(input),
-                static_summary=f"Scheduled {input.plugin_key} ingestion",
+                static_summary=f"Scheduled {input.connector_key} ingestion",
             ),
             spec=spec,
             policy=SchedulePolicy(
@@ -318,13 +318,13 @@ class TemporalWorkflowService:
     def _search_attributes(input: IngestionWorkflowInput) -> TypedSearchAttributes:
         pairs = [
             SearchAttributePair(_TENANT_ID, input.tenant_id),
-            SearchAttributePair(_BINDING_ID, input.binding_id),
-            SearchAttributePair(_PLUGIN_KEY, input.plugin_key),
+            SearchAttributePair(_INGESTION_SOURCE_ID, input.source_id),
+            SearchAttributePair(_CONNECTOR_KEY, input.connector_key),
             SearchAttributePair(_WORKFLOW_CATEGORY, "ingestion"),
             SearchAttributePair(_TRIGGER_TYPE, input.trigger_type),
         ]
-        if input.connection_id:
-            pairs.append(SearchAttributePair(_CONNECTION_ID, input.connection_id))
+        if input.integration_connection_id:
+            pairs.append(SearchAttributePair(_INTEGRATION_CONNECTION_ID, input.integration_connection_id))
         return TypedSearchAttributes(pairs)
 
     @staticmethod
@@ -332,17 +332,17 @@ class TemporalWorkflowService:
         *,
         tenant_id: str,
         status: str | None,
-        binding_id: str | None,
-        connection_id: str | None,
+        source_id: str | None,
+        integration_connection_id: str | None,
     ) -> str:
         clauses = [
             f"WorkflowType = '{INGESTION_WORKFLOW_NAME}'",
             f"TenantId = '{_visibility_literal(tenant_id)}'",
         ]
-        if binding_id:
-            clauses.append(f"BindingId = '{_visibility_literal(binding_id)}'")
-        if connection_id:
-            clauses.append(f"ConnectionId = '{_visibility_literal(connection_id)}'")
+        if source_id:
+            clauses.append(f"IngestionSourceId = '{_visibility_literal(source_id)}'")
+        if integration_connection_id:
+            clauses.append(f"IntegrationConnectionId = '{_visibility_literal(integration_connection_id)}'")
         if status:
             normalized = status.strip().casefold()
             if normalized not in _STATUS_QUERY_VALUES:
@@ -363,10 +363,10 @@ class TemporalWorkflowService:
             "run_id": execution.run_id,
             "workflow_type": execution.workflow_type,
             "status": status,
-            "binding_id": execution.typed_search_attributes.get(_BINDING_ID),
-            "connection_id": execution.typed_search_attributes.get(_CONNECTION_ID),
+            "source_id": execution.typed_search_attributes.get(_INGESTION_SOURCE_ID),
+            "integration_connection_id": execution.typed_search_attributes.get(_INTEGRATION_CONNECTION_ID),
             "tenant_id": execution.typed_search_attributes.get(_TENANT_ID),
-            "plugin_key": execution.typed_search_attributes.get(_PLUGIN_KEY),
+            "connector_key": execution.typed_search_attributes.get(_CONNECTOR_KEY),
             "trigger_type": execution.typed_search_attributes.get(_TRIGGER_TYPE),
             "started_at": execution.start_time.isoformat(),
             "finished_at": (

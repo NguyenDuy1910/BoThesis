@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bothesis.db.models import (
     AccessRequest,
     Item,
-    PluginConnection,
+    IntegrationConnection,
     Group,
     Role,
     Tenant,
@@ -70,11 +70,11 @@ class AdminService:
                     Group.deleted_at.is_(None),
                 )
             ),
-            "active_plugin_connections": await self._count(
-                select(func.count()).select_from(PluginConnection).where(
-                    PluginConnection.tenant_id == tenant_id,
-                    PluginConnection.status == ACTIVE_STATUS,
-                    PluginConnection.deleted_at.is_(None),
+            "active_integration_connections": await self._count(
+                select(func.count()).select_from(IntegrationConnection).where(
+                    IntegrationConnection.tenant_id == tenant_id,
+                    IntegrationConnection.status == ACTIVE_STATUS,
+                    IntegrationConnection.deleted_at.is_(None),
                 )
             ),
             "items": await self._count(

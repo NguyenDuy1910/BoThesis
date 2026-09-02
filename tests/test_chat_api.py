@@ -32,7 +32,6 @@ from bothesis.connector.protocol import (
     SourceProvider,
 )
 from bothesis.knowledge import Evidence
-from bothesis.document_index import DocumentProcessingError
 from bothesis.services import AuthContext, RequestIdentity
 
 
@@ -101,7 +100,10 @@ def test_default_agent_composes_the_openrouter_transport(
     monkeypatch.setattr(api_service_module, "OpenRouterTransport", TestOpenRouterTransport)
     monkeypatch.setattr(main._api_service, "_agent", None)
 
-    assert isinstance(main._api_service._get_agent().model, TestOpenRouterTransport)
+    agent = main._api_service._get_agent()
+
+    assert isinstance(agent.model, TestOpenRouterTransport)
+    assert agent.tools.has("knowledge_search")
 
 
 class PermissionDeniedTransport:
@@ -378,20 +380,15 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
     )
 
     class Uploads:
-        async def upload_to_collection(self, *_: Any, **__: Any) -> Any:
-            return SimpleNamespace(item=document, created=True)
-
-        async def get_document(self, *_: Any, **__: Any) -> Any:
-            return document
-
-    class Pipeline:
         attempts = 0
 
-        async def index_document(self, *_: Any, **__: Any) -> Any:
+        async def upload_to_collection(self, *_: Any, **__: Any) -> Any:
             self.attempts += 1
-            if self.attempts == 1:
-                document.status = "failed"
-                raise DocumentProcessingError("index dispatch failed")
+            document.status = "failed"
+            return SimpleNamespace(item=document, created=True)
+
+        async def retry_indexing(self, *_: Any, **__: Any) -> Any:
+            self.attempts += 1
             document.status = "ready"
             document.metadata_["processing"] = {"index_schema_version": "test"}
             return document
@@ -404,7 +401,6 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
 
     monkeypatch.setattr(service, "_resolve_access", resolve_access)
     monkeypatch.setattr(service, "_uploads", Uploads())
-    monkeypatch.setattr(service, "_pipeline", Pipeline())
     monkeypatch.setattr(service, "_session_factory", _SessionContext)
     monkeypatch.setattr(api_service_module.AuditService, "record", record_audit)
 
@@ -437,9 +433,10 @@ def test_qdrant_citation_does_not_synthesize_element_ranges() -> None:
     payload = {
         "chunk_index": 4,
         "chunk_text": "Projected chunk evidence",
-        "citation_section": "Canonical section",
-        "citation_section_path": ["Policy", "Canonical section"],
+        "section_path": ["Policy", "Canonical section"],
         "citation_anchor": "canonical-section",
+        "page_start": 3,
+        "page_end": 4,
     }
 
     citation = main._api_service._payload_citation(payload)
@@ -448,30 +445,38 @@ def test_qdrant_citation_does_not_synthesize_element_ranges() -> None:
     assert citation.section == "Canonical section"
     assert citation.section_path == ("Policy", "Canonical section")
     assert citation.anchor == "canonical-section"
+    assert citation.page_start == 3
+    assert citation.page_end == 4
 
 
-def test_qdrant_viewer_does_not_split_multispan_chunk_projection() -> None:
+def test_viewer_uses_canonical_multispan_citation_geometry() -> None:
     payload = {
         "chunk_id": "chunk-multi",
         "chunk_index": 0,
         "chunk_text": "First element\n\nSecond element",
-        "citation_section_path": ["Policy"],
-        "citation_spans": [
-            {"page": 1, "element_id": "p001_para_001"},
-            {"page": 2, "element_id": "p002_para_001"},
-        ],
+        "section_path": ["Policy"],
     }
+    citation = CitationInfo(
+        section="Policy",
+        section_path=("Policy",),
+        page_start=1,
+        page_end=2,
+        spans=(
+            CitationSpan(page=1, element_id="p001_para_001"),
+            CitationSpan(page=2, element_id="p002_para_001"),
+        ),
+    )
 
     elements, chunks_by_id = main._api_service._viewer_elements(
-        "doc-1", [payload]
+        "doc-1",
+        [payload],
+        {"chunk-multi": citation},
     )
 
     assert elements == []
     assert chunks_by_id["chunk-multi"] is payload
-    assert main._api_service._payload_citation(payload).spans == (
-        CitationSpan(page=1, element_id="p001_para_001"),
-        CitationSpan(page=2, element_id="p002_para_001"),
-    )
+    assert citation.spans[0].element_id == "p001_para_001"
+    assert main._api_service._payload_citation(payload).spans == ()
 
 
 def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
@@ -546,6 +551,9 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     # ``/responses`` takes instructions as a request parameter, so the input is
     # items only — there is no synthetic leading system message.
     assert "<agent_instructions>" in transport.requests[0]["instructions"]
+    assert [tool["name"] for tool in transport.requests[0]["tools"]] == [
+        "knowledge_search"
+    ]
     assert transport.stream_requests[0] == [
         {"type": "message", "role": "user", "content": "Recent scope question"},
         {"type": "message", "role": "assistant", "content": "Recent scope answer"},
@@ -555,6 +563,78 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
             "content": "<user_message>What is the leave policy?</user_message>",
         },
     ]
+
+
+def test_document_search_api_uses_authorized_retrieval_scope(monkeypatch) -> None:
+    user_id, tenant_id = _install_access(monkeypatch)
+    item_id = uuid4()
+    collection_id = UUID(int=12)
+
+    class SearchRetriever:
+        def __init__(self) -> None:
+            self.contexts: list[AgentContext] = []
+
+        async def search(
+            self,
+            query: str,
+            *,
+            limit: int,
+            ctx: AgentContext,
+        ) -> list[Evidence]:
+            assert query == "annual leave"
+            assert limit == 4
+            self.contexts.append(ctx)
+            return [
+                Evidence(
+                    id="chunk-1",
+                    item_id=str(item_id),
+                    chunk_id="chunk-1",
+                    collection_item_id=str(collection_id),
+                    title="Leave policy",
+                    content="Employees receive 20 days of annual leave.",
+                    source=SourceIdentity(
+                        connector_id="connection-1",
+                        provider=SourceProvider.CONFLUENCE,
+                        external_id="leave-policy",
+                        url="https://knowledge.example/leave-policy",
+                    ),
+                    citation=CitationInfo(
+                        section="Annual leave",
+                        section_path=("Policy", "Annual leave"),
+                        page_start=2,
+                        page_end=2,
+                    ),
+                    section_path=("Policy", "Annual leave"),
+                    relevance_score=0.8,
+                    rerank_score=1.0,
+                )
+            ]
+
+    retriever = SearchRetriever()
+    monkeypatch.setattr(main._api_service, "_retriever", retriever)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/v1/documents/search",
+            headers={
+                "X-Bothesis-Tenant-Id": str(tenant_id),
+                "X-Bothesis-User-Id": str(user_id),
+            },
+            json={
+                "query": "annual leave",
+                "top_k": 4,
+                "collection_item_ids": [str(collection_id)],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["results"][0]["id"] == str(item_id)
+    assert payload["results"][0]["metadata"]["chunk_id"] == "chunk-1"
+    assert payload["results"][0]["metadata"]["citation"]["page_start"] == 2
+    assert retriever.contexts[0].tenant_id == str(tenant_id)
+    assert retriever.contexts[0].collection_item_ids == (str(collection_id),)
 
 
 def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:

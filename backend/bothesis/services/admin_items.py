@@ -9,7 +9,7 @@ from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from bothesis.db.models import Item, ItemOrigin, PluginBinding
+from bothesis.db.models import Item, ExternalResource, IngestionSource
 from bothesis.document_index.vector_store import VectorStore
 from bothesis.services import (
     ITEM_MANAGE_PERMISSION,
@@ -30,19 +30,17 @@ _ITEM_STATUSES = {"pending", "processing", "ready", "failed", "unsupported"}
 
 
 class AdminItemService:
-    """Query canonical Items without coupling them to their Plugin Origins."""
+    """Query canonical Items without coupling them to connector implementations."""
 
     def __init__(
         self,
         session: AsyncSession,
         *,
         vector_store: VectorStore | None = None,
-        plugin_encryption_key: str | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._session = session
         self._vector_store = vector_store
-        self._plugin_encryption_key = plugin_encryption_key
         self._audit = audit or AuditService(session)
 
     async def create_collection(
@@ -91,7 +89,7 @@ class AdminItemService:
         search: str | None = None,
         status: str | None = None,
         item_type: str | None = None,
-        binding_id: UUID | None = None,
+        ingestion_source_id: UUID | None = None,
         created_by_user_id: UUID | None = None,
         sort: str = "updated_at",
         direction: str = "desc",
@@ -105,14 +103,14 @@ class AdminItemService:
         ]
         if search and search.strip():
             term = f"%{search.strip()}%"
-            matching_origins = select(ItemOrigin.item_id).where(
-                ItemOrigin.external_id.ilike(term), ItemOrigin.deleted_at.is_(None)
+            matching_resources = select(ExternalResource.item_id).where(
+                ExternalResource.external_id.ilike(term), ExternalResource.deleted_at.is_(None)
             )
             filters.append(
                 or_(
                     Item.title.ilike(term),
                     cast(Item.metadata_["description"], String).ilike(term),
-                    Item.id.in_(matching_origins),
+                    Item.id.in_(matching_resources),
                 )
             )
         if status:
@@ -125,12 +123,12 @@ class AdminItemService:
             if normalized_type not in {"collection", "document"}:
                 raise AdminValidationError("unsupported item type")
             filters.append(Item.item_type == normalized_type)
-        if binding_id is not None:
+        if ingestion_source_id is not None:
             filters.append(
                 Item.id.in_(
-                    select(ItemOrigin.item_id).where(
-                        ItemOrigin.binding_id == binding_id,
-                        ItemOrigin.deleted_at.is_(None),
+                    select(ExternalResource.item_id).where(
+                        ExternalResource.ingestion_source_id == ingestion_source_id,
+                        ExternalResource.deleted_at.is_(None),
                     )
                 )
             )
@@ -153,9 +151,9 @@ class AdminItemService:
             await self._session.scalars(
                 select(Item)
                 .options(
-                    selectinload(Item.origins)
-                    .selectinload(ItemOrigin.binding)
-                    .selectinload(PluginBinding.connection)
+                    selectinload(Item.external_resources)
+                    .selectinload(ExternalResource.ingestion_source)
+                    .selectinload(IngestionSource.integration_connection)
                 )
                 .where(*filters)
                 .order_by(order, Item.id)
@@ -187,12 +185,12 @@ class AdminItemService:
                 target_id: int(count)
                 for target_id, count in (
                     await self._session.execute(
-                        select(PluginBinding.target_item_id, func.count(PluginBinding.id))
+                        select(IngestionSource.target_item_id, func.count(IngestionSource.id))
                         .where(
-                            PluginBinding.target_item_id.in_(collection_ids),
-                            PluginBinding.deleted_at.is_(None),
+                            IngestionSource.target_item_id.in_(collection_ids),
+                            IngestionSource.deleted_at.is_(None),
                         )
-                        .group_by(PluginBinding.target_item_id)
+                        .group_by(IngestionSource.target_item_id)
                     )
                 ).all()
             }
@@ -221,9 +219,9 @@ class AdminItemService:
         item = await self._session.scalar(
             select(Item)
             .options(
-                selectinload(Item.origins)
-                .selectinload(ItemOrigin.binding)
-                .selectinload(PluginBinding.connection),
+                selectinload(Item.external_resources)
+                .selectinload(ExternalResource.ingestion_source)
+                .selectinload(IngestionSource.integration_connection),
                 selectinload(Item.access_grants),
             )
             .where(
@@ -322,20 +320,23 @@ class AdminItemService:
         payload = await self.get_item(actor, item_id)
         if payload["status"] != "failed":
             raise AdminConflictError("only failed items can be retried")
-        origin = await self._session.scalar(
-            select(ItemOrigin).where(
-                ItemOrigin.item_id == item_id, ItemOrigin.deleted_at.is_(None)
+        external_resource = await self._session.scalar(
+            select(ExternalResource).where(
+                ExternalResource.item_id == item_id, ExternalResource.deleted_at.is_(None)
             )
         )
-        if origin is None:
+        if external_resource is None:
             item = await self._session.get(Item, item_id)
             assert item is not None
             item.status = "pending"
-            return {"item": await self.get_item(actor, item.id), "sync_run": None}
+            return {
+                "item": await self.get_item(actor, item.id),
+                "ingestion_run": None,
+            }
         return {
             "item": payload,
-            "binding_id": str(origin.binding_id),
-            "sync_run": None,
+            "ingestion_source_id": str(external_resource.ingestion_source_id),
+            "ingestion_run": None,
         }
 
     async def delete_item(self, actor: AuthContext, item_id: UUID) -> None:
@@ -355,7 +356,11 @@ class AdminItemService:
     def _payload(item: Item) -> dict[str, Any]:
         processing = item.metadata_.get("processing")
         description = item.metadata_.get("description")
-        origins = [origin for origin in item.origins if origin.deleted_at is None]
+        external_resources = [
+            resource
+            for resource in item.external_resources
+            if resource.deleted_at is None
+        ]
         return {
             "id": str(item.id),
             "item_type": item.item_type,
@@ -377,19 +382,27 @@ class AdminItemService:
             ),
             "created_at": timestamp(item.created_at),
             "updated_at": timestamp(item.updated_at),
-            "origins": [
+            "external_resources": [
                 {
-                    "id": str(origin.id),
-                    "external_id": origin.external_id,
-                    "source_url": origin.source_url,
-                    "binding_id": str(origin.binding_id),
-                    "connection": {
-                        "id": str(origin.binding.connection.id),
-                        "display_name": origin.binding.connection.display_name,
-                        "plugin_key": origin.binding.connection.plugin_key,
+                    "id": str(external_resource.id),
+                    "external_id": external_resource.external_id,
+                    "source_url": external_resource.source_url,
+                    "ingestion_source_id": str(
+                        external_resource.ingestion_source_id
+                    ),
+                    "integration_connection": {
+                        "id": str(
+                            external_resource.ingestion_source.integration_connection.id
+                        ),
+                        "display_name": (
+                            external_resource.ingestion_source.integration_connection.display_name
+                        ),
+                        "connector_key": (
+                            external_resource.ingestion_source.integration_connection.connector_key
+                        ),
                     },
                 }
-                for origin in origins
+                for external_resource in external_resources
             ],
         }
 

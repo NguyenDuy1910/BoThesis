@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "title": "BoThesis canonical Item and storage ownership",
   "status": "implemented",
   "ownership": {
@@ -10,18 +10,22 @@
     "knowledge": "permission filtering, retrieval, reranking, and evidence",
     "agent": "reasoning over grounded evidence"
   },
-  "source_entities": {
-    "items": ["collection", "document", "file"],
+  "canonical_entities": {
+    "items": ["collection", "document"],
     "hierarchy": "parent_item_id",
     "object_metadata": ["storage_key", "mime_type", "size_bytes"],
-    "retrieval_acl": ["allowed_principal_tokens", "denied_principal_tokens"],
     "lifecycle": ["pending", "processing", "ready", "failed", "unsupported", "deleted"]
   },
-  "connector_entities": {
-    "connectors": "configured connection instances",
-    "connector_credentials": "connector-bound authenticated-encryption payloads",
-    "connector_scopes": "independently checkpointed synchronization units",
-    "sync_runs": "operational history and counters"
+  "integration_entities": {
+    "integration_connections": "reusable connector configuration",
+    "integration_credentials": "connection-bound authenticated-encryption payloads",
+    "ingestion_sources": "independently checkpointed external scopes targeting Collection Items",
+    "external_resources": "external identity and version state mapped to canonical Items",
+    "incremental_identity": "(ingestion_source_id, external_id) -> item_id",
+    "execution_history": "Temporal"
+  },
+  "upload_entities": {
+    "item_uploads": "native upload idempotency and lifecycle without external-resource tracking"
   },
   "chat_entities": {
     "message_items": ["attachment", "reference", "output"]
@@ -33,5 +37,5 @@
     "plaintext connector credentials",
     "generation-based index state"
   ],
-  "initialization": "make init rebuilds PostgreSQL and Qdrant directly; no migrations"
+  "schema_change": "ORM defines the target schema; SQL migrations preserve durable PostgreSQL state"
 }

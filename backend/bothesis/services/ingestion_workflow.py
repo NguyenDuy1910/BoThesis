@@ -1,4 +1,4 @@
-"""The complete durable application workflow for plugin ingestion."""
+"""The complete durable application workflow for connector ingestion."""
 
 from __future__ import annotations
 
@@ -16,12 +16,12 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
 from bothesis.connector.pipeline import ConnectorPipelineError, PipelineResult
-from bothesis.db.models import Item, ItemOrigin, PluginBinding
+from bothesis.db.models import Item, ExternalResource, IngestionSource
 from bothesis.services import (
     AdminNotFoundError,
     AdminValidationError,
     InvalidDocumentStateError,
-    PluginService,
+    IntegrationService,
 )
 from bothesis.workflow import (
     INGESTION_ACTIVITY_NAME,
@@ -36,11 +36,11 @@ if TYPE_CHECKING:
 
     from bothesis.connector import ConnectorPipelineConfig
     from bothesis.connector.file.file_connector import FileConnector
-    from bothesis.document_index import EmbeddingService
+    from bothesis.document_index import ChunkContextGenerator, EmbeddingService
     from bothesis.document_index.raw_storage import DocumentStorage
-    from bothesis.document_index.semantic_contextualizer import SemanticContextualizer
     from bothesis.document_index.vector_store import VectorStore
-    from bothesis.plugin.registry import PluginRegistry
+    from bothesis.connector.registry import ConnectorRegistry
+    from bothesis.services.preview import KnowledgePreviewService
 
 _NON_RETRYABLE_FAILURE_TYPES = frozenset(
     {
@@ -63,11 +63,12 @@ class IngestionWorkflow:
         embedder: EmbeddingService | None = None,
         raw_storage: DocumentStorage | None = None,
         *,
-        registry: PluginRegistry | None = None,
+        registry: ConnectorRegistry | None = None,
         credential_encryption_key: str | None = None,
         pipeline_config: ConnectorPipelineConfig | None = None,
         embedding_batch_size: int = 32,
-        semantic_contextualizer: SemanticContextualizer | None = None,
+        semantic_contextualizer: ChunkContextGenerator | None = None,
+        preview_service: KnowledgePreviewService | None = None,
     ) -> None:
         # Temporal constructs a dependency-free instance for deterministic
         # orchestration. The worker constructs a configured instance and
@@ -82,6 +83,7 @@ class IngestionWorkflow:
         self._pipeline_config = pipeline_config
         self._embedding_batch_size = embedding_batch_size
         self._semantic_contextualizer = semantic_contextualizer
+        self._preview_service = preview_service
 
     @workflow.run
     async def run(self, input: IngestionWorkflowInput) -> IngestionResult:
@@ -126,7 +128,7 @@ class IngestionWorkflow:
         heartbeat = asyncio.create_task(self._heartbeat())
         try:
             result = await self._ingest(
-                UUID(input.binding_id),
+                UUID(input.source_id),
                 test_connection=input.test_connection,
             )
         except ConnectorPipelineError as exc:
@@ -179,7 +181,7 @@ class IngestionWorkflow:
             }
         )
         return IngestionResult(
-            binding_id=input.binding_id,
+            source_id=input.source_id,
             discovered_count=result.discovered_changes,
             processed_count=result.processed_items,
             indexed_count=result.written_chunks,
@@ -191,7 +193,7 @@ class IngestionWorkflow:
 
     async def _ingest(
         self,
-        binding_id: UUID,
+        source_id: UUID,
         *,
         test_connection: bool,
     ) -> PipelineResult:
@@ -200,47 +202,49 @@ class IngestionWorkflow:
         from bothesis.connector import ConnectorPipeline, ConnectorPipelineConfig
         from bothesis.connector.file.file_connector import FileConnector
         from bothesis.document_index.knowledge_sink import QdrantKnowledgeSink
+        from bothesis.services.preview import KnowledgePreviewService
 
         session_factory, store, embedder, raw_storage = self._dependencies()
         async with session_factory() as session:
-            binding, connector = await PluginService(
+            source, connector = await IntegrationService(
                 session,
                 registry=self._registry,
                 credential_encryption_key=self._credential_encryption_key,
-            ).runtime_for_binding(binding_id)
-            resolved_binding_id = binding.id
-            connector_id = binding.connection_id
-            plugin_key = binding.connection.plugin_key
-            tenant_id = binding.connection.tenant_id
-            checkpoint_data = dict(binding.checkpoint or {})
+            ).runtime_for_source(source_id)
+            resolved_source_id = source.id
+            integration_connection_id = source.integration_connection_id
+            connector_key = source.integration_connection.connector_key
+            tenant_id = source.integration_connection.tenant_id
+            checkpoint_data = dict(source.checkpoint or {})
 
-        if connector.source != plugin_key:
-            raise ValueError("Plugin key does not match Connection")
+        if connector.source != connector_key:
+            raise ValueError("connector key does not match integration connection")
         set_storage = getattr(connector, "set_storage", None)
         if set_storage is not None:
             set_storage(raw_storage)
         if isinstance(connector, FileConnector):
-            await self._load_file_records(connector, resolved_binding_id)
+            await self._load_file_records(connector, resolved_source_id)
 
         scopes = await connector.list_scopes()
         if len(scopes) != 1:
-            raise ValueError(
-                "a Plugin Binding must resolve to exactly one runtime scope"
-            )
+            raise ValueError("an ingestion source must resolve to exactly one runtime scope")
         checkpoint = connector.checkpoint_model.model_validate(checkpoint_data)
         sink = QdrantKnowledgeSink(
             store,
             embedder,
             session_factory=session_factory,
-            binding_id=resolved_binding_id,
+            ingestion_source_id=resolved_source_id,
             embedding_batch_size=self._embedding_batch_size,
             semantic_contextualizer=self._semantic_contextualizer,
+            preview_service=(
+                self._preview_service or KnowledgePreviewService(raw_storage)
+            ),
         )
         pipeline = ConnectorPipeline(
             connector,
             sink,
             tenant_id=str(tenant_id),
-            connector_id=str(connector_id),
+            connector_id=str(integration_connection_id),
             config=self._pipeline_config or ConnectorPipelineConfig(),
         )
         result = await pipeline.run_scope(
@@ -248,23 +252,23 @@ class IngestionWorkflow:
             checkpoint,
             test_connection=test_connection,
         )
-        await self._complete(resolved_binding_id, result)
+        await self._complete(resolved_source_id, result)
         return result
 
     async def _load_file_records(
         self,
         connector: FileConnector,
-        binding_id: UUID,
+        source_id: UUID,
     ) -> None:
         session_factory, _, _, _ = self._dependencies()
         async with session_factory() as session:
             rows = (
                 await session.execute(
-                    select(Item, ItemOrigin)
-                    .join(ItemOrigin, ItemOrigin.item_id == Item.id)
+                    select(Item, ExternalResource)
+                    .join(ExternalResource, ExternalResource.item_id == Item.id)
                     .where(
-                        ItemOrigin.binding_id == binding_id,
-                        ItemOrigin.deleted_at.is_(None),
+                        ExternalResource.ingestion_source_id == source_id,
+                        ExternalResource.deleted_at.is_(None),
                         Item.item_type == "document",
                         Item.storage_key.is_not(None),
                         Item.status != "deleted",
@@ -275,43 +279,41 @@ class IngestionWorkflow:
         connector.set_records(
             [
                 {
-                    "external_id": origin.external_id,
+                    "external_id": external_resource.external_id,
                     "file_name": item.metadata_.get("file_name") or item.title,
                     "storage_key": item.storage_key,
                     "size_bytes": item.size_bytes,
                     "mime_type": item.mime_type,
-                    "provider_version": origin.external_version,
+                    "provider_version": external_resource.external_version,
                     "uploaded_at": (
                         item.metadata_.get("uploaded_at")
                         or item.created_at.isoformat()
                     ),
                     "modified_at": (
-                        origin.external_updated_at or item.created_at
+                        external_resource.external_updated_at or item.created_at
                     ).isoformat(),
                     "metadata": dict(item.metadata_),
                     "acl": {},
                 }
-                for item, origin in rows
+                for item, external_resource in rows
             ]
         )
 
-    async def _complete(self, binding_id: UUID, result: PipelineResult) -> None:
+    async def _complete(self, source_id: UUID, result: PipelineResult) -> None:
         session_factory, _, _, _ = self._dependencies()
         async with session_factory.begin() as session:
-            binding = await session.scalar(
-                select(PluginBinding)
-                .where(PluginBinding.id == binding_id)
+            source = await session.scalar(
+                select(IngestionSource)
+                .where(IngestionSource.id == source_id)
                 .with_for_update()
             )
-            if binding is None or binding.deleted_at is not None:
-                raise InvalidDocumentStateError(
-                    f"Plugin Binding not found: {binding_id}"
-                )
+            if source is None or source.deleted_at is not None:
+                raise InvalidDocumentStateError(f"ingestion source not found: {source_id}")
             if result.checkpoint_advanced:
-                binding.checkpoint = result.checkpoint.model_dump(mode="json")
+                source.checkpoint = result.checkpoint.model_dump(mode="json")
             finished = datetime.now(UTC)
-            binding.last_synced_at = finished
-            binding.last_indexed_at = finished
+            source.last_ingested_at = finished
+            source.last_indexed_at = finished
             await session.flush()
 
     def _dependencies(

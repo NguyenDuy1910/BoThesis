@@ -23,7 +23,7 @@ import { adminRequest } from "@/modules/admin/api";
 import { connectorDefinition } from "@/modules/connectors/catalog";
 import { ConnectorLogo } from "@/modules/connectors/components/ConnectorLogo";
 import { errorMessage } from "@/modules/knowledge-management/presentation";
-import type { PluginBinding, PluginConnection } from "@/modules/knowledge-management/types";
+import type { IngestionSource, IntegrationConnection } from "@/modules/knowledge-management/types";
 
 export function AddContentMenu({
   onConnect,
@@ -64,7 +64,7 @@ export function AddContentMenu({
 }
 
 export function ConnectSourceDialog({
-  bindings,
+  sources,
   connections,
   error,
   initialConnectionId,
@@ -75,8 +75,8 @@ export function ConnectSourceDialog({
   onConnected,
   onReload,
 }: {
-  bindings: PluginBinding[];
-  connections: PluginConnection[];
+  sources: IngestionSource[];
+  connections: IntegrationConnection[];
   error: string | null;
   initialConnectionId?: string | null;
   knowledgeBaseId: string;
@@ -88,8 +88,8 @@ export function ConnectSourceDialog({
 }) {
   const { toast } = useToast();
   const existingConnectionIds = useMemo(
-    () => new Set(bindings.map((binding) => binding.connection_id)),
-    [bindings],
+    () => new Set(sources.map((source) => source.integration_connection_id)),
+    [sources],
   );
   const available = connections.filter(
     (connection) => connection.status === "active" && !existingConnectionIds.has(connection.id),
@@ -112,8 +112,8 @@ export function ConnectSourceDialog({
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const binding = await adminRequest<PluginBinding>(
-        `/plugin-connections/${connection.id}/bindings`,
+      const source = await adminRequest<IngestionSource>(
+        `/integration-connections/${connection.id}/sources`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -128,7 +128,7 @@ export function ConnectSourceDialog({
         },
       );
       try {
-        await adminRequest(`/plugin-bindings/${binding.id}/sync`, { method: "POST" });
+        await adminRequest(`/ingestion-sources/${source.id}/ingest`, { method: "POST" });
         toast({
           title: "Source connected",
           description: `${connection.display_name} is connected and the first import is queued.`,
@@ -186,7 +186,7 @@ export function ConnectSourceDialog({
         <div aria-label="Connected sources" className="space-y-2" role="radiogroup">
           {available.map((connection) => {
             const selected = selectedId === connection.id;
-            const connector = connectorDefinition(connection.plugin_key);
+            const connector = connectorDefinition(connection.connector_key);
             return (
               <button
                 aria-checked={selected}
@@ -211,10 +211,10 @@ export function ConnectSourceDialog({
                 tabIndex={selected || (!selectedId && connection === available[0]) ? 0 : -1}
                 type="button"
               >
-                <ConnectorLogo provider={connection.plugin_key} size="sm" />
+                <ConnectorLogo provider={connection.connector_key} size="sm" />
                 <span className="min-w-0 flex-1 text-left">
                   <strong className="block truncate text-sm text-[var(--text)]">{connection.display_name}</strong>
-                  <small className="mt-0.5 block truncate text-xs text-[var(--text-muted)]">{connector?.name ?? connection.plugin_key} · Validated connection</small>
+                  <small className="mt-0.5 block truncate text-xs text-[var(--text-muted)]">{connector?.name ?? connection.connector_key} · Validated connection</small>
                 </span>
                 <span aria-hidden="true" className="knowledge-source-choice__radio" />
               </button>

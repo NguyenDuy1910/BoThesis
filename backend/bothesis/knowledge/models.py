@@ -23,9 +23,21 @@ class Evidence:
     chunk_id: str
     title: str
     content: str
+    collection_item_id: str | None = None
     source: SourceIdentity | None = None
     citation: CitationInfo = field(default_factory=CitationInfo)
+    section_path: tuple[str, ...] = ()
+    contextual_text: str | None = None
     relevance_score: float | None = None
+    rerank_score: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceContext:
+    """Bounded model context and the exact evidence represented in it."""
+
+    text: str
+    evidence: tuple[Evidence, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,4 +47,4 @@ class KnowledgeQuery:
     filters: Mapping[str, object] = field(default_factory=dict)
 
 
-__all__ = ["Evidence", "KnowledgeQuery", "RetrievalContext"]
+__all__ = ["Evidence", "EvidenceContext", "KnowledgeQuery", "RetrievalContext"]

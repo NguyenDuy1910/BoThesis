@@ -14,7 +14,6 @@ import type {
   ConversationDocument,
   ResponseStreamEvent,
 } from "../types";
-import type { ChatConnectorMode } from "@/modules/connectors/types";
 
 type ChatStatus = "ready" | "submitted" | "streaming";
 
@@ -81,8 +80,6 @@ export function useBothesisChat({
       historyMessages?: ChatMessage[];
       displayMessages?: ChatMessage[];
       documents?: ConversationDocument[];
-      connectorMode?: ChatConnectorMode;
-      connectorIds?: string[];
     } = {},
   ) => {
     if (controllerRef.current) return;
@@ -123,8 +120,6 @@ export function useBothesisChat({
         conversationId,
         history,
         documentIds: options.documents?.map((document) => document.id),
-        connectorMode: options.connectorMode ?? "auto",
-        connectorIds: options.connectorIds ?? [],
         signal: controller.signal,
         onEvent: (event) => {
           setStatus("streaming");
@@ -168,14 +163,10 @@ export function useBothesisChat({
   const sendMessage = useCallback(async ({
     text,
     documents = [],
-    connectorMode = "auto",
-    connectorIds = [],
   }: {
     text: string;
     documents?: ConversationDocument[];
-    connectorMode?: ChatConnectorMode;
-    connectorIds?: string[];
-  }) => run(text, true, { documents, connectorMode, connectorIds }), [run]);
+  }) => run(text, true, { documents }), [run]);
   const stop = useCallback(() => {
     const activeAssistantId = activeAssistantIdRef.current;
     controllerRef.current?.abort();
@@ -197,12 +188,8 @@ export function useBothesisChat({
   }, []);
   const clearError = useCallback(() => setError(null), []);
   const regenerate = useCallback(async ({
-    connectorIds = [],
-    connectorMode = "auto",
     messageId: targetId,
   }: {
-    connectorIds?: string[];
-    connectorMode?: ChatConnectorMode;
     messageId?: string;
   } = {}) => {
     const context = regenerationContext(messagesRef.current, targetId);
@@ -211,8 +198,6 @@ export function useBothesisChat({
       historyMessages: context.historyMessages,
       displayMessages: context.displayMessages,
       documents: context.documents,
-      connectorMode,
-      connectorIds,
     });
   }, [run]);
 

@@ -46,6 +46,7 @@ class ContextualChunk(BaseModel):
     access: EffectiveAccess
     citation: CitationInfo
     relevance_score: float | None = None
+    rerank_score: float | None = None
 
 
 class IndexQuery(BaseModel):

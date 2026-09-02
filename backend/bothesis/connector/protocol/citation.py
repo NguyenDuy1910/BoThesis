@@ -48,7 +48,19 @@ class CitationInfo(BaseModel):
     section: str | None = None
     section_path: tuple[str, ...] = ()
     anchor: str | None = None
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
     spans: tuple[CitationSpan, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_page_range(self) -> "CitationInfo":
+        if (
+            self.page_start is not None
+            and self.page_end is not None
+            and self.page_end < self.page_start
+        ):
+            raise ValueError("page_end must not precede page_start")
+        return self
 
 
 __all__ = ["BoundingBox", "CitationInfo", "CitationSpan"]

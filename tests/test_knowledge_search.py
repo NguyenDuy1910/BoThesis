@@ -14,12 +14,14 @@ from bothesis.agent.models import AgentContext, ToolContext
 from bothesis.agent.protocol import FunctionTool
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
-from bothesis.document_index.search import QdrantSearchIndex
+from bothesis.document_index.search import VectorSearchIndex
 from bothesis.knowledge import (
     CitationResolver,
     Evidence,
     EvidenceBuilder,
+    EvidenceContextBuilder,
     KnowledgeRetriever,
+    SemanticReranker,
 )
 from bothesis.knowledge.retriever import DocumentIndexRetriever
 from bothesis.knowledge.reranker import ScoreReranker
@@ -45,7 +47,7 @@ TOOL_CONTEXT = ToolContext(agent_context=CONTEXT)
 def _chunk(
     *,
     chunk_id: str = "chunk-1",
-    connection_id: str = "connection-1",
+    integration_connection_id: str = "connection-1",
     collection_item_id: str = "collection-1",
     score: float = 0.91,
 ) -> ContextualChunk:
@@ -64,7 +66,7 @@ def _chunk(
         document_type="plain_text",
         collection_item_id=collection_item_id,
         source=SourceIdentity(
-            connector_id=connection_id,
+            connector_id=integration_connection_id,
             provider=SourceProvider.CONFLUENCE,
             external_id="doc-1",
             url="https://knowledge.example/leave-policy",
@@ -270,23 +272,22 @@ class StubSemanticVectorStore:
                     "content_type": "text",
                     "chunk_text": " Employees receive 20 days of annual leave.\n",
                     "contextual_text": "Document: Leave policy\nSection: Annual leave\n\n Employees receive 20 days of annual leave.\n",
-                    "plugin_key": "confluence",
-                    "connection_id": "connection-1",
+                    "connector_key": "confluence",
                     "external_id": "doc-1",
                     "source_url": "https://knowledge.example/leave-policy",
-                    "context_section_path": ["Annual leave"],
-                    "citation_section_path": ["Annual leave"],
-                    "citation_section": "Annual leave",
+                    "section_path": ["Annual leave"],
+                    "page_start": 2,
+                    "page_end": 3,
                 },
             )
         ]
 
 
 @pytest.mark.asyncio
-async def test_qdrant_search_index_embeds_and_rebuilds_contextual_chunks() -> None:
+async def test_vector_search_index_embeds_and_rebuilds_contextual_chunks() -> None:
     store = StubSemanticVectorStore()
     embedder = StubEmbedder()
-    index = QdrantSearchIndex(store, embedder)  # type: ignore[arg-type]
+    index = VectorSearchIndex(store, embedder)  # type: ignore[arg-type]
 
     results = await index.search(
         " annual leave ",
@@ -312,6 +313,9 @@ async def test_qdrant_search_index_embeds_and_rebuilds_contextual_chunks() -> No
     assert document.relevance_score == 0.91
     assert document.citation.section == "Annual leave"
     assert document.citation.section_path == ("Annual leave",)
+    assert document.citation.page_start == 2
+    assert document.citation.page_end == 3
+    assert document.citation.spans == ()
     assert document.chunk_text == " Employees receive 20 days of annual leave.\n"
     assert document.contextual_text.endswith(" annual leave.\n")
 
@@ -348,7 +352,7 @@ async def test_collection_scoped_retrieval_filters_before_reranking() -> None:
     assert index.calls == [
         {
             "query": "annual leave",
-            "limit": 3,
+            "limit": 20,
             "tenant_id": "tenant-1",
             "collection_item_ids": ("collection-7",),
         }
@@ -419,10 +423,10 @@ async def test_collection_retrieval_remains_tenant_scoped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_qdrant_search_index_rejects_a_missing_tenant_scope() -> None:
+async def test_vector_search_index_rejects_a_missing_tenant_scope() -> None:
     store = StubSemanticVectorStore()
     embedder = StubEmbedder()
-    index = QdrantSearchIndex(store, embedder)  # type: ignore[arg-type]
+    index = VectorSearchIndex(store, embedder)  # type: ignore[arg-type]
 
     with pytest.raises(ValueError, match="tenant_id must not be empty"):
         await index.search(
@@ -447,7 +451,8 @@ async def test_knowledge_search_returns_bounded_evidence_and_source_metadata() -
     assert retriever.calls == [("annual leave", 3)]
     assert result.error is None
     assert result.metadata["result_count"] == 1
-    assert "[chunk-1] Leave policy" in result.content
+    assert "Evidence ID: chunk-1" in result.content
+    assert "Chunk ID: chunk-1" in result.content
     assert len(result.evidence) == 1
     evidence = result.evidence[0]
     assert evidence is EVIDENCE
@@ -530,3 +535,76 @@ def test_tool_registry_exposes_declarations_through_the_protocol() -> None:
     definition = registry.definitions()[0]
     assert definition.activity_label == "Search knowledge base"
     assert definition.activity_category == "retrieval"
+
+
+class StubRerankTransport:
+    model = "reranker-test"
+
+    def __init__(self, output_text: str) -> None:
+        self.output_text = output_text
+        self.calls: list[dict[str, object]] = []
+
+    async def responses(self, **kwargs: object) -> object:
+        self.calls.append(dict(kwargs))
+        return SimpleNamespace(output_text=self.output_text)
+
+
+@pytest.mark.asyncio
+async def test_semantic_reranker_uses_structured_order_and_preserves_scores() -> None:
+    lower = _chunk(chunk_id="lower", score=0.8)
+    higher = _chunk(chunk_id="higher", score=0.7)
+    transport = StubRerankTransport('{"chunk_ids":["higher","lower"]}')
+
+    ranked = await SemanticReranker(transport).rerank(  # type: ignore[arg-type]
+        [lower, higher],
+        query="annual leave policy",
+        limit=2,
+    )
+
+    assert [chunk.id for chunk in ranked] == ["higher", "lower"]
+    assert [chunk.relevance_score for chunk in ranked] == [0.7, 0.8]
+    assert [chunk.rerank_score for chunk in ranked] == [1.0, 0.5]
+    assert transport.calls[0]["temperature"] == 0
+
+
+class FailingReranker:
+    async def rerank(
+        self,
+        chunks: Sequence[ContextualChunk],
+        *,
+        limit: int,
+        query: str = "",
+    ) -> list[ContextualChunk]:
+        del chunks, limit, query
+        raise RuntimeError("reranker unavailable")
+
+
+@pytest.mark.asyncio
+async def test_reranking_failure_falls_back_to_candidate_order() -> None:
+    first = _chunk(chunk_id="first", score=0.2)
+    second = _chunk(chunk_id="second", score=0.9)
+    index = StubDocumentIndex([first, second])
+    retriever = DocumentIndexRetriever(
+        index,
+        reranker=FailingReranker(),  # type: ignore[arg-type]
+        candidate_count=7,
+    )
+
+    results = await retriever.search("annual leave", limit=1, ctx=CONTEXT)
+
+    assert index.calls[0]["limit"] == 7
+    assert [item.chunk_id for item in results] == ["first"]
+
+
+def test_context_builder_is_bounded_deduplicated_and_canonical() -> None:
+    evidence = EvidenceBuilder().build(DOCUMENT)
+    built = EvidenceContextBuilder(
+        max_characters=600,
+        max_evidence_characters=200,
+    ).build([evidence, evidence])
+
+    assert len(built.text) <= 600
+    assert built.evidence == (evidence,)
+    assert built.text.count("Evidence ID: chunk-1") == 1
+    assert evidence.content in built.text
+    assert "Document: Leave policy\nSection:" not in built.text

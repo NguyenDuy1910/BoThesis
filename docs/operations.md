@@ -79,18 +79,25 @@ short-lived upload or download URL only at runtime. When using MinIO, the S3
 access key and secret in `backend/.env` must match the MinIO root credentials
 used by Compose; a `SignatureDoesNotMatch` response means they do not match.
 
+Image and PDF ingestion may also write versioned WebP objects below the owning
+Item's `previews/` prefix. These are derived presentation assets; the raw object
+remains authoritative. Bound rendering with `BOTHESIS_PREVIEW_MAX_SOURCE_BYTES`,
+`BOTHESIS_PREVIEW_MAX_PAGES`, `BOTHESIS_PREVIEW_MAX_DIMENSION`, and
+`BOTHESIS_PREVIEW_WEBP_QUALITY`. Preview URLs are signed at read time and use
+`BOTHESIS_PREVIEW_URL_SECONDS`.
+
 ## Identity and credentials
 
 ```dotenv
 # Exactly 32 URL-safe base64-decoded bytes; generate once and retain securely.
-BOTHESIS_PLUGIN_ENCRYPTION_KEY=...
+BOTHESIS_INTEGRATION_ENCRYPTION_KEY=...
 
 # Local development only. Never enable this in deployment.
 BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true
 ```
 
-Plugin provider credentials are encrypted before they are written to
-`plugin_credentials`. They are not Item metadata, Qdrant payload, frontend
+Integration credentials are encrypted before they are written to
+`integration_credentials`. They are not Item metadata, Qdrant payload, frontend
 configuration, or audit-log content.
 
 ## Health and observability

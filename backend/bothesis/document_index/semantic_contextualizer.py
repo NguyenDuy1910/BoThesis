@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from bothesis.agent.prompts.template_render import render_prompt
-from bothesis.agent.transports.openrouter import OpenRouterTransport
+from bothesis import ModelResponseClient, render_prompt
 from bothesis.connector.protocol import Chunk
 
 _DISALLOWED_PREFIXES = ("document:", "section:", "context:", "description:")
@@ -16,7 +15,7 @@ class SemanticContextualizer:
 
     def __init__(
         self,
-        transport: OpenRouterTransport,
+        transport: ModelResponseClient,
         *,
         model_name: str | None = None,
         max_output_tokens: int = 128,
@@ -26,6 +25,12 @@ class SemanticContextualizer:
         self._transport = transport
         self._model_name = model_name
         self._max_output_tokens = max_output_tokens
+
+    @property
+    def model_name(self) -> str | None:
+        """Return the configured model identity used for index freshness."""
+
+        return self._model_name or self._transport.model
 
     async def describe(
         self,

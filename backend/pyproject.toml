@@ -23,5 +23,7 @@ dependencies = [
     "temporalio>=1.32,<2",
     "uvicorn[standard]>=0.52.1",
     "docling>=2.121,<2.122",
+    "pillow>=12,<13",
+    "pypdfium2>=5,<6",
     "atlassian-python-api>=5.0.3,<6",
 ]
