@@ -364,6 +364,62 @@ async def test_integration_list_eager_loads_optional_credentials(
 
 
 @pytest.mark.asyncio
+async def test_authorized_item_is_projectable_without_further_database_io(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The knowledge viewer reads an authorized Item outside the await chain.
+
+    Its upload lifecycle must already be loaded: a lazy load would run asyncpg
+    I/O from synchronous code and fail the request with MissingGreenlet.
+    """
+
+    async with session_factory.begin() as session:
+        auth = AuthService(session)
+        tenant = await auth.create_tenant("viewer", "Viewer")
+        owner = await auth.create_user("viewer@example.com")
+        role = await auth.create_role(
+            tenant.id,
+            "reader",
+            "Reader",
+            permission_codes=["knowledge.read", "access.manage"],
+        )
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
+        items = ItemService(session)
+        collection = await items.create_collection(
+            tenant_id=tenant.id,
+            title="Policies",
+            created_by_user_id=owner.id,
+        )
+        await CollectionAccessService(session).grant(
+            collection.id,
+            principal_type="user",
+            principal_id=owner.id,
+            role="owner",
+            actor=actor,
+        )
+        # A connector-ingested document has no upload row at all.
+        ingested = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=collection.id,
+            title="Ingested policy",
+            document_type="pdf",
+            created_by_user_id=owner.id,
+        )
+        ingested_id = ingested.id
+
+    async with session_factory.begin() as session:
+        item = await ItemService(session).get_item_by_canonical_id(
+            str(ingested_id), access=actor
+        )
+        loaded = item
+
+    # Outside the session, reading the relationship must not touch the database.
+    assert loaded.upload is None
+    assert loaded.status == "pending"
+
+
+@pytest.mark.asyncio
 async def test_external_resource_mapping_preserves_canonical_item_identity(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

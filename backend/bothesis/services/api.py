@@ -508,6 +508,7 @@ class ApiService:
                 "item_id": str(item.id),
                 "title": item.title,
                 "content_type": item.mime_type or "text/plain",
+                "status": item.status,
                 "external_url": CitationResolver.original_url(
                     self._file_source(item),
                     focus_citation,

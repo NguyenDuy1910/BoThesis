@@ -25,9 +25,12 @@ class EvidenceContextBuilder:
 
     def build(self, evidence: Sequence[Evidence]) -> EvidenceContext:
         introduction = (
-            "Retrieved access-permitted enterprise evidence. "
-            "Use the canonical Evidence text for factual claims and cite its "
-            "evidence ID with [[cite:evidence-id]].\n\n"
+            "Retrieved access-permitted enterprise evidence. Use the canonical "
+            "Evidence text for factual claims, and cite the source reference of "
+            "the evidence that supports each claim with [[cite:source-id]] "
+            "immediately after that claim. Only reference IDs listed below "
+            "exist; never invent a reference, a page, or a document "
+            "identifier.\n\n"
         )
         blocks: list[str] = []
         included: list[Evidence] = []
@@ -65,16 +68,20 @@ class EvidenceContextBuilder:
         )
 
     def _header(self, item: Evidence) -> str:
+        # Internal Item and chunk identifiers stay out of the model context.
+        # The source reference is the only identity the model can cite, and the
+        # backend resolves it back to canonical citation metadata.
         lines = [
-            f"--- Document: {item.title or item.item_id} ---",
-            f"Evidence ID: {item.id}",
-            f"Item ID: {item.item_id}",
-            f"Chunk ID: {item.chunk_id}",
+            f"--- Document: {item.title or 'Untitled source'} ---",
+            f"Source reference: {item.id}",
         ]
         if item.section_path:
             lines.append(f"Section: {' > '.join(item.section_path)}")
+        pages = _page_label(item)
+        if pages is not None:
+            lines.append(f"Page: {pages}")
         if item.source is not None:
-            lines.append(f"Source: {item.source.provider.value}")
+            lines.append(f"Origin: {item.source.provider.value}")
             if item.source.url:
                 lines.append(f"Source URL: {item.source.url}")
         return "\n".join(lines)
@@ -102,6 +109,16 @@ class EvidenceContextBuilder:
         if len(text) <= limit:
             return text
         return f"{text[: max(1, limit - 1)].rstrip()}…"
+
+
+def _page_label(item: Evidence) -> str | None:
+    start = item.citation.page_start
+    end = item.citation.page_end
+    if start is None:
+        return str(end) if end is not None else None
+    if end is None or end == start:
+        return str(start)
+    return f"{start}-{end}"
 
 
 __all__ = ["EvidenceContextBuilder"]

@@ -62,7 +62,7 @@ class KnowledgeSearch(Tool):
                 "Search access-permitted enterprise knowledge for source-grounded "
                 "evidence. Use focused standalone queries that retain exact "
                 "entities, identifiers, dates, and constraints. Results include "
-                "evidence IDs for citations."
+                "the source references to cite."
             ),
             input_schema={
                 "type": "object",

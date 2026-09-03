@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import httpx
@@ -28,10 +29,13 @@ from bothesis.agent.tools.knowledge_search import KnowledgeSearch
 from bothesis.connector.protocol import (
     CitationInfo,
     CitationSpan,
+    EffectiveAccess,
+    Hierarchy,
     SourceIdentity,
     SourceProvider,
 )
-from bothesis.knowledge import Evidence
+from bothesis.document_index import ContextualChunk
+from bothesis.knowledge import Evidence, ItemKnowledgeRetriever, source_reference
 from bothesis.services import AuthContext, RequestIdentity
 
 
@@ -563,6 +567,144 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
             "content": "<user_message>What is the leave policy?</user_message>",
         },
     ]
+
+
+class IndexedChunkIndex:
+    """One indexed chunk, as the vector index returns it to knowledge."""
+
+    def __init__(self, chunk: ContextualChunk) -> None:
+        self._chunk = chunk
+
+    async def search_item_content(
+        self,
+        query: str,
+        *,
+        limit: int,
+        tenant_id: str,
+        collection_item_ids: tuple[str, ...],
+    ) -> list[ContextualChunk]:
+        return [self._chunk]
+
+
+def _indexed_chunk() -> ContextualChunk:
+    return ContextualChunk(
+        id="9f1c2d34-0000-4000-8000-000000000001:12",
+        item_id="9f1c2d34-0000-4000-8000-000000000001",
+        chunk_index=12,
+        content_type="text",
+        chunk_text="Employees receive 20 days of annual leave.",
+        contextual_text="Leave policy: employees receive 20 days of annual leave.",
+        title="Leave policy",
+        document_type="pdf",
+        collection_item_id=str(UUID(int=12)),
+        source=SourceIdentity(
+            connector_id="upload",
+            provider=SourceProvider.FILE,
+            external_id="9f1c2d34-0000-4000-8000-000000000001",
+        ),
+        hierarchy=Hierarchy(),
+        access=EffectiveAccess(),
+        citation=CitationInfo(page_start=7, page_end=7, section="Annual leave"),
+        relevance_score=0.92,
+    )
+
+
+def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
+    monkeypatch,
+) -> None:
+    """The whole grounding chain, from indexed chunk to client citation.
+
+    Retrieval assigns the reference, the model cites only that reference, and
+    the backend — not the model — produces the citation the client receives.
+    """
+
+    chunk = _indexed_chunk()
+    reference = source_reference(chunk.item_id, chunk.id)
+    captured_context: list[str] = []
+
+    class ContextCapturingSearch(KnowledgeSearch):
+        async def execute(self, arguments, ctx):  # type: ignore[no-untyped-def]
+            output = await super().execute(arguments, ctx)
+            captured_context.append(output.content)
+            return output
+
+    registry = ToolRegistry()
+    registry.register(
+        ContextCapturingSearch(ItemKnowledgeRetriever(IndexedChunkIndex(chunk)))  # type: ignore[arg-type]
+    )
+    transport = native.ScriptedResponsesTransport(
+        [
+            [*native.created("resp_a"), *search_call(), *native.completed("resp_a")],
+            [
+                *native.created("resp_b"),
+                *native.message(
+                    item_id="msg_1",
+                    output_index=0,
+                    deltas=[f"Employees receive 20 days [[cite:{reference}]]."],
+                    phase="final_answer",
+                ),
+                *native.completed("resp_b"),
+            ],
+        ]
+    )
+    agent = Agent(
+        transport,
+        registry,
+        config=AgentConfig(max_model_turns=3, max_tool_rounds=2),
+    )
+    monkeypatch.setattr(main._api_service, "_agent", agent)
+    user_id, tenant_id = _install_access(monkeypatch)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={
+                "message": "How much annual leave is there?",
+                "tenant_id": str(tenant_id),
+                "user_id": str(user_id),
+                "knowledge_mode": "selected",
+                "collection_item_ids": [str(UUID(int=12))],
+            },
+        )
+
+    assert response.status_code == 200
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+    # The model context offers the reference and withholds internal identifiers.
+    assert f"Source reference: {reference}" in captured_context[0]
+    assert chunk.id not in captured_context[0]
+    assert chunk.item_id not in captured_context[0]
+
+    # The marker is never visible to the reader.
+    answer = "".join(
+        event["delta"]
+        for event in events
+        if event["type"] == "response.output_text.delta"
+    )
+    assert answer == "Employees receive 20 days ."
+
+    # The citation the client receives is built from canonical metadata.
+    annotation = next(
+        event["annotation"]
+        for event in events
+        if event["type"] == "response.output_text.annotation.added"
+    )
+    citation = annotation["citation"]
+    assert annotation["type"] == "bothesis:document_citation"
+    assert citation["id"] == reference
+    assert citation["item_id"] == chunk.item_id
+    assert citation["chunk_id"] == chunk.id
+    assert citation["title"] == "Leave policy"
+    assert citation["page_start"] == 7
+    assert citation["internal_url"] == (
+        f"/knowledge/items/{chunk.item_id}?chunk={quote(chunk.id, safe='')}"
+    )
+    # No infrastructure detail reaches the client.
+    assert not {"collection_name", "point_id", "storage_key", "vector"} & set(citation)
 
 
 def test_document_search_api_uses_authorized_retrieval_scope(monkeypatch) -> None:

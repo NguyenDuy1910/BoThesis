@@ -30,6 +30,7 @@ from bothesis.knowledge import (
     ItemKnowledgeRetriever,
     KnowledgeRetriever,
     SemanticReranker,
+    source_reference,
 )
 
 CONTEXT = AgentContext(
@@ -90,7 +91,7 @@ DOCUMENT = _chunk()
 
 def _evidence(chunk: ContextualChunk) -> Evidence:
     return Evidence(
-        id=chunk.id,
+        id=source_reference(chunk.item_id, chunk.id),
         item_id=chunk.item_id,
         chunk_id=chunk.id,
         collection_item_id=chunk.collection_item_id,
@@ -447,8 +448,11 @@ async def test_knowledge_search_returns_bounded_evidence_and_source_metadata() -
     assert retriever.calls == [("annual leave", 3)]
     assert result.error is None
     assert result.metadata["result_count"] == 1
-    assert "Evidence ID: chunk-1" in result.content
-    assert "Chunk ID: chunk-1" in result.content
+    # The model context carries the source reference and nothing that would
+    # let the model invent an Item or chunk identifier.
+    assert f"Source reference: {EVIDENCE.id}" in result.content
+    assert "chunk-1" not in result.content
+    assert "doc-1" not in result.content
     assert len(result.evidence) == 1
     evidence = result.evidence[0]
     assert evidence is EVIDENCE
@@ -516,7 +520,7 @@ def test_knowledge_search_declares_itself_as_a_protocol_function_tool() -> None:
     assert declaration.name == "knowledge_search"
     assert declaration.parameters["required"] == ["queries"]
     assert "access-permitted" in declaration.description
-    assert "evidence IDs for citations" in declaration.description
+    assert "source references to cite" in declaration.description
     assert (
         "Do not use generic terms"
         in declaration.parameters["properties"]["queries"]["description"]
@@ -539,13 +543,14 @@ def test_tool_registry_exposes_declarations_through_the_protocol() -> None:
 class StubRerankTransport:
     model = "reranker-test"
 
-    def __init__(self, output_text: str) -> None:
+    def __init__(self, output_text: str, status: str = "completed") -> None:
         self.output_text = output_text
+        self.status = status
         self.calls: list[dict[str, object]] = []
 
     async def responses(self, **kwargs: object) -> object:
         self.calls.append(dict(kwargs))
-        return SimpleNamespace(output_text=self.output_text)
+        return SimpleNamespace(output_text=self.output_text, status=self.status)
 
 
 @pytest.mark.asyncio
@@ -564,6 +569,62 @@ async def test_semantic_reranker_uses_structured_order_and_preserves_scores() ->
     assert [chunk.relevance_score for chunk in ranked] == [0.7, 0.8]
     assert [chunk.rerank_score for chunk in ranked] == [1.0, 0.5]
     assert transport.calls[0]["temperature"] == 0
+
+
+@pytest.mark.asyncio
+async def test_semantic_reranker_reports_an_empty_reasoning_model_response() -> None:
+    """A reasoning model can spend the whole budget before writing anything.
+
+    That must surface as a named retrieval failure, not as a JSON parse error
+    from feeding an empty string to the decoder.
+    """
+
+    transport = StubRerankTransport("", status="incomplete")
+
+    with pytest.raises(ValueError, match="reranker returned no text"):
+        await SemanticReranker(transport).rerank(  # type: ignore[arg-type]
+            [_chunk()],
+            query="annual leave policy",
+            limit=1,
+        )
+
+    # The budget must leave room for reasoning plus the ordering itself.
+    assert int(transport.calls[0]["max_output_tokens"]) >= 1_024
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "output_text",
+    [
+        '{"chunk_ids":["higher","lower"]}',
+        '```json\n{"chunk_ids":["higher","lower"]}\n```',
+        '```\n{"chunk_ids":["higher","lower"]}\n```',
+        'Here is the ranking:\n{"chunk_ids":["higher","lower"]}\nHope that helps.',
+    ],
+)
+async def test_semantic_reranker_reads_the_order_through_model_wrapping(
+    output_text: str,
+) -> None:
+    lower = _chunk(chunk_id="lower", score=0.8)
+    higher = _chunk(chunk_id="higher", score=0.7)
+
+    ranked = await SemanticReranker(StubRerankTransport(output_text)).rerank(  # type: ignore[arg-type]
+        [lower, higher],
+        query="annual leave policy",
+        limit=2,
+    )
+
+    assert [chunk.id for chunk in ranked] == ["higher", "lower"]
+
+
+@pytest.mark.asyncio
+async def test_semantic_reranker_rejects_a_response_without_a_json_object() -> None:
+    with pytest.raises(ValueError, match="no JSON object"):
+        await SemanticReranker(StubRerankTransport("I cannot rank these.")).rerank(  # type: ignore[arg-type]
+            [_chunk()],
+            query="annual leave policy",
+            limit=1,
+        )
 
 
 class FailingReranker:
@@ -604,6 +665,60 @@ def test_context_builder_is_bounded_deduplicated_and_canonical() -> None:
 
     assert len(built.text) <= 600
     assert built.evidence == (evidence,)
-    assert built.text.count("Evidence ID: chunk-1") == 1
+    assert built.text.count(f"Source reference: {evidence.id}") == 1
     assert evidence.content in built.text
     assert "Document: Leave policy\nSection:" not in built.text
+
+
+@pytest.mark.asyncio
+async def test_retrieval_assigns_stable_source_references_to_evidence() -> None:
+    """The reference is derived from the chunk identity it stands for.
+
+    Two retrieval rounds — or two concurrent tool calls — must produce the same
+    reference for the same chunk, and different references for different ones,
+    without any run-scoped counter.
+    """
+
+    other = _chunk(chunk_id="chunk-2", score=0.4)
+    retriever = ItemKnowledgeRetriever(StubDocumentIndex([DOCUMENT, other]))
+
+    first = await retriever.search("annual leave", limit=2, ctx=CONTEXT)
+    second = await retriever.search("annual leave", limit=2, ctx=CONTEXT)
+
+    references = [item.id for item in first]
+    assert references == [item.id for item in second]
+    assert len(set(references)) == 2
+    assert all(reference.startswith("source-") for reference in references)
+    # The reference never carries the identifiers it stands for.
+    assert all(
+        item.chunk_id not in item.id and item.item_id not in item.id for item in first
+    )
+    # Canonical identity is preserved alongside the reference.
+    assert [(item.item_id, item.chunk_id) for item in first] == [
+        ("doc-1", "chunk-1"),
+        ("doc-1", "chunk-2"),
+    ]
+
+
+def test_source_reference_is_distinct_per_item_and_chunk() -> None:
+    assert source_reference("doc-1", "chunk-1") == source_reference("doc-1", "chunk-1")
+    assert source_reference("doc-1", "chunk-1") != source_reference("doc-2", "chunk-1")
+    assert source_reference("doc-1", "chunk-1") != source_reference("doc-1", "chunk-2")
+    # Concatenation must not collide across an item/chunk boundary.
+    assert source_reference("a", "bc") != source_reference("ab", "c")
+
+
+def test_context_builder_reports_the_page_the_model_may_cite() -> None:
+    paged = Evidence(
+        id="source-abc12345",
+        item_id="doc-1",
+        chunk_id="chunk-1",
+        title="Leave policy",
+        content="Employees receive 20 days of annual leave.",
+        citation=CitationInfo(page_start=7, page_end=9),
+    )
+
+    built = EvidenceContextBuilder().build([paged])
+
+    assert "Page: 7-9" in built.text
+    assert "[[cite:source-id]]" in built.text

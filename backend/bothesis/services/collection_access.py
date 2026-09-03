@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import and_, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from bothesis.db.models import CollectionAccess, Group, Item, TenantMembership, User
 from bothesis.services import (
@@ -239,8 +240,13 @@ class CollectionAccessService:
     ) -> Item:
         if access.tenant_id is None:
             raise DocumentNotFoundError(f"item not found: {item_id}")
+        # Callers project the authorized Item outside this session's await
+        # chain, so its upload lifecycle is loaded here. A lazy load would run
+        # asyncpg I/O from synchronous code and fail with MissingGreenlet.
         item = await self._session.scalar(
-            select(Item).where(
+            select(Item)
+            .options(joinedload(Item.upload))
+            .where(
                 Item.id == item_id,
                 Item.tenant_id == access.tenant_id,
                 Item.status != "deleted",

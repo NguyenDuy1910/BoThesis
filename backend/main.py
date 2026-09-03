@@ -281,6 +281,7 @@ class KnowledgeItemViewer(BaseModel):
     item_id: str
     title: str
     content_type: str
+    status: Literal["pending", "processing", "ready", "failed", "unsupported", "deleted"]
     external_url: str | None = None
     document_url: str | None = None
     preview: KnowledgePreview | None = None

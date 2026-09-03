@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from hashlib import sha256
 
 from bothesis.document_index import ContextualChunk, ItemContentIndex
 from bothesis.knowledge import Evidence, Reranker, RetrievalContext
@@ -77,9 +78,13 @@ class ItemKnowledgeRetriever:
                 raise ValueError("reranker returned invalid candidates")
             return ranked[:limit]
         except Exception as exc:  # noqa: BLE001 - optional reranking must fail open
+            # Validation failures carry only positions and identifiers, so the
+            # reason is logged; anything else could echo a provider payload.
+            reason = str(exc) if isinstance(exc, (ValueError, TypeError)) else ""
             log.warning(
-                "retrieval reranking failed; preserving score order: %s",
+                "retrieval reranking failed; preserving score order: %s%s",
                 type(exc).__name__,
+                f": {reason}" if reason else "",
             )
             return _score_order(chunks, limit=limit)
 
@@ -96,9 +101,22 @@ def _score_order(chunks: list[ContextualChunk], *, limit: int) -> list[Contextua
     )[:limit]
 
 
+def source_reference(item_id: str, chunk_id: str) -> str:
+    """Return the stable, model-safe reference for one retrieved chunk.
+
+    The model never sees an Item or chunk identifier: it cites this reference,
+    and the backend maps it back to canonical metadata. The value is derived
+    from the identity it stands for, so the same chunk keeps the same reference
+    across retrieval rounds and concurrent tool calls without run state.
+    """
+
+    digest = sha256(f"{item_id}\0{chunk_id}".encode()).hexdigest()
+    return f"source-{digest[:8]}"
+
+
 def _evidence_from_chunk(chunk: ContextualChunk) -> Evidence:
     return Evidence(
-        id=chunk.id,
+        id=source_reference(chunk.item_id, chunk.id),
         item_id=chunk.item_id,
         chunk_id=chunk.id,
         collection_item_id=chunk.collection_item_id,
@@ -129,4 +147,4 @@ def _validate_tenant_id(tenant_id: str) -> str:
     return normalized_tenant_id
 
 
-__all__ = ["ItemKnowledgeRetriever"]
+__all__ = ["ItemKnowledgeRetriever", "source_reference"]

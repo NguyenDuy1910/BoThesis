@@ -78,7 +78,7 @@ class ContextBuilder(Protocol):
 
 from .context_builder import EvidenceContextBuilder
 from .evidence import CitationResolver
-from .retriever import ItemKnowledgeRetriever
+from .retriever import ItemKnowledgeRetriever, source_reference
 from .semantic_reranker import SemanticReranker
 
 __all__ = [
@@ -92,4 +92,5 @@ __all__ = [
     "Reranker",
     "RetrievalContext",
     "SemanticReranker",
+    "source_reference",
 ]

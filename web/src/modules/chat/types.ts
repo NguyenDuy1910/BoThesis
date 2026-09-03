@@ -39,6 +39,8 @@ export interface CitationReference {
   section?: string | null;
   section_path?: string[] | null;
   anchor?: string | null;
+  page_start?: number | null;
+  page_end?: number | null;
   spans?: CitationSpan[] | null;
   source?: CitationSource | null;
   internal_url?: string | null;
