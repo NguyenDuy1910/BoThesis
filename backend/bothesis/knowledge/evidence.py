@@ -1,9 +1,8 @@
-"""Provider-neutral navigation targets for structured citations."""
+"""Provider-neutral navigation targets for grounded citations."""
 
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from bothesis.document_index.models import CitationInfo, ContextualChunk, SourceIdentity
-from .models import Evidence
+from bothesis.connector.protocol import CitationInfo, SourceIdentity
 
 
 class CitationResolver:
@@ -31,24 +30,4 @@ class CitationResolver:
         return urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, anchor))
 
 
-class EvidenceBuilder:
-    """Convert indexed chunks into the bounded evidence contract for agents."""
-
-    def build(self, chunk: ContextualChunk) -> Evidence:
-        return Evidence(
-            id=chunk.id,
-            item_id=chunk.item_id,
-            chunk_id=chunk.id,
-            collection_item_id=chunk.collection_item_id,
-            title=chunk.title or chunk.item_id,
-            content=chunk.chunk_text,
-            source=chunk.source,
-            citation=chunk.citation,
-            section_path=tuple(chunk.context.section_path),
-            contextual_text=chunk.contextual_text,
-            relevance_score=chunk.relevance_score,
-            rerank_score=chunk.rerank_score,
-        )
-
-
-__all__ = ["CitationResolver", "EvidenceBuilder"]
+__all__ = ["CitationResolver"]

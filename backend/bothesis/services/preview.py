@@ -19,7 +19,7 @@ import pypdfium2 as pdfium
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from bothesis.db.models import Item
-from bothesis.document_index.raw_storage import DocumentStorage, StoredObject
+from bothesis.storage import DocumentStorage, StoredObject
 from bothesis.services import (
     DEFAULT_PREVIEW_MAX_DIMENSION,
     DEFAULT_PREVIEW_MAX_PAGES,

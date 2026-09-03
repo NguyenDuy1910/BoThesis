@@ -17,15 +17,13 @@ from bothesis.connector.protocol import (
     SourceProvider,
 )
 from bothesis.db.models import Item
-from bothesis.document_index import (
-    DocumentProcessingError,
-    DocumentUnavailableError,
-)
-from bothesis.document_index.raw_storage import DocumentStorage
+from bothesis.storage import DocumentStorage
 from bothesis.services import (
     AuthContext,
     CanonicalDocumentContent,
     DEFAULT_PROCESSING_MAX_BYTES,
+    DocumentProcessingError,
+    DocumentUnavailableError,
 )
 
 

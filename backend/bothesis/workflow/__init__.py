@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass
 
-INGESTION_ACTIVITY_NAME = "bothesis.run_ingestion"
+INGESTION_ACTIVITY_NAME = "bothesis.ingest_items"
 INGESTION_TASK_QUEUE = "bothesis-ingestion"
 INGESTION_WORKFLOW_NAME = "bothesis.ingestion"
 TEMPORAL_DEFAULT_NAMESPACE = "default"
@@ -30,8 +30,7 @@ class TemporalSettings:
                 os.getenv("BOTHESIS_TEMPORAL_TARGET") or TEMPORAL_DEFAULT_TARGET
             ).strip(),
             namespace=(
-                os.getenv("BOTHESIS_TEMPORAL_NAMESPACE")
-                or TEMPORAL_DEFAULT_NAMESPACE
+                os.getenv("BOTHESIS_TEMPORAL_NAMESPACE") or TEMPORAL_DEFAULT_NAMESPACE
             ).strip(),
             task_queue=(
                 os.getenv("BOTHESIS_TEMPORAL_TASK_QUEUE") or INGESTION_TASK_QUEUE

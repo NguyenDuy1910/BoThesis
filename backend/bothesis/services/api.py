@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from qdrant_client import models as qmodels
 from sqlalchemy import select
 
 from bothesis.agent import Agent, AgentConfig
@@ -24,16 +23,14 @@ from bothesis.connector.protocol import (
 )
 from bothesis.db.engine import get_session_factory, session_scope
 from bothesis.db.models import Item
-from bothesis.document_index import SemanticContextualizer
-from bothesis.document_index.indexer import DocumentPipeline
-from bothesis.document_index.qdrant_index import QdrantDocumentIndex
-from bothesis.document_index.raw_storage import S3DocumentStorage
-from bothesis.document_index.search import VectorSearchIndex
-from bothesis.document_index.vector_store import VectorStore
-from bothesis.knowledge import CitationResolver, SemanticReranker
-from bothesis.knowledge.retriever import DocumentIndexRetriever
+from bothesis.document_index import ItemIndex, SemanticContextualizer
+from bothesis.storage import S3DocumentStorage
+from bothesis.knowledge import (
+    CitationResolver,
+    ItemKnowledgeRetriever,
+    SemanticReranker,
+)
 from bothesis.observability import create_langfuse_tracing
-from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_PROCESSING_MAX_BYTES,
@@ -46,11 +43,13 @@ from bothesis.services import (
     CitationService,
     CollectionAccessService,
     DocumentNotFoundError,
+    ItemIngestionService,
     ItemService,
     RequestIdentity,
     UploadService,
     require_tenant_permission,
 )
+from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
 from bothesis.services.request_identity import resolve_auth_context
 
 log = logging.getLogger(__name__)
@@ -72,15 +71,16 @@ class ApiService:
         reranker_model: str | None = None,
         retrieval_context_characters: int = 8_000,
     ) -> None:
-        if min(
-            hybrid_candidate_limit,
-            final_retrieval_top_k,
-            retrieval_context_characters,
-        ) < 1:
+        if (
+            min(
+                hybrid_candidate_limit,
+                final_retrieval_top_k,
+                retrieval_context_characters,
+            )
+            < 1
+        ):
             raise ValueError("retrieval limits must be at least one")
-        self._allow_insecure_development_identity = (
-            allow_insecure_development_identity
-        )
+        self._allow_insecure_development_identity = allow_insecure_development_identity
         self._qdrant_prefer_grpc = qdrant_prefer_grpc
         self._contextualization_enabled = contextualization_enabled
         self._contextualization_model = contextualization_model
@@ -94,10 +94,11 @@ class ApiService:
         self._storage_initialized = False
         self._uploads: UploadService | None = None
         self._previews: KnowledgePreviewService | None = None
-        self._pipeline: DocumentPipeline | None = None
+        self._index: ItemIndex | None = None
+        self._ingestion: ItemIngestionService | None = None
         self._agent: Agent | None = None
         self._agent_transport: OpenRouterTransport | None = None
-        self._retriever: DocumentIndexRetriever | None = None
+        self._retriever: ItemKnowledgeRetriever | None = None
         self._contextualization_transport: OpenRouterTransport | None = None
 
     async def chat_events(
@@ -120,16 +121,20 @@ class ApiService:
         )
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         async with session_scope(self._sessions()) as session:
-            allowed_ids = await CollectionAccessService(
-                session
-            ).allowed_collection_ids(access)
+            allowed_ids = await CollectionAccessService(session).allowed_collection_ids(
+                access
+            )
         allowed_set = set(allowed_ids)
         if knowledge_mode == "off":
             selected_collection_ids: tuple[UUID, ...] = ()
             allowed_tool_names: tuple[str, ...] | None = ()
         elif knowledge_mode == "selected":
-            if not collection_item_ids or not set(collection_item_ids).issubset(allowed_set):
-                raise PermissionError("one or more selected Collections are unavailable")
+            if not collection_item_ids or not set(collection_item_ids).issubset(
+                allowed_set
+            ):
+                raise PermissionError(
+                    "one or more selected Collections are unavailable"
+                )
             selected_collection_ids = tuple(dict.fromkeys(collection_item_ids))
             allowed_tool_names = ("knowledge_search",)
         else:
@@ -182,9 +187,7 @@ class ApiService:
                 return {"items": [], "total": 0}
             collections = list(
                 await session.scalars(
-                    select(Item)
-                    .where(Item.id.in_(ids))
-                    .order_by(Item.title, Item.id)
+                    select(Item).where(Item.id.in_(ids)).order_by(Item.title, Item.id)
                 )
             )
             return {
@@ -214,9 +217,9 @@ class ApiService:
         access = await self._resolve_access(identity)
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         async with session_scope(self._sessions()) as session:
-            allowed_ids = await CollectionAccessService(
-                session
-            ).allowed_collection_ids(access)
+            allowed_ids = await CollectionAccessService(session).allowed_collection_ids(
+                access
+            )
         allowed_set = set(allowed_ids)
         requested_ids = tuple(dict.fromkeys(collection_item_ids or allowed_ids))
         if not set(requested_ids).issubset(allowed_set):
@@ -406,7 +409,7 @@ class ApiService:
             ).authorization_collection_id(item.id, tenant_id=access.tenant_id)
             if collection_id is None:
                 raise DocumentNotFoundError("citation not found")
-            payloads = await self._qdrant_item_payloads(
+            payloads = await self._indexed_item_payloads(
                 item_id=str(item.id),
                 collection_item_id=str(collection_id),
                 access=access,
@@ -460,7 +463,7 @@ class ApiService:
             ).authorization_collection_id(item.id, tenant_id=access.tenant_id)
             if collection_id is None:
                 raise DocumentNotFoundError("item not found")
-            payloads = await self._qdrant_item_payloads(
+            payloads = await self._indexed_item_payloads(
                 item_id=str(item.id),
                 collection_item_id=str(collection_id),
                 access=access,
@@ -517,7 +520,7 @@ class ApiService:
                 "focus": focus,
             }
 
-    async def _qdrant_item_payloads(
+    async def _indexed_item_payloads(
         self,
         *,
         item_id: str,
@@ -528,50 +531,36 @@ class ApiService:
     ) -> list[dict[str, Any]]:
         if access.tenant_id is None:
             return []
-        store = VectorStore(
-            collection_name=os.getenv("QDRANT_COLLECTION"),
-            url=os.getenv("QDRANT_URL"),
-            api_key=os.getenv("QDRANT_API_KEY") or None,
-            prefer_grpc=self._qdrant_prefer_grpc,
-            timeout=20,
-        )
-        access_filter = store.build_access_filter(
+        chunks = await self._item_index().get_item_content(
+            item_id,
             tenant_id=str(access.tenant_id),
-            collection_item_ids={collection_item_id},
+            collection_item_id=collection_item_id,
+            chunk_id=chunk_id,
+            limit=limit,
         )
-        must = [
-            *(access_filter.must or []),
-            qmodels.FieldCondition(
-                key="item_id", match=qmodels.MatchValue(value=item_id)
-            ),
+        return [
+            {
+                "item_id": chunk.item_id,
+                "chunk_id": chunk.id,
+                "chunk_index": chunk.chunk_index,
+                "title": chunk.title,
+                "content_type": chunk.content_type,
+                "chunk_text": chunk.chunk_text,
+                "section_path": list(chunk.context.section_path),
+                "citation_anchor": chunk.citation.anchor,
+                "page_start": chunk.citation.page_start,
+                "page_end": chunk.citation.page_end,
+            }
+            for chunk in chunks
         ]
-        if chunk_id:
-            must.append(
-                qmodels.FieldCondition(
-                    key="chunk_id", match=qmodels.MatchValue(value=chunk_id)
-                )
-            )
-        try:
-            points, _ = await store.scroll_points(
-                scroll_filter=qmodels.Filter(must=must),
-                limit=limit,
-                with_payload=True,
-                with_vectors=False,
-            )
-        finally:
-            await store.aclose()
-        payloads = [
-            dict(point.payload)
-            for point in points
-            if isinstance(getattr(point, "payload", None), Mapping)
-        ]
-        return sorted(payloads, key=lambda value: int(value.get("chunk_index") or 0))
 
     async def aclose(self) -> None:
-        if self._pipeline is not None:
-            await self._pipeline.aclose()
+        if self._index is not None:
+            await self._index.aclose()
         if self._contextualization_transport is not None:
-            await self._contextualization_transport.aclose()
+            close = getattr(self._contextualization_transport, "aclose", None)
+            if close is not None:
+                await close()
         if self._agent_transport is not None:
             close = getattr(self._agent_transport, "aclose", None)
             if close is not None:
@@ -613,7 +602,7 @@ class ApiService:
             self._uploads = UploadService(
                 self._sessions(),
                 object_storage=self._object_storage(),
-                pipeline=self._document_pipeline(),
+                ingestion_service=self._ingestion_service(),
                 document_source=ChatDocumentSourceService(
                     object_storage=self._object_storage(),
                     processor=FileProcessor(max_file_bytes=processing_max_bytes),
@@ -644,9 +633,7 @@ class ApiService:
                     max_dimension=int(
                         os.getenv("BOTHESIS_PREVIEW_MAX_DIMENSION", "1600")
                     ),
-                    webp_quality=int(
-                        os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")
-                    ),
+                    webp_quality=int(os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")),
                 ),
                 max_source_bytes=int(
                     os.getenv(
@@ -660,7 +647,9 @@ class ApiService:
     def _object_storage(self) -> Any:
         if self._storage_initialized:
             return self._storage
-        provider = (os.getenv("BOTHESIS_OBJECT_STORAGE_PROVIDER") or "aws_s3").strip().lower()
+        provider = (
+            (os.getenv("BOTHESIS_OBJECT_STORAGE_PROVIDER") or "aws_s3").strip().lower()
+        )
         if provider == "aws_s3":
             bucket = (
                 os.getenv("BOTHESIS_S3_BUCKET")
@@ -679,24 +668,22 @@ class ApiService:
             if not bucket:
                 raise RuntimeError("BOTHESIS_OBJECT_STORAGE_BUCKET is required")
             self._storage = S3DocumentStorage(
-                    bucket=bucket,
-                    region=(
-                        os.getenv("BOTHESIS_S3_REGION")
-                        or os.getenv("AWS_REGION")
-                        or os.getenv("AWS_DEFAULT_REGION")
-                        or None
-                    ),
-                    endpoint_url=endpoint_url or None,
-                    addressing_style=(
-                        os.getenv("BOTHESIS_S3_ADDRESSING_STYLE") or "auto"
-                    ).strip(),
-                    timeout_seconds=float(
-                        os.getenv("BOTHESIS_S3_TIMEOUT_SECONDS", "20")
-                    ),
-                    max_pool_connections=int(
-                        os.getenv("BOTHESIS_S3_MAX_POOL_CONNECTIONS", "20")
-                    ),
-                )
+                bucket=bucket,
+                region=(
+                    os.getenv("BOTHESIS_S3_REGION")
+                    or os.getenv("AWS_REGION")
+                    or os.getenv("AWS_DEFAULT_REGION")
+                    or None
+                ),
+                endpoint_url=endpoint_url or None,
+                addressing_style=(
+                    os.getenv("BOTHESIS_S3_ADDRESSING_STYLE") or "auto"
+                ).strip(),
+                timeout_seconds=float(os.getenv("BOTHESIS_S3_TIMEOUT_SECONDS", "20")),
+                max_pool_connections=int(
+                    os.getenv("BOTHESIS_S3_MAX_POOL_CONNECTIONS", "20")
+                ),
+            )
         elif provider == "cloudflare_r2":
             bucket = (
                 os.getenv("BOTHESIS_R2_BUCKET")
@@ -709,7 +696,10 @@ class ApiService:
             secret_access_key = (
                 os.getenv("BOTHESIS_R2_SECRET_ACCESS_KEY") or ""
             ).strip()
-            if any((account_id, endpoint_url, access_key_id, secret_access_key)) and not bucket:
+            if (
+                any((account_id, endpoint_url, access_key_id, secret_access_key))
+                and not bucket
+            ):
                 raise RuntimeError(
                     "BOTHESIS_R2_BUCKET is required when Cloudflare R2 is configured"
                 )
@@ -719,23 +709,22 @@ class ApiService:
                 )
             if bucket and not (access_key_id and secret_access_key):
                 raise RuntimeError(
-                    "BOTHESIS_R2_ACCESS_KEY_ID and BOTHESIS_R2_SECRET_ACCESS_KEY are required"
+                    "BOTHESIS_R2_ACCESS_KEY_ID and "
+                    "BOTHESIS_R2_SECRET_ACCESS_KEY are required"
                 )
             if not bucket:
                 raise RuntimeError("BOTHESIS_OBJECT_STORAGE_BUCKET is required")
             self._storage = S3DocumentStorage.for_cloudflare_r2(
-                    bucket=bucket,
-                    account_id=account_id or None,
-                    endpoint_url=endpoint_url or None,
-                    access_key_id=access_key_id or None,
-                    secret_access_key=secret_access_key or None,
-                    timeout_seconds=float(
-                        os.getenv("BOTHESIS_R2_TIMEOUT_SECONDS", "20")
-                    ),
-                    max_pool_connections=int(
-                        os.getenv("BOTHESIS_R2_MAX_POOL_CONNECTIONS", "20")
-                    ),
-                )
+                bucket=bucket,
+                account_id=account_id or None,
+                endpoint_url=endpoint_url or None,
+                access_key_id=access_key_id or None,
+                secret_access_key=secret_access_key or None,
+                timeout_seconds=float(os.getenv("BOTHESIS_R2_TIMEOUT_SECONDS", "20")),
+                max_pool_connections=int(
+                    os.getenv("BOTHESIS_R2_MAX_POOL_CONNECTIONS", "20")
+                ),
+            )
         else:
             raise RuntimeError(
                 "BOTHESIS_OBJECT_STORAGE_PROVIDER must be aws_s3 or cloudflare_r2"
@@ -743,8 +732,8 @@ class ApiService:
         self._storage_initialized = True
         return self._storage
 
-    def _document_pipeline(self) -> DocumentPipeline:
-        if self._pipeline is None:
+    def _item_index(self) -> ItemIndex:
+        if self._index is None:
             base_url = os.getenv(
                 "OPEN_ROUTER_BASE_URL",
                 OpenRouterTransport.DEFAULT_BASE_URL,
@@ -760,24 +749,29 @@ class ApiService:
                     self._contextualization_transport,
                     model_name=self._contextualization_model,
                 )
-            self._pipeline = DocumentPipeline(
-                self._sessions(),
+            self._index = ItemIndex(
                 embedder=embedder,
-                vector_index=QdrantDocumentIndex(
-                    VectorStore(
-                        collection_name=os.getenv("QDRANT_COLLECTION"),
-                        url=os.getenv("QDRANT_URL"),
-                        api_key=os.getenv("QDRANT_API_KEY") or None,
-                        prefer_grpc=self._qdrant_prefer_grpc,
-                        timeout=20,
-                    ),
-                ),
+                collection_name=os.getenv("QDRANT_COLLECTION"),
+                url=os.getenv("QDRANT_URL"),
+                api_key=os.getenv("QDRANT_API_KEY") or None,
+                prefer_grpc=self._qdrant_prefer_grpc,
+                timeout=20,
                 embedding_batch_size=int(
                     os.getenv("BOTHESIS_DOCUMENT_EMBEDDING_BATCH_SIZE", "32")
                 ),
                 semantic_contextualizer=semantic_contextualizer,
+                candidate_limit=self._hybrid_candidate_limit,
             )
-        return self._pipeline
+        return self._index
+
+    def _ingestion_service(self) -> ItemIngestionService:
+        if self._ingestion is None:
+            self._ingestion = ItemIngestionService(
+                self._sessions(),
+                index=self._item_index(),
+                preview_service=self._preview_service(),
+            )
+        return self._ingestion
 
     def _get_agent(self) -> Agent:
         if self._agent is None:
@@ -827,7 +821,7 @@ class ApiService:
             )
         return self._agent_transport
 
-    def _knowledge_retriever(self) -> DocumentIndexRetriever:
+    def _knowledge_retriever(self) -> ItemKnowledgeRetriever:
         if self._retriever is None:
             transport = self._model_transport()
             reranker = (
@@ -835,18 +829,8 @@ class ApiService:
                 if self._reranking_enabled
                 else None
             )
-            self._retriever = DocumentIndexRetriever(
-                VectorSearchIndex(
-                    VectorStore(
-                        collection_name=os.getenv("QDRANT_COLLECTION"),
-                        url=os.getenv("QDRANT_URL"),
-                        api_key=os.getenv("QDRANT_API_KEY") or None,
-                        prefer_grpc=self._qdrant_prefer_grpc,
-                        timeout=8,
-                    ),
-                    transport,
-                    candidate_limit=self._hybrid_candidate_limit,
-                ),
+            self._retriever = ItemKnowledgeRetriever(
+                self._item_index(),
                 reranker=reranker,
                 candidate_count=self._hybrid_candidate_limit,
                 reranking_enabled=self._reranking_enabled,
@@ -864,11 +848,7 @@ class ApiService:
                     1,
                     min(
                         600,
-                        int(
-                            os.getenv(
-                                "BOTHESIS_DOCUMENT_CITATION_URL_SECONDS", "300"
-                            )
-                        ),
+                        int(os.getenv("BOTHESIS_DOCUMENT_CITATION_URL_SECONDS", "300")),
                     ),
                 ),
             ).url
@@ -885,9 +865,7 @@ class ApiService:
                 str(document.parent_item_id) if document.parent_item_id else None
             ),
             "file_name": str(
-                document.metadata_.get("file_name")
-                or document.title
-                or "document"
+                document.metadata_.get("file_name") or document.title or "document"
             ),
             "content_type": document.mime_type or "application/octet-stream",
             "size_bytes": document.size_bytes or 0,

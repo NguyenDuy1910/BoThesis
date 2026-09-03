@@ -6,7 +6,7 @@ import json
 from collections.abc import Sequence
 
 from bothesis import ModelResponseClient, render_prompt
-from bothesis.document_index.models import ContextualChunk
+from bothesis.document_index import ContextualChunk
 
 
 class SemanticReranker:
@@ -56,7 +56,7 @@ class SemanticReranker:
         )
         raw_text = getattr(response, "output_text", None)
         if not isinstance(raw_text, str):
-            raise ValueError("reranker response does not contain text")
+            raise TypeError("reranker response does not contain text")
         ordered_ids = self._ordered_ids(raw_text, candidates)
         by_id = {chunk.id: chunk for chunk in candidates}
         ordered = [by_id[chunk_id] for chunk_id in ordered_ids]
@@ -64,7 +64,9 @@ class SemanticReranker:
         selected = ordered[:limit]
         denominator = max(1, len(selected))
         return [
-            chunk.model_copy(update={"rerank_score": (denominator - rank) / denominator})
+            chunk.model_copy(
+                update={"rerank_score": (denominator - rank) / denominator}
+            )
             for rank, chunk in enumerate(selected)
         ]
 

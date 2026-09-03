@@ -12,8 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bothesis.connector.file import FinxFileExtensions
 from bothesis.db.models import Item
-from bothesis.document_index import DocumentProcessingError
-from bothesis.document_index.indexer import DocumentPipeline
+from bothesis.storage import (
+    DocumentStorage,
+    ObjectStorageError,
+    StoredObject,
+)
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
@@ -23,18 +26,15 @@ from bothesis.services import (
     CollectionAccessService,
     CollectionUpload,
     DocumentNotFoundError,
-    ItemService,
+    DocumentProcessingError,
     InvalidDocumentStateError,
+    ItemIngestionService,
+    ItemService,
     UploadConflictError,
     UploadStart,
     UploadTarget,
     UploadTooLargeError,
     UploadValidationError,
-)
-from bothesis.document_index.raw_storage import (
-    DocumentStorage,
-    ObjectStorageError,
-    StoredObject,
 )
 from bothesis.services.preview import KnowledgePreviewService
 
@@ -49,7 +49,7 @@ class UploadService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         object_storage: DocumentStorage,
-        pipeline: DocumentPipeline,
+        ingestion_service: ItemIngestionService,
         document_source: ChatDocumentSource,
         preview_service: KnowledgePreviewService | None = None,
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
@@ -59,7 +59,7 @@ class UploadService:
             raise ValueError("upload limits must be greater than zero")
         self._session_factory = session_factory
         self._object_storage = object_storage
-        self._pipeline = pipeline
+        self._ingestion = ingestion_service
         self._document_source = document_source
         self._preview_service = preview_service
         self.max_upload_bytes = max_upload_bytes
@@ -97,7 +97,9 @@ class UploadService:
         assert item.upload is not None
         if item.upload.status == "available":
             item = await self._index_available(item, access=access)
-            return UploadStart(item=item, upload=item.upload, upload_required=False, target=None)
+            return UploadStart(
+                item=item, upload=item.upload, upload_required=False, target=None
+            )
         if item.upload.status not in {"pending", "failed"}:
             raise UploadConflictError("item is not in an uploadable state")
         if not item.storage_key:
@@ -158,9 +160,7 @@ class UploadService:
             uploaded_now = False
             if item.upload.status != "available":
                 if not item.storage_key:
-                    raise UploadConflictError(
-                        "item has no durable object storage key"
-                    )
+                    raise UploadConflictError("item has no durable object storage key")
                 try:
                     stored = await asyncio.to_thread(
                         self._object_storage.put_path,
@@ -285,7 +285,7 @@ class UploadService:
         access: AuthContext,
         document_id: UUID,
     ) -> None:
-        await self._pipeline.delete_upload(document_id, access=access)
+        await self._ingestion.remove_upload(document_id, access=access)
 
     async def get_document(
         self,
@@ -346,7 +346,7 @@ class UploadService:
         access: AuthContext,
     ) -> Item:
         try:
-            return await self._pipeline.index_upload(
+            return await self._ingestion.index_upload(
                 document.id,
                 access=access,
                 source=self._document_source,
@@ -450,6 +450,7 @@ class UploadService:
             raise UploadTooLargeError(
                 f"upload exceeds the {self.max_upload_bytes} byte limit"
             )
+
 
 def _file_name(value: str) -> str:
     normalized = value.strip()

@@ -1,4 +1,4 @@
-"""S3-compatible raw document storage implemented with boto3."""
+"""S3-compatible durable object storage implemented with boto3."""
 
 from __future__ import annotations
 

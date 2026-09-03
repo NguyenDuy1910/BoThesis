@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from bothesis.agent.protocol import FunctionCallItem
-from bothesis.knowledge.models import Evidence
+from bothesis.knowledge import Evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +93,7 @@ class ToolObservation:
             return "skipped"
         return "failed"
 
+
 @dataclass(slots=True)
 class ConversationRun:
     """Mutable accounting and grounded evidence for one user-initiated run."""
@@ -112,9 +113,9 @@ class ConversationRun:
 
 __all__ = [
     "AgentContext",
-    "ConversationRun",
     "ConversationDocument",
     "ConversationMessage",
+    "ConversationRun",
     "Evidence",
     "ToolContext",
     "ToolObservation",

@@ -13,8 +13,9 @@ from sqlalchemy.exc import IntegrityError
 from temporalio.service import RPCError
 
 from bothesis.db.engine import get_session_factory, session_scope
-from bothesis.document_index.vector_store import VectorStore
+from bothesis.document_index import ItemIndex
 from bothesis.services import (
+    SOURCE_MANAGE_PERMISSION,
     AccessRequestService,
     AdminConflictError,
     AdminExternalUnavailableError,
@@ -27,9 +28,9 @@ from bothesis.services import (
     CollectionAccessService,
     GroupService,
     IntegrationService,
+    ItemIngestionService,
     RequestIdentity,
     RoleService,
-    SOURCE_MANAGE_PERMISSION,
     TenantService,
     UserService,
     require_tenant_permission,
@@ -58,7 +59,9 @@ class AdminApiService:
         async with self._request(identity) as (session, actor):
             return await TenantService(session).list_spaces(actor)
 
-    async def get_space(self, identity: RequestIdentity, tenant_id: UUID) -> dict[str, Any]:
+    async def get_space(
+        self, identity: RequestIdentity, tenant_id: UUID
+    ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             return await TenantService(session).get_space(actor, tenant_id)
 
@@ -66,9 +69,13 @@ class AdminApiService:
         self, identity: RequestIdentity, tenant_id: UUID, changes: dict[str, Any]
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await TenantService(session).update_space(actor, tenant_id, **changes)
+            return await TenantService(session).update_space(
+                actor, tenant_id, **changes
+            )
 
-    async def list_users(self, identity: RequestIdentity, **filters: Any) -> dict[str, Any]:
+    async def list_users(
+        self, identity: RequestIdentity, **filters: Any
+    ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             return await UserService(session).list_users(actor, **filters)
 
@@ -78,7 +85,9 @@ class AdminApiService:
         async with self._request(identity) as (session, actor):
             return await UserService(session).create_user(actor, **values)
 
-    async def get_user(self, identity: RequestIdentity, user_id: UUID) -> dict[str, Any]:
+    async def get_user(
+        self, identity: RequestIdentity, user_id: UUID
+    ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             return await UserService(session).get_user(actor, user_id)
 
@@ -92,7 +101,9 @@ class AdminApiService:
         async with self._request(identity) as (session, actor):
             return await RoleService(session).list_permissions(actor)
 
-    async def list_roles(self, identity: RequestIdentity, **filters: Any) -> dict[str, Any]:
+    async def list_roles(
+        self, identity: RequestIdentity, **filters: Any
+    ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             return await RoleService(session).list_roles(actor, **filters)
 
@@ -102,7 +113,9 @@ class AdminApiService:
         async with self._request(identity) as (session, actor):
             return await RoleService(session).create_role(actor, **values)
 
-    async def get_role(self, identity: RequestIdentity, role_id: UUID) -> dict[str, Any]:
+    async def get_role(
+        self, identity: RequestIdentity, role_id: UUID
+    ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             return await RoleService(session).get_role(actor, role_id)
 
@@ -116,7 +129,9 @@ class AdminApiService:
         async with self._request(identity) as (session, actor):
             await RoleService(session).disable_role(actor, role_id)
 
-    async def list_groups(self, identity: RequestIdentity, **filters: Any) -> dict[str, Any]:
+    async def list_groups(
+        self, identity: RequestIdentity, **filters: Any
+    ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             return await GroupService(session).list_groups(actor, **filters)
 
@@ -126,7 +141,9 @@ class AdminApiService:
         async with self._request(identity) as (session, actor):
             return await GroupService(session).create_group(actor, **values)
 
-    async def get_group(self, identity: RequestIdentity, group_id: UUID) -> dict[str, Any]:
+    async def get_group(
+        self, identity: RequestIdentity, group_id: UUID
+    ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             return await GroupService(session).get_group(actor, group_id)
 
@@ -140,7 +157,9 @@ class AdminApiService:
         self, identity: RequestIdentity, group_id: UUID, user_ids: list[UUID]
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await GroupService(session).replace_members(actor, group_id, user_ids)
+            return await GroupService(session).replace_members(
+                actor, group_id, user_ids
+            )
 
     async def delete_group(self, identity: RequestIdentity, group_id: UUID) -> None:
         async with self._request(identity) as (session, actor):
@@ -166,13 +185,20 @@ class AdminApiService:
         self, identity: RequestIdentity, integration_connection_id: UUID
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await self._integrations(session).get_connection(actor, integration_connection_id)
+            return await self._integrations(session).get_connection(
+                actor, integration_connection_id
+            )
 
     async def update_integration_connection(
-        self, identity: RequestIdentity, integration_connection_id: UUID, changes: dict[str, Any]
+        self,
+        identity: RequestIdentity,
+        integration_connection_id: UUID,
+        changes: dict[str, Any],
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await self._integrations(session).update_connection(actor, integration_connection_id, **changes)
+            return await self._integrations(session).update_connection(
+                actor, integration_connection_id, **changes
+            )
 
     async def delete_integration_connection(
         self, identity: RequestIdentity, integration_connection_id: UUID
@@ -191,19 +217,20 @@ class AdminApiService:
                 if len(source_ids) >= ingestion_sources["total"]:
                     break
                 page += 1
-            await self._integrations(session).delete_connection(actor, integration_connection_id)
-        await asyncio.gather(
-            *(
-                self._workflows.delete_schedule(source_id)
-                for source_id in source_ids
+            await self._integrations(session).delete_connection(
+                actor, integration_connection_id
             )
+        await asyncio.gather(
+            *(self._workflows.delete_schedule(source_id) for source_id in source_ids)
         )
 
     async def validate_integration_connection(
         self, identity: RequestIdentity, integration_connection_id: UUID
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await self._integrations(session).validate_connection(actor, integration_connection_id)
+            return await self._integrations(session).validate_connection(
+                actor, integration_connection_id
+            )
 
     async def list_ingestion_sources(
         self, identity: RequestIdentity, **filters: Any
@@ -221,7 +248,10 @@ class AdminApiService:
         return result
 
     async def create_ingestion_source(
-        self, identity: RequestIdentity, integration_connection_id: UUID, values: dict[str, Any]
+        self,
+        identity: RequestIdentity,
+        integration_connection_id: UUID,
+        values: dict[str, Any],
     ) -> dict[str, Any]:
         values = dict(values)
         schedule = values.pop("schedule", None)
@@ -231,9 +261,7 @@ class AdminApiService:
             )
             workflow_input = self._workflow_input(source, actor)
         if schedule is not None:
-            source["schedule"] = await self._upsert_schedule(
-                workflow_input, schedule
-            )
+            source["schedule"] = await self._upsert_schedule(workflow_input, schedule)
         return source
 
     async def get_ingestion_source(
@@ -259,13 +287,9 @@ class AdminApiService:
             await self._workflows.delete_schedule(str(source_id))
             source["schedule"] = None
         elif schedule is not None:
-            source["schedule"] = await self._upsert_schedule(
-                workflow_input, schedule
-            )
+            source["schedule"] = await self._upsert_schedule(workflow_input, schedule)
         else:
-            source["schedule"] = await self._workflows.describe_schedule(
-                str(source_id)
-            )
+            source["schedule"] = await self._workflows.describe_schedule(str(source_id))
         return source
 
     async def delete_ingestion_source(
@@ -331,10 +355,10 @@ class AdminApiService:
             "terminated",
             "timed_out",
         }:
-            raise AdminConflictError("only closed unsuccessful workflows can be retried")
-        return await self.ingest_source(
-            identity, UUID(str(previous["source_id"]))
-        )
+            raise AdminConflictError(
+                "only closed unsuccessful workflows can be retried"
+            )
+        return await self.ingest_source(identity, UUID(str(previous["source_id"])))
 
     async def cancel_ingestion_job(
         self, identity: RequestIdentity, workflow_id: str
@@ -425,7 +449,9 @@ class AdminApiService:
         await self.get_ingestion_source(identity, source_id)
         await self._workflows.delete_schedule(str(source_id))
 
-    async def list_items(self, identity: RequestIdentity, **filters: Any) -> dict[str, Any]:
+    async def list_items(
+        self, identity: RequestIdentity, **filters: Any
+    ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             async with self._item_service(session) as service:
                 return await service.list_items(actor, **filters)
@@ -437,7 +463,9 @@ class AdminApiService:
             async with self._item_service(session) as service:
                 return await service.create_collection(actor, **values)
 
-    async def get_item(self, identity: RequestIdentity, item_id: UUID) -> dict[str, Any]:
+    async def get_item(
+        self, identity: RequestIdentity, item_id: UUID
+    ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             async with self._item_service(session) as service:
                 return await service.get_item(actor, item_id)
@@ -465,7 +493,9 @@ class AdminApiService:
             async with self._item_service(session) as service:
                 return await service.update_status(actor, item_id, status=status)
 
-    async def retry_item(self, identity: RequestIdentity, item_id: UUID) -> dict[str, Any]:
+    async def retry_item(
+        self, identity: RequestIdentity, item_id: UUID
+    ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
             async with self._item_service(session) as service:
                 result = await service.retry_item(actor, item_id)
@@ -493,7 +523,9 @@ class AdminApiService:
         self, identity: RequestIdentity, item_id: UUID, values: dict[str, Any]
     ) -> dict[str, object]:
         async with self._request(identity) as (session, actor):
-            grant = await CollectionAccessService(session).grant(item_id, actor=actor, **values)
+            grant = await CollectionAccessService(session).grant(
+                item_id, actor=actor, **values
+            )
             await AuditService(session).record(
                 actor,
                 action="collection.access.granted",
@@ -641,7 +673,7 @@ class AdminApiService:
     @staticmethod
     @asynccontextmanager
     async def _item_service(session: Any) -> AsyncIterator[AdminItemService]:
-        store = VectorStore(
+        index = ItemIndex(
             collection_name=os.getenv("QDRANT_COLLECTION"),
             url=os.getenv("QDRANT_URL"),
             api_key=os.getenv("QDRANT_API_KEY") or None,
@@ -650,10 +682,13 @@ class AdminApiService:
         try:
             yield AdminItemService(
                 session,
-                vector_store=store,
+                ingestion_service=ItemIngestionService(
+                    get_session_factory(),
+                    index=index,
+                ),
             )
         finally:
-            await store.aclose()
+            await index.aclose()
 
 
 __all__ = ["AdminApiService"]

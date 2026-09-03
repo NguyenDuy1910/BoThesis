@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Sequence
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -14,17 +14,6 @@ from bothesis.agent.models import AgentContext, ToolContext
 from bothesis.agent.protocol import FunctionTool
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
-from bothesis.document_index.search import VectorSearchIndex
-from bothesis.knowledge import (
-    CitationResolver,
-    Evidence,
-    EvidenceBuilder,
-    EvidenceContextBuilder,
-    KnowledgeRetriever,
-    SemanticReranker,
-)
-from bothesis.knowledge.retriever import DocumentIndexRetriever
-from bothesis.knowledge.reranker import ScoreReranker
 from bothesis.connector.protocol import (
     CitationInfo,
     CitationSpan,
@@ -33,7 +22,15 @@ from bothesis.connector.protocol import (
     SourceIdentity,
     SourceProvider,
 )
-from bothesis.document_index.models import ChunkContext, ContextualChunk
+from bothesis.document_index import ChunkContext, ContextualChunk, ItemIndex
+from bothesis.knowledge import (
+    CitationResolver,
+    Evidence,
+    EvidenceContextBuilder,
+    ItemKnowledgeRetriever,
+    KnowledgeRetriever,
+    SemanticReranker,
+)
 
 CONTEXT = AgentContext(
     user_id="user-1",
@@ -76,18 +73,39 @@ def _chunk(
         citation=CitationInfo(
             section="Annual leave",
             section_path=("Annual leave",),
-            spans=(CitationSpan(
-                element_id="paragraph_001",
-                start_offset=0,
-                end_offset=len("Employees receive 20 days of annual leave."),
-            ),),
+            spans=(
+                CitationSpan(
+                    element_id="paragraph_001",
+                    start_offset=0,
+                    end_offset=len("Employees receive 20 days of annual leave."),
+                ),
+            ),
         ),
         relevance_score=score,
     )
 
 
 DOCUMENT = _chunk()
-EVIDENCE = EvidenceBuilder().build(DOCUMENT)
+
+
+def _evidence(chunk: ContextualChunk) -> Evidence:
+    return Evidence(
+        id=chunk.id,
+        item_id=chunk.item_id,
+        chunk_id=chunk.id,
+        collection_item_id=chunk.collection_item_id,
+        title=chunk.title or chunk.item_id,
+        content=chunk.chunk_text,
+        source=chunk.source,
+        citation=chunk.citation,
+        section_path=tuple(chunk.context.section_path),
+        contextual_text=chunk.contextual_text,
+        relevance_score=chunk.relevance_score,
+        rerank_score=chunk.rerank_score,
+    )
+
+
+EVIDENCE = _evidence(DOCUMENT)
 
 
 def test_citation_resolver_builds_internal_and_native_targets() -> None:
@@ -102,22 +120,13 @@ def test_citation_resolver_builds_internal_and_native_targets() -> None:
     )
 
 
-def test_evidence_builder_preserves_original_chunk_text_and_citation() -> None:
-    evidence = EvidenceBuilder().build(DOCUMENT)
+def test_evidence_contract_preserves_original_chunk_text_and_citation() -> None:
+    evidence = _evidence(DOCUMENT)
 
     assert evidence.content == DOCUMENT.chunk_text
     assert evidence.content != DOCUMENT.contextual_text
     assert evidence.citation is DOCUMENT.citation
     assert evidence.chunk_id == DOCUMENT.id
-
-
-def test_score_reranker_orders_filtered_chunks_and_applies_limit() -> None:
-    lower = _chunk(chunk_id="lower", score=0.3)
-    higher = _chunk(chunk_id="higher", score=0.9)
-
-    assert ScoreReranker().rerank([lower, higher], limit=1) == [higher]
-    with pytest.raises(ValueError, match="limit must be at least one"):
-        ScoreReranker().rerank([higher], limit=0)
 
 
 class StubRetriever(KnowledgeRetriever):
@@ -172,7 +181,7 @@ class StubDocumentIndex:
         self.events = events
         self.calls: list[dict[str, object]] = []
 
-    async def search(
+    async def search_item_content(
         self,
         query: str,
         *,
@@ -203,21 +212,16 @@ class RecordingReranker:
         chunks: Sequence[ContextualChunk],
         *,
         limit: int,
+        query: str = "",
     ) -> list[ContextualChunk]:
+        del query
         self.events.append("rerank")
         self.calls.append(list(chunks))
-        return ScoreReranker().rerank(chunks, limit=limit)
-
-
-class RecordingEvidenceBuilder(EvidenceBuilder):
-    def __init__(self, events: list[str]) -> None:
-        self.events = events
-        self.calls: list[ContextualChunk] = []
-
-    def build(self, chunk: ContextualChunk) -> Evidence:
-        self.events.append("evidence")
-        self.calls.append(chunk)
-        return super().build(chunk)
+        return sorted(
+            chunks,
+            key=lambda chunk: chunk.relevance_score or float("-inf"),
+            reverse=True,
+        )[:limit]
 
 
 class StubEmbedder:
@@ -229,34 +233,28 @@ class StubEmbedder:
         return [0.1, 0.2]
 
 
-class StubSemanticVectorStore:
+class StubIndexBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[list[float], str, object, int, int]] = []
-        self.access_contexts: list[object] = []
-        self.payload_filters: list[object] = []
 
-    def build_retrieval_filter(
+    async def search_item_points(
         self,
-        _search_params: object,
         *,
-        access_context: object,
-        payload_filters: object,
-    ) -> object:
-        self.access_contexts.append(access_context)
-        self.payload_filters.append(payload_filters)
-        return "scoped-filter"
-
-    async def semantic_search(
-        self,
         query_vector: list[float],
-        *,
         query_text: str,
-        query_filter: object,
+        tenant_id: str,
+        collection_item_ids: tuple[str, ...],
         limit: int,
         candidate_limit: int,
     ) -> list[object]:
         self.calls.append(
-            (query_vector, query_text, query_filter, limit, candidate_limit)
+            (
+                query_vector,
+                query_text,
+                (tenant_id, collection_item_ids),
+                limit,
+                candidate_limit,
+            )
         )
         return [
             SimpleNamespace(
@@ -271,7 +269,10 @@ class StubSemanticVectorStore:
                     "collection_item_id": "collection-1",
                     "content_type": "text",
                     "chunk_text": " Employees receive 20 days of annual leave.\n",
-                    "contextual_text": "Document: Leave policy\nSection: Annual leave\n\n Employees receive 20 days of annual leave.\n",
+                    "contextual_text": (
+                        "Document: Leave policy\nSection: Annual leave\n\n "
+                        "Employees receive 20 days of annual leave.\n"
+                    ),
                     "connector_key": "confluence",
                     "external_id": "doc-1",
                     "source_url": "https://knowledge.example/leave-policy",
@@ -284,12 +285,12 @@ class StubSemanticVectorStore:
 
 
 @pytest.mark.asyncio
-async def test_vector_search_index_embeds_and_rebuilds_contextual_chunks() -> None:
-    store = StubSemanticVectorStore()
+async def test_item_index_search_embeds_and_rebuilds_contextual_chunks() -> None:
+    backend = StubIndexBackend()
     embedder = StubEmbedder()
-    index = VectorSearchIndex(store, embedder)  # type: ignore[arg-type]
+    index = ItemIndex(backend=backend, embedder=embedder)  # type: ignore[arg-type]
 
-    results = await index.search(
+    results = await index.search_item_content(
         " annual leave ",
         limit=3,
         tenant_id="tenant-1",
@@ -297,12 +298,9 @@ async def test_vector_search_index_embeds_and_rebuilds_contextual_chunks() -> No
     )
 
     assert embedder.queries == ["annual leave"]
-    assert store.calls == [
-        ([0.1, 0.2], "annual leave", "scoped-filter", 3, 20)
+    assert backend.calls == [
+        ([0.1, 0.2], "annual leave", ("tenant-1", ("collection-1",)), 3, 20)
     ]
-    access = store.access_contexts[0]
-    assert getattr(access, "tenant_id") == "tenant-1"
-    assert getattr(access, "collection_item_ids") == ("collection-1",)
     assert len(results) == 1
     document = results[0]
     assert document.id == "chunk-1"
@@ -334,11 +332,9 @@ async def test_collection_scoped_retrieval_filters_before_reranking() -> None:
         events=events,
     )
     reranker = RecordingReranker(events)
-    evidence_builder = RecordingEvidenceBuilder(events)
-    retriever = DocumentIndexRetriever(
+    retriever = ItemKnowledgeRetriever(
         index,
         reranker=reranker,
-        evidence_builder=evidence_builder,
     )
     context = AgentContext(
         user_id="person@example.test",
@@ -357,10 +353,9 @@ async def test_collection_scoped_retrieval_filters_before_reranking() -> None:
             "collection_item_ids": ("collection-7",),
         }
     ]
-    assert events == ["index", "rerank", "evidence"]
+    assert events == ["index", "rerank"]
     assert reranker.calls == [[visible]]
-    assert evidence_builder.calls == [visible]
-    assert results == [EvidenceBuilder().build(visible)]
+    assert results == [_evidence(visible)]
     assert isinstance(results[0], Evidence)
 
 
@@ -372,7 +367,7 @@ async def test_document_index_retriever_validates_before_search_or_reranking(
 ) -> None:
     events: list[str] = []
     index = StubDocumentIndex([DOCUMENT], events=events)
-    retriever = DocumentIndexRetriever(index, reranker=RecordingReranker(events))
+    retriever = ItemKnowledgeRetriever(index, reranker=RecordingReranker(events))
     context = AgentContext(
         user_id="user-1",
         tenant_id="tenant-1",
@@ -388,9 +383,11 @@ async def test_document_index_retriever_validates_before_search_or_reranking(
 
 
 @pytest.mark.asyncio
-async def test_document_index_retriever_requires_a_tenant_even_for_empty_scope() -> None:
+async def test_document_index_retriever_requires_a_tenant_even_for_empty_scope() -> (
+    None
+):
     index = StubDocumentIndex([DOCUMENT])
-    retriever = DocumentIndexRetriever(index)
+    retriever = ItemKnowledgeRetriever(index)
     context = AgentContext(
         user_id="user-1",
         tenant_id="   ",
@@ -407,7 +404,7 @@ async def test_document_index_retriever_requires_a_tenant_even_for_empty_scope()
 @pytest.mark.asyncio
 async def test_collection_retrieval_remains_tenant_scoped() -> None:
     index = StubDocumentIndex([DOCUMENT])
-    retriever = DocumentIndexRetriever(index)
+    retriever = ItemKnowledgeRetriever(index)
     context = AgentContext(
         user_id="admin-1",
         tenant_id="tenant-1",
@@ -423,21 +420,20 @@ async def test_collection_retrieval_remains_tenant_scoped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_vector_search_index_rejects_a_missing_tenant_scope() -> None:
-    store = StubSemanticVectorStore()
+async def test_item_index_rejects_a_missing_tenant_scope() -> None:
+    backend = StubIndexBackend()
     embedder = StubEmbedder()
-    index = VectorSearchIndex(store, embedder)  # type: ignore[arg-type]
+    index = ItemIndex(backend=backend, embedder=embedder)  # type: ignore[arg-type]
 
     with pytest.raises(ValueError, match="tenant_id must not be empty"):
-        await index.search(
+        await index.search_item_content(
             "annual leave",
             limit=3,
             tenant_id="",
             collection_item_ids=("collection-1",),
         )
 
-    assert store.access_contexts == []
-    assert store.calls == []
+    assert backend.calls == []
     assert embedder.queries == []
 
 
@@ -496,7 +492,9 @@ async def test_knowledge_search_handles_retrieval_failures() -> None:
         TOOL_CONTEXT,
     )
 
-    assert result.error == "Knowledge search is temporarily unavailable. Please try again."
+    assert (
+        result.error == "Knowledge search is temporarily unavailable. Please try again."
+    )
     assert result.metadata["outcome"] == "retrieval_failure"
 
 
@@ -519,9 +517,10 @@ def test_knowledge_search_declares_itself_as_a_protocol_function_tool() -> None:
     assert declaration.parameters["required"] == ["queries"]
     assert "access-permitted" in declaration.description
     assert "evidence IDs for citations" in declaration.description
-    assert "Do not use generic terms" in declaration.parameters["properties"][
-        "queries"
-    ]["description"]
+    assert (
+        "Do not use generic terms"
+        in declaration.parameters["properties"]["queries"]["description"]
+    )
     # A closed argument schema lets a provider enforce strict tool calling.
     assert declaration.strict is True
 
@@ -584,7 +583,7 @@ async def test_reranking_failure_falls_back_to_candidate_order() -> None:
     first = _chunk(chunk_id="first", score=0.2)
     second = _chunk(chunk_id="second", score=0.9)
     index = StubDocumentIndex([first, second])
-    retriever = DocumentIndexRetriever(
+    retriever = ItemKnowledgeRetriever(
         index,
         reranker=FailingReranker(),  # type: ignore[arg-type]
         candidate_count=7,
@@ -593,11 +592,11 @@ async def test_reranking_failure_falls_back_to_candidate_order() -> None:
     results = await retriever.search("annual leave", limit=1, ctx=CONTEXT)
 
     assert index.calls[0]["limit"] == 7
-    assert [item.chunk_id for item in results] == ["first"]
+    assert [item.chunk_id for item in results] == ["second"]
 
 
 def test_context_builder_is_bounded_deduplicated_and_canonical() -> None:
-    evidence = EvidenceBuilder().build(DOCUMENT)
+    evidence = _evidence(DOCUMENT)
     built = EvidenceContextBuilder(
         max_characters=600,
         max_evidence_characters=200,

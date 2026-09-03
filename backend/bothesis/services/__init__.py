@@ -14,9 +14,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from bothesis.db.models import Item, ItemUpload
-from bothesis.document_index.raw_storage import PresignedRequest
 from bothesis.connector.protocol import Chunk, DocumentItem
+from bothesis.db.models import Item, ItemUpload
+from bothesis.storage import PresignedRequest
 
 ACTIVE_STATUS = "active"
 INACTIVE_STATUS = "inactive"
@@ -46,6 +46,8 @@ ADMIN_PERMISSION_CATALOG = (
 DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 DEFAULT_UPLOAD_URL_SECONDS = 600
 DEFAULT_PROCESSING_MAX_BYTES = 100 * 1024 * 1024
+PARSER_VERSION = "docling-2.121"
+CHUNKER_VERSION = "docling-hybrid-line-v1"
 PREVIEW_SCHEMA_VERSION = 1
 PREVIEW_RENDERER_VERSION = "webp-v1"
 DEFAULT_PREVIEW_MAX_SOURCE_BYTES = 100 * 1024 * 1024
@@ -157,6 +159,7 @@ class ChatDocumentSource(Protocol):
         expires_seconds: int,
     ) -> str: ...
 
+
 class DocumentServiceError(Exception):
     """Base exception for durable document service failures."""
 
@@ -167,6 +170,14 @@ class DocumentNotFoundError(DocumentServiceError):
 
 class InvalidDocumentStateError(DocumentServiceError):
     """Raised when a lifecycle or lineage transition is invalid."""
+
+
+class DocumentProcessingError(RuntimeError):
+    """Raised when an Item's durable source cannot be prepared for indexing."""
+
+
+class DocumentUnavailableError(DocumentProcessingError):
+    """Raised when an authorized Item's durable source is unavailable."""
 
 
 class UploadServiceError(RuntimeError):
@@ -366,9 +377,7 @@ def normalize_codes(
     field_name: str,
     max_length: int = 64,
 ) -> list[str]:
-    return sorted(
-        {normalize_code(value, field_name, max_length) for value in values}
-    )
+    return sorted({normalize_code(value, field_name, max_length) for value in values})
 
 
 def normalize_page(page: int, page_size: int) -> tuple[int, int, int]:
@@ -385,60 +394,45 @@ def timestamp(value: datetime | None) -> str | None:
 
 # Import primary service classes only after their contracts are defined. The
 # service modules import these contracts from this package during initialization.
+# This order is dependency-sensitive; do not sort these imports alphabetically.
+# isort: off
 from bothesis.services.auth import AuthService  # noqa: E402
 from bothesis.services.citation import CitationService  # noqa: E402
-from bothesis.services.item import ItemService  # noqa: E402
+from bothesis.services.chat_document_source import (  # noqa: E402
+    ChatDocumentSourceService,
+)
 from bothesis.services.collection_access import CollectionAccessService  # noqa: E402
-from bothesis.services.conversation import ConversationService  # noqa: E402
-from bothesis.services.upload import UploadService  # noqa: E402
 from bothesis.services.audit import AuditService  # noqa: E402
-from bothesis.services.integration_credential import IntegrationCredentialService  # noqa: E402
-from bothesis.services.integration import IntegrationService  # noqa: E402
-from bothesis.services.access_requests import AccessRequestService  # noqa: E402
-from bothesis.services.admin_items import AdminItemService  # noqa: E402
-from bothesis.services.admin import AdminService  # noqa: E402
-from bothesis.services.chat_document_source import ChatDocumentSourceService  # noqa: E402
-from bothesis.services.groups import GroupService  # noqa: E402
-from bothesis.services.roles import RoleService  # noqa: E402
-from bothesis.services.tenants import TenantService  # noqa: E402
-from bothesis.services.users import UserService  # noqa: E402
-from bothesis.services.api import ApiService  # noqa: E402
-from bothesis.services.admin_api import AdminApiService  # noqa: E402
+from bothesis.services.integration_credential import (  # noqa: E402
+    IntegrationCredentialService,
+)
+from bothesis.services.item import ItemService  # noqa: E402
+from bothesis.services.conversation import ConversationService  # noqa: E402
 from bothesis.services.preview import (  # noqa: E402
     KnowledgePreviewRenderer,
     KnowledgePreviewService,
 )
+from bothesis.services.ingestion import ItemIngestionService  # noqa: E402
+from bothesis.services.integration import IntegrationService  # noqa: E402
+from bothesis.services.access_requests import AccessRequestService  # noqa: E402
+from bothesis.services.admin import AdminService  # noqa: E402
+from bothesis.services.admin_items import AdminItemService  # noqa: E402
+from bothesis.services.groups import GroupService  # noqa: E402
+from bothesis.services.roles import RoleService  # noqa: E402
+from bothesis.services.tenants import TenantService  # noqa: E402
+from bothesis.services.users import UserService  # noqa: E402
+from bothesis.services.upload import UploadService  # noqa: E402
+from bothesis.services.api import ApiService  # noqa: E402
+from bothesis.services.admin_api import AdminApiService  # noqa: E402
+# isort: on
 
 __all__ = [
-    "ACTIVE_STATUS",
     "ACCESS_MANAGE_PERMISSION",
-    "AccessRequestService",
-    "ADMIN_PERMISSION_CATALOG",
+    "ACTIVE_STATUS",
     "ADMIN_PERMISSION",
+    "ADMIN_PERMISSION_CATALOG",
     "AUDIT_READ_PERMISSION",
-    "AdminConflictError",
-    "AdminApiService",
-    "AdminItemService",
-    "AdminService",
-    "AdminExternalUnavailableError",
-    "AdminNotFoundError",
-    "AdminServiceError",
-    "AdminValidationError",
-    "AuditService",
-    "ApiService",
-    "AuthContext",
-    "RequestIdentity",
-    "AuthService",
-    "AuthServiceError",
-    "AuthorizationError",
-    "AsyncUploadStream",
-    "CanonicalDocumentContent",
-    "CitationService",
-    "ChatDocumentSource",
-    "ChatDocumentSourceService",
-    "CollectionAccessService",
-    "CollectionUpload",
-    "ConversationService",
+    "CHUNKER_VERSION",
     "DEFAULT_MAX_UPLOAD_BYTES",
     "DEFAULT_PREVIEW_MAX_DIMENSION",
     "DEFAULT_PREVIEW_MAX_PAGES",
@@ -446,38 +440,67 @@ __all__ = [
     "DEFAULT_PREVIEW_WEBP_QUALITY",
     "DEFAULT_PROCESSING_MAX_BYTES",
     "DEFAULT_UPLOAD_URL_SECONDS",
-    "DocumentNotFoundError",
-    "DocumentServiceError",
-    "ITEM_MANAGE_PERMISSION",
     "GROUP_MANAGE_PERMISSION",
+    "INACTIVE_STATUS",
+    "ITEM_MANAGE_PERMISSION",
+    "KNOWLEDGE_READ_PERMISSION",
+    "MESSAGE_ITEM_RELATIONS",
+    "PARSER_VERSION",
+    "PREVIEW_RENDERER_VERSION",
+    "PREVIEW_SCHEMA_VERSION",
+    "ROLE_MANAGE_PERMISSION",
+    "SOURCE_MANAGE_PERMISSION",
+    "TENANT_MANAGE_PERMISSION",
+    "USER_MANAGE_PERMISSION",
+    "AccessRequestService",
+    "AdminApiService",
+    "AdminConflictError",
+    "AdminExternalUnavailableError",
+    "AdminItemService",
+    "AdminNotFoundError",
+    "AdminService",
+    "AdminServiceError",
+    "AdminValidationError",
+    "ApiService",
+    "AsyncUploadStream",
+    "AuditService",
+    "AuthContext",
+    "AuthService",
+    "AuthServiceError",
+    "AuthorizationError",
+    "CanonicalDocumentContent",
+    "ChatDocumentSource",
+    "ChatDocumentSourceService",
+    "CitationService",
+    "CollectionAccessService",
+    "CollectionUpload",
+    "ConversationService",
+    "DocumentNotFoundError",
+    "DocumentProcessingError",
+    "DocumentServiceError",
+    "DocumentUnavailableError",
     "GroupService",
     "IdentityConflictError",
     "IdentityInactiveError",
     "IdentityNotFoundError",
-    "INACTIVE_STATUS",
+    "IntegrationCredentialService",
+    "IntegrationService",
     "InvalidDocumentStateError",
+    "ItemIngestionService",
     "ItemService",
-    "KNOWLEDGE_READ_PERMISSION",
     "KnowledgePreview",
     "KnowledgePreviewRenderer",
     "KnowledgePreviewService",
-    "MESSAGE_ITEM_RELATIONS",
-    "IntegrationCredentialService",
-    "IntegrationService",
-    "PREVIEW_RENDERER_VERSION",
-    "PREVIEW_SCHEMA_VERSION",
     "PreviewAsset",
     "PreviewGenerationError",
     "PreviewManifest",
     "PreviewOriginal",
     "PreviewRepresentation",
-    "ROLE_MANAGE_PERMISSION",
-    "RoleService",
     "RenderedPreview",
     "RenderedPreviewAsset",
+    "RequestIdentity",
     "ResolvedPreviewAsset",
-    "SOURCE_MANAGE_PERMISSION",
-    "TENANT_MANAGE_PERMISSION",
+    "RoleService",
     "TenantService",
     "UploadConflictError",
     "UploadService",
@@ -486,7 +509,6 @@ __all__ = [
     "UploadTarget",
     "UploadTooLargeError",
     "UploadValidationError",
-    "USER_MANAGE_PERMISSION",
     "UserService",
     "normalize_code",
     "normalize_codes",

@@ -1,4 +1,4 @@
-"""Raw document storage contract and provider implementations.
+"""Durable object storage contract and provider implementations.
 
 Raw storage owns binary object access only. Document metadata, parsing, and
 indexing remain outside this package.

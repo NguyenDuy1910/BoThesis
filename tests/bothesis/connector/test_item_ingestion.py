@@ -8,11 +8,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
+import bothesis.services.ingestion as item_ingestion
 import pytest
-from PIL import Image
-from qdrant_client import models as qmodels
-
-from bothesis.connector.file import FileProcessingError
 from bothesis.connector.protocol import (
     AccessPolicy,
     Chunk,
@@ -20,38 +17,30 @@ from bothesis.connector.protocol import (
     CitationSpan,
     DocumentItem,
     DocumentKind,
-    EffectiveAccess,
     Hierarchy,
     ProviderCacheEntry,
     SourceIdentity,
     SourceProvider,
 )
-from bothesis.document_index.raw_storage import aws_s3
 from bothesis.db.models import Item, ItemUpload
-from bothesis.services import (
-    AuthContext,
-    UploadService,
-    UploadTooLargeError,
-)
-from bothesis.services.chat_document_source import ChatDocumentSourceService
-from bothesis.document_index.indexer import DocumentPipeline
-from bothesis.document_index.models import ChunkContext, ContextualChunk
-from bothesis.document_index import (
-    BM25_MODEL,
-    BM25_OPTIONS,
-    DocumentProcessingError,
-    IndexingContext,
-    SPARSE_VECTOR_NAME,
-)
-from bothesis.document_index.raw_storage import (
+from bothesis.document_index import IndexingContext, ItemIndex
+from bothesis.storage import (
     ObjectStorageError,
     PresignedRequest,
     S3DocumentStorage,
     StoredObject,
+    aws_s3,
 )
-from bothesis.document_index.qdrant_index import QdrantDocumentIndex
+from bothesis.services import (
+    AuthContext,
+    DocumentProcessingError,
+    ItemIngestionService,
+    UploadService,
+    UploadTooLargeError,
+)
+from bothesis.services.chat_document_source import ChatDocumentSourceService
 from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
-import bothesis.document_index.indexer as document_indexer
+from PIL import Image
 
 
 class _Embedder:
@@ -64,16 +53,8 @@ class _Embedder:
         return [[float(len(document))] for document in documents]
 
 
-class _NoopVectorIndex:
-    async def replace_document(self, *args: Any, **kwargs: Any) -> None:
-        return None
-
-    async def soft_delete_document(self, document_id: Any, **kwargs: Any) -> None:
-        return None
-
-
 @pytest.mark.asyncio
-async def test_document_pipeline_owns_the_source_neutral_indexing_sequence(
+async def test_item_ingestion_owns_the_source_neutral_indexing_sequence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -113,21 +94,21 @@ async def test_document_pipeline_owns_the_source_neutral_indexing_sequence(
             assert len(chunks) == 1
             events.append("citations")
 
-    class VectorIndex:
-        async def replace_document(
+    class Index:
+        async def index_item_content(
             self,
-            _: Item,
+            _: DocumentItem,
             chunks: Any,
-            vectors: Any,
             *,
             context: IndexingContext,
-        ) -> None:
-            assert len(chunks) == len(vectors) == 1
+        ) -> int:
+            assert len(chunks) == 1
             assert context.connector_key == "file"
             events.append("vectors")
+            return len(chunks)
 
-    monkeypatch.setattr(document_indexer, "ItemService", Items)
-    monkeypatch.setattr(document_indexer, "CitationService", Citations)
+    monkeypatch.setattr(item_ingestion, "ItemService", Items)
+    monkeypatch.setattr(item_ingestion, "CitationService", Citations)
     stored = _document("text/plain")
     canonical = DocumentItem(
         id=str(stored.id),
@@ -149,13 +130,12 @@ async def test_document_pipeline_owns_the_source_neutral_indexing_sequence(
         content_type="text",
         citation=CitationInfo(),
     )
-    pipeline = DocumentPipeline(
+    ingestion = ItemIngestionService(
         cast(Any, SessionFactory()),
-        embedder=_Embedder(),
-        vector_index=cast(Any, VectorIndex()),
+        index=cast(Any, Index()),
     )
 
-    count = await pipeline.index_document(
+    count = await ingestion.process_item_content(
         stored,
         canonical,
         [chunk],
@@ -224,7 +204,7 @@ def test_upload_limits_reject_oversize_objects() -> None:
     uploads = UploadService(
         cast(Any, None),
         object_storage=cast(Any, SimpleNamespace()),
-        pipeline=cast(Any, SimpleNamespace()),
+        ingestion_service=cast(Any, SimpleNamespace()),
         document_source=cast(Any, SimpleNamespace()),
         max_upload_bytes=100,
     )
@@ -283,9 +263,7 @@ class _PathProcessor:
             chunk_index=0,
             chunk_text="streamed evidence",
             content_type="text",
-            citation=CitationInfo(
-                spans=(CitationSpan(element_id="doc_para_001"),)
-            ),
+            citation=CitationInfo(spans=(CitationSpan(element_id="doc_para_001"),)),
         )
         return SimpleNamespace(
             item=item,
@@ -338,8 +316,8 @@ async def test_index_processing_rejects_oversize_source_before_download() -> Non
     assert storage.reads == 0
 
 
-def test_document_indexer_has_no_raw_processing_implementation_dependencies() -> None:
-    source_path = Path(cast(str, document_indexer.__file__))
+def test_item_ingestion_has_no_raw_processing_implementation_dependencies() -> None:
+    source_path = Path(cast(str, item_ingestion.__file__))
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     imported_modules = {
         node.module
@@ -355,11 +333,7 @@ def test_document_indexer_has_no_raw_processing_implementation_dependencies() ->
 
     assert not any(
         module.startswith(
-            (
-                "bothesis.connector.file",
-                "bothesis.connector.processing",
-                "bothesis.document_index.raw_storage",
-            )
+            ("bothesis.connector.file", "bothesis.connector.processing", "bothesis.storage")
         )
         for module in imported_modules
     )
@@ -454,7 +428,7 @@ def test_s3_put_path_streams_from_a_file(tmp_path: Path) -> None:
     client = _PresigningS3Client()
     storage = S3DocumentStorage(bucket="documents", client=client)
 
-    stored = storage.put_path(
+    storage.put_path(
         path,
         "files/document-1/report.txt",
         content_type="text/plain",
@@ -602,14 +576,25 @@ async def test_s3_download_to_path_streams_content(tmp_path: Path) -> None:
     assert client.body.closed is True
 
 
-class _RecordingVectorStore:
+class _RecordingIndexBackend:
     def __init__(self) -> None:
         self.deleted: list[str] = []
         self.deleted_tenants: list[str | None] = []
-        self.batches: list[list[Any]] = []
-        self.access_updates: list[tuple[str, dict[str, Any]]] = []
+        self.batches: list[tuple[list[Any], list[list[float]]]] = []
 
-    async def soft_delete_document_points(
+    async def replace_item_points(
+        self,
+        *,
+        item_id: str,
+        tenant_id: str,
+        records: Any,
+        vectors: Any,
+    ) -> None:
+        self.deleted.append(item_id)
+        self.deleted_tenants.append(tenant_id)
+        self.batches.append((list(records), [list(vector) for vector in vectors]))
+
+    async def tombstone_item_points(
         self,
         document_id: str,
         *,
@@ -618,41 +603,31 @@ class _RecordingVectorStore:
         self.deleted.append(document_id)
         self.deleted_tenants.append(tenant_id)
 
-    async def upsert_points(self, points: list[Any]) -> None:
-        self.batches.append(points)
-
-    async def set_document_payload(
-        self,
-        document_id: str,
-        payload: dict[str, Any],
-    ) -> None:
-        self.access_updates.append((document_id, payload))
-
 
 @pytest.mark.asyncio
-async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> None:
+async def test_item_index_replacement_uses_deterministic_bounded_payloads() -> None:
     tenant_id = uuid4()
     user_id = uuid4()
     document = _document("text/plain")
+    item = DocumentItem(
+        id=str(document.id),
+        title="sample",
+        document_kind=DocumentKind.NOTE,
+        source=SourceIdentity(
+            connector_id="file",
+            provider=SourceProvider.FILE,
+            external_id=str(document.id),
+        ),
+        hierarchy=Hierarchy(parent_id=str(document.parent_item_id)),
+        access=AccessPolicy.from_reader_ids([str(user_id)]),
+    )
     chunks = [
-        ContextualChunk(
+        Chunk(
             id=f"{document.id}:0",
             item_id=str(document.id),
             chunk_index=0,
             content_type="text",
             chunk_text="grounded content",
-            contextual_text="Document: sample\n\ngrounded content",
-            context=ChunkContext(section_path=["Summary"]),
-            title="sample",
-            document_type="plain_text",
-            collection_item_id=str(document.parent_item_id),
-            source=SourceIdentity(
-                connector_id="upload",
-                provider=SourceProvider.FILE,
-                external_id=str(document.id),
-            ),
-            hierarchy=Hierarchy(),
-            access=EffectiveAccess(reader_ids=[str(user_id)]),
             citation=CitationInfo(
                 section="Summary",
                 section_path=("Summary",),
@@ -660,23 +635,12 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
             ),
         )
     ]
-    access = AuthContext(
-        user_id=user_id,
-        email="person@example.test",
-        display_name="Person",
-        tenant_id=tenant_id,
-        role_id=uuid4(),
-        role_code="analyst",
-        permission_codes=("knowledge.read",),
-        group_ids=(),
-    )
-    store = _RecordingVectorStore()
-    index = QdrantDocumentIndex(cast(Any, store))
+    backend = _RecordingIndexBackend()
+    index = ItemIndex(backend=cast(Any, backend), embedder=_Embedder())
 
-    await index.replace_document(
-        document,
+    await index.index_item_content(
+        item,
         chunks,
-        [[0.1, 0.2]],
         context=IndexingContext(
             tenant_id=str(tenant_id),
             collection_item_id=str(document.parent_item_id),
@@ -685,10 +649,9 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
             connector_key="file",
         ),
     )
-    await index.replace_document(
-        document,
+    await index.index_item_content(
+        item,
         chunks,
-        [[0.3, 0.4]],
         context=IndexingContext(
             tenant_id=str(tenant_id),
             collection_item_id=str(document.parent_item_id),
@@ -698,17 +661,12 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
         ),
     )
 
-    assert store.deleted == [str(document.id), str(document.id)]
-    assert store.deleted_tenants == [str(tenant_id), str(tenant_id)]
-    assert store.batches[0][0].id == store.batches[1][0].id
-    payload = store.batches[0][0].payload
-    vectors = store.batches[0][0].vector
-    assert vectors["content"] == [0.1, 0.2]
-    assert vectors[SPARSE_VECTOR_NAME] == qmodels.Document(
-        text=chunks[0].contextual_text,
-        model=BM25_MODEL,
-        options=BM25_OPTIONS,
-    )
+    assert backend.deleted == [str(document.id), str(document.id)]
+    assert backend.deleted_tenants == [str(tenant_id), str(tenant_id)]
+    assert backend.batches[0][0][0].point_id == backend.batches[1][0][0].point_id
+    payload = backend.batches[0][0][0].payload.to_payload()
+    expected_text = "Document: sample\n\ngrounded content"
+    assert backend.batches[0][1] == [[float(len(expected_text))]]
     assert payload["tenant_id"] == str(tenant_id)
     assert payload["collection_item_id"] == str(document.parent_item_id)
     assert "integration_connection_id" not in payload
@@ -729,11 +687,8 @@ async def test_vector_replacement_uses_deterministic_points_and_reader_acl() -> 
     assert "access" not in payload
     assert "storage" not in payload
 
-    await index.update_document_access(document.id, access=access)
-    assert store.access_updates == []
-
-    await index.soft_delete_document(document.id)
-    assert store.deleted == [str(document.id), str(document.id), str(document.id)]
+    await index.remove_item_content(str(document.id), tenant_id=str(tenant_id))
+    assert backend.deleted == [str(document.id), str(document.id), str(document.id)]
 
 
 def test_provider_cache_expiry_uses_utc() -> None:

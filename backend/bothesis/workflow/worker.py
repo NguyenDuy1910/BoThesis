@@ -17,11 +17,11 @@ from temporalio.worker.workflow_sandbox import (
 
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.db.engine import get_session_factory
-from bothesis.document_index.raw_storage import S3DocumentStorage
-from bothesis.document_index import SemanticContextualizer
-from bothesis.document_index.vector_store import VectorStore
-from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
+from bothesis.document_index import ItemIndex, SemanticContextualizer
+from bothesis.storage import S3DocumentStorage
+from bothesis.services.ingestion_activity import IngestionActivity
 from bothesis.services.ingestion_workflow import IngestionWorkflow
+from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
 from bothesis.workflow import TemporalSettings
 from bothesis.workflow.client import TemporalClientProvider
 
@@ -31,19 +31,18 @@ class TemporalWorker:
 
     def __init__(self, settings: TemporalSettings | None = None) -> None:
         self._settings = settings or TemporalSettings.from_environment()
-        self._embedder: OpenRouterTransport | None = None
         self._contextualization_transport: OpenRouterTransport | None = None
-        self._store: VectorStore | None = None
+        self._index: ItemIndex | None = None
         self._storage: S3DocumentStorage | None = None
 
     async def run(self) -> None:
         client = await TemporalClientProvider(self._settings).get()
-        ingestion = self._configured_ingestion_workflow()
+        ingestion = self._configured_ingestion_activity()
         worker = Worker(
             client,
             task_queue=self._settings.task_queue,
             workflows=[IngestionWorkflow],
-            activities=[ingestion.run_ingestion],
+            activities=[ingestion.ingest_items],
             # Importing a submodule of ``bothesis.services`` executes that
             # package's database-backed public boundary. Pass through only the
             # already-loaded workflow module and its lightweight contracts;
@@ -68,15 +67,8 @@ class TemporalWorker:
         finally:
             await self._close()
 
-    def _configured_ingestion_workflow(self) -> IngestionWorkflow:
-        self._store = VectorStore(
-            collection_name=os.getenv("QDRANT_COLLECTION"),
-            url=os.getenv("QDRANT_URL"),
-            api_key=os.getenv("QDRANT_API_KEY") or None,
-            prefer_grpc=_environment_boolean("QDRANT_PREFER_GRPC"),
-            timeout=60,
-        )
-        self._embedder = OpenRouterTransport(
+    def _configured_ingestion_activity(self) -> IngestionActivity:
+        embedder = OpenRouterTransport(
             base_url=os.getenv(
                 "OPEN_ROUTER_BASE_URL", OpenRouterTransport.DEFAULT_BASE_URL
             )
@@ -94,19 +86,26 @@ class TemporalWorker:
                 self._contextualization_transport,
                 model_name=model,
             )
+        self._index = ItemIndex(
+            collection_name=os.getenv("QDRANT_COLLECTION"),
+            url=os.getenv("QDRANT_URL"),
+            api_key=os.getenv("QDRANT_API_KEY") or None,
+            prefer_grpc=_environment_boolean("QDRANT_PREFER_GRPC"),
+            timeout=60,
+            embedder=embedder,
+            semantic_contextualizer=semantic_contextualizer,
+            embedding_batch_size=int(
+                os.getenv("BOTHESIS_DOCUMENT_EMBEDDING_BATCH_SIZE", "32")
+            ),
+        )
         self._storage = _object_storage()
-        return IngestionWorkflow(
+        return IngestionActivity(
             get_session_factory(),
-            self._store,
-            self._embedder,
+            self._index,
             self._storage,
             credential_encryption_key=(
                 os.getenv("BOTHESIS_INTEGRATION_ENCRYPTION_KEY") or None
             ),
-            embedding_batch_size=int(
-                os.getenv("BOTHESIS_DOCUMENT_EMBEDDING_BATCH_SIZE", "32")
-            ),
-            semantic_contextualizer=semantic_contextualizer,
             preview_service=KnowledgePreviewService(
                 self._storage,
                 renderer=KnowledgePreviewRenderer(
@@ -114,9 +113,7 @@ class TemporalWorker:
                     max_dimension=int(
                         os.getenv("BOTHESIS_PREVIEW_MAX_DIMENSION", "1600")
                     ),
-                    webp_quality=int(
-                        os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")
-                    ),
+                    webp_quality=int(os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")),
                 ),
                 max_source_bytes=int(
                     os.getenv("BOTHESIS_PREVIEW_MAX_SOURCE_BYTES", "104857600")
@@ -125,12 +122,10 @@ class TemporalWorker:
         )
 
     async def _close(self) -> None:
-        if self._embedder is not None:
-            await self._embedder.aclose()
         if self._contextualization_transport is not None:
             await self._contextualization_transport.aclose()
-        if self._store is not None:
-            await self._store.aclose()
+        if self._index is not None:
+            await self._index.aclose()
         if self._storage is not None:
             await self._storage.aclose()
 
@@ -174,13 +169,9 @@ def _object_storage() -> S3DocumentStorage:
             or os.getenv("BOTHESIS_OBJECT_STORAGE_ENDPOINT")
             or None
         ),
-        addressing_style=(
-            os.getenv("BOTHESIS_S3_ADDRESSING_STYLE") or "auto"
-        ).strip(),
+        addressing_style=(os.getenv("BOTHESIS_S3_ADDRESSING_STYLE") or "auto").strip(),
         timeout_seconds=float(os.getenv("BOTHESIS_S3_TIMEOUT_SECONDS", "20")),
-        max_pool_connections=int(
-            os.getenv("BOTHESIS_S3_MAX_POOL_CONNECTIONS", "20")
-        ),
+        max_pool_connections=int(os.getenv("BOTHESIS_S3_MAX_POOL_CONNECTIONS", "20")),
     )
 
 
@@ -193,7 +184,9 @@ def _environment_boolean(name: str, *, default: bool = False) -> bool:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"{name} must be a JSON boolean") from exc
     if not isinstance(value, bool):
-        raise RuntimeError(f"{name} must be a JSON boolean")
+        raise RuntimeError(  # noqa: TRY004 - invalid process configuration
+            f"{name} must be a JSON boolean"
+        )
     return value
 
 

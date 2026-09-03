@@ -28,7 +28,7 @@ from fastapi.routing import APIRouter
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 from dotenv import load_dotenv
 from bothesis.connector.protocol import BoundingBox, CitationInfo
-from bothesis.document_index.raw_storage import ObjectStorageError
+from bothesis.storage import ObjectStorageError
 from bothesis.health import HealthReport, HealthService, HealthSettings
 from bothesis.services import (
     AdminApiService,

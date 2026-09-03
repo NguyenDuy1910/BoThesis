@@ -9,8 +9,7 @@ from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from bothesis.db.models import Item, ExternalResource, IngestionSource
-from bothesis.document_index.vector_store import VectorStore
+from bothesis.db.models import ExternalResource, IngestionSource, Item
 from bothesis.services import (
     ITEM_MANAGE_PERMISSION,
     AdminConflictError,
@@ -19,9 +18,10 @@ from bothesis.services import (
     AuditService,
     AuthContext,
     CollectionAccessService,
+    ItemIngestionService,
     ItemService,
-    normalize_required_text,
     normalize_page,
+    normalize_required_text,
     require_tenant_permission,
     timestamp,
 )
@@ -36,11 +36,11 @@ class AdminItemService:
         self,
         session: AsyncSession,
         *,
-        vector_store: VectorStore | None = None,
+        ingestion_service: ItemIngestionService | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._session = session
-        self._vector_store = vector_store
+        self._ingestion = ingestion_service
         self._audit = audit or AuditService(session)
 
     async def create_collection(
@@ -104,7 +104,8 @@ class AdminItemService:
         if search and search.strip():
             term = f"%{search.strip()}%"
             matching_resources = select(ExternalResource.item_id).where(
-                ExternalResource.external_id.ilike(term), ExternalResource.deleted_at.is_(None)
+                ExternalResource.external_id.ilike(term),
+                ExternalResource.deleted_at.is_(None),
             )
             filters.append(
                 or_(
@@ -185,7 +186,10 @@ class AdminItemService:
                 target_id: int(count)
                 for target_id, count in (
                     await self._session.execute(
-                        select(IngestionSource.target_item_id, func.count(IngestionSource.id))
+                        select(
+                            IngestionSource.target_item_id,
+                            func.count(IngestionSource.id),
+                        )
                         .where(
                             IngestionSource.target_item_id.in_(collection_ids),
                             IngestionSource.deleted_at.is_(None),
@@ -322,7 +326,8 @@ class AdminItemService:
             raise AdminConflictError("only failed items can be retried")
         external_resource = await self._session.scalar(
             select(ExternalResource).where(
-                ExternalResource.item_id == item_id, ExternalResource.deleted_at.is_(None)
+                ExternalResource.item_id == item_id,
+                ExternalResource.deleted_at.is_(None),
             )
         )
         if external_resource is None:
@@ -342,9 +347,9 @@ class AdminItemService:
     async def delete_item(self, actor: AuthContext, item_id: UUID) -> None:
         require_tenant_permission(actor, ITEM_MANAGE_PERMISSION)
         payload = await self.get_item(actor, item_id)
-        if self._vector_store is not None and payload["item_type"] == "document":
-            await self._vector_store.soft_delete_document_points(str(item_id))
-        await ItemService(self._session).soft_delete_item(item_id, actor=actor)
+        if self._ingestion is None:
+            raise RuntimeError("Item deletion requires ItemIngestionService")
+        await self._ingestion.remove_item(item_id, actor=actor)
         await self._audit.record(
             actor,
             action=f"{payload['item_type']}.deleted",
@@ -387,9 +392,7 @@ class AdminItemService:
                     "id": str(external_resource.id),
                     "external_id": external_resource.external_id,
                     "source_url": external_resource.source_url,
-                    "ingestion_source_id": str(
-                        external_resource.ingestion_source_id
-                    ),
+                    "ingestion_source_id": str(external_resource.ingestion_source_id),
                     "integration_connection": {
                         "id": str(
                             external_resource.ingestion_source.integration_connection.id

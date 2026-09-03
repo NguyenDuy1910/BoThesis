@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from bothesis.knowledge.models import Evidence, EvidenceContext
+from bothesis.knowledge import Evidence, EvidenceContext
 
 
 class EvidenceContextBuilder:

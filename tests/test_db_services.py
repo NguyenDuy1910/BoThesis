@@ -9,42 +9,41 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
+from bothesis.connector.protocol import BoundingBox, Chunk, CitationInfo, CitationSpan
 from bothesis.db.models import (
     AuditLog,
     Base,
     Citation,
     Conversation,
-    Item,
     ExternalResource,
-    ItemUpload,
     IngestionSource,
-    Message,
-    MessageItem,
     IntegrationConnection,
     IntegrationCredential,
+    Item,
+    ItemUpload,
+    Message,
+    MessageItem,
 )
-from bothesis.connector.protocol import BoundingBox, Chunk, CitationInfo, CitationSpan
+from bothesis.storage import ObjectStorageError, StoredObject
 from bothesis.services import (
     AccessRequestService,
     AdminItemService,
     AuthContext,
-    AuthService,
     AuthorizationError,
-    CollectionAccessService,
+    AuthService,
     CitationService,
+    CollectionAccessService,
     DocumentNotFoundError,
-    ItemService,
+    DocumentProcessingError,
     IntegrationCredentialService,
     IntegrationService,
+    ItemService,
     UploadService,
     UploadTooLargeError,
     UploadValidationError,
 )
-from bothesis.document_index.raw_storage import ObjectStorageError, StoredObject
-
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -310,11 +309,14 @@ async def test_integration_credentials_are_encrypted_and_owner_models_are_explic
             "access_token": "top-secret",
             "refresh_token": "refresh-secret",
         }
-        assert await session.scalar(
-            select(IntegrationCredential).where(
-                IntegrationCredential.integration_connection_id == personal.id
+        assert (
+            await session.scalar(
+                select(IntegrationCredential).where(
+                    IntegrationCredential.integration_connection_id == personal.id
+                )
             )
-        ) is record
+            is record
+        )
 
 
 def test_integration_encryption_key_accepts_unpadded_urlsafe_base64() -> None:
@@ -353,7 +355,8 @@ async def test_integration_list_eager_loads_optional_credentials(
 
     async with session_factory.begin() as session:
         result = await IntegrationService(session).list_connections(
-            actor, page_size=100,
+            actor,
+            page_size=100,
         )
 
     assert result["total"] == 1
@@ -470,9 +473,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         assert created["item_type"] == "collection"
         assert created["title"] == "Engineering handbook"
         assert created["inherit_access"] is True
-        assert created["metadata"] == {
-            "description": "Governed engineering knowledge"
-        }
+        assert created["metadata"] == {"description": "Governed engineering knowledge"}
         assert created["created_by_user_id"] == str(owner.id)
         assert created["collection_access"] == [
             {
@@ -540,7 +541,7 @@ class _AsyncUpload:
         if self._offset >= len(self._body):
             return b""
         end = len(self._body) if size < 0 else self._offset + size
-        chunk = self._body[self._offset:end]
+        chunk = self._body[self._offset : end]
         self._offset += len(chunk)
         return chunk
 
@@ -567,6 +568,25 @@ class _UploadStorage:
             etag="etag-upload",
             version_id="version-upload",
         )
+
+
+class _UnavailableIngestion:
+    async def index_upload(self, *_: object, **__: object) -> Item:
+        raise DocumentProcessingError("indexing is outside this integration test")
+
+
+def _uploads(
+    session_factory: async_sessionmaker[AsyncSession],
+    storage: _UploadStorage,
+    **kwargs: object,
+) -> UploadService:
+    return UploadService(
+        session_factory,
+        object_storage=storage,
+        ingestion_service=_UnavailableIngestion(),  # type: ignore[arg-type]
+        document_source=object(),  # type: ignore[arg-type]
+        **kwargs,
+    )
 
 
 async def _collection_upload_contexts(
@@ -645,9 +665,11 @@ async def _collection_upload_contexts(
 async def test_collection_upload_is_authorized_parented_and_retry_safe(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    collection_id, editor, viewer, _ = await _collection_upload_contexts(session_factory)
+    collection_id, editor, viewer, _ = await _collection_upload_contexts(
+        session_factory
+    )
     storage = _UploadStorage()
-    uploads = UploadService(session_factory, object_storage=storage)
+    uploads = _uploads(session_factory, storage)
 
     first = await uploads.upload_to_collection(
         editor,
@@ -709,7 +731,7 @@ async def test_collection_upload_rejects_tenant_permission_and_collection_states
     collection_id, _, viewer, outsider = await _collection_upload_contexts(
         session_factory
     )
-    uploads = UploadService(session_factory, object_storage=_UploadStorage())
+    uploads = _uploads(session_factory, _UploadStorage())
     viewer_content = _AsyncUpload(b"viewer")
     outsider_content = _AsyncUpload(b"outsider")
 
@@ -775,9 +797,9 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     collection_id, editor, _, _ = await _collection_upload_contexts(session_factory)
-    uploads = UploadService(
+    uploads = _uploads(
         session_factory,
-        object_storage=_UploadStorage(),
+        _UploadStorage(),
         max_upload_bytes=8,
     )
 
@@ -800,10 +822,7 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
             content=_AsyncUpload(b"123456789"),
         )
 
-    failing_uploads = UploadService(
-        session_factory,
-        object_storage=_UploadStorage(fail=True),
-    )
+    failing_uploads = _uploads(session_factory, _UploadStorage(fail=True))
     with pytest.raises(ObjectStorageError):
         await failing_uploads.upload_to_collection(
             editor,
@@ -815,9 +834,7 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
         )
     async with session_factory() as session:
         failed = await session.scalar(
-            select(ItemUpload).where(
-                ItemUpload.idempotency_key == "storage-failure"
-            )
+            select(ItemUpload).where(ItemUpload.idempotency_key == "storage-failure")
         )
         assert failed is not None
         item = await session.get(Item, failed.item_id)
