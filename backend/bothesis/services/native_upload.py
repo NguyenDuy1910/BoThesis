@@ -17,31 +17,29 @@ from bothesis.storage import (
     ObjectStorageError,
     StoredObject,
 )
+from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.item import ItemService
+from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
     AsyncUploadStream,
     AuthContext,
-    ChatDocumentSource,
-    CollectionAccessService,
+    StoredFileContent,
     CollectionUpload,
     DocumentNotFoundError,
     DocumentProcessingError,
     InvalidDocumentStateError,
-    ItemIngestionService,
-    ItemService,
     UploadConflictError,
     UploadStart,
     UploadTarget,
     UploadTooLargeError,
     UploadValidationError,
 )
-from bothesis.services.preview import KnowledgePreviewService
-
 log = logging.getLogger(__name__)
 
 
-class UploadService:
+class NativeUploadService:
     """Create Item metadata first, then upload original bytes to object storage."""
 
     def __init__(
@@ -50,8 +48,7 @@ class UploadService:
         *,
         object_storage: DocumentStorage,
         ingestion_service: ItemIngestionService,
-        document_source: ChatDocumentSource,
-        preview_service: KnowledgePreviewService | None = None,
+        document_source: StoredFileContent,
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
         upload_url_seconds: int = DEFAULT_UPLOAD_URL_SECONDS,
     ) -> None:
@@ -61,7 +58,6 @@ class UploadService:
         self._object_storage = object_storage
         self._ingestion = ingestion_service
         self._document_source = document_source
-        self._preview_service = preview_service
         self.max_upload_bytes = max_upload_bytes
         self._upload_url_seconds = upload_url_seconds
 
@@ -157,7 +153,6 @@ class UploadService:
                 raise UploadConflictError(str(exc)) from exc
 
             assert item.upload is not None
-            uploaded_now = False
             if item.upload.status != "available":
                 if not item.storage_key:
                     raise UploadConflictError("item has no durable object storage key")
@@ -198,11 +193,6 @@ class UploadService:
                             "version_id": stored.version_id,
                         },
                     )
-                uploaded_now = True
-            item = await self._with_preview(
-                item,
-                source_path=temporary_path if uploaded_now else None,
-            )
             item = await self._index_available(item, access=access)
             return CollectionUpload(item=item, created=created)
         finally:
@@ -223,7 +213,6 @@ class UploadService:
             )
             assert item.upload is not None
             if item.upload.status == "available":
-                item = await self._with_preview(item)
                 return await self._index_available(item, access=access)
             storage_key = item.storage_key
             expected_size = item.size_bytes
@@ -261,7 +250,6 @@ class UploadService:
                     "version_id": stored.version_id,
                 },
             )
-        item = await self._with_preview(item)
         return await self._index_available(item, access=access)
 
     async def retry_indexing(
@@ -353,39 +341,6 @@ class UploadService:
             )
         except DocumentProcessingError:
             return await self.get_document(access, document.id)
-
-    async def _with_preview(
-        self,
-        document: Item,
-        *,
-        source_path: Path | None = None,
-    ) -> Item:
-        if self._preview_service is None:
-            return document
-        try:
-            manifest = await self._preview_service.generate(
-                document,
-                source_path=source_path,
-            )
-        except Exception as exc:
-            log.warning(
-                "document preview generation failed document_id=%s error_type=%s",
-                document.id,
-                type(exc).__name__,
-            )
-            return document
-        if manifest is None:
-            return document
-        preview_metadata = manifest.model_dump(mode="json")
-        if document.metadata_.get("preview") == preview_metadata:
-            return document
-        async with self._session_factory.begin() as session:
-            await ItemService(session).merge_metadata(
-                document.id,
-                {"preview": preview_metadata},
-            )
-        document.metadata_ = {**dict(document.metadata_), "preview": preview_metadata}
-        return document
 
     async def _require_writable_collection(
         self,
@@ -503,7 +458,7 @@ def _validate_stored_object(
         )
 
 
-__all__ = ["UploadService"]
+__all__ = ["NativeUploadService"]
 
 
 def _document_type(content_type: str) -> str:

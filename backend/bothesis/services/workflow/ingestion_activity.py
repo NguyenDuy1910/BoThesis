@@ -21,15 +21,15 @@ from bothesis.connector.registry import ConnectorRegistry
 from bothesis.db.models import ExternalResource, IngestionSource, Item
 from bothesis.document_index import ItemIndex
 from bothesis.storage import DocumentStorage
+from bothesis.services.integration import IntegrationService
+from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (
     AdminNotFoundError,
     AdminValidationError,
-    IntegrationService,
     InvalidDocumentStateError,
-    ItemIngestionService,
 )
 from bothesis.services.preview import KnowledgePreviewService
-from bothesis.workflow import (
+from bothesis.services.workflow import (
     INGESTION_ACTIVITY_NAME,
     IngestionResult,
     IngestionWorkflowInput,

@@ -36,7 +36,7 @@ from bothesis.services import (
 )
 
 
-class AuthService:
+class IdentityStoreService:
     """Manage durable identities and resolve fail-closed authorization context."""
 
     def __init__(self, session: AsyncSession) -> None:
@@ -442,4 +442,4 @@ def _optional_text(
     return _required_text(value, field_name, max_length)
 
 
-__all__ = ["AuthService"]
+__all__ = ["IdentityStoreService"]

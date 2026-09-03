@@ -34,7 +34,7 @@ from temporalio.exceptions import (
 )
 from temporalio.service import RPCError, RPCStatusCode
 
-from bothesis.workflow import (
+from bothesis.services.workflow import (
     INGESTION_WORKFLOW_NAME,
     IngestionProgress,
     IngestionResult,
@@ -44,7 +44,7 @@ from bothesis.workflow import (
     ingestion_schedule_id,
     ingestion_workflow_id,
 )
-from bothesis.workflow.client import TemporalClientProvider
+from bothesis.services.workflow.client import TemporalClientProvider
 
 _TENANT_ID = SearchAttributeKey.for_keyword("TenantId")
 _INGESTION_SOURCE_ID = SearchAttributeKey.for_keyword("IngestionSourceId")

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from uuid import uuid4
 
-import bothesis.services.ingestion as item_ingestion
+import bothesis.services.item_ingestion as item_ingestion
 import pytest
 from bothesis.connector.protocol import (
     AccessPolicy,
@@ -34,12 +34,13 @@ from bothesis.storage import (
 from bothesis.services import (
     AuthContext,
     DocumentProcessingError,
-    ItemIngestionService,
-    UploadService,
     UploadTooLargeError,
 )
-from bothesis.services.chat_document_source import ChatDocumentSourceService
-from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
+from bothesis.services.item_ingestion import ItemIngestionService
+from bothesis.services.native_upload import NativeUploadService
+from bothesis.services.stored_file_content import StoredFileContentService
+from bothesis.services.preview import KnowledgePreviewService
+from bothesis.services.preview_renderer import KnowledgePreviewRenderer
 from PIL import Image
 
 
@@ -201,7 +202,7 @@ def _document(
 
 
 def test_upload_limits_reject_oversize_objects() -> None:
-    uploads = UploadService(
+    uploads = NativeUploadService(
         cast(Any, None),
         object_storage=cast(Any, SimpleNamespace()),
         ingestion_service=cast(Any, SimpleNamespace()),
@@ -276,7 +277,7 @@ async def test_index_processing_streams_object_storage_to_a_temporary_path() -> 
     raw = b"bounded source content"
     storage = _StreamingStorage(raw)
     source_processor = _PathProcessor()
-    service = ChatDocumentSourceService(
+    service = StoredFileContentService(
         object_storage=cast(Any, storage),
         processor=cast(Any, source_processor),
     )
@@ -298,7 +299,7 @@ async def test_index_processing_streams_object_storage_to_a_temporary_path() -> 
 @pytest.mark.asyncio
 async def test_index_processing_rejects_oversize_source_before_download() -> None:
     storage = _StreamingStorage(b"oversize")
-    service = ChatDocumentSourceService(
+    service = StoredFileContentService(
         object_storage=cast(Any, storage),
         processor=cast(Any, _PathProcessor()),
         max_processing_bytes=4,

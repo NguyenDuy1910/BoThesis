@@ -23,6 +23,8 @@ from bothesis.db.models import (
 )
 from bothesis.connector import ConnectorDefinition
 from bothesis.connector.registry import ConnectorRegistry
+from bothesis.services.audit import AuditService
+from bothesis.services.integration_credential import IntegrationCredentialService
 from bothesis.services import (
     ACTIVE_STATUS,
     SOURCE_MANAGE_PERMISSION,
@@ -30,9 +32,7 @@ from bothesis.services import (
     AdminExternalUnavailableError,
     AdminNotFoundError,
     AdminValidationError,
-    AuditService,
     AuthContext,
-    IntegrationCredentialService,
     normalize_page,
     normalize_required_text,
     require_tenant_permission,

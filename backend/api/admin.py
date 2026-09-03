@@ -14,36 +14,35 @@ from temporalio.service import RPCError
 
 from bothesis.db.engine import get_session_factory, session_scope
 from bothesis.document_index import ItemIndex
+from bothesis.services.access_requests import AccessRequestService
+from bothesis.services.audit import AuditService
+from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.groups import GroupService
+from bothesis.services.integration import IntegrationService
+from bothesis.services.item_catalog import ItemCatalogService
+from bothesis.services.item_ingestion import ItemIngestionService
+from bothesis.services.roles import RoleService
+from bothesis.services.tenant_overview import TenantOverviewService
+from bothesis.services.tenants import TenantService
+from bothesis.services.users import UserService
 from bothesis.services import (
     SOURCE_MANAGE_PERMISSION,
-    AccessRequestService,
     AdminConflictError,
     AdminExternalUnavailableError,
-    AdminItemService,
     AdminNotFoundError,
-    AdminService,
     AdminValidationError,
-    AuditService,
     AuthContext,
-    CollectionAccessService,
-    GroupService,
-    IntegrationService,
-    ItemIngestionService,
-    RequestIdentity,
-    RoleService,
-    TenantService,
-    UserService,
     require_tenant_permission,
 )
-from bothesis.services.request_identity import resolve_auth_context
-from bothesis.workflow import (
+from api.identity import RequestIdentity, resolve_auth_context
+from bothesis.services.workflow import (
     IngestionWorkflowInput,
     WorkflowExecutionNotFoundError,
 )
-from bothesis.workflow.service import TemporalWorkflowService
+from bothesis.services.workflow.service import TemporalWorkflowService
 
 
-class AdminApiService:
+class AdministrationApi:
     """Own request transactions and delegate admin work to focused services."""
 
     def __init__(self, *, allow_insecure_development_identity: bool) -> None:
@@ -53,7 +52,7 @@ class AdminApiService:
 
     async def overview(self, identity: RequestIdentity) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await AdminService(session).overview(actor)
+            return await TenantOverviewService(session).overview(actor)
 
     async def list_spaces(self, identity: RequestIdentity) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
@@ -672,7 +671,7 @@ class AdminApiService:
 
     @staticmethod
     @asynccontextmanager
-    async def _item_service(session: Any) -> AsyncIterator[AdminItemService]:
+    async def _item_service(session: Any) -> AsyncIterator[ItemCatalogService]:
         index = ItemIndex(
             collection_name=os.getenv("QDRANT_COLLECTION"),
             url=os.getenv("QDRANT_URL"),
@@ -680,7 +679,7 @@ class AdminApiService:
             timeout=20,
         )
         try:
-            yield AdminItemService(
+            yield ItemCatalogService(
                 session,
                 ingestion_service=ItemIngestionService(
                     get_session_factory(),
@@ -691,4 +690,4 @@ class AdminApiService:
             await index.aclose()
 
 
-__all__ = ["AdminApiService"]
+__all__ = ["AdministrationApi"]

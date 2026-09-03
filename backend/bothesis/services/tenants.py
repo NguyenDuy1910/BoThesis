@@ -9,10 +9,10 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import Tenant
+from bothesis.services.audit import AuditService
 from bothesis.services import (
     TENANT_MANAGE_PERMISSION,
     AdminNotFoundError,
-    AuditService,
     AuthContext,
     normalize_required_text,
     require_tenant_permission,

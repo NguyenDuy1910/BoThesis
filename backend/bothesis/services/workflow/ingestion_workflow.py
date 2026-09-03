@@ -7,7 +7,7 @@ from datetime import timedelta
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from bothesis.workflow import (
+from bothesis.services.workflow import (
     INGESTION_ACTIVITY_NAME,
     INGESTION_WORKFLOW_NAME,
     IngestionProgress,

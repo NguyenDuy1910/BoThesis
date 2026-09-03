@@ -10,16 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from bothesis.db.models import ExternalResource, IngestionSource, Item
+from bothesis.services.audit import AuditService
+from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.item import ItemService
+from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (
     ITEM_MANAGE_PERMISSION,
     AdminConflictError,
     AdminNotFoundError,
     AdminValidationError,
-    AuditService,
     AuthContext,
-    CollectionAccessService,
-    ItemIngestionService,
-    ItemService,
     normalize_page,
     normalize_required_text,
     require_tenant_permission,
@@ -29,7 +29,7 @@ from bothesis.services import (
 _ITEM_STATUSES = {"pending", "processing", "ready", "failed", "unsupported"}
 
 
-class AdminItemService:
+class ItemCatalogService:
     """Query canonical Items without coupling them to connector implementations."""
 
     def __init__(
@@ -410,4 +410,4 @@ class AdminItemService:
         }
 
 
-__all__ = ["AdminItemService"]
+__all__ = ["ItemCatalogService"]

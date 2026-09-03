@@ -27,7 +27,7 @@ from bothesis.services import (
 )
 
 
-class ChatDocumentSourceService:
+class StoredFileContentService:
     """Resolve stored uploads and produce canonical connector evidence."""
 
     def __init__(
@@ -187,4 +187,4 @@ class ChatDocumentSourceService:
         return DocumentKind.DOCUMENT
 
 
-__all__ = ["ChatDocumentSourceService"]
+__all__ = ["StoredFileContentService"]

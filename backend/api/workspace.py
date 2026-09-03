@@ -31,31 +31,31 @@ from bothesis.knowledge import (
     SemanticReranker,
 )
 from bothesis.observability import create_langfuse_tracing
+from bothesis.services.audit import AuditService
+from bothesis.services.citation import CitationService
+from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.item import ItemService
+from bothesis.services.item_ingestion import ItemIngestionService
+from bothesis.services.native_upload import NativeUploadService
+from bothesis.services.stored_file_content import StoredFileContentService
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_PROCESSING_MAX_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
     KNOWLEDGE_READ_PERMISSION,
     AsyncUploadStream,
-    AuditService,
     AuthContext,
-    ChatDocumentSourceService,
-    CitationService,
-    CollectionAccessService,
     DocumentNotFoundError,
-    ItemIngestionService,
-    ItemService,
-    RequestIdentity,
-    UploadService,
     require_tenant_permission,
 )
-from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
-from bothesis.services.request_identity import resolve_auth_context
+from bothesis.services.preview import KnowledgePreviewService
+from bothesis.services.preview_renderer import KnowledgePreviewRenderer
+from api.identity import RequestIdentity, resolve_auth_context
 
 log = logging.getLogger(__name__)
 
 
-class ApiService:
+class WorkspaceApi:
     """Own chat, upload, citation, and document application workflows."""
 
     def __init__(
@@ -92,7 +92,7 @@ class ApiService:
         self._session_factory: Any | None = None
         self._storage: Any | None = None
         self._storage_initialized = False
-        self._uploads: UploadService | None = None
+        self._uploads: NativeUploadService | None = None
         self._previews: KnowledgePreviewService | None = None
         self._index: ItemIndex | None = None
         self._ingestion: ItemIngestionService | None = None
@@ -592,7 +592,7 @@ class ApiService:
             self._session_factory = get_session_factory()
         return self._session_factory
 
-    def _upload_service(self) -> UploadService:
+    def _upload_service(self) -> NativeUploadService:
         if self._uploads is None:
             processing_max_bytes = int(
                 os.getenv(
@@ -600,16 +600,15 @@ class ApiService:
                     str(DEFAULT_PROCESSING_MAX_BYTES),
                 )
             )
-            self._uploads = UploadService(
+            self._uploads = NativeUploadService(
                 self._sessions(),
                 object_storage=self._object_storage(),
                 ingestion_service=self._ingestion_service(),
-                document_source=ChatDocumentSourceService(
+                document_source=StoredFileContentService(
                     object_storage=self._object_storage(),
                     processor=FileProcessor(max_file_bytes=processing_max_bytes),
                     max_processing_bytes=processing_max_bytes,
                 ),
-                preview_service=self._preview_service(),
                 max_upload_bytes=int(
                     os.getenv(
                         "BOTHESIS_DOCUMENT_MAX_UPLOAD_BYTES",
@@ -1023,4 +1022,4 @@ class ApiService:
         )
 
 
-__all__ = ["ApiService"]
+__all__ = ["WorkspaceApi"]

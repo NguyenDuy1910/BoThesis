@@ -9,6 +9,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import Role, TenantMembership
+from bothesis.services.audit import AuditService
+from bothesis.services.identity_store import IdentityStoreService
 from bothesis.services import (
     ACTIVE_STATUS,
     ADMIN_PERMISSION_CATALOG,
@@ -17,9 +19,7 @@ from bothesis.services import (
     AdminConflictError,
     AdminNotFoundError,
     AdminValidationError,
-    AuditService,
     AuthContext,
-    AuthService,
     IdentityConflictError,
     normalize_codes,
     normalize_page,
@@ -35,11 +35,11 @@ class RoleService:
         self,
         session: AsyncSession,
         *,
-        auth: AuthService | None = None,
+        auth: IdentityStoreService | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._session = session
-        self._auth = auth or AuthService(session)
+        self._auth = auth or IdentityStoreService(session)
         self._audit = audit or AuditService(session)
 
     async def list_permissions(self, actor: AuthContext) -> dict[str, Any]:

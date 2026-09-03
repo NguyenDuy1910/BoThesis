@@ -42,6 +42,36 @@ Primary source types:
 - Enforce permissions before retrieval results or BI data reach the agent.
 - Log operational events without leaking private content or secrets.
 
+## Application boundaries and naming
+- `backend/main.py` is executable bootstrap only: load local environment, configure
+  process logging, and start the ASGI application. It must not define HTTP
+  schemas, routers, request parsing, or business workflows.
+- `backend/api` owns the complete FastAPI boundary: request/response DTOs,
+  header and middleware identity extraction, validation, routers, HTTP error
+  mapping, application lifespan, and transport-specific application facades.
+  API modules may depend on services; services must never import FastAPI,
+  `Request`, `Response`, or API request DTOs.
+- Parse all environment configuration at an executable/composition boundary and
+  inject typed dependencies into application and service objects. Do not create
+  storage clients, model transports, index clients, or workflow clients inside
+  a domain service from environment variables.
+- `bothesis.services.__init__` contains only shared contracts, DTOs, errors,
+  and constants. Import concrete services from the module that owns them;
+  never re-export concrete service classes through the package barrel.
+- Name a service for the durable resource or lifecycle it owns, never for the
+  caller, screen, or transport. Examples: `NativeUploadService`,
+  `StoredFileContentService`, `ItemIngestionService`, and `ItemCatalogService`.
+  Avoid catch-all names such as `ApiService`, `AdminService`, or
+  `ChatDocumentSourceService`.
+- Keep raw native upload, stored-file canonicalization, and connector extraction
+  as distinct adapters into the same Item lifecycle. `ItemIngestionService` is
+  the single owner of Item processing state, preview persistence, citations,
+  index replacement, reprocessing, and tombstone coordination.
+- Temporal workflow definitions, activities, clients, and scheduling services
+  belong in `bothesis.services.workflow`. Keep their shared workflow contracts
+  in `bothesis.services.workflow.__init__`; API modules may call its services
+  but must not contain Temporal implementation details.
+
 ## Item knowledge architecture
 - Read the current architecture and every affected call site before adding or
   moving ingestion, indexing, or retrieval code.

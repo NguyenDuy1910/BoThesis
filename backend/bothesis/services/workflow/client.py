@@ -6,7 +6,7 @@ import asyncio
 
 from temporalio.client import Client
 
-from bothesis.workflow import TemporalSettings
+from bothesis.services.workflow import TemporalSettings
 
 
 class TemporalClientProvider:

@@ -26,22 +26,22 @@ from bothesis.db.models import (
 )
 from bothesis.storage import ObjectStorageError, StoredObject
 from bothesis.services import (
-    AccessRequestService,
-    AdminItemService,
     AuthContext,
     AuthorizationError,
-    AuthService,
-    CitationService,
-    CollectionAccessService,
     DocumentNotFoundError,
     DocumentProcessingError,
-    IntegrationCredentialService,
-    IntegrationService,
-    ItemService,
-    UploadService,
     UploadTooLargeError,
     UploadValidationError,
 )
+from bothesis.services.access_requests import AccessRequestService
+from bothesis.services.identity_store import IdentityStoreService
+from bothesis.services.citation import CitationService
+from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.integration import IntegrationService
+from bothesis.services.integration_credential import IntegrationCredentialService
+from bothesis.services.item import ItemService
+from bothesis.services.item_catalog import ItemCatalogService
+from bothesis.services.native_upload import NativeUploadService
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -81,7 +81,7 @@ async def test_identity_supports_multiple_tenant_memberships(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         first_tenant = await auth.create_tenant("acme", "Acme")
         second_tenant = await auth.create_tenant("labs", "Labs")
         user = await auth.create_user("USER@EXAMPLE.COM")
@@ -116,7 +116,7 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
         role = await auth.create_role(tenant.id, "member", "Member")
@@ -186,7 +186,7 @@ async def test_citations_replace_geometry_by_stable_chunk_identity(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("citations", "Citations")
         owner = await auth.create_user("citations@example.com")
         collection = await ItemService(session).create_collection(
@@ -268,7 +268,7 @@ async def test_integration_credentials_are_encrypted_and_owner_models_are_explic
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
         role = await auth.create_role(tenant.id, "member", "Member")
@@ -331,7 +331,7 @@ async def test_integration_list_eager_loads_optional_credentials(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
         role = await auth.create_role(
@@ -374,7 +374,7 @@ async def test_authorized_item_is_projectable_without_further_database_io(
     """
 
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("viewer", "Viewer")
         owner = await auth.create_user("viewer@example.com")
         role = await auth.create_role(
@@ -424,7 +424,7 @@ async def test_external_resource_mapping_preserves_canonical_item_identity(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("source-map", "Source mapping")
         owner = await auth.create_user("source-map@example.com")
         role = await auth.create_role(tenant.id, "source-manager", "Source Manager")
@@ -507,7 +507,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme-knowledge", "Acme Knowledge")
         owner = await auth.create_user("knowledge-owner@example.com")
         role = await auth.create_role(
@@ -519,7 +519,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         await auth.assign_membership(owner.id, tenant.id, role.id)
         actor = await auth.get_context(owner.id, tenant_id=tenant.id)
 
-        created = await AdminItemService(session).create_collection(
+        created = await ItemCatalogService(session).create_collection(
             actor,
             title="Engineering handbook",
             inherit_access=True,
@@ -538,7 +538,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
                 "role": "owner",
             }
         ]
-        listed = await AdminItemService(session).list_items(
+        listed = await ItemCatalogService(session).list_items(
             actor,
             item_type="collection",
             search="governed engineering",
@@ -557,7 +557,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         assert audit_event is not None
         assert audit_event.tenant_id == tenant.id
 
-        updated = await AdminItemService(session).update_collection(
+        updated = await ItemCatalogService(session).update_collection(
             actor,
             UUID(created["id"]),
             title="Engineering playbook",
@@ -635,8 +635,8 @@ def _uploads(
     session_factory: async_sessionmaker[AsyncSession],
     storage: _UploadStorage,
     **kwargs: object,
-) -> UploadService:
-    return UploadService(
+) -> NativeUploadService:
+    return NativeUploadService(
         session_factory,
         object_storage=storage,
         ingestion_service=_UnavailableIngestion(),  # type: ignore[arg-type]
@@ -649,7 +649,7 @@ async def _collection_upload_contexts(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> tuple[UUID, AuthContext, AuthContext, AuthContext]:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("upload-tenant", "Upload tenant")
         other_tenant = await auth.create_tenant("upload-other", "Other tenant")
         owner = await auth.create_user("upload-owner@example.com")

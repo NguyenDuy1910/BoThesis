@@ -17,17 +17,17 @@ from bothesis.db.models import (
     TenantMembership,
     User,
 )
+from bothesis.services.audit import AuditService
 from bothesis.services import (
     ACTIVE_STATUS,
     ADMIN_PERMISSION,
-    AuditService,
     AuthContext,
     require_tenant_permission,
     timestamp,
 )
 
 
-class AdminService:
+class TenantOverviewService:
     """Aggregate only real control-plane state for the Admin overview."""
 
     def __init__(
@@ -120,4 +120,4 @@ class AdminService:
         return int(await self._session.scalar(statement) or 0)
 
 
-__all__ = ["AdminService"]
+__all__ = ["TenantOverviewService"]

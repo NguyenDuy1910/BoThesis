@@ -22,7 +22,7 @@ from bothesis.connector.protocol import (
     TablePart,
     TextPart,
 )
-from bothesis.services import IntegrationService
+from bothesis.services.integration import IntegrationService
 
 
 def test_confluence_cql_escapes_configured_values() -> None:

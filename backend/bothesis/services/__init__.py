@@ -58,43 +58,43 @@ DEFAULT_PREVIEW_WEBP_QUALITY = 80
 PreviewRepresentation = Literal["original", "image", "pages"]
 
 
-class AuthServiceError(Exception):
+class IdentityServiceError(Exception):
     """Base exception for identity and authorization failures."""
 
 
-class IdentityNotFoundError(AuthServiceError):
+class IdentityNotFoundError(IdentityServiceError):
     """Raised when a requested user, tenant, role, or connector does not exist."""
 
 
-class IdentityConflictError(AuthServiceError):
+class IdentityConflictError(IdentityServiceError):
     """Raised when a unique identity or membership already exists."""
 
 
-class IdentityInactiveError(AuthServiceError):
+class IdentityInactiveError(IdentityServiceError):
     """Raised when an identity exists but is not active."""
 
 
-class AuthorizationError(AuthServiceError):
+class AuthorizationError(IdentityServiceError):
     """Raised when an identity lacks the required tenant permission."""
 
 
-class AdminServiceError(Exception):
-    """Base exception for tenant administration failures."""
+class AdministrationError(Exception):
+    """Base exception for governed administration failures."""
 
 
-class AdminNotFoundError(AdminServiceError):
+class AdminNotFoundError(AdministrationError):
     """Raised when a tenant-scoped administration record is unavailable."""
 
 
-class AdminConflictError(AdminServiceError):
+class AdminConflictError(AdministrationError):
     """Raised when an administration write conflicts with durable state."""
 
 
-class AdminValidationError(AdminServiceError):
+class AdminValidationError(AdministrationError):
     """Raised when an administration input or state transition is invalid."""
 
 
-class AdminExternalUnavailableError(AdminServiceError):
+class AdminExternalUnavailableError(AdministrationError):
     """Raised when a configured external source cannot be reached."""
 
 
@@ -125,15 +125,6 @@ class AuthContext:
 
 
 @dataclass(frozen=True, slots=True)
-class RequestIdentity:
-    """HTTP-derived identity inputs passed into the service boundary."""
-
-    auth_context: AuthContext | None = None
-    user_id: str | UUID | None = None
-    tenant_id: str | UUID | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class CanonicalDocumentContent:
     """Canonical source item and chunks produced for one stored document."""
 
@@ -142,7 +133,7 @@ class CanonicalDocumentContent:
 
 
 @runtime_checkable
-class ChatDocumentSource(Protocol):
+class StoredFileContent(Protocol):
     """Raw-source boundary consumed by the chat document index pipeline."""
 
     async def canonicalize(
@@ -180,19 +171,19 @@ class DocumentUnavailableError(DocumentProcessingError):
     """Raised when an authorized Item's durable source is unavailable."""
 
 
-class UploadServiceError(RuntimeError):
-    """Base error for a document upload request."""
+class NativeUploadError(RuntimeError):
+    """Base error for a native document upload request."""
 
 
-class UploadTooLargeError(UploadServiceError):
+class UploadTooLargeError(NativeUploadError):
     pass
 
 
-class UploadConflictError(UploadServiceError):
+class UploadConflictError(NativeUploadError):
     pass
 
 
-class UploadValidationError(UploadServiceError):
+class UploadValidationError(NativeUploadError):
     pass
 
 
@@ -392,40 +383,6 @@ def timestamp(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
-# Import primary service classes only after their contracts are defined. The
-# service modules import these contracts from this package during initialization.
-# This order is dependency-sensitive; do not sort these imports alphabetically.
-# isort: off
-from bothesis.services.auth import AuthService  # noqa: E402
-from bothesis.services.citation import CitationService  # noqa: E402
-from bothesis.services.chat_document_source import (  # noqa: E402
-    ChatDocumentSourceService,
-)
-from bothesis.services.collection_access import CollectionAccessService  # noqa: E402
-from bothesis.services.audit import AuditService  # noqa: E402
-from bothesis.services.integration_credential import (  # noqa: E402
-    IntegrationCredentialService,
-)
-from bothesis.services.item import ItemService  # noqa: E402
-from bothesis.services.conversation import ConversationService  # noqa: E402
-from bothesis.services.preview import (  # noqa: E402
-    KnowledgePreviewRenderer,
-    KnowledgePreviewService,
-)
-from bothesis.services.ingestion import ItemIngestionService  # noqa: E402
-from bothesis.services.integration import IntegrationService  # noqa: E402
-from bothesis.services.access_requests import AccessRequestService  # noqa: E402
-from bothesis.services.admin import AdminService  # noqa: E402
-from bothesis.services.admin_items import AdminItemService  # noqa: E402
-from bothesis.services.groups import GroupService  # noqa: E402
-from bothesis.services.roles import RoleService  # noqa: E402
-from bothesis.services.tenants import TenantService  # noqa: E402
-from bothesis.services.users import UserService  # noqa: E402
-from bothesis.services.upload import UploadService  # noqa: E402
-from bothesis.services.api import ApiService  # noqa: E402
-from bothesis.services.admin_api import AdminApiService  # noqa: E402
-# isort: on
-
 __all__ = [
     "ACCESS_MANAGE_PERMISSION",
     "ACTIVE_STATUS",
@@ -452,45 +409,27 @@ __all__ = [
     "SOURCE_MANAGE_PERMISSION",
     "TENANT_MANAGE_PERMISSION",
     "USER_MANAGE_PERMISSION",
-    "AccessRequestService",
-    "AdminApiService",
     "AdminConflictError",
     "AdminExternalUnavailableError",
-    "AdminItemService",
     "AdminNotFoundError",
-    "AdminService",
-    "AdminServiceError",
+    "AdministrationError",
     "AdminValidationError",
-    "ApiService",
     "AsyncUploadStream",
-    "AuditService",
     "AuthContext",
-    "AuthService",
-    "AuthServiceError",
+    "IdentityServiceError",
     "AuthorizationError",
     "CanonicalDocumentContent",
-    "ChatDocumentSource",
-    "ChatDocumentSourceService",
-    "CitationService",
-    "CollectionAccessService",
+    "StoredFileContent",
     "CollectionUpload",
-    "ConversationService",
     "DocumentNotFoundError",
     "DocumentProcessingError",
     "DocumentServiceError",
     "DocumentUnavailableError",
-    "GroupService",
     "IdentityConflictError",
     "IdentityInactiveError",
     "IdentityNotFoundError",
-    "IntegrationCredentialService",
-    "IntegrationService",
     "InvalidDocumentStateError",
-    "ItemIngestionService",
-    "ItemService",
     "KnowledgePreview",
-    "KnowledgePreviewRenderer",
-    "KnowledgePreviewService",
     "PreviewAsset",
     "PreviewGenerationError",
     "PreviewManifest",
@@ -498,18 +437,13 @@ __all__ = [
     "PreviewRepresentation",
     "RenderedPreview",
     "RenderedPreviewAsset",
-    "RequestIdentity",
     "ResolvedPreviewAsset",
-    "RoleService",
-    "TenantService",
     "UploadConflictError",
-    "UploadService",
-    "UploadServiceError",
+    "NativeUploadError",
     "UploadStart",
     "UploadTarget",
     "UploadTooLargeError",
     "UploadValidationError",
-    "UserService",
     "normalize_code",
     "normalize_codes",
     "normalize_page",

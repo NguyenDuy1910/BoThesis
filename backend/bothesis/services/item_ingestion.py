@@ -20,15 +20,15 @@ from bothesis.connector.protocol import (
 )
 from bothesis.db.models import ExternalResource, IngestionSource, Item
 from bothesis.document_index import IndexingContext, ItemIndex
+from bothesis.services.citation import CitationService
+from bothesis.services.item import ItemService
 from bothesis.services import (
     CHUNKER_VERSION,
     PARSER_VERSION,
     AuthContext,
-    ChatDocumentSource,
-    CitationService,
+    StoredFileContent,
     DocumentProcessingError,
     DocumentUnavailableError,
-    ItemService,
 )
 from bothesis.services.preview import KnowledgePreviewService
 
@@ -64,7 +64,7 @@ class ItemIngestionService:
         document_id: UUID,
         *,
         access: AuthContext,
-        source: ChatDocumentSource,
+        source: StoredFileContent,
     ) -> Item:
         """Canonicalize and index an available upload under a retry-safe lock."""
 
@@ -288,7 +288,7 @@ class ItemIngestionService:
         document_id: UUID,
         *,
         access: AuthContext,
-        source: ChatDocumentSource,
+        source: StoredFileContent,
     ) -> Item:
         document = await self._load_upload(
             document_id,
@@ -307,6 +307,7 @@ class ItemIngestionService:
                 raise
             raise DocumentProcessingError("document canonicalization failed") from exc
 
+        await self._persist_preview(document)
         await self.process_item_content(
             document,
             canonical.item,

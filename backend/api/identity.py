@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bothesis.services.identity_store import IdentityStoreService
 from bothesis.services import (
     AuthContext,
-    AuthService,
     AuthorizationError,
-    RequestIdentity,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class RequestIdentity:
+    """Trusted identity inputs received at the HTTP boundary."""
+
+    auth_context: AuthContext | None = None
+    user_id: str | UUID | None = None
+    tenant_id: str | UUID | None = None
 
 
 async def resolve_auth_context(
@@ -53,7 +62,7 @@ async def resolve_auth_context(
             )
         except (TypeError, ValueError) as exc:
             raise AuthorizationError("tenant ID must be a UUID") from exc
-    context = await AuthService(session).get_context(user_id, tenant_id=tenant_id)
+    context = await IdentityStoreService(session).get_context(user_id, tenant_id=tenant_id)
     _validate_tenant_claim(context, raw_tenant_id)
     return context
 
@@ -76,4 +85,4 @@ def _validate_tenant_claim(
         raise AuthorizationError("tenant claim does not match database membership")
 
 
-__all__ = ["resolve_auth_context"]
+__all__ = ["RequestIdentity", "resolve_auth_context"]

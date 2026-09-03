@@ -19,11 +19,12 @@ from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.db.engine import get_session_factory
 from bothesis.document_index import ItemIndex, SemanticContextualizer
 from bothesis.storage import S3DocumentStorage
-from bothesis.services.ingestion_activity import IngestionActivity
-from bothesis.services.ingestion_workflow import IngestionWorkflow
-from bothesis.services.preview import KnowledgePreviewRenderer, KnowledgePreviewService
-from bothesis.workflow import TemporalSettings
-from bothesis.workflow.client import TemporalClientProvider
+from bothesis.services.workflow.ingestion_activity import IngestionActivity
+from bothesis.services.workflow.ingestion_workflow import IngestionWorkflow
+from bothesis.services.preview import KnowledgePreviewService
+from bothesis.services.preview_renderer import KnowledgePreviewRenderer
+from bothesis.services.workflow import TemporalSettings
+from bothesis.services.workflow.client import TemporalClientProvider
 
 
 class TemporalWorker:
@@ -50,8 +51,8 @@ class TemporalWorker:
             workflow_runner=SandboxedWorkflowRunner(
                 restrictions=SandboxRestrictions.default.with_passthrough_modules(
                     "bothesis.services",
-                    "bothesis.services.ingestion_workflow",
-                    "bothesis.workflow",
+                    "bothesis.services.workflow.ingestion_workflow",
+                    "bothesis.services.workflow",
                 )
             ),
             max_concurrent_activities=int(
