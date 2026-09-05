@@ -146,6 +146,45 @@ async def test_citation_renderer_carries_split_markers_between_deltas() -> None:
     assert used_evidence_ids == {"ev-1"}
 
 
+@pytest.mark.asyncio
+async def test_citation_renderer_never_grounds_an_unknown_source_reference() -> None:
+    """A reference the backend did not issue is not a citation.
+
+    The model can only cite what retrieval put in front of it. An invented or
+    stale reference stays literal text so no citation payload is fabricated.
+    """
+
+    evidence = {
+        "source-a1b2c3d4": Evidence(
+            id="source-a1b2c3d4",
+            item_id="doc-1",
+            chunk_id="chunk-1",
+            title="Leave policy",
+            content="Grounded content",
+        )
+    }
+    used_evidence_ids: set[str] = set()
+
+    events = [
+        event
+        async for event in CitationRenderer().render(
+            ("Policy [[cite:source-ffffffff]] and [[cite:source-a1b2c3d4]] apply",),
+            evidence,
+            used_evidence_ids,
+        )
+    ]
+
+    # The invented reference is dropped entirely: it must not become a
+    # citation, and it must not leak an internal marker into the prose.
+    assert events == [
+        ("Policy ", None),
+        (" and ", None),
+        ("", "source-a1b2c3d4"),
+        (" apply", None),
+    ]
+    assert used_evidence_ids == {"source-a1b2c3d4"}
+
+
 # Native OpenRouter tool-call normalization is covered by
 # tests/bothesis/agent/test_openrouter_adapter.py, which drives the adapter
 # through its public streaming contract instead of a private helper.

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -19,14 +20,15 @@ from bothesis.connector.protocol import (
 )
 from bothesis.document_index import (
     INDEX_SCHEMA_VERSION,
+    ChunkContext,
     ChunkContextGenerator,
+    ContextualChunk,
     IndexingContext,
     build_contextual_chunks,
 )
-from bothesis.document_index.models import ChunkContext, ContextualChunk
 
 
-class IndexedChunk(BaseModel):
+class _IndexedChunk(BaseModel):
     """Bounded retrieval projection of a :class:`ContextualChunk`.
 
     Raw content parts, complete access policies, storage objects, and arbitrary
@@ -67,7 +69,7 @@ class IndexedChunk(BaseModel):
         return [item.strip() for item in value if item.strip()]
 
     @model_validator(mode="after")
-    def _validate_page_range(self) -> "IndexedChunk":
+    def _validate_page_range(self) -> _IndexedChunk:
         if (
             self.page_start is not None
             and self.page_end is not None
@@ -81,7 +83,7 @@ class IndexedChunk(BaseModel):
         cls,
         chunk: ContextualChunk,
         context: IndexingContext,
-    ) -> "IndexedChunk":
+    ) -> _IndexedChunk:
         return cls(
             tenant_id=context.tenant_id,
             collection_item_id=context.collection_item_id,
@@ -108,16 +110,39 @@ class IndexedChunk(BaseModel):
         return self.model_dump(mode="json", exclude_none=True)
 
 
+class _IndexedChunkRecord(BaseModel):
+    """Private deterministic point identifier and payload."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    point_id: str = Field(min_length=1)
+    payload: _IndexedChunk
+
+    @classmethod
+    def from_contextual_chunk(
+        cls,
+        chunk: ContextualChunk,
+        context: IndexingContext,
+    ) -> _IndexedChunkRecord:
+        return cls(
+            point_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"{context.tenant_id}:{chunk.item_id}:{chunk.chunk_index}",
+                )
+            ),
+            payload=_IndexedChunk.from_contextual_chunk(chunk, context),
+        )
+
+
 async def build_index_records(
     chunks: Sequence[Chunk],
     item: DocumentItem,
     context: IndexingContext,
     *,
     semantic_contextualizer: ChunkContextGenerator | None = None,
-) -> list[IndexedChunkRecord]:
+) -> list[_IndexedChunkRecord]:
     """Contextualize canonical chunks and build deterministic index records."""
-
-    from bothesis.document_index import IndexedChunkRecord
 
     contextual_chunks = await build_contextual_chunks(
         chunks,
@@ -125,12 +150,12 @@ async def build_index_records(
         semantic_contextualizer=semantic_contextualizer,
     )
     return [
-        IndexedChunkRecord.from_contextual_chunk(chunk, context)
+        _IndexedChunkRecord.from_contextual_chunk(chunk, context)
         for chunk in contextual_chunks
     ]
 
 
-def contextual_chunk_from_point(point: object) -> ContextualChunk | None:
+def _contextual_chunk_from_point(point: object) -> ContextualChunk | None:
     """Rebuild one canonical retrieval chunk from an indexed point payload."""
 
     raw_payload = getattr(point, "payload", None)
@@ -285,9 +310,5 @@ def _payload_int(
 
 
 __all__ = [
-    "ContextualChunk",
-    "IndexedChunk",
-    "build_contextual_chunks",
     "build_index_records",
-    "contextual_chunk_from_point",
 ]

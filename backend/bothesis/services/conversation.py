@@ -11,7 +11,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bothesis.db.models import Conversation, Message
-from bothesis.services import AuthContext, DocumentNotFoundError, ItemService
+from bothesis.services import AuthContext, DocumentNotFoundError
+from bothesis.services.item import ItemService
 
 
 class ConversationService:

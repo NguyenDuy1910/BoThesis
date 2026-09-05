@@ -18,7 +18,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { AppShell } from "@/components/ui/AppShell";
@@ -45,9 +45,16 @@ import type {
   ChatMessagePart,
   ConversationDocument,
 } from "@/modules/chat/types";
+import {
+  isSameActivity,
+  knowledgeDocumentActivity,
+  type RightActivity,
+} from "@/modules/chat/activity";
+import { answerSources, type AnswerSource } from "@/modules/chat/sources";
 import { AppSidebar } from "./AppSidebar";
 import { AnswerSources } from "./AnswerSources";
 import { AssistantTurn } from "./AssistantTurn";
+import { RightActivityPanel } from "./RightActivityPanel";
 
 const suggestions = [
   {
@@ -240,6 +247,9 @@ function ChatConversation({
 }) {
   const [input, setInput] = useState("");
   const [composerAttachments, setComposerAttachments] = useState<ComposerDocument[]>([]);
+  // Source inspection lives beside this conversation, so opening a citation
+  // never touches the streamed messages, the composer, or the scroll position.
+  const [activity, setActivity] = useState<RightActivity | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   const messageStackRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -403,6 +413,30 @@ function ChatConversation({
     void regenerate({ messageId });
   }, [regenerate]);
 
+  // Hand the caret back to the composer when a turn settles — including a
+  // failed one, so a retry or follow-up can be typed straight away. Focus is
+  // left alone if the reader moved it somewhere deliberate, and on touch
+  // input where raising the keyboard would cover the answer just delivered.
+  const wasStreamingRef = useRef(false);
+  useEffect(() => {
+    const settled = wasStreamingRef.current && !isStreaming;
+    wasStreamingRef.current = isStreaming;
+    if (!settled || !isConfigured) return;
+    if (window.matchMedia("(pointer: coarse)").matches) return;
+    const focused = document.activeElement;
+    if (focused && focused !== document.body && focused !== textareaRef.current) return;
+    textareaRef.current?.focus();
+  }, [isConfigured, isStreaming]);
+
+  const openSource = useCallback((source: AnswerSource) => {
+    const next = knowledgeDocumentActivity(source);
+    // Repeated clicks on the open citation reuse the panel instead of
+    // reloading it; a different citation replaces the activity in place.
+    setActivity((current) => (isSameActivity(current, next) ? current : next));
+  }, []);
+
+  const closeActivity = useCallback(() => setActivity(null), []);
+
   const { hasMoreBelow, jumpToLatest } = useJumpToLatest(chatScrollRef, messageStackRef);
 
   return (
@@ -427,75 +461,91 @@ function ChatConversation({
         </div>
       </header>
 
-      <div className="conversation-pane">
-          <div
-            className="chat-scroll"
-            ref={chatScrollRef}
-          >
-            <div className="chat-inner">
-              {messages.length === 0 ? (
-                <Welcome onSelect={submit} />
-              ) : (
-                <MessageList
-                  activityConnectorLabel={activeConnectorLabel}
-                  isStreaming={isStreaming}
-                  lastMessageId={lastMessage?.id}
-                  messages={messages}
-                  onRegenerate={handleRegenerate}
-                  stackRef={messageStackRef}
-                />
-              )}
-            </div>
-          </div>
-
-          {hasMoreBelow && messages.length > 0 && (
-            <button
-              aria-label="Jump to latest"
-              className="chat-jump"
-              onClick={jumpToLatest}
-              title="Jump to latest"
-              type="button"
+      <div
+        className={clsx(
+          "chat-activity-layout",
+          activity && "chat-activity-layout--open",
+        )}
+      >
+        <div className="conversation-pane">
+            <div
+              className="chat-scroll"
+              ref={chatScrollRef}
             >
-              <ArrowDown aria-hidden="true" size={15} />
-            </button>
-          )}
-
-          {error && !hasMessageError && <div className="chat-inner"><div className="error-box" role="alert">{error.message} Try again or start a new conversation.</div></div>}
-          {!isConfigured && (
-            <div className="chat-inner">
-              <div className="error-box" role="status">Chat is unavailable because workspace access has not been configured. Contact your administrator.</div>
+              <div className="chat-inner">
+                {messages.length === 0 ? (
+                  <Welcome onSelect={submit} />
+                ) : (
+                  <MessageList
+                    activeCitationId={activity?.citationId}
+                    activityConnectorLabel={activeConnectorLabel}
+                    isStreaming={isStreaming}
+                    lastMessageId={lastMessage?.id}
+                    messages={messages}
+                    onOpenSource={openSource}
+                    onRegenerate={handleRegenerate}
+                    stackRef={messageStackRef}
+                  />
+                )}
+              </div>
             </div>
-          )}
-          <ChatComposer
-            attachments={composerAttachments}
-            input={input}
-            isConfigured={isConfigured}
-            isStreaming={isStreaming}
-            isUploading={isUploading}
-            onChange={setInput}
-            onFiles={selectAttachments}
-            onRemoveAttachment={removeAttachment}
-            onStop={stop}
-            onSubmit={submit}
-            textareaRef={textareaRef}
-          />
+
+            {hasMoreBelow && messages.length > 0 && (
+              <button
+                aria-label="Jump to latest"
+                className="chat-jump"
+                onClick={jumpToLatest}
+                title="Jump to latest"
+                type="button"
+              >
+                <ArrowDown aria-hidden="true" size={15} />
+              </button>
+            )}
+
+            {error && !hasMessageError && <div className="chat-inner"><div className="error-box" role="alert">{error.message} Try again or start a new conversation.</div></div>}
+            {!isConfigured && (
+              <div className="chat-inner">
+                <div className="error-box" role="status">Chat is unavailable because workspace access has not been configured. Contact your administrator.</div>
+              </div>
+            )}
+            <ChatComposer
+              attachments={composerAttachments}
+              input={input}
+              isConfigured={isConfigured}
+              isStreaming={isStreaming}
+              isUploading={isUploading}
+              onChange={setInput}
+              onFiles={selectAttachments}
+              onRemoveAttachment={removeAttachment}
+              onStop={stop}
+              onSubmit={submit}
+              textareaRef={textareaRef}
+            />
+        </div>
+        {activity && (
+          <RightActivityPanel activity={activity} onClose={closeActivity} />
+        )}
       </div>
     </section>
   );
 }
 
 function MessageList({
+  activeCitationId,
   activityConnectorLabel,
   isStreaming,
   lastMessageId,
   messages,
+  onOpenSource,
   onRegenerate,
   stackRef,
 }: {
+  activeCitationId?: string;
   activityConnectorLabel?: string;
   isStreaming: boolean;
   lastMessageId?: string;
   messages: ChatMessage[];
+  onOpenSource: (source: AnswerSource) => void;
   onRegenerate: (messageId: string) => void;
   stackRef: RefObject<HTMLDivElement | null>;
 }) {
@@ -503,10 +553,12 @@ function MessageList({
     <div className="message-stack" ref={stackRef}>
       {messages.map((message) => (
         <MessageView
+          activeCitationId={activeCitationId}
           activityConnectorLabel={isStreaming && message.id === lastMessageId ? activityConnectorLabel : undefined}
           isStreaming={isStreaming && message.id === lastMessageId}
           key={message.id}
           message={message}
+          onOpenSource={onOpenSource}
           onRegenerate={onRegenerate}
         />
       ))}
@@ -515,17 +567,24 @@ function MessageList({
 }
 
 const MessageView = memo(function MessageView({
+  activeCitationId,
   activityConnectorLabel,
   isStreaming,
   message,
+  onOpenSource,
   onRegenerate,
 }: {
+  activeCitationId?: string;
   activityConnectorLabel?: string;
   isStreaming: boolean;
   message: ChatMessage;
+  onOpenSource: (source: AnswerSource) => void;
   onRegenerate: (messageId: string) => void;
 }) {
   const { copy, copied } = useClipboard();
+  // Collected once per message and shared by the inline chips and the summary
+  // list, so both always agree on numbering.
+  const sources = useMemo(() => answerSources(message.turn), [message.turn]);
   // The answer keeps easing onto screen for a moment after the stream ends, so
   // the sources and the action row wait for the text rather than for the socket.
   const [isRevealing, setIsRevealing] = useState(false);
@@ -561,13 +620,22 @@ const MessageView = memo(function MessageView({
     <div className="message-row assistant">
       <div className="message-body">
         <AssistantTurn
+          activeCitationId={activeCitationId}
           activityConnectorLabel={activityConnectorLabel}
           isStreaming={isStreaming}
+          onOpenSource={onOpenSource}
           onRevealingChange={setIsRevealing}
+          sources={sources}
           turn={message.turn}
         />
         {streamError && <div className="error-box" role="alert">{streamError}</div>}
-        {hasSettled && <AnswerSources turn={message.turn} />}
+        {hasSettled && (
+          <AnswerSources
+            activeCitationId={activeCitationId}
+            onOpenSource={onOpenSource}
+            sources={sources}
+          />
+        )}
         {hasSettled && (text || streamError) && (
           <div className="answer-footer">
             <div className="assistant-actions" aria-label="Assistant message actions" role="group">

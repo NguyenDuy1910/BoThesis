@@ -14,9 +14,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from bothesis.db.models import Item, ItemUpload
-from bothesis.document_index.raw_storage import PresignedRequest
 from bothesis.connector.protocol import Chunk, DocumentItem
+from bothesis.db.models import Item, ItemUpload
+from bothesis.storage import PresignedRequest
 
 ACTIVE_STATUS = "active"
 INACTIVE_STATUS = "inactive"
@@ -46,6 +46,8 @@ ADMIN_PERMISSION_CATALOG = (
 DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 DEFAULT_UPLOAD_URL_SECONDS = 600
 DEFAULT_PROCESSING_MAX_BYTES = 100 * 1024 * 1024
+PARSER_VERSION = "docling-2.121"
+CHUNKER_VERSION = "docling-hybrid-line-v1"
 PREVIEW_SCHEMA_VERSION = 1
 PREVIEW_RENDERER_VERSION = "webp-v1"
 DEFAULT_PREVIEW_MAX_SOURCE_BYTES = 100 * 1024 * 1024
@@ -56,43 +58,43 @@ DEFAULT_PREVIEW_WEBP_QUALITY = 80
 PreviewRepresentation = Literal["original", "image", "pages"]
 
 
-class AuthServiceError(Exception):
+class IdentityServiceError(Exception):
     """Base exception for identity and authorization failures."""
 
 
-class IdentityNotFoundError(AuthServiceError):
+class IdentityNotFoundError(IdentityServiceError):
     """Raised when a requested user, tenant, role, or connector does not exist."""
 
 
-class IdentityConflictError(AuthServiceError):
+class IdentityConflictError(IdentityServiceError):
     """Raised when a unique identity or membership already exists."""
 
 
-class IdentityInactiveError(AuthServiceError):
+class IdentityInactiveError(IdentityServiceError):
     """Raised when an identity exists but is not active."""
 
 
-class AuthorizationError(AuthServiceError):
+class AuthorizationError(IdentityServiceError):
     """Raised when an identity lacks the required tenant permission."""
 
 
-class AdminServiceError(Exception):
-    """Base exception for tenant administration failures."""
+class AdministrationError(Exception):
+    """Base exception for governed administration failures."""
 
 
-class AdminNotFoundError(AdminServiceError):
+class AdminNotFoundError(AdministrationError):
     """Raised when a tenant-scoped administration record is unavailable."""
 
 
-class AdminConflictError(AdminServiceError):
+class AdminConflictError(AdministrationError):
     """Raised when an administration write conflicts with durable state."""
 
 
-class AdminValidationError(AdminServiceError):
+class AdminValidationError(AdministrationError):
     """Raised when an administration input or state transition is invalid."""
 
 
-class AdminExternalUnavailableError(AdminServiceError):
+class AdminExternalUnavailableError(AdministrationError):
     """Raised when a configured external source cannot be reached."""
 
 
@@ -123,15 +125,6 @@ class AuthContext:
 
 
 @dataclass(frozen=True, slots=True)
-class RequestIdentity:
-    """HTTP-derived identity inputs passed into the service boundary."""
-
-    auth_context: AuthContext | None = None
-    user_id: str | UUID | None = None
-    tenant_id: str | UUID | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class CanonicalDocumentContent:
     """Canonical source item and chunks produced for one stored document."""
 
@@ -140,7 +133,7 @@ class CanonicalDocumentContent:
 
 
 @runtime_checkable
-class ChatDocumentSource(Protocol):
+class StoredFileContent(Protocol):
     """Raw-source boundary consumed by the chat document index pipeline."""
 
     async def canonicalize(
@@ -157,6 +150,7 @@ class ChatDocumentSource(Protocol):
         expires_seconds: int,
     ) -> str: ...
 
+
 class DocumentServiceError(Exception):
     """Base exception for durable document service failures."""
 
@@ -169,19 +163,27 @@ class InvalidDocumentStateError(DocumentServiceError):
     """Raised when a lifecycle or lineage transition is invalid."""
 
 
-class UploadServiceError(RuntimeError):
-    """Base error for a document upload request."""
+class DocumentProcessingError(RuntimeError):
+    """Raised when an Item's durable source cannot be prepared for indexing."""
 
 
-class UploadTooLargeError(UploadServiceError):
+class DocumentUnavailableError(DocumentProcessingError):
+    """Raised when an authorized Item's durable source is unavailable."""
+
+
+class NativeUploadError(RuntimeError):
+    """Base error for a native document upload request."""
+
+
+class UploadTooLargeError(NativeUploadError):
     pass
 
 
-class UploadConflictError(UploadServiceError):
+class UploadConflictError(NativeUploadError):
     pass
 
 
-class UploadValidationError(UploadServiceError):
+class UploadValidationError(NativeUploadError):
     pass
 
 
@@ -305,7 +307,7 @@ class ResolvedPreviewAsset(BaseModel):
     page: int | None = Field(default=None, ge=1)
 
 
-class KnowledgePreview(BaseModel):
+class KnowledgePreviewView(BaseModel):
     """Consistent UX representation for an authorized knowledge asset.
 
     Citation spans use the same one-based ``page`` values as assets and
@@ -366,9 +368,7 @@ def normalize_codes(
     field_name: str,
     max_length: int = 64,
 ) -> list[str]:
-    return sorted(
-        {normalize_code(value, field_name, max_length) for value in values}
-    )
+    return sorted({normalize_code(value, field_name, max_length) for value in values})
 
 
 def normalize_page(page: int, page_size: int) -> tuple[int, int, int]:
@@ -383,62 +383,13 @@ def timestamp(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
-# Import primary service classes only after their contracts are defined. The
-# service modules import these contracts from this package during initialization.
-from bothesis.services.auth import AuthService  # noqa: E402
-from bothesis.services.citation import CitationService  # noqa: E402
-from bothesis.services.item import ItemService  # noqa: E402
-from bothesis.services.collection_access import CollectionAccessService  # noqa: E402
-from bothesis.services.conversation import ConversationService  # noqa: E402
-from bothesis.services.upload import UploadService  # noqa: E402
-from bothesis.services.audit import AuditService  # noqa: E402
-from bothesis.services.integration_credential import IntegrationCredentialService  # noqa: E402
-from bothesis.services.integration import IntegrationService  # noqa: E402
-from bothesis.services.access_requests import AccessRequestService  # noqa: E402
-from bothesis.services.admin_items import AdminItemService  # noqa: E402
-from bothesis.services.admin import AdminService  # noqa: E402
-from bothesis.services.chat_document_source import ChatDocumentSourceService  # noqa: E402
-from bothesis.services.groups import GroupService  # noqa: E402
-from bothesis.services.roles import RoleService  # noqa: E402
-from bothesis.services.tenants import TenantService  # noqa: E402
-from bothesis.services.users import UserService  # noqa: E402
-from bothesis.services.api import ApiService  # noqa: E402
-from bothesis.services.admin_api import AdminApiService  # noqa: E402
-from bothesis.services.preview import (  # noqa: E402
-    KnowledgePreviewRenderer,
-    KnowledgePreviewService,
-)
-
 __all__ = [
-    "ACTIVE_STATUS",
     "ACCESS_MANAGE_PERMISSION",
-    "AccessRequestService",
-    "ADMIN_PERMISSION_CATALOG",
+    "ACTIVE_STATUS",
     "ADMIN_PERMISSION",
+    "ADMIN_PERMISSION_CATALOG",
     "AUDIT_READ_PERMISSION",
-    "AdminConflictError",
-    "AdminApiService",
-    "AdminItemService",
-    "AdminService",
-    "AdminExternalUnavailableError",
-    "AdminNotFoundError",
-    "AdminServiceError",
-    "AdminValidationError",
-    "AuditService",
-    "ApiService",
-    "AuthContext",
-    "RequestIdentity",
-    "AuthService",
-    "AuthServiceError",
-    "AuthorizationError",
-    "AsyncUploadStream",
-    "CanonicalDocumentContent",
-    "CitationService",
-    "ChatDocumentSource",
-    "ChatDocumentSourceService",
-    "CollectionAccessService",
-    "CollectionUpload",
-    "ConversationService",
+    "CHUNKER_VERSION",
     "DEFAULT_MAX_UPLOAD_BYTES",
     "DEFAULT_PREVIEW_MAX_DIMENSION",
     "DEFAULT_PREVIEW_MAX_PAGES",
@@ -446,48 +397,53 @@ __all__ = [
     "DEFAULT_PREVIEW_WEBP_QUALITY",
     "DEFAULT_PROCESSING_MAX_BYTES",
     "DEFAULT_UPLOAD_URL_SECONDS",
-    "DocumentNotFoundError",
-    "DocumentServiceError",
-    "ITEM_MANAGE_PERMISSION",
     "GROUP_MANAGE_PERMISSION",
-    "GroupService",
+    "INACTIVE_STATUS",
+    "ITEM_MANAGE_PERMISSION",
+    "KNOWLEDGE_READ_PERMISSION",
+    "MESSAGE_ITEM_RELATIONS",
+    "PARSER_VERSION",
+    "PREVIEW_RENDERER_VERSION",
+    "PREVIEW_SCHEMA_VERSION",
+    "ROLE_MANAGE_PERMISSION",
+    "SOURCE_MANAGE_PERMISSION",
+    "TENANT_MANAGE_PERMISSION",
+    "USER_MANAGE_PERMISSION",
+    "AdminConflictError",
+    "AdminExternalUnavailableError",
+    "AdminNotFoundError",
+    "AdministrationError",
+    "AdminValidationError",
+    "AsyncUploadStream",
+    "AuthContext",
+    "IdentityServiceError",
+    "AuthorizationError",
+    "CanonicalDocumentContent",
+    "StoredFileContent",
+    "CollectionUpload",
+    "DocumentNotFoundError",
+    "DocumentProcessingError",
+    "DocumentServiceError",
+    "DocumentUnavailableError",
     "IdentityConflictError",
     "IdentityInactiveError",
     "IdentityNotFoundError",
-    "INACTIVE_STATUS",
     "InvalidDocumentStateError",
-    "ItemService",
-    "KNOWLEDGE_READ_PERMISSION",
-    "KnowledgePreview",
-    "KnowledgePreviewRenderer",
-    "KnowledgePreviewService",
-    "MESSAGE_ITEM_RELATIONS",
-    "IntegrationCredentialService",
-    "IntegrationService",
-    "PREVIEW_RENDERER_VERSION",
-    "PREVIEW_SCHEMA_VERSION",
+    "KnowledgePreviewView",
     "PreviewAsset",
     "PreviewGenerationError",
     "PreviewManifest",
     "PreviewOriginal",
     "PreviewRepresentation",
-    "ROLE_MANAGE_PERMISSION",
-    "RoleService",
     "RenderedPreview",
     "RenderedPreviewAsset",
     "ResolvedPreviewAsset",
-    "SOURCE_MANAGE_PERMISSION",
-    "TENANT_MANAGE_PERMISSION",
-    "TenantService",
     "UploadConflictError",
-    "UploadService",
-    "UploadServiceError",
+    "NativeUploadError",
     "UploadStart",
     "UploadTarget",
     "UploadTooLargeError",
     "UploadValidationError",
-    "USER_MANAGE_PERMISSION",
-    "UserService",
     "normalize_code",
     "normalize_codes",
     "normalize_page",

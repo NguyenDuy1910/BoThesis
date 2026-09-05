@@ -1251,33 +1251,27 @@ a {
   overflow: hidden;
 }
 
-.chat-workflow-layout {
+/* Chat stays the primary workspace; an activity opens beside it. */
+.chat-activity-layout {
   display: grid;
   min-height: 0;
   flex: 1 1 auto;
   grid-template-columns: minmax(0, 1fr);
+  /* The row must be bounded by the viewport, not by the conversation. An
+     implicit `auto` row grows with the messages, which pushes the composer
+     past the clipped edge of this container once an answer gets long. */
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   background: var(--surface);
+  transition: grid-template-columns 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.chat-workflow-layout--open {
+.chat-activity-layout--open {
   grid-template-columns: minmax(26rem, 1fr) minmax(22rem, 42vw);
 }
 
-.chat-workflow-layout__chat {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.chat-workflow-layout__canvas {
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  background: var(--surface);
-  box-shadow: var(--shadow-soft);
+@media (prefers-reduced-motion: reduce) {
+  .chat-activity-layout { transition: none; }
 }
 
 .workflow-canvas-loading {
@@ -1355,20 +1349,18 @@ a {
   font-weight: 700;
 }
 
+/* Stacked below 1080px. Both rows stay shrinkable so a short viewport
+   scrolls inside the conversation instead of overflowing the composer. */
 @media (max-width: 1080px) {
-  .chat-workflow-layout--open {
+  .chat-activity-layout--open {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(18rem, 1fr) minmax(24rem, 45dvh);
-  }
-
-  .chat-workflow-layout__canvas {
-    box-shadow: var(--shadow-soft);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 45dvh);
   }
 }
 
 @media (max-width: 720px) {
-  .chat-workflow-layout--open {
-    grid-template-rows: minmax(14rem, 1fr) minmax(22rem, 50dvh);
+  .chat-activity-layout--open {
+    grid-template-rows: minmax(0, 1fr) minmax(0, 50dvh);
   }
 }
 
@@ -2688,6 +2680,331 @@ details.assistant-turn__reasoning {
   font-size: 0.75rem;
   overflow-wrap: anywhere;
 }
+
+/* Inline citation chip, rendered where the model placed the marker */
+.answer-citation-chip {
+  display: inline-flex;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-hairline);
+  border-radius: 0.3125rem;
+  background: var(--bg-subtle);
+  padding: 0 0.25rem;
+  margin-inline-start: 0.1875rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.625rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: 0.1875rem;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.answer-citation-chip:hover {
+  border-color: var(--brand-accent);
+  background: var(--brand-accent-soft);
+  color: var(--brand-accent-strong);
+}
+
+.answer-citation-chip--active {
+  border-color: var(--brand-accent);
+  background: var(--brand-accent);
+  color: var(--text-on-brand);
+}
+
+.answer-citation-chip:focus-visible {
+  outline: 2px solid var(--brand-accent);
+  outline-offset: 1px;
+}
+
+/* Clickable citation markers on a finished answer */
+.answer-citations {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.125rem;
+}
+
+.answer-citations__markers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.answer-citations__marker {
+  display: inline-flex;
+  min-width: 1.375rem;
+  height: 1.375rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-hairline);
+  border-radius: 0.375rem;
+  background: var(--bg-subtle);
+  padding: 0 0.3125rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.answer-citations__marker:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.answer-citations__marker--active {
+  border-color: var(--brand-accent);
+  background: var(--brand-accent-soft);
+  color: var(--brand-accent-strong);
+}
+
+.answer-citations__marker:focus-visible {
+  outline: 2px solid var(--brand-accent);
+  outline-offset: 1px;
+}
+
+.answer-sources__link {
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: start;
+}
+
+.answer-sources__link--active .answer-sources__title { color: var(--brand-accent-strong); }
+
+/* Right activity panel */
+.activity-panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-inline-start: 1px solid var(--border-hairline);
+  background: var(--surface);
+  z-index: var(--z-activity);
+}
+
+.activity-panel__header {
+  display: flex;
+  min-height: 3.25rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid var(--border-hairline);
+  padding: 0 0.75rem 0 1rem;
+}
+
+.activity-panel__identity {
+  display: grid;
+  min-width: 0;
+  gap: 0.0625rem;
+}
+
+.activity-panel__eyebrow {
+  color: var(--text-soft);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.activity-panel__title {
+  overflow: hidden;
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-panel__close {
+  display: inline-flex;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.activity-panel__close:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.activity-panel__body {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+/* Rendered source pages inside the activity panel */
+.source-preview {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem 1.25rem;
+}
+
+.source-preview__meta {
+  display: flex;
+  min-height: 1.75rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.source-preview__section {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-preview__pager {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.25rem;
+  margin-inline-start: auto;
+}
+
+.source-preview__page-button {
+  display: inline-flex;
+  width: 1.75rem;
+  height: 1.75rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.source-preview__page-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.source-preview__page-button:disabled { cursor: default; opacity: 0.4; }
+
+.source-preview__page-count {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.source-preview__stage {
+  position: relative;
+  min-width: 0;
+}
+
+/* The page box matches the render's aspect ratio, so a normalized citation
+   region maps onto it as a percentage at every panel and window size. */
+.source-preview__page {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+
+.source-preview__image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.source-preview__highlight {
+  position: absolute;
+  border: 1px solid var(--highlight-border);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--highlight-surface) 45%, transparent);
+  pointer-events: none;
+}
+
+.source-preview__page-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+/* Neighbouring pages are fetched into cache, never laid out. */
+.source-preview__prefetch {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.source-preview__notice {
+  display: grid;
+  justify-items: center;
+  gap: 0.375rem;
+  padding: 2.5rem 1rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.source-preview__notice-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-weight: 650;
+}
+
+.source-preview__notice-detail {
+  max-width: 22rem;
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.source-preview__notice-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--brand-accent);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.source-preview__quote {
+  margin: 0;
+  border-inline-start: 2px solid var(--border-strong);
+  padding-inline-start: 0.75rem;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.source-preview__spinner { animation: agent-activity-spin 0.9s linear infinite; }
 
 /* ── Jump to latest ──────────────────────────────────────────────────────────
    The transcript pins a new question near the top and deliberately does not

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from bothesis.agent.citation import CitationRenderer
-from bothesis.agent.models import Evidence
+from bothesis.agent.models import CitationReferences, Evidence
 from bothesis.agent.protocol import (
     DOCUMENT_CITATION_TYPE,
     Annotation,
@@ -22,10 +22,22 @@ _PartKey = tuple[int, int]
 
 
 class CitationProjection:
-    """Rewrite one response stream so citations become annotations."""
+    """Rewrite one response stream so citations become inline annotations.
 
-    def __init__(self, evidence: Mapping[str, Evidence]) -> None:
+    An internal ``[[cite:ref_1]]`` marker becomes the reader-facing ``[1]`` at
+    the exact position the model placed it, plus one annotation whose index
+    range brackets that marker. Position therefore survives serialization: the
+    client renders a chip where the claim is, not a list at the end.
+    """
+
+    def __init__(
+        self,
+        evidence: Mapping[str, Evidence],
+        *,
+        references: CitationReferences | None = None,
+    ) -> None:
         self._evidence = evidence
+        self._references = references or CitationReferences()
         self._renderers: dict[_PartKey, CitationRenderer] = {}
         self._text: dict[_PartKey, list[str]] = {}
         self._annotations: dict[_PartKey, list[Annotation]] = {}
@@ -90,7 +102,7 @@ class CitationProjection:
                 self._text.setdefault(key, []).append(visible_text)
                 events.append(event.model_copy(update={"delta": visible_text}))
             if evidence_id:
-                events.append(self._annotation_event(event, key, evidence_id))
+                events.extend(self._citation_events(event, key, evidence_id))
         self._text.setdefault(key, [])
         return tuple(events)
 
@@ -114,21 +126,40 @@ class CitationProjection:
             ),
         )
 
-    def _annotation_event(
+    def _citation_events(
         self,
         event: ResponseOutputTextDeltaEvent,
         key: _PartKey,
         evidence_id: str,
-    ) -> ResponseOutputTextAnnotationAddedEvent:
+    ) -> tuple[ResponseStreamEvent, ...]:
+        """Emit the reader-facing marker and the annotation that locates it.
+
+        The marker is one whole delta, so a client never sees a half-written
+        citation even though the model's own marker arrived split across
+        several deltas.
+        """
+
+        number = self._references.number(evidence_id)
+        marker = f"[{number}]"
+        start = len(self._value(key))
+        self._text.setdefault(key, []).append(marker)
         annotations = self._annotations.setdefault(key, [])
-        annotation = _document_citation(self._evidence[evidence_id], len(self._value(key)))
+        annotation = _document_citation(
+            self._evidence[evidence_id],
+            number=number,
+            start=start,
+            end=start + len(marker),
+        )
         annotations.append(annotation)
-        return ResponseOutputTextAnnotationAddedEvent(
-            item_id=event.item_id,
-            output_index=event.output_index,
-            content_index=event.content_index,
-            annotation_index=len(annotations) - 1,
-            annotation=annotation,
+        return (
+            event.model_copy(update={"delta": marker}),
+            ResponseOutputTextAnnotationAddedEvent(
+                item_id=event.item_id,
+                output_index=event.output_index,
+                content_index=event.content_index,
+                annotation_index=len(annotations) - 1,
+                annotation=annotation,
+            ),
         )
 
     def _message(self, output_index: int, item: MessageItem) -> MessageItem:
@@ -157,8 +188,19 @@ class CitationProjection:
         return "".join(self._text.get(key, ()))
 
 
-def _document_citation(evidence: Evidence, offset: int) -> Annotation:
-    """Build the one BoThesis annotation type from an evidence record."""
+def _document_citation(
+    evidence: Evidence,
+    *,
+    number: int,
+    start: int,
+    end: int,
+) -> Annotation:
+    """Build the one BoThesis annotation type from an evidence record.
+
+    Everything here is canonical retrieval metadata. Short-lived preview URLs
+    are deliberately absent: the client resolves those per click through the
+    authorized knowledge API, so no occurrence carries a preview payload.
+    """
 
     locator = evidence.citation.model_dump(mode="json", exclude_none=True)
     source = (
@@ -174,10 +216,12 @@ def _document_citation(evidence: Evidence, offset: int) -> Annotation:
     )
     return {
         "type": DOCUMENT_CITATION_TYPE,
-        "start_index": offset,
-        "end_index": offset,
+        "start_index": start,
+        "end_index": end,
         "citation": {
             "id": evidence.id,
+            "reference": evidence.id,
+            "number": number,
             "item_id": evidence.item_id,
             "chunk_id": evidence.chunk_id,
             "title": evidence.title,

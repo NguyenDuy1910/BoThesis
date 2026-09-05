@@ -6,7 +6,7 @@ import json
 from collections.abc import Sequence
 
 from bothesis import ModelResponseClient, render_prompt
-from bothesis.document_index.models import ContextualChunk
+from bothesis.document_index import ContextualChunk
 
 
 class SemanticReranker:
@@ -17,7 +17,10 @@ class SemanticReranker:
         transport: ModelResponseClient,
         *,
         model_name: str | None = None,
-        max_output_tokens: int = 256,
+        # A reasoning model spends this same budget on reasoning before it
+        # writes anything, so a small cap returns an empty response rather than
+        # the ID list. The headroom keeps the ordering bounded but reachable.
+        max_output_tokens: int = 2_048,
         max_candidate_characters: int = 2_400,
     ) -> None:
         if max_output_tokens < 1 or max_candidate_characters < 1:
@@ -55,8 +58,11 @@ class SemanticReranker:
             temperature=0,
         )
         raw_text = getattr(response, "output_text", None)
-        if not isinstance(raw_text, str):
-            raise ValueError("reranker response does not contain text")
+        if not isinstance(raw_text, str) or not raw_text.strip():
+            raise ValueError(
+                "reranker returned no text "
+                f"(status={getattr(response, 'status', 'unknown')})"
+            )
         ordered_ids = self._ordered_ids(raw_text, candidates)
         by_id = {chunk.id: chunk for chunk in candidates}
         ordered = [by_id[chunk_id] for chunk_id in ordered_ids]
@@ -64,7 +70,9 @@ class SemanticReranker:
         selected = ordered[:limit]
         denominator = max(1, len(selected))
         return [
-            chunk.model_copy(update={"rerank_score": (denominator - rank) / denominator})
+            chunk.model_copy(
+                update={"rerank_score": (denominator - rank) / denominator}
+            )
             for rank, chunk in enumerate(selected)
         ]
 
@@ -85,12 +93,7 @@ class SemanticReranker:
         raw_text: str,
         candidates: Sequence[ContextualChunk],
     ) -> list[str]:
-        normalized = raw_text.strip()
-        if normalized.startswith("```"):
-            lines = normalized.splitlines()
-            if len(lines) >= 3 and lines[-1].strip() == "```":
-                normalized = "\n".join(lines[1:-1])
-        value = json.loads(normalized)
+        value = json.loads(_json_object(raw_text))
         if not isinstance(value, dict) or set(value) != {"chunk_ids"}:
             raise ValueError("reranker response must contain only chunk_ids")
         chunk_ids = value["chunk_ids"]
@@ -104,6 +107,28 @@ class SemanticReranker:
         if not set(chunk_ids).issubset(allowed):
             raise ValueError("reranker returned an unknown chunk_id")
         return chunk_ids
+
+
+def _json_object(raw_text: str) -> str:
+    """Return the JSON object a model wrote, ignoring how it wrapped it.
+
+    Models fence the object, tag the fence with a language, or surround it with
+    a sentence. The ordering is still theirs; only the wrapping is discarded.
+    """
+
+    normalized = raw_text.strip()
+    if normalized.startswith("```"):
+        fenced = normalized.split("```")
+        if len(fenced) >= 3:
+            body = fenced[1]
+            # Drop an opening language tag such as ```json.
+            normalized = body.split("\n", 1)[1] if "\n" in body else body
+            normalized = normalized.strip()
+    start = normalized.find("{")
+    end = normalized.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("reranker response contains no JSON object")
+    return normalized[start : end + 1]
 
 
 __all__ = ["SemanticReranker"]

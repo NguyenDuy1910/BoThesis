@@ -38,7 +38,7 @@ init: reset-all ## Initialize the complete local BoThesis environment.
 	@echo "  User ID:   $$(sed -n 's/^NEXT_PUBLIC_BOTHESIS_USER_ID=//p' web/.env.local | tail -n 1)"
 	@echo
 	@echo "Start the API with: cd backend && uv run python main.py"
-	@echo "Start the worker with: cd backend && uv run python -m bothesis.workflow.worker"
+	@echo "Start the worker with: cd backend && uv run python -m bothesis.services.workflow.worker"
 
 reset-all: _temporal-reset db-reset qdrant-init status ## Reset all databases and Qdrant, apply the current design, and seed the admin.
 	@echo "PostgreSQL, Temporal, and Qdrant reset is complete."

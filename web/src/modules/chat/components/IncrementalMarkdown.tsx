@@ -15,6 +15,7 @@ import {
   type HTMLAttributes,
   type ReactNode,
 } from "react";
+import clsx from "clsx";
 import { Check, Copy } from "lucide-react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -27,9 +28,15 @@ import {
   REVEAL_COMMIT_INTERVAL_MS,
   splitStreamingMarkdown,
 } from "../streaming-markdown";
+import {
+  CITATION_NUMBER_PROP,
+  rehypeCitationMarkers,
+} from "../citation-markers";
+export { citationRenderingSources } from "../citation-markers";
+import type { AnswerSource } from "../sources";
 
 const MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkMath];
-const MARKDOWN_REHYPE_PLUGINS = [rehypeKatex];
+const MARKDOWN_REHYPE_PLUGINS = [rehypeKatex, rehypeCitationMarkers];
 
 // Only the streaming tail can hold a half-written marker, so self-healing runs
 // there and nowhere else. `text-only` keeps a partial `[label](htt` as plain
@@ -64,7 +71,65 @@ const MARKDOWN_COMPONENTS: Components = {
   pre: MarkdownPre,
   code: MarkdownCode,
   table: MarkdownTable,
+  cite: MarkdownCitation,
 };
+
+/**
+ * The citations an answer is allowed to render inline.
+ *
+ * Only numbers this answer actually cited resolve to a chip; anything else the
+ * model happened to write as `[n]` stays literal text. Nothing about the
+ * document is carried here — the panel re-resolves it per click.
+ */
+interface CitationRendering {
+  sources: ReadonlyMap<number, AnswerSource>;
+  activeCitationId?: string;
+  onOpenSource?: (source: AnswerSource) => void;
+}
+
+const EMPTY_CITATIONS: CitationRendering = { sources: new Map() };
+
+const CitationRenderingContext = createContext<CitationRendering>(EMPTY_CITATIONS);
+
+export function CitationRenderingProvider({
+  children,
+  value,
+}: {
+  children: ReactNode;
+  value: CitationRendering;
+}) {
+  return (
+    <CitationRenderingContext.Provider value={value}>
+      {children}
+    </CitationRenderingContext.Provider>
+  );
+}
+
+function MarkdownCitation({ children, ...properties }: HTMLAttributes<HTMLElement>) {
+  const rendering = useContext(CitationRenderingContext);
+  const raw = (properties as Record<string, unknown>)[CITATION_NUMBER_PROP];
+  const number = typeof raw === "string" ? Number(raw) : Number.NaN;
+  const source = Number.isFinite(number) ? rendering.sources.get(number) : undefined;
+  // An unresolved number was never a citation: keep the reader's text intact
+  // rather than offering a chip that cannot open anything.
+  if (!source) return <>{children}</>;
+
+  return (
+    <button
+      aria-label={`Show source ${source.index}: ${source.title}`}
+      aria-pressed={rendering.activeCitationId === source.id}
+      className={clsx(
+        "answer-citation-chip",
+        rendering.activeCitationId === source.id && "answer-citation-chip--active",
+      )}
+      onClick={() => rendering.onOpenSource?.(source)}
+      title={[source.title, source.locator].filter(Boolean).join(" · ")}
+      type="button"
+    >
+      {source.index}
+    </button>
+  );
+}
 
 // Mermaid renders only once the answer is complete: it is async and stateful, so
 // rendering it from half-written source would flash. Passing that through

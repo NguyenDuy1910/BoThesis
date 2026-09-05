@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from bothesis.connector.protocol import (
     AccessPolicy,
+    Chunk,
     CitationInfo,
     CitationSpan,
-    Chunk,
     DocumentItem,
     DocumentKind,
     Hierarchy,
@@ -18,13 +17,11 @@ from bothesis.connector.protocol import (
 )
 from bothesis.document_index import (
     INDEX_SCHEMA_VERSION,
-    ContextualChunkBuilder,
+    ContextualChunk,
     IndexingContext,
-    StructuralContextualizer,
+    ItemIndex,
     build_contextual_chunks,
-    build_index_records,
 )
-from bothesis.document_index.models import ContextualChunk
 
 
 def _document() -> DocumentItem:
@@ -68,8 +65,19 @@ def _context() -> IndexingContext:
     )
 
 
-def test_contextual_chunk_builder_preserves_the_legacy_public_name() -> None:
-    assert StructuralContextualizer is ContextualChunkBuilder
+class _Embedder:
+    embedding_model = "test-embedding"
+
+    async def embed_documents(self, documents: list[str]) -> list[list[float]]:
+        return [[float(len(document))] for document in documents]
+
+
+class _Backend:
+    def __init__(self) -> None:
+        self.records: list[object] = []
+
+    async def replace_item_points(self, **kwargs: object) -> None:
+        self.records = list(kwargs["records"])  # type: ignore[arg-type]
 
 
 def test_indexing_context_normalizes_required_identifiers() -> None:
@@ -97,7 +105,11 @@ async def test_index_projection_is_bounded_and_collection_scoped() -> None:
     assert isinstance(contextual[0], ContextualChunk)
     assert contextual[0].chunk_text == source_chunk.chunk_text
     assert "RAW-CONTENT-MUST-NOT-BE-INDEXED" not in contextual[0].contextual_text
-    record = (await build_index_records([source_chunk], document, _context()))[0]
+    backend = _Backend()
+    index = ItemIndex(backend=backend, embedder=_Embedder())  # type: ignore[arg-type]
+    await index.index_item_content(document, [source_chunk], context=_context())
+    record = backend.records[0]
+    assert hasattr(record, "payload")
     payload = record.payload
     assert payload.collection_item_id == "collection-1"
     assert payload.connector_key == "jira"
@@ -123,9 +135,12 @@ async def test_index_projection_is_bounded_and_collection_scoped() -> None:
 
 @pytest.mark.asyncio
 async def test_qdrant_point_ids_are_deterministic() -> None:
-    first = await build_index_records([_chunk()], _document(), _context())
-    second = await build_index_records([_chunk()], _document(), _context())
-    assert first[0].point_id == second[0].point_id
+    backend = _Backend()
+    index = ItemIndex(backend=backend, embedder=_Embedder())  # type: ignore[arg-type]
+    await index.index_item_content(_document(), [_chunk()], context=_context())
+    first_id = backend.records[0].point_id
+    await index.index_item_content(_document(), [_chunk()], context=_context())
+    assert backend.records[0].point_id == first_id
 
 
 def test_public_access_is_explicit() -> None:

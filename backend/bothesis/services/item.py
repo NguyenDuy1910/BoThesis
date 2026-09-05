@@ -22,11 +22,11 @@ from bothesis.db.models import (
     MessageItem,
     IngestionSource,
 )
+from bothesis.services.identity_store import IdentityStoreService
 from bothesis.services import (
     ACTIVE_STATUS,
     MESSAGE_ITEM_RELATIONS,
     AuthContext,
-    AuthService,
     DocumentNotFoundError,
     InvalidDocumentStateError,
 )
@@ -61,8 +61,8 @@ class ItemService:
         metadata: Mapping[str, Any] | None = None,
         item_id: UUID | None = None,
     ) -> Item:
-        await AuthService(self._session).get_tenant(tenant_id)
-        await AuthService(self._session).get_user(created_by_user_id)
+        await IdentityStoreService(self._session).get_tenant(tenant_id)
+        await IdentityStoreService(self._session).get_user(created_by_user_id)
         await self._validate_parent(
             tenant_id=tenant_id,
             parent_item_id=parent_item_id,
@@ -136,8 +136,8 @@ class ItemService:
         document_type: str,
         metadata: Mapping[str, Any] | None = None,
     ) -> tuple[Item, bool]:
-        await AuthService(self._session).get_user(owner_user_id)
-        await AuthService(self._session).get_tenant(tenant_id)
+        await IdentityStoreService(self._session).get_user(owner_user_id)
+        await IdentityStoreService(self._session).get_tenant(tenant_id)
         normalized_key = _required_text(
             idempotency_key, "upload idempotency key", max_length=128
         )
@@ -212,8 +212,8 @@ class ItemService:
     ) -> tuple[Item, bool]:
         """Create one idempotent native upload under an existing collection."""
 
-        await AuthService(self._session).get_user(owner_user_id)
-        await AuthService(self._session).get_tenant(tenant_id)
+        await IdentityStoreService(self._session).get_user(owner_user_id)
+        await IdentityStoreService(self._session).get_tenant(tenant_id)
         collection = await self._session.scalar(
             select(Item).where(
                 Item.id == collection_id,

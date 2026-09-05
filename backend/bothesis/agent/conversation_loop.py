@@ -201,7 +201,7 @@ class ConversationLoop:
 
         started_at = perf_counter()
         reducer = ResponseReducer()
-        projection = CitationProjection(state.evidence)
+        projection = CitationProjection(state.evidence, references=state.references)
         trace_context = (
             self._tracing.model_turn(
                 messages=_traced_items(request.input),
@@ -273,7 +273,10 @@ class ConversationLoop:
         )
         batch = await self._tool_executor.execute(
             response.function_calls,
-            context=ToolContext(agent_context=execution_ctx),
+            context=ToolContext(
+                agent_context=execution_ctx,
+                references=state.references,
+            ),
             remaining_calls=self._config.max_tool_calls - state.tool_call_count,
             previous_signatures=state.executed_tool_signatures,
             evidence=state.evidence,

@@ -14,8 +14,11 @@ from bothesis.connector.protocol import (
     Hierarchy,
     SourceIdentity,
 )
-from bothesis.document_index import ChunkContextGenerator
-from bothesis.document_index.models import ChunkContext, ContextualChunk
+from bothesis.document_index import (
+    ChunkContext,
+    ChunkContextGenerator,
+    ContextualChunk,
+)
 
 log = logging.getLogger(__name__)
 
@@ -86,11 +89,6 @@ class ContextualChunkBuilder:
         )
 
 
-# Keep the package's existing public name without maintaining a second
-# implementation. New code should use the role-specific name above.
-StructuralContextualizer = ContextualChunkBuilder
-
-
 async def build_contextual_chunks(
     chunks: Sequence[Chunk],
     item: DocumentItem,
@@ -118,7 +116,7 @@ async def build_contextual_chunks(
                     title=item.title,
                     section_path=chunk.section_path,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - enrichment is best effort
                 log.warning(
                     "semantic context generation failed for chunk %s; "
                     "using structural context: %s",
@@ -160,9 +158,7 @@ def _document_context(
         metadata.append(f"Summary: {summary}")
     sections = list(
         dict.fromkeys(
-            " > ".join(chunk.section_path)
-            for chunk in chunks
-            if chunk.section_path
+            " > ".join(chunk.section_path) for chunk in chunks if chunk.section_path
         )
     )
     if sections:
@@ -226,8 +222,7 @@ def _validate_chunks(chunks: Sequence[Chunk], item: DocumentItem) -> tuple[Chunk
             raise TypeError("chunks must contain only connector Chunk values")
         if chunk.item_id != item.id:
             raise ValueError(
-                f"Chunk {chunk.id!r} belongs to item {chunk.item_id!r}, "
-                f"not {item.id!r}"
+                f"Chunk {chunk.id!r} belongs to item {chunk.item_id!r}, not {item.id!r}"
             )
         if chunk.id in seen_ids:
             raise ValueError(f"Duplicate chunk id {chunk.id!r} for item {item.id!r}")
@@ -249,6 +244,5 @@ def _metadata_scalar(metadata: dict[str, str | list[str]], key: str) -> str | No
 
 __all__ = [
     "ContextualChunkBuilder",
-    "StructuralContextualizer",
     "build_contextual_chunks",
 ]

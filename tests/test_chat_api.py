@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import httpx
@@ -19,8 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import native_responses as native
 
-import main
-import bothesis.services.api as api_service_module
+import api.app as api_app
+import api.deps as api_deps
+import bothesis.runtime as runtime_module
+import bothesis.services.workspace_documents as workspace_documents_module
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext
 from bothesis.agent.tools import ToolRegistry
@@ -28,11 +31,21 @@ from bothesis.agent.tools.knowledge_search import KnowledgeSearch
 from bothesis.connector.protocol import (
     CitationInfo,
     CitationSpan,
+    EffectiveAccess,
+    Hierarchy,
     SourceIdentity,
     SourceProvider,
 )
-from bothesis.knowledge import Evidence
-from bothesis.services import AuthContext, RequestIdentity
+from bothesis.document_index import ContextualChunk
+from bothesis.knowledge import Evidence, ItemKnowledgeRetriever
+from api.routers import ChatRequest
+from bothesis.services import AuthContext
+from bothesis.services.document_presentation import (
+    DocumentPresenter,
+    payload_citation,
+    viewer_elements,
+)
+from bothesis.services.workspace_documents import WorkspaceDocumentService
 
 
 def search_call(output_index: int = 0) -> list[Any]:
@@ -59,7 +72,7 @@ class ScriptedTransport(native.ScriptedResponsesTransport):
                         output_index=0,
                         deltas=[
                             "Employees receive 20 days of annual leave "
-                            "[[cite:chunk-1]]."
+                            "[[cite:ref_1]]."
                         ],
                         phase="final_answer",
                     ),
@@ -97,10 +110,10 @@ def test_default_agent_composes_the_openrouter_transport(
                 yield None
 
     monkeypatch.setattr(openrouter_transport, "OpenRouterTransport", TestOpenRouterTransport)
-    monkeypatch.setattr(api_service_module, "OpenRouterTransport", TestOpenRouterTransport)
-    monkeypatch.setattr(main._api_service, "_agent", None)
+    monkeypatch.setattr(runtime_module, "OpenRouterTransport", TestOpenRouterTransport)
+    monkeypatch.setattr(api_deps.get_runtime(), "_agent", None)
 
-    agent = main._api_service._get_agent()
+    agent = api_deps.get_runtime().agent()
 
     assert isinstance(agent.model, TestOpenRouterTransport)
     assert agent.tools.has("knowledge_search")
@@ -203,7 +216,7 @@ class InterleavedTransport(native.ScriptedResponsesTransport):
                     *native.message(
                         item_id="msg_2",
                         output_index=0,
-                        deltas=["Employees receive 20 days ", "[[cite:chunk-1]]."],
+                        deltas=["Employees receive 20 days ", "[[cite:ref_1]]."],
                         phase="final_answer",
                     ),
                     *native.completed("resp_b"),
@@ -258,6 +271,20 @@ class _SessionContext:
         return None
 
 
+def _override_caller(monkeypatch: Any, resolve: Any) -> None:
+    """Answer both caller dependencies with one already-resolved identity.
+
+    The override takes no parameters so FastAPI does not read a ``*args``
+    signature as required query parameters.
+    """
+
+    async def caller() -> AuthContext:
+        return await resolve()
+
+    for dependency in (api_deps.get_auth_context, api_deps.get_chat_auth_context):
+        monkeypatch.setitem(api_app.app.dependency_overrides, dependency, caller)
+
+
 def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
     user_id = uuid4()
     tenant_id = uuid4()
@@ -274,13 +301,29 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
             group_ids=(),
         )
 
-    monkeypatch.setattr(main._api_service, "_resolve_access", resolve_access)
-    monkeypatch.setattr(main._api_service, "_session_factory", _SessionContext)
+    _override_caller(monkeypatch, resolve_access)
+    monkeypatch.setattr(api_deps.get_runtime(), "_session_factory", _SessionContext)
+
+    class ConversationRecorder:
+        def __init__(self) -> None:
+            self.started: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+            self.finished: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        async def start_turn(self, *_: Any, **__: Any) -> None:
+            self.started.append((_, __))
+            return None
+
+        async def finish_turn(self, *_: Any, **__: Any) -> None:
+            self.finished.append((_, __))
+            return None
+
+    monkeypatch.setattr(api_deps.get_runtime(), "_conversations", ConversationRecorder())
     async def allowed_collections(*_: Any, **__: Any) -> tuple[UUID, ...]:
         return (UUID(int=12), UUID(int=14))
 
     monkeypatch.setattr(
-        "bothesis.services.api.CollectionAccessService.allowed_collection_ids",
+        "bothesis.services.collection_access.CollectionAccessService"
+        ".allowed_collection_ids",
         allowed_collections,
     )
     return user_id, tenant_id
@@ -294,13 +337,26 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
     user_id = uuid4()
     now = datetime.now(UTC).isoformat()
 
-    async def upload_collection_document(
-        identity: RequestIdentity,
+    access = AuthContext(
+        user_id=user_id,
+        email="editor@example.test",
+        display_name="Editor",
+        tenant_id=tenant_id,
+        role_id=uuid4(),
+        role_code="editor",
+        permission_codes=("admin", "knowledge.read"),
+        group_ids=(),
+    )
+
+    async def resolve_access(*_: Any, **__: Any) -> AuthContext:
+        return access
+
+    async def upload_to_collection(
+        caller: AuthContext,
         requested_collection_id: UUID,
         **values: Any,
     ) -> dict[str, Any]:
-        assert identity.tenant_id == str(tenant_id)
-        assert identity.user_id == str(user_id)
+        assert caller is access
         assert requested_collection_id == collection_id
         assert values["idempotency_key"] == "upload-contract-1"
         assert values["file_name"] == "policy.txt"
@@ -323,12 +379,13 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
             "created": True,
         }
 
-    monkeypatch.setattr(
-        main._api_service,
-        "upload_collection_document",
-        upload_collection_document,
+    _override_caller(monkeypatch, resolve_access)
+    monkeypatch.setitem(
+        api_app.app.dependency_overrides,
+        api_deps.get_workspace_document_service,
+        lambda: SimpleNamespace(upload_to_collection=upload_to_collection),
     )
-    with TestClient(main.app) as client:
+    with TestClient(api_app.app) as client:
         response = client.post(
             f"/api/v1/collections/{collection_id}/documents/upload",
             headers={
@@ -348,10 +405,6 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
 async def test_collection_upload_reports_ingestion_dispatch_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = api_service_module.ApiService(
-        allow_insecure_development_identity=True,
-        qdrant_prefer_grpc=False,
-    )
     user_id = uuid4()
     tenant_id = uuid4()
     collection_id = uuid4()
@@ -393,19 +446,23 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
             document.metadata_["processing"] = {"index_schema_version": "test"}
             return document
 
-    async def resolve_access(*_: Any, **__: Any) -> AuthContext:
-        return access
-
     async def record_audit(*_: Any, **__: Any) -> None:
         return None
 
-    monkeypatch.setattr(service, "_resolve_access", resolve_access)
-    monkeypatch.setattr(service, "_uploads", Uploads())
-    monkeypatch.setattr(service, "_session_factory", _SessionContext)
-    monkeypatch.setattr(api_service_module.AuditService, "record", record_audit)
+    monkeypatch.setattr(workspace_documents_module.AuditService, "record", record_audit)
+    service = WorkspaceDocumentService(
+        _SessionContext,
+        uploads=Uploads(),
+        presenter=DocumentPresenter(
+            object_storage=lambda: None,
+            preview=SimpleNamespace(resolve=lambda *_, **__: None),
+            citation_url_seconds=300,
+            preview_url_seconds=300,
+        ),
+    )
 
-    result = await service.upload_collection_document(
-        RequestIdentity(user_id=user_id, tenant_id=tenant_id),
+    result = await service.upload_to_collection(
+        access,
         collection_id,
         idempotency_key="dispatch-failure",
         file_name="policy.txt",
@@ -418,10 +475,7 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
     assert result["document"]["status"] == "failed"
     assert result["document"]["parent_item_id"] == str(collection_id)
 
-    retried = await service.retry_document_indexing(
-        RequestIdentity(user_id=user_id, tenant_id=tenant_id),
-        document.id,
-    )
+    retried = await service.retry_indexing(access, document.id)
 
     assert retried["created"] is False
     assert retried["ingestion_status"] == "ready"
@@ -439,7 +493,7 @@ def test_qdrant_citation_does_not_synthesize_element_ranges() -> None:
         "page_end": 4,
     }
 
-    citation = main._api_service._payload_citation(payload)
+    citation = payload_citation(payload)
 
     assert citation.spans == ()
     assert citation.section == "Canonical section"
@@ -467,7 +521,7 @@ def test_viewer_uses_canonical_multispan_citation_geometry() -> None:
         ),
     )
 
-    elements, chunks_by_id = main._api_service._viewer_elements(
+    elements, chunks_by_id = viewer_elements(
         "doc-1",
         [payload],
         {"chunk-multi": citation},
@@ -476,7 +530,7 @@ def test_viewer_uses_canonical_multispan_citation_geometry() -> None:
     assert elements == []
     assert chunks_by_id["chunk-multi"] is payload
     assert citation.spans[0].element_id == "p001_para_001"
-    assert main._api_service._payload_citation(payload).spans == ()
+    assert payload_citation(payload).spans == ()
 
 
 def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
@@ -493,11 +547,11 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
             recent_history_messages=2,
         ),
     )
-    monkeypatch.setattr(main._api_service, "_agent", agent)
+    monkeypatch.setattr(api_deps.get_runtime(), "_agent", agent)
     user_id, tenant_id = _install_access(monkeypatch)
     conversation_id = uuid4()
 
-    with TestClient(main.app) as client:
+    with TestClient(api_app.app) as client:
         response = client.post(
             "/api/v1/agent/chat",
             json={
@@ -515,7 +569,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     events = [
         json.loads(line.removeprefix("data: "))
         for line in response.text.splitlines()
@@ -545,7 +599,15 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     assert annotation["type"] == "bothesis:document_citation"
     assert annotation["citation"]["item_id"] == "doc-1"
     assert annotation["citation"]["chunk_id"] == "chunk-1"
+    assert annotation["citation"]["reference"] == "ref_1"
+    assert annotation["citation"]["number"] == 1
     assert annotation["citation"]["source"]["provider"] == "confluence"
+    conversations = api_deps.get_runtime()._conversations
+    assert conversations is not None
+    assert len(conversations.started) == 1
+    assert conversations.started[0][1]["content"] == "What is the leave policy?"
+    assert len(conversations.finished) == 1
+    assert conversations.finished[0][1]["content"] == "Employees receive 20 days of annual leave [1]."
     assert len(retriever.contexts) == 1
     assert len(retriever.contexts[0].collection_item_ids) == 1
     # ``/responses`` takes instructions as a request parameter, so the input is
@@ -563,6 +625,273 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
             "content": "<user_message>What is the leave policy?</user_message>",
         },
     ]
+
+
+class IndexedChunkIndex:
+    """One indexed chunk, as the vector index returns it to knowledge."""
+
+    def __init__(self, chunk: ContextualChunk) -> None:
+        self._chunk = chunk
+
+    async def search_item_content(
+        self,
+        query: str,
+        *,
+        limit: int,
+        tenant_id: str,
+        collection_item_ids: tuple[str, ...],
+    ) -> list[ContextualChunk]:
+        return [self._chunk]
+
+
+def _indexed_chunk() -> ContextualChunk:
+    return ContextualChunk(
+        id="9f1c2d34-0000-4000-8000-000000000001:12",
+        item_id="9f1c2d34-0000-4000-8000-000000000001",
+        chunk_index=12,
+        content_type="text",
+        chunk_text="Employees receive 20 days of annual leave.",
+        contextual_text="Leave policy: employees receive 20 days of annual leave.",
+        title="Leave policy",
+        document_type="pdf",
+        collection_item_id=str(UUID(int=12)),
+        source=SourceIdentity(
+            connector_id="upload",
+            provider=SourceProvider.FILE,
+            external_id="9f1c2d34-0000-4000-8000-000000000001",
+        ),
+        hierarchy=Hierarchy(),
+        access=EffectiveAccess(),
+        citation=CitationInfo(page_start=7, page_end=7, section="Annual leave"),
+        relevance_score=0.92,
+    )
+
+
+def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
+    monkeypatch,
+) -> None:
+    """The whole grounding chain, from indexed chunk to client citation.
+
+    Retrieval assigns the reference, the model cites only that reference, and
+    the backend — not the model — produces the citation the client receives.
+    """
+
+    chunk = _indexed_chunk()
+    reference = "ref_1"
+    captured_context: list[str] = []
+
+    class ContextCapturingSearch(KnowledgeSearch):
+        async def execute(self, arguments, ctx):  # type: ignore[no-untyped-def]
+            output = await super().execute(arguments, ctx)
+            captured_context.append(output.content)
+            return output
+
+    registry = ToolRegistry()
+    registry.register(
+        ContextCapturingSearch(ItemKnowledgeRetriever(IndexedChunkIndex(chunk)))  # type: ignore[arg-type]
+    )
+    transport = native.ScriptedResponsesTransport(
+        [
+            [*native.created("resp_a"), *search_call(), *native.completed("resp_a")],
+            [
+                *native.created("resp_b"),
+                *native.message(
+                    item_id="msg_1",
+                    output_index=0,
+                    deltas=[f"Employees receive 20 days [[cite:{reference}]]."],
+                    phase="final_answer",
+                ),
+                *native.completed("resp_b"),
+            ],
+        ]
+    )
+    agent = Agent(
+        transport,
+        registry,
+        config=AgentConfig(max_model_turns=3, max_tool_rounds=2),
+    )
+    monkeypatch.setattr(api_deps.get_runtime(), "_agent", agent)
+    user_id, tenant_id = _install_access(monkeypatch)
+
+    with TestClient(api_app.app) as client:
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={
+                "message": "How much annual leave is there?",
+                "tenant_id": str(tenant_id),
+                "user_id": str(user_id),
+                "knowledge_mode": "selected",
+                "collection_item_ids": [str(UUID(int=12))],
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+
+    # The model context offers the reference and withholds internal identifiers.
+    assert f"Source reference: {reference}" in captured_context[0]
+    assert chunk.id not in captured_context[0]
+    assert chunk.item_id not in captured_context[0]
+
+    # The internal marker never reaches the reader; the chip stands where the
+    # model put it, inline with the claim it supports.
+    answer = "".join(
+        event["delta"]
+        for event in events
+        if event["type"] == "response.output_text.delta"
+    )
+    assert answer == "Employees receive 20 days [1]."
+    assert "[[cite:" not in answer
+
+    # The citation the client receives is built from canonical metadata.
+    annotation = next(
+        event["annotation"]
+        for event in events
+        if event["type"] == "response.output_text.annotation.added"
+    )
+    citation = annotation["citation"]
+    assert annotation["type"] == "bothesis:document_citation"
+    # The index range brackets the marker, so position survives serialization.
+    assert answer[annotation["start_index"] : annotation["end_index"]] == "[1]"
+    assert citation["number"] == 1
+    assert citation["reference"] == reference
+    assert citation["id"] == reference
+    assert citation["item_id"] == chunk.item_id
+    assert citation["chunk_id"] == chunk.id
+    assert citation["title"] == "Leave policy"
+    assert citation["page_start"] == 7
+    assert citation["internal_url"] == (
+        f"/knowledge/items/{chunk.item_id}?chunk={quote(chunk.id, safe='')}"
+    )
+    # No infrastructure detail reaches the client.
+    assert not {"collection_name", "point_id", "storage_key", "vector"} & set(citation)
+
+
+class TwoChunkIndex:
+    """Two indexed chunks of the same document, as the index returns them."""
+
+    def __init__(self, chunks: list[ContextualChunk]) -> None:
+        self._chunks = chunks
+
+    async def search_item_content(
+        self,
+        query: str,
+        *,
+        limit: int,
+        tenant_id: str,
+        collection_item_ids: tuple[str, ...],
+    ) -> list[ContextualChunk]:
+        return self._chunks
+
+
+def test_chat_api_places_repeated_and_multiple_citations_inline(monkeypatch) -> None:
+    """The acceptance case: a chip after each supported claim.
+
+    The same source cited twice keeps one number, a second source gets the
+    next, and two markers may sit together on one claim.
+    """
+
+    first = _indexed_chunk()
+    second = first.model_copy(
+        update={
+            "id": "9f1c2d34-0000-4000-8000-000000000001:13",
+            "chunk_index": 13,
+            "chunk_text": "Four endpoints serve the streaming API.",
+            "relevance_score": 0.81,
+        }
+    )
+    registry = ToolRegistry()
+    registry.register(
+        KnowledgeSearch(ItemKnowledgeRetriever(TwoChunkIndex([first, second])))  # type: ignore[arg-type]
+    )
+    transport = native.ScriptedResponsesTransport(
+        [
+            [*native.created("resp_a"), *search_call(), *native.completed("resp_a")],
+            [
+                *native.created("resp_b"),
+                *native.message(
+                    item_id="msg_1",
+                    output_index=0,
+                    deltas=[
+                        "You must create one VPC endpoint for each service name.",
+                        " [[cite:ref_1]] One endpoint is used for the REST API",
+                        " and four are used for the streaming API. [[cite:ref_1]]",
+                        "[[cite:ref_2]]",
+                    ],
+                    phase="final_answer",
+                ),
+                *native.completed("resp_b"),
+            ],
+        ]
+    )
+    monkeypatch.setattr(
+        api_deps.get_runtime(),
+        "_agent",
+        Agent(
+            transport,
+            registry,
+            config=AgentConfig(max_model_turns=3, max_tool_rounds=2),
+        ),
+    )
+    user_id, tenant_id = _install_access(monkeypatch)
+
+    with TestClient(api_app.app) as client:
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={
+                "message": "How many VPC endpoints do I need?",
+                "tenant_id": str(tenant_id),
+                "user_id": str(user_id),
+                "knowledge_mode": "selected",
+                "collection_item_ids": [str(UUID(int=12))],
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    answer = "".join(
+        event["delta"]
+        for event in events
+        if event["type"] == "response.output_text.delta"
+    )
+    annotations = [
+        event["annotation"]
+        for event in events
+        if event["type"] == "response.output_text.annotation.added"
+    ]
+
+    assert answer == (
+        "You must create one VPC endpoint for each service name. [1] "
+        "One endpoint is used for the REST API and four are used for the "
+        "streaming API. [1][2]"
+    )
+    # Three occurrences, two distinct sources; the repeat reuses its number.
+    assert [annotation["citation"]["number"] for annotation in annotations] == [1, 1, 2]
+    assert [annotation["citation"]["reference"] for annotation in annotations] == [
+        "ref_1",
+        "ref_1",
+        "ref_2",
+    ]
+    # Every annotation brackets its own marker, in order of appearance.
+    assert [
+        answer[annotation["start_index"] : annotation["end_index"]]
+        for annotation in annotations
+    ] == ["[1]", "[1]", "[2]"]
+    assert [annotation["start_index"] for annotation in annotations] == sorted(
+        annotation["start_index"] for annotation in annotations
+    )
+    # The repeat resolves to the same chunk, the new number to the other.
+    assert annotations[0]["citation"]["chunk_id"] == first.id
+    assert annotations[1]["citation"]["chunk_id"] == first.id
+    assert annotations[2]["citation"]["chunk_id"] == second.id
 
 
 def test_document_search_api_uses_authorized_retrieval_scope(monkeypatch) -> None:
@@ -611,9 +940,9 @@ def test_document_search_api_uses_authorized_retrieval_scope(monkeypatch) -> Non
             ]
 
     retriever = SearchRetriever()
-    monkeypatch.setattr(main._api_service, "_retriever", retriever)
+    monkeypatch.setattr(api_deps.get_runtime(), "_retriever", retriever)
 
-    with TestClient(main.app) as client:
+    with TestClient(api_app.app) as client:
         response = client.post(
             "/api/v1/documents/search",
             headers={
@@ -627,7 +956,7 @@ def test_document_search_api_uses_authorized_retrieval_scope(monkeypatch) -> Non
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["total"] == 1
     assert payload["results"][0]["id"] == str(item_id)
@@ -641,10 +970,10 @@ def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     registry = ToolRegistry()
     registry.register(KnowledgeSearch(StubRetriever()))
     agent = Agent(InterleavedTransport(), registry)
-    monkeypatch.setattr(main._api_service, "_agent", agent)
+    monkeypatch.setattr(api_deps.get_runtime(), "_agent", agent)
     user_id, tenant_id = _install_access(monkeypatch)
 
-    with TestClient(main.app) as client:
+    with TestClient(api_app.app) as client:
         response = client.post(
             "/api/v1/agent/chat",
             json={
@@ -719,7 +1048,7 @@ async def test_a_reasoning_item_replays_as_a_canonical_input_item() -> None:
 
 
 def test_chat_api_rejects_unbounded_history() -> None:
-    with TestClient(main.app) as client:
+    with TestClient(api_app.app) as client:
         response = client.post(
             "/api/v1/agent/chat",
             json={
@@ -737,7 +1066,7 @@ def test_chat_api_rejects_unbounded_history() -> None:
 
 
 def test_chat_api_rejects_history_message_over_context_budget() -> None:
-    with TestClient(main.app) as client:
+    with TestClient(api_app.app) as client:
         response = client.post(
             "/api/v1/agent/chat",
             json={
@@ -754,9 +1083,9 @@ def test_chat_api_rejects_history_message_over_context_budget() -> None:
 
 def test_chat_request_requires_a_bounded_explicit_collection_selection() -> None:
     with pytest.raises(ValueError, match="requires at least one Collection"):
-        main.ChatRequest(message="hello", knowledge_mode="selected")
+        ChatRequest(message="hello", knowledge_mode="selected")
 
-    request = main.ChatRequest(
+    request = ChatRequest(
         message="hello",
         knowledge_mode="selected",
         collection_item_ids=[UUID(int=12), UUID(int=14)],

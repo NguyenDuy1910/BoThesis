@@ -1,15 +1,19 @@
-"""Contextualization, embedding, payload projection, and vector indexing."""
+"""Contextualization, embedding, payload projection, and Item indexing."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
-from uuid import NAMESPACE_URL, UUID, uuid5
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from bothesis.connector.protocol import Chunk
+from bothesis.connector.protocol import (
+    Chunk,
+    CitationInfo,
+    EffectiveAccess,
+    Hierarchy,
+    SourceIdentity,
+)
 
 INDEX_SCHEMA_VERSION = 11
 DENSE_VECTOR_NAME = "content"
@@ -75,64 +79,43 @@ class ChunkContextGenerator(Protocol):
     ) -> str | None: ...
 
 
-from .contextualization import (  # noqa: E402
-    ContextualChunkBuilder,
-    StructuralContextualizer,
-    build_contextual_chunks,
-)
-from .semantic_contextualizer import SemanticContextualizer  # noqa: E402
-from .models import ChunkContext, ContextualChunk, IndexQuery, PreparedDocument
-from .payload import (
-    IndexedChunk,
-    build_index_records,
-    contextual_chunk_from_point,
-)
-
-
-class IndexedChunkRecord(BaseModel):
-    """A deterministic point identifier paired with its indexed chunk."""
+class ChunkContext(BaseModel):
+    """Structural and optional semantic context attached to an Item chunk."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    point_id: str = Field(min_length=1)
-    payload: IndexedChunk
-
-    @classmethod
-    def from_contextual_chunk(
-        cls,
-        chunk: ContextualChunk,
-        context: IndexingContext,
-    ) -> "IndexedChunkRecord":
-        return cls(
-            point_id=str(
-                uuid5(
-                    NAMESPACE_URL,
-                    f"{context.tenant_id}:{chunk.item_id}:{chunk.chunk_index}",
-                )
-            ),
-            payload=IndexedChunk.from_contextual_chunk(chunk, context),
-        )
+    section_path: list[str] = Field(default_factory=list)
+    summary: str | None = None
 
 
-if TYPE_CHECKING:
-    from bothesis.db.models import Item
+class ContextualChunk(BaseModel):
+    """Storage-neutral indexed Item chunk returned to knowledge retrieval."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    chunk_index: int = Field(ge=0)
+    content_type: str = Field(min_length=1)
+    chunk_text: str = Field(min_length=1)
+    contextual_text: str = Field(min_length=1)
+    context: ChunkContext = Field(default_factory=ChunkContext)
+    title: str | None = None
+    document_type: str = Field(min_length=1)
+    collection_item_id: str | None = None
+    source: SourceIdentity
+    hierarchy: Hierarchy
+    access: EffectiveAccess
+    citation: CitationInfo
+    relevance_score: float | None = None
+    rerank_score: float | None = None
 
 
-DEFAULT_DIRECT_MAX_BYTES = 20 * 1024 * 1024
-PARSER_VERSION = "docling-2.121"
-CHUNKER_VERSION = "docling-hybrid-line-v1"
-DIRECT_IMAGE_TYPES = frozenset(
-    {"image/png", "image/jpeg", "image/webp", "image/gif"}
+from .contextualization import (
+    ContextualChunkBuilder,
+    build_contextual_chunks,
 )
-
-
-class DocumentProcessingError(RuntimeError):
-    """Raised when a chat document cannot be prepared for indexing."""
-
-
-class DocumentUnavailableError(DocumentProcessingError):
-    """Raised when an authorized document's raw content is unavailable."""
-
+from .semantic_contextualizer import SemanticContextualizer
 
 @runtime_checkable
 class EmbeddingService(Protocol):
@@ -142,41 +125,13 @@ class EmbeddingService(Protocol):
 
     async def embed_documents(self, documents: list[str]) -> list[list[float]]: ...
 
-
-@runtime_checkable
-class VectorIndex(Protocol):
-    """Derived-index operations required by the document pipeline."""
-
-    async def replace_document(
-        self,
-        document: Item,
-        chunks: Sequence[ContextualChunk],
-        vectors: Sequence[Sequence[float]],
-        *,
-        context: IndexingContext,
-    ) -> None: ...
-
-    async def soft_delete_document(
-        self,
-        document_id: UUID,
-        *,
-        tenant_id: str | None = None,
-    ) -> None: ...
-
-    async def aclose(self) -> None: ...
+    async def embed_query(self, query: str) -> list[float]: ...
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedDocuments:
-    """Model-ready chat document contexts."""
-
-    contexts: tuple[PreparedDocument, ...]
-
-
-class DocumentIndex(Protocol):
+class ItemContentIndex(Protocol):
     """Read-only, storage-neutral search boundary consumed by knowledge."""
 
-    async def search(
+    async def search_item_content(
         self,
         query: str,
         *,
@@ -187,35 +142,23 @@ class DocumentIndex(Protocol):
         """Return indexed chunks after applying the supplied access scope."""
 
 
+from .index import ItemIndex
+
 __all__ = [
     "BM25_MODEL",
     "BM25_OPTIONS",
-    "CHUNKER_VERSION",
+    "DEFAULT_HYBRID_CANDIDATE_LIMIT",
+    "DENSE_VECTOR_NAME",
+    "INDEX_SCHEMA_VERSION",
+    "SPARSE_VECTOR_NAME",
     "ChunkContext",
     "ChunkContextGenerator",
     "ContextualChunk",
     "ContextualChunkBuilder",
-    "DEFAULT_DIRECT_MAX_BYTES",
-    "DEFAULT_HYBRID_CANDIDATE_LIMIT",
-    "DENSE_VECTOR_NAME",
-    "DIRECT_IMAGE_TYPES",
-    "DocumentIndex",
-    "DocumentProcessingError",
-    "DocumentUnavailableError",
     "EmbeddingService",
-    "INDEX_SCHEMA_VERSION",
-    "IndexedChunk",
-    "IndexedChunkRecord",
     "IndexingContext",
-    "IndexQuery",
-    "PARSER_VERSION",
-    "PreparedDocument",
-    "PreparedDocuments",
-    "SPARSE_VECTOR_NAME",
+    "ItemContentIndex",
+    "ItemIndex",
     "SemanticContextualizer",
-    "StructuralContextualizer",
-    "VectorIndex",
     "build_contextual_chunks",
-    "build_index_records",
-    "contextual_chunk_from_point",
 ]

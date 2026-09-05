@@ -9,42 +9,41 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
+from bothesis.connector.protocol import BoundingBox, Chunk, CitationInfo, CitationSpan
 from bothesis.db.models import (
     AuditLog,
     Base,
     Citation,
     Conversation,
-    Item,
     ExternalResource,
-    ItemUpload,
     IngestionSource,
-    Message,
-    MessageItem,
     IntegrationConnection,
     IntegrationCredential,
+    Item,
+    ItemUpload,
+    Message,
+    MessageItem,
 )
-from bothesis.connector.protocol import BoundingBox, Chunk, CitationInfo, CitationSpan
+from bothesis.storage import ObjectStorageError, StoredObject
 from bothesis.services import (
-    AccessRequestService,
-    AdminItemService,
     AuthContext,
-    AuthService,
     AuthorizationError,
-    CollectionAccessService,
-    CitationService,
     DocumentNotFoundError,
-    ItemService,
-    IntegrationCredentialService,
-    IntegrationService,
-    UploadService,
+    DocumentProcessingError,
     UploadTooLargeError,
     UploadValidationError,
 )
-from bothesis.document_index.raw_storage import ObjectStorageError, StoredObject
-
+from bothesis.services.access_requests import AccessRequestService
+from bothesis.services.identity_store import IdentityStoreService
+from bothesis.services.citation import CitationService
+from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.integration_connections import IntegrationConnectionService
+from bothesis.services.integration_credential import IntegrationCredentialService
+from bothesis.services.item import ItemService
+from bothesis.services.item_catalog import ItemCatalogService
+from bothesis.services.document_upload import DocumentUploadService
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -82,7 +81,7 @@ async def test_identity_supports_multiple_tenant_memberships(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         first_tenant = await auth.create_tenant("acme", "Acme")
         second_tenant = await auth.create_tenant("labs", "Labs")
         user = await auth.create_user("USER@EXAMPLE.COM")
@@ -117,7 +116,7 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
         role = await auth.create_role(tenant.id, "member", "Member")
@@ -187,7 +186,7 @@ async def test_citations_replace_geometry_by_stable_chunk_identity(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("citations", "Citations")
         owner = await auth.create_user("citations@example.com")
         collection = await ItemService(session).create_collection(
@@ -269,7 +268,7 @@ async def test_integration_credentials_are_encrypted_and_owner_models_are_explic
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
         role = await auth.create_role(tenant.id, "member", "Member")
@@ -310,11 +309,14 @@ async def test_integration_credentials_are_encrypted_and_owner_models_are_explic
             "access_token": "top-secret",
             "refresh_token": "refresh-secret",
         }
-        assert await session.scalar(
-            select(IntegrationCredential).where(
-                IntegrationCredential.integration_connection_id == personal.id
+        assert (
+            await session.scalar(
+                select(IntegrationCredential).where(
+                    IntegrationCredential.integration_connection_id == personal.id
+                )
             )
-        ) is record
+            is record
+        )
 
 
 def test_integration_encryption_key_accepts_unpadded_urlsafe_base64() -> None:
@@ -329,7 +331,7 @@ async def test_integration_list_eager_loads_optional_credentials(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
         role = await auth.create_role(
@@ -352,8 +354,9 @@ async def test_integration_list_eager_loads_optional_credentials(
         )
 
     async with session_factory.begin() as session:
-        result = await IntegrationService(session).list_connections(
-            actor, page_size=100,
+        result = await IntegrationConnectionService(session).list_connections(
+            actor,
+            page_size=100,
         )
 
     assert result["total"] == 1
@@ -361,11 +364,67 @@ async def test_integration_list_eager_loads_optional_credentials(
 
 
 @pytest.mark.asyncio
+async def test_authorized_item_is_projectable_without_further_database_io(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The knowledge viewer reads an authorized Item outside the await chain.
+
+    Its upload lifecycle must already be loaded: a lazy load would run asyncpg
+    I/O from synchronous code and fail the request with MissingGreenlet.
+    """
+
+    async with session_factory.begin() as session:
+        auth = IdentityStoreService(session)
+        tenant = await auth.create_tenant("viewer", "Viewer")
+        owner = await auth.create_user("viewer@example.com")
+        role = await auth.create_role(
+            tenant.id,
+            "reader",
+            "Reader",
+            permission_codes=["knowledge.read", "access.manage"],
+        )
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
+        items = ItemService(session)
+        collection = await items.create_collection(
+            tenant_id=tenant.id,
+            title="Policies",
+            created_by_user_id=owner.id,
+        )
+        await CollectionAccessService(session).grant(
+            collection.id,
+            principal_type="user",
+            principal_id=owner.id,
+            role="owner",
+            actor=actor,
+        )
+        # A connector-ingested document has no upload row at all.
+        ingested = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=collection.id,
+            title="Ingested policy",
+            document_type="pdf",
+            created_by_user_id=owner.id,
+        )
+        ingested_id = ingested.id
+
+    async with session_factory.begin() as session:
+        item = await ItemService(session).get_item_by_canonical_id(
+            str(ingested_id), access=actor
+        )
+        loaded = item
+
+    # Outside the session, reading the relationship must not touch the database.
+    assert loaded.upload is None
+    assert loaded.status == "pending"
+
+
+@pytest.mark.asyncio
 async def test_external_resource_mapping_preserves_canonical_item_identity(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("source-map", "Source mapping")
         owner = await auth.create_user("source-map@example.com")
         role = await auth.create_role(tenant.id, "source-manager", "Source Manager")
@@ -448,7 +507,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme-knowledge", "Acme Knowledge")
         owner = await auth.create_user("knowledge-owner@example.com")
         role = await auth.create_role(
@@ -460,7 +519,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         await auth.assign_membership(owner.id, tenant.id, role.id)
         actor = await auth.get_context(owner.id, tenant_id=tenant.id)
 
-        created = await AdminItemService(session).create_collection(
+        created = await ItemCatalogService(session).create_collection(
             actor,
             title="Engineering handbook",
             inherit_access=True,
@@ -470,9 +529,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         assert created["item_type"] == "collection"
         assert created["title"] == "Engineering handbook"
         assert created["inherit_access"] is True
-        assert created["metadata"] == {
-            "description": "Governed engineering knowledge"
-        }
+        assert created["metadata"] == {"description": "Governed engineering knowledge"}
         assert created["created_by_user_id"] == str(owner.id)
         assert created["collection_access"] == [
             {
@@ -481,7 +538,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
                 "role": "owner",
             }
         ]
-        listed = await AdminItemService(session).list_items(
+        listed = await ItemCatalogService(session).list_items(
             actor,
             item_type="collection",
             search="governed engineering",
@@ -500,7 +557,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         assert audit_event is not None
         assert audit_event.tenant_id == tenant.id
 
-        updated = await AdminItemService(session).update_collection(
+        updated = await ItemCatalogService(session).update_collection(
             actor,
             UUID(created["id"]),
             title="Engineering playbook",
@@ -540,7 +597,7 @@ class _AsyncUpload:
         if self._offset >= len(self._body):
             return b""
         end = len(self._body) if size < 0 else self._offset + size
-        chunk = self._body[self._offset:end]
+        chunk = self._body[self._offset : end]
         self._offset += len(chunk)
         return chunk
 
@@ -569,11 +626,30 @@ class _UploadStorage:
         )
 
 
+class _UnavailableIngestion:
+    async def index_upload(self, *_: object, **__: object) -> Item:
+        raise DocumentProcessingError("indexing is outside this integration test")
+
+
+def _uploads(
+    session_factory: async_sessionmaker[AsyncSession],
+    storage: _UploadStorage,
+    **kwargs: object,
+) -> DocumentUploadService:
+    return DocumentUploadService(
+        session_factory,
+        object_storage=storage,
+        ingestion_service=_UnavailableIngestion(),  # type: ignore[arg-type]
+        document_source=object(),  # type: ignore[arg-type]
+        **kwargs,
+    )
+
+
 async def _collection_upload_contexts(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> tuple[UUID, AuthContext, AuthContext, AuthContext]:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("upload-tenant", "Upload tenant")
         other_tenant = await auth.create_tenant("upload-other", "Other tenant")
         owner = await auth.create_user("upload-owner@example.com")
@@ -645,9 +721,11 @@ async def _collection_upload_contexts(
 async def test_collection_upload_is_authorized_parented_and_retry_safe(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    collection_id, editor, viewer, _ = await _collection_upload_contexts(session_factory)
+    collection_id, editor, viewer, _ = await _collection_upload_contexts(
+        session_factory
+    )
     storage = _UploadStorage()
-    uploads = UploadService(session_factory, object_storage=storage)
+    uploads = _uploads(session_factory, storage)
 
     first = await uploads.upload_to_collection(
         editor,
@@ -709,7 +787,7 @@ async def test_collection_upload_rejects_tenant_permission_and_collection_states
     collection_id, _, viewer, outsider = await _collection_upload_contexts(
         session_factory
     )
-    uploads = UploadService(session_factory, object_storage=_UploadStorage())
+    uploads = _uploads(session_factory, _UploadStorage())
     viewer_content = _AsyncUpload(b"viewer")
     outsider_content = _AsyncUpload(b"outsider")
 
@@ -775,9 +853,9 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     collection_id, editor, _, _ = await _collection_upload_contexts(session_factory)
-    uploads = UploadService(
+    uploads = _uploads(
         session_factory,
-        object_storage=_UploadStorage(),
+        _UploadStorage(),
         max_upload_bytes=8,
     )
 
@@ -800,10 +878,7 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
             content=_AsyncUpload(b"123456789"),
         )
 
-    failing_uploads = UploadService(
-        session_factory,
-        object_storage=_UploadStorage(fail=True),
-    )
+    failing_uploads = _uploads(session_factory, _UploadStorage(fail=True))
     with pytest.raises(ObjectStorageError):
         await failing_uploads.upload_to_collection(
             editor,
@@ -815,9 +890,7 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
         )
     async with session_factory() as session:
         failed = await session.scalar(
-            select(ItemUpload).where(
-                ItemUpload.idempotency_key == "storage-failure"
-            )
+            select(ItemUpload).where(ItemUpload.idempotency_key == "storage-failure")
         )
         assert failed is not None
         item = await session.get(Item, failed.item_id)
