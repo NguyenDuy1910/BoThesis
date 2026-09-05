@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -169,6 +170,50 @@ class BlockingRetriever(KnowledgeRetriever):
     ) -> list[Evidence]:
         await asyncio.Event().wait()
         return []
+
+
+class SelectiveRetriever(KnowledgeRetriever):
+    """Answer known queries and stall on the rest, to force a partial failure."""
+
+    def __init__(self, evidence_by_query: dict[str, list[Evidence]]) -> None:
+        self.evidence_by_query = evidence_by_query
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        ctx: AgentContext,
+    ) -> list[Evidence]:
+        evidence = self.evidence_by_query.get(query)
+        if evidence is None:
+            await asyncio.Event().wait()
+        return evidence or []
+
+
+class SlowRetriever(KnowledgeRetriever):
+    """Record how many searches overlap, so concurrency is observable."""
+
+    def __init__(self, *, delay_seconds: float, evidence: list[Evidence]) -> None:
+        self.delay_seconds = delay_seconds
+        self.evidence = evidence
+        self.in_flight = 0
+        self.concurrent_peak = 0
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+        ctx: AgentContext,
+    ) -> list[Evidence]:
+        self.in_flight += 1
+        self.concurrent_peak = max(self.concurrent_peak, self.in_flight)
+        try:
+            await asyncio.sleep(self.delay_seconds)
+            return self.evidence
+        finally:
+            self.in_flight -= 1
 
 
 class StubDocumentIndex:
@@ -515,6 +560,75 @@ async def test_knowledge_search_handles_timeouts() -> None:
 
     assert result.error == "Knowledge search timed out. Please try again."
     assert result.metadata["outcome"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_search_keeps_evidence_when_only_one_query_fails() -> None:
+    """A partial retrieval failure must not discard the evidence that arrived."""
+
+    tool = KnowledgeSearch(
+        SelectiveRetriever({"annual leave": [EVIDENCE]}),
+        timeout_seconds=0.05,
+    )
+
+    result = await tool.execute(
+        {"queries": ["annual leave", "carry over"]},
+        ToolContext(agent_context=CONTEXT),
+    )
+
+    assert result.error is None
+    assert result.metadata["outcome"] == "partial_success"
+    assert [item.id for item in result.evidence] == ["ref_1"]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_search_runs_queries_concurrently_under_one_deadline() -> None:
+    """Queries share the tool's budget instead of each restarting their own."""
+
+    retriever = SlowRetriever(delay_seconds=0.05, evidence=[EVIDENCE])
+    tool = KnowledgeSearch(retriever, timeout_seconds=0.4)
+
+    started_at = time.perf_counter()
+    result = await tool.execute(
+        {"queries": ["annual leave", "carry over", "unused days"]},
+        ToolContext(agent_context=CONTEXT),
+    )
+    elapsed = time.perf_counter() - started_at
+
+    assert result.metadata["outcome"] == "success"
+    assert retriever.concurrent_peak == 3
+    # Three sequential 50ms searches would take 150ms; concurrent ones do not.
+    assert elapsed < 0.12
+
+
+@pytest.mark.asyncio
+async def test_knowledge_search_bounds_total_time_when_every_query_stalls() -> None:
+    tool = KnowledgeSearch(BlockingRetriever(), timeout_seconds=0.05)
+
+    started_at = time.perf_counter()
+    result = await tool.execute(
+        {"queries": ["annual leave", "carry over", "unused days"]},
+        ToolContext(agent_context=CONTEXT),
+    )
+    elapsed = time.perf_counter() - started_at
+
+    assert result.metadata["outcome"] == "timeout"
+    assert elapsed < 0.2
+
+
+def test_knowledge_search_rejects_a_retriever_that_is_not_a_boundary() -> None:
+    """A misconfigured runtime fails at wiring time, not on every tool call."""
+
+    with pytest.raises(TypeError, match="KnowledgeRetriever"):
+        KnowledgeSearch(SimpleNamespace())  # type: ignore[arg-type]
+
+
+def test_knowledge_search_builds_its_declaration_once() -> None:
+    """The runtime reads the declaration on every turn; it must not be rebuilt."""
+
+    tool = KnowledgeSearch(StubRetriever([]))
+
+    assert tool.definition is tool.definition
 
 
 def test_knowledge_search_declares_itself_as_a_protocol_function_tool() -> None:

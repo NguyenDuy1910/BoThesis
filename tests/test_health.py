@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import api.app as api_app
+import api.deps as api_deps
 from bothesis.health import HealthService, HealthSettings
 
 SETTINGS = HealthSettings(
@@ -38,12 +39,12 @@ def _service(handler) -> HealthService:
 
 
 def _get_health(service: HealthService) -> httpx.Response:
-    api_app.app.dependency_overrides[api_app._get_health_service] = lambda: service
+    api_app.app.dependency_overrides[api_deps.get_health_service] = lambda: service
     try:
         with TestClient(api_app.app) as client:
             return client.get("/health")
     finally:
-        api_app.app.dependency_overrides.pop(api_app._get_health_service, None)
+        api_app.app.dependency_overrides.pop(api_deps.get_health_service, None)
 
 
 def _qdrant_collection() -> dict[str, object]:

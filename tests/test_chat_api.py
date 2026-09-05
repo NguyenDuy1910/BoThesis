@@ -21,7 +21,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 import native_responses as native
 
 import api.app as api_app
-import api.workspace as workspace_api_module
+import api.deps as api_deps
+import bothesis.runtime as runtime_module
+import bothesis.services.workspace_documents as workspace_documents_module
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext
 from bothesis.agent.tools import ToolRegistry
@@ -35,9 +37,15 @@ from bothesis.connector.protocol import (
     SourceProvider,
 )
 from bothesis.document_index import ContextualChunk
-from bothesis.knowledge import Evidence, ItemKnowledgeRetriever, source_reference
-from api.identity import RequestIdentity
+from bothesis.knowledge import Evidence, ItemKnowledgeRetriever
+from api.routers import ChatRequest
 from bothesis.services import AuthContext
+from bothesis.services.document_presentation import (
+    DocumentPresenter,
+    payload_citation,
+    viewer_elements,
+)
+from bothesis.services.workspace_documents import WorkspaceDocumentService
 
 
 def search_call(output_index: int = 0) -> list[Any]:
@@ -102,10 +110,10 @@ def test_default_agent_composes_the_openrouter_transport(
                 yield None
 
     monkeypatch.setattr(openrouter_transport, "OpenRouterTransport", TestOpenRouterTransport)
-    monkeypatch.setattr(workspace_api_module, "OpenRouterTransport", TestOpenRouterTransport)
-    monkeypatch.setattr(api_app._workspace_api, "_agent", None)
+    monkeypatch.setattr(runtime_module, "OpenRouterTransport", TestOpenRouterTransport)
+    monkeypatch.setattr(api_deps.get_runtime(), "_agent", None)
 
-    agent = api_app._workspace_api._get_agent()
+    agent = api_deps.get_runtime().agent()
 
     assert isinstance(agent.model, TestOpenRouterTransport)
     assert agent.tools.has("knowledge_search")
@@ -263,6 +271,20 @@ class _SessionContext:
         return None
 
 
+def _override_caller(monkeypatch: Any, resolve: Any) -> None:
+    """Answer both caller dependencies with one already-resolved identity.
+
+    The override takes no parameters so FastAPI does not read a ``*args``
+    signature as required query parameters.
+    """
+
+    async def caller() -> AuthContext:
+        return await resolve()
+
+    for dependency in (api_deps.get_auth_context, api_deps.get_chat_auth_context):
+        monkeypatch.setitem(api_app.app.dependency_overrides, dependency, caller)
+
+
 def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
     user_id = uuid4()
     tenant_id = uuid4()
@@ -279,8 +301,8 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
             group_ids=(),
         )
 
-    monkeypatch.setattr(api_app._workspace_api, "_resolve_access", resolve_access)
-    monkeypatch.setattr(api_app._workspace_api, "_session_factory", _SessionContext)
+    _override_caller(monkeypatch, resolve_access)
+    monkeypatch.setattr(api_deps.get_runtime(), "_session_factory", _SessionContext)
 
     class ConversationRecorder:
         def __init__(self) -> None:
@@ -295,12 +317,13 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
             self.finished.append((_, __))
             return None
 
-    monkeypatch.setattr(api_app._workspace_api, "_conversations", ConversationRecorder())
+    monkeypatch.setattr(api_deps.get_runtime(), "_conversations", ConversationRecorder())
     async def allowed_collections(*_: Any, **__: Any) -> tuple[UUID, ...]:
         return (UUID(int=12), UUID(int=14))
 
     monkeypatch.setattr(
-        "api.workspace.CollectionAccessService.allowed_collection_ids",
+        "bothesis.services.collection_access.CollectionAccessService"
+        ".allowed_collection_ids",
         allowed_collections,
     )
     return user_id, tenant_id
@@ -314,13 +337,26 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
     user_id = uuid4()
     now = datetime.now(UTC).isoformat()
 
-    async def upload_collection_document(
-        identity: RequestIdentity,
+    access = AuthContext(
+        user_id=user_id,
+        email="editor@example.test",
+        display_name="Editor",
+        tenant_id=tenant_id,
+        role_id=uuid4(),
+        role_code="editor",
+        permission_codes=("admin", "knowledge.read"),
+        group_ids=(),
+    )
+
+    async def resolve_access(*_: Any, **__: Any) -> AuthContext:
+        return access
+
+    async def upload_to_collection(
+        caller: AuthContext,
         requested_collection_id: UUID,
         **values: Any,
     ) -> dict[str, Any]:
-        assert identity.tenant_id == str(tenant_id)
-        assert identity.user_id == str(user_id)
+        assert caller is access
         assert requested_collection_id == collection_id
         assert values["idempotency_key"] == "upload-contract-1"
         assert values["file_name"] == "policy.txt"
@@ -343,10 +379,11 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
             "created": True,
         }
 
-    monkeypatch.setattr(
-        api_app._workspace_api,
-        "upload_collection_document",
-        upload_collection_document,
+    _override_caller(monkeypatch, resolve_access)
+    monkeypatch.setitem(
+        api_app.app.dependency_overrides,
+        api_deps.get_workspace_document_service,
+        lambda: SimpleNamespace(upload_to_collection=upload_to_collection),
     )
     with TestClient(api_app.app) as client:
         response = client.post(
@@ -368,10 +405,6 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
 async def test_collection_upload_reports_ingestion_dispatch_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service = workspace_api_module.WorkspaceApi(
-        allow_insecure_development_identity=True,
-        qdrant_prefer_grpc=False,
-    )
     user_id = uuid4()
     tenant_id = uuid4()
     collection_id = uuid4()
@@ -413,19 +446,23 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
             document.metadata_["processing"] = {"index_schema_version": "test"}
             return document
 
-    async def resolve_access(*_: Any, **__: Any) -> AuthContext:
-        return access
-
     async def record_audit(*_: Any, **__: Any) -> None:
         return None
 
-    monkeypatch.setattr(service, "_resolve_access", resolve_access)
-    monkeypatch.setattr(service, "_uploads", Uploads())
-    monkeypatch.setattr(service, "_session_factory", _SessionContext)
-    monkeypatch.setattr(workspace_api_module.AuditService, "record", record_audit)
+    monkeypatch.setattr(workspace_documents_module.AuditService, "record", record_audit)
+    service = WorkspaceDocumentService(
+        _SessionContext,
+        uploads=Uploads(),
+        presenter=DocumentPresenter(
+            object_storage=lambda: None,
+            preview=SimpleNamespace(resolve=lambda *_, **__: None),
+            citation_url_seconds=300,
+            preview_url_seconds=300,
+        ),
+    )
 
-    result = await service.upload_collection_document(
-        RequestIdentity(user_id=user_id, tenant_id=tenant_id),
+    result = await service.upload_to_collection(
+        access,
         collection_id,
         idempotency_key="dispatch-failure",
         file_name="policy.txt",
@@ -438,10 +475,7 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
     assert result["document"]["status"] == "failed"
     assert result["document"]["parent_item_id"] == str(collection_id)
 
-    retried = await service.retry_document_indexing(
-        RequestIdentity(user_id=user_id, tenant_id=tenant_id),
-        document.id,
-    )
+    retried = await service.retry_indexing(access, document.id)
 
     assert retried["created"] is False
     assert retried["ingestion_status"] == "ready"
@@ -459,7 +493,7 @@ def test_qdrant_citation_does_not_synthesize_element_ranges() -> None:
         "page_end": 4,
     }
 
-    citation = api_app._workspace_api._payload_citation(payload)
+    citation = payload_citation(payload)
 
     assert citation.spans == ()
     assert citation.section == "Canonical section"
@@ -487,7 +521,7 @@ def test_viewer_uses_canonical_multispan_citation_geometry() -> None:
         ),
     )
 
-    elements, chunks_by_id = api_app._workspace_api._viewer_elements(
+    elements, chunks_by_id = viewer_elements(
         "doc-1",
         [payload],
         {"chunk-multi": citation},
@@ -496,7 +530,7 @@ def test_viewer_uses_canonical_multispan_citation_geometry() -> None:
     assert elements == []
     assert chunks_by_id["chunk-multi"] is payload
     assert citation.spans[0].element_id == "p001_para_001"
-    assert api_app._workspace_api._payload_citation(payload).spans == ()
+    assert payload_citation(payload).spans == ()
 
 
 def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
@@ -513,7 +547,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
             recent_history_messages=2,
         ),
     )
-    monkeypatch.setattr(api_app._workspace_api, "_agent", agent)
+    monkeypatch.setattr(api_deps.get_runtime(), "_agent", agent)
     user_id, tenant_id = _install_access(monkeypatch)
     conversation_id = uuid4()
 
@@ -535,7 +569,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     events = [
         json.loads(line.removeprefix("data: "))
         for line in response.text.splitlines()
@@ -568,7 +602,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     assert annotation["citation"]["reference"] == "ref_1"
     assert annotation["citation"]["number"] == 1
     assert annotation["citation"]["source"]["provider"] == "confluence"
-    conversations = api_app._workspace_api._conversations
+    conversations = api_deps.get_runtime()._conversations
     assert conversations is not None
     assert len(conversations.started) == 1
     assert conversations.started[0][1]["content"] == "What is the leave policy?"
@@ -676,7 +710,7 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
         registry,
         config=AgentConfig(max_model_turns=3, max_tool_rounds=2),
     )
-    monkeypatch.setattr(api_app._workspace_api, "_agent", agent)
+    monkeypatch.setattr(api_deps.get_runtime(), "_agent", agent)
     user_id, tenant_id = _install_access(monkeypatch)
 
     with TestClient(api_app.app) as client:
@@ -691,7 +725,7 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     events = [
         json.loads(line.removeprefix("data: "))
         for line in response.text.splitlines()
@@ -795,7 +829,7 @@ def test_chat_api_places_repeated_and_multiple_citations_inline(monkeypatch) -> 
         ]
     )
     monkeypatch.setattr(
-        api_app._workspace_api,
+        api_deps.get_runtime(),
         "_agent",
         Agent(
             transport,
@@ -817,7 +851,7 @@ def test_chat_api_places_repeated_and_multiple_citations_inline(monkeypatch) -> 
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     events = [
         json.loads(line.removeprefix("data: "))
         for line in response.text.splitlines()
@@ -906,7 +940,7 @@ def test_document_search_api_uses_authorized_retrieval_scope(monkeypatch) -> Non
             ]
 
     retriever = SearchRetriever()
-    monkeypatch.setattr(api_app._workspace_api, "_retriever", retriever)
+    monkeypatch.setattr(api_deps.get_runtime(), "_retriever", retriever)
 
     with TestClient(api_app.app) as client:
         response = client.post(
@@ -922,7 +956,7 @@ def test_document_search_api_uses_authorized_retrieval_scope(monkeypatch) -> Non
             },
         )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["total"] == 1
     assert payload["results"][0]["id"] == str(item_id)
@@ -936,7 +970,7 @@ def test_chat_api_flushes_safe_interleaved_events(monkeypatch) -> None:
     registry = ToolRegistry()
     registry.register(KnowledgeSearch(StubRetriever()))
     agent = Agent(InterleavedTransport(), registry)
-    monkeypatch.setattr(api_app._workspace_api, "_agent", agent)
+    monkeypatch.setattr(api_deps.get_runtime(), "_agent", agent)
     user_id, tenant_id = _install_access(monkeypatch)
 
     with TestClient(api_app.app) as client:
@@ -1049,9 +1083,9 @@ def test_chat_api_rejects_history_message_over_context_budget() -> None:
 
 def test_chat_request_requires_a_bounded_explicit_collection_selection() -> None:
     with pytest.raises(ValueError, match="requires at least one Collection"):
-        api_app.ChatRequest(message="hello", knowledge_mode="selected")
+        ChatRequest(message="hello", knowledge_mode="selected")
 
-    request = api_app.ChatRequest(
+    request = ChatRequest(
         message="hello",
         knowledge_mode="selected",
         collection_item_ids=[UUID(int=12), UUID(int=14)],

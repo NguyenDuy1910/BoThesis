@@ -16,7 +16,12 @@ from bothesis.knowledge import (
     EvidenceContextBuilder,
     KnowledgeRetriever,
 )
-from bothesis.observability import LangfuseTracing
+from bothesis.observability import LangfuseTracing, RetrievalTrace
+
+
+_EMPTY_CONTENT = "No matching access-permitted enterprise documents were found."
+_TIMEOUT_ERROR = "Knowledge search timed out. Please try again."
+_FAILURE_ERROR = "Knowledge search is temporarily unavailable. Please try again."
 
 
 class KnowledgeSearch(Tool):
@@ -30,12 +35,17 @@ class KnowledgeSearch(Tool):
         *,
         result_limit: int = 5,
         max_queries: int = 3,
-        timeout_seconds: float = 8.0,
+        timeout_seconds: float = 25.0,
         max_context_characters: int = 8_000,
         max_evidence_characters: int = 1_600,
         context_builder: ContextBuilder | None = None,
         tracing: LangfuseTracing | None = None,
     ) -> None:
+        # The retrieval boundary is checked once here rather than on every
+        # execution: a misconfigured runtime must fail at wiring time, not be
+        # reported to the model as a per-call tool failure.
+        if not isinstance(retriever, KnowledgeRetriever):
+            raise TypeError("retriever must implement the KnowledgeRetriever protocol")
         if result_limit < 1:
             raise ValueError("result_limit must be at least one")
         if max_queries < 1:
@@ -54,16 +64,26 @@ class KnowledgeSearch(Tool):
             max_evidence_characters=max_evidence_characters,
         )
         self._tracing = tracing
+        # The declaration is fixed once the limits are known, and the runtime
+        # reads it on every model turn, tool call, and text-payload check.
+        self._definition = self._build_definition()
 
     @property
     def definition(self) -> ToolDefinition:
+        return self._definition
+
+    def _build_definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="knowledge_search",
             description=(
-                "Search access-permitted enterprise knowledge for source-grounded "
-                "evidence. Use focused standalone queries that retain exact "
-                "entities, identifiers, dates, and constraints. Results include "
-                "the source references to cite."
+                "Search access-permitted enterprise knowledge base for source-grounded "
+                "evidence. ONLY use this tool when you need enterprise-specific "
+                "information. Use focused, specific queries with exact entity names, "
+                "identifiers, or dates. If the query is too vague or generic, ask "
+                "the user for clarification BEFORE using this tool. Results include "
+                "the source references to cite. If no results are found, explicitly "
+                "tell the user that information was not found in the knowledge base - "
+                "never fabricate an answer."
             ),
             input_schema={
                 "type": "object",
@@ -71,8 +91,13 @@ class KnowledgeSearch(Tool):
                     "queries": {
                         "type": "array",
                         "description": (
-                            "One to three focused standalone queries. Do not use "
-                            "generic terms or combine unrelated questions."
+                            "One to three focused standalone queries with specific details. "
+                            "Each query must be specific and independently searchable. "
+                            "Do not use generic terms (like 'information', 'details', 'company') "
+                            "without specific context. Do not combine unrelated questions. "
+                            "Use exact names, identifiers, dates, project codes when available. "
+                            "If you only have a vague concept, ask the user for more specifics "
+                            "instead of searching with generic terms."
                         ),
                         "items": {
                             "type": "string",
@@ -96,7 +121,7 @@ class KnowledgeSearch(Tool):
         ctx: ToolContext,
     ) -> ToolOutput:
         queries, validation_error = self._validated_queries(arguments)
-        if validation_error:
+        if validation_error is not None:
             return ToolOutput(
                 content="",
                 error=validation_error,
@@ -106,89 +131,96 @@ class KnowledgeSearch(Tool):
                     "duration_ms": 0,
                 },
             )
-        if not isinstance(self._retriever, KnowledgeRetriever):
-            return ToolOutput(
-                content="",
-                error="Knowledge search is temporarily unavailable. Please try again.",
-                metadata={
-                    "outcome": "configuration_error",
-                    "result_count": 0,
-                    "duration_ms": 0,
-                },
-            )
 
         started_at = perf_counter()
-        results = await asyncio.gather(
-            *(self._search_query(query, ctx) for query in queries),
-        )
-        evidence: list[Evidence] = []
-        failures: list[str] = []
-        seen_evidence_ids: set[str] = set()
-        for query_evidence, failure in results:
-            if failure:
-                failures.append(failure)
-            for item in query_evidence:
-                if item.id in seen_evidence_ids:
-                    continue
-                seen_evidence_ids.add(item.id)
-                # The compact reference is what the model is allowed to cite,
-                # and it is assigned before the context is built so the model
-                # never sees an Item or chunk identifier it could echo back.
-                evidence.append(
-                    replace(
-                        item,
-                        id=ctx.references.reference(item.item_id, item.chunk_id),
-                    )
-                )
-
+        results = await self._search_all(queries, ctx)
+        evidence, failures = self._merged_evidence(results, ctx)
         duration_ms = self._duration_ms(started_at)
-        if not evidence:
-            if failures:
-                outcome = (
-                    "timeout"
-                    if all(failure == "timeout" for failure in failures)
-                    else "retrieval_failure"
-                )
-                message = (
-                    "Knowledge search timed out. Please try again."
-                    if outcome == "timeout"
-                    else "Knowledge search is temporarily unavailable. Please try again."
-                )
-                return ToolOutput(
-                    content="",
-                    error=message,
-                    metadata={
-                        "outcome": outcome,
-                        "result_count": 0,
-                        "duration_ms": duration_ms,
-                    },
-                )
+
+        context = self._context_builder.build(evidence) if evidence else None
+        if context is not None and context.evidence:
             return ToolOutput(
-                content="No matching access-permitted enterprise documents were found.",
+                content=context.text,
+                evidence=list(context.evidence),
                 metadata={
-                    "outcome": "empty",
-                    "result_count": 0,
-                    "success_criteria_met": False,
+                    "outcome": "partial_success" if failures else "success",
+                    "result_count": len(context.evidence),
+                    "success_criteria_met": True,
                     "duration_ms": duration_ms,
                 },
             )
-
-        context = self._context_builder.build(evidence)
+        if failures:
+            # Reaching here means no query produced citable content, so the
+            # failure is the whole outcome rather than a partial one.
+            timed_out = all(failure == "timeout" for failure in failures)
+            return ToolOutput(
+                content="",
+                error=_TIMEOUT_ERROR if timed_out else _FAILURE_ERROR,
+                metadata={
+                    "outcome": "timeout" if timed_out else "retrieval_failure",
+                    "result_count": 0,
+                    "duration_ms": duration_ms,
+                },
+            )
         return ToolOutput(
-            content=context.text,
-            evidence=list(context.evidence),
+            content=_EMPTY_CONTENT,
             metadata={
-                "outcome": "partial_success" if failures else "success",
-                "result_count": len(context.evidence),
-                "success_criteria_met": True,
+                "outcome": "empty",
+                "result_count": 0,
+                "success_criteria_met": False,
                 "duration_ms": duration_ms,
             },
         )
+
+    async def _search_all(
+        self,
+        queries: list[str],
+        ctx: ToolContext,
+    ) -> list[tuple[list[Evidence], str | None]]:
+        """Run every query concurrently under one shared wall-clock budget."""
+
+        # A single deadline bounds the whole call: without it, queries dispatched
+        # behind a saturated retrieval pool each restart their own budget and the
+        # tool can outlive the timeout the runtime was promised.
+        deadline = asyncio.get_running_loop().time() + self._timeout_seconds
+        if len(queries) == 1:
+            return [await self._search_query(queries[0], ctx, deadline)]
+        return list(
+            await asyncio.gather(
+                *(self._search_query(query, ctx, deadline) for query in queries)
+            )
+        )
+
+    def _merged_evidence(
+        self,
+        results: list[tuple[list[Evidence], str | None]],
+        ctx: ToolContext,
+    ) -> tuple[list[Evidence], list[str]]:
+        """Collapse per-query results into one deduplicated, citable ranking."""
+
+        evidence: list[Evidence] = []
+        failures: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for query_evidence, failure in results:
+            if failure is not None:
+                failures.append(failure)
+                continue
+            for item in query_evidence:
+                identity = (item.item_id, item.chunk_id)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                # The compact reference is what the model is allowed to cite,
+                # and it is assigned before the context is built so the model
+                # never sees an Item or chunk identifier it could echo back.
+                evidence.append(replace(item, id=ctx.references.reference(*identity)))
+        return evidence, failures
 
     async def _search_query(
         self,
         query: str,
         ctx: ToolContext,
+        deadline: float,
     ) -> tuple[list[Evidence], str | None]:
         started_at = perf_counter()
         trace_context = (
@@ -202,35 +234,18 @@ class KnowledgeSearch(Tool):
         )
         with trace_context as retrieval_trace:
             try:
-                evidence = await asyncio.wait_for(
-                    self._retriever.search(
+                async with asyncio.timeout_at(deadline):
+                    evidence = await self._retriever.search(
                         query,
                         limit=self._result_limit,
                         ctx=ctx.agent_context,
-                    ),
-                    timeout=self._timeout_seconds,
-                )
+                    )
             except TimeoutError:
-                if retrieval_trace is not None:
-                    retrieval_trace.fail(
-                        category="timeout",
-                        duration_ms=self._duration_ms(started_at),
-                    )
-                return [], "timeout"
+                return [], self._failed(retrieval_trace, "timeout", started_at)
             except ValueError:
-                if retrieval_trace is not None:
-                    retrieval_trace.fail(
-                        category="invalid_query",
-                        duration_ms=self._duration_ms(started_at),
-                    )
-                return [], "invalid_query"
+                return [], self._failed(retrieval_trace, "invalid_query", started_at)
             except Exception:  # noqa: BLE001 - retrieval errors are model observations
-                if retrieval_trace is not None:
-                    retrieval_trace.fail(
-                        category="retrieval_failure",
-                        duration_ms=self._duration_ms(started_at),
-                    )
-                return [], "retrieval_failure"
+                return [], self._failed(retrieval_trace, "retrieval_failure", started_at)
 
             if retrieval_trace is not None:
                 retrieval_trace.complete(
@@ -245,6 +260,16 @@ class KnowledgeSearch(Tool):
                     duration_ms=self._duration_ms(started_at),
                 )
             return evidence, None
+
+    def _failed(
+        self,
+        trace: RetrievalTrace | None,
+        category: str,
+        started_at: float,
+    ) -> str:
+        if trace is not None:
+            trace.fail(category=category, duration_ms=self._duration_ms(started_at))
+        return category
 
     def _validated_queries(
         self,
@@ -265,7 +290,10 @@ class KnowledgeSearch(Tool):
             if not query:
                 return [], "knowledge_search queries must not be empty."
             if len(query) > self._MAX_QUERY_CHARACTERS:
-                return [], "knowledge_search queries must not exceed 512 characters."
+                return [], (
+                    "knowledge_search queries must not exceed "
+                    f"{self._MAX_QUERY_CHARACTERS} characters."
+                )
             query_key = query.casefold()
             if query_key not in seen_queries:
                 seen_queries.add(query_key)

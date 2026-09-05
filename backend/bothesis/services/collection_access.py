@@ -135,7 +135,7 @@ class CollectionAccessService:
             )
         )
         return {
-            "items": [self._payload(grant) for grant in grants],
+            "items": [self.grant_payload(grant) for grant in grants],
             "total": int(total or 0),
             "page": page,
             "page_size": page_size,
@@ -339,7 +339,7 @@ class CollectionAccessService:
             raise AdminNotFoundError(f"{principal_type} principal not found")
 
     @staticmethod
-    def _payload(grant: CollectionAccess) -> dict[str, object]:
+    def grant_payload(grant: CollectionAccess) -> dict[str, object]:
         return {
             "item_id": str(grant.item_id),
             "principal_type": grant.principal_type,

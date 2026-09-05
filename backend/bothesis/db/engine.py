@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from functools import lru_cache
+from typing import Any
 
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
@@ -69,6 +70,43 @@ def get_session_factory(
     )
 
 
+SessionFactory = Callable[[], AsyncSession]
+
+
+class LazySessionFactory:
+    """Stand in for a session factory, opening the engine on first use.
+
+    Building the engine reads ``DATABASE_URL``, so deferring it keeps request
+    validation and application wiring independent of database configuration.
+    Every other attribute — ``begin``, ``kw``, and the rest of the
+    ``async_sessionmaker`` surface callers rely on — is forwarded unchanged.
+    """
+
+    __slots__ = ("_factory",)
+
+    def __init__(self) -> None:
+        self._factory: async_sessionmaker[AsyncSession] | None = None
+
+    def resolve(self) -> async_sessionmaker[AsyncSession]:
+        """Return the real factory, creating the engine the first time."""
+
+        factory = self._factory
+        if factory is None:
+            factory = get_session_factory()
+            self._factory = factory
+        return factory
+
+    def __call__(self, **local_kw: Any) -> AsyncSession:
+        return self.resolve()(**local_kw)
+
+    def __getattr__(self, name: str) -> Any:
+        # ``_factory`` lives in ``__slots__``; reaching here for it would mean
+        # the instance was never initialized, and resolving would recurse.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self.resolve(), name)
+
+
 async def get_session() -> AsyncIterator[AsyncSession]:
     """Yield a request-scoped session suitable for a FastAPI dependency."""
 
@@ -115,6 +153,8 @@ async def get_connection(
 
 
 __all__ = [
+    "LazySessionFactory",
+    "SessionFactory",
     "get_connection",
     "get_engine",
     "get_session",

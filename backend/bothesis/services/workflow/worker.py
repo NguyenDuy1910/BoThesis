@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -15,28 +13,35 @@ from temporalio.worker.workflow_sandbox import (
     SandboxRestrictions,
 )
 
+from config import AppConfig, get_config
+
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.db.engine import get_session_factory
 from bothesis.document_index import ItemIndex, SemanticContextualizer
-from bothesis.storage import S3DocumentStorage
-from bothesis.services.workflow.ingestion_activity import IngestionActivity
-from bothesis.services.workflow.ingestion_workflow import IngestionWorkflow
-from bothesis.services.preview import KnowledgePreview
+from bothesis.runtime import AppRuntime
 from bothesis.services.workflow import TemporalSettings
 from bothesis.services.workflow.client import TemporalClientProvider
+from bothesis.services.workflow.ingestion_activity import IngestionActivity
+from bothesis.services.workflow.ingestion_workflow import IngestionWorkflow
 
 
 class TemporalWorker:
     """Register and run BoThesis application workflows and Activities."""
 
-    def __init__(self, settings: TemporalSettings | None = None) -> None:
+    def __init__(
+        self,
+        settings: TemporalSettings | None = None,
+        config: AppConfig | None = None,
+    ) -> None:
         self._settings = settings or TemporalSettings.from_environment()
+        self._config = config or get_config()
+        self._runtime = AppRuntime(self._config)
         self._contextualization_transport: OpenRouterTransport | None = None
         self._index: ItemIndex | None = None
-        self._storage: S3DocumentStorage | None = None
 
     async def run(self) -> None:
         client = await TemporalClientProvider(self._settings).get()
+        worker_config = self._config.worker
         ingestion = self._configured_ingestion_activity()
         worker = Worker(
             client,
@@ -54,13 +59,11 @@ class TemporalWorker:
                     "bothesis.services.workflow",
                 )
             ),
-            max_concurrent_activities=int(
-                os.getenv("BOTHESIS_TEMPORAL_MAX_CONCURRENT_ACTIVITIES", "4")
+            max_concurrent_activities=worker_config.max_concurrent_activities,
+            max_task_queue_activities_per_second=worker_config.activity_rate_limit,
+            graceful_shutdown_timeout=timedelta(
+                seconds=worker_config.graceful_shutdown_seconds
             ),
-            max_task_queue_activities_per_second=_optional_float(
-                os.getenv("BOTHESIS_TEMPORAL_ACTIVITY_RATE_LIMIT")
-            ),
-            graceful_shutdown_timeout=timedelta(seconds=30),
         )
         try:
             await worker.run()
@@ -68,53 +71,39 @@ class TemporalWorker:
             await self._close()
 
     def _configured_ingestion_activity(self) -> IngestionActivity:
-        embedder = OpenRouterTransport(
-            base_url=os.getenv(
-                "OPEN_ROUTER_BASE_URL", OpenRouterTransport.DEFAULT_BASE_URL
-            )
-        )
-        semantic_contextualizer = None
-        if _environment_boolean("BOTHESIS_CONTEXTUALIZATION_ENABLED", default=True):
-            model = os.getenv("BOTHESIS_CONTEXTUALIZATION_MODEL") or None
+        """Build the ingestion Activity from configuration, not the environment."""
+
+        model = self._config.model
+        index = self._config.vector_index
+        contextualizer = None
+        if model.contextualization_enabled:
             self._contextualization_transport = OpenRouterTransport(
-                base_url=os.getenv(
-                    "OPEN_ROUTER_BASE_URL", OpenRouterTransport.DEFAULT_BASE_URL
-                ),
-                model=model,
+                base_url=model.openrouter_base_url,
+                model=model.contextualization_model,
             )
-            semantic_contextualizer = SemanticContextualizer(
+            contextualizer = SemanticContextualizer(
                 self._contextualization_transport,
-                model_name=model,
+                model_name=model.contextualization_model,
             )
+        # Indexing runs longer than a request, so it uses its own client timeout.
         self._index = ItemIndex(
-            collection_name=os.getenv("QDRANT_COLLECTION"),
-            url=os.getenv("QDRANT_URL"),
-            api_key=os.getenv("QDRANT_API_KEY") or None,
-            prefer_grpc=_environment_boolean("QDRANT_PREFER_GRPC"),
-            timeout=60,
-            embedder=embedder,
-            semantic_contextualizer=semantic_contextualizer,
-            embedding_batch_size=int(
-                os.getenv("BOTHESIS_DOCUMENT_EMBEDDING_BATCH_SIZE", "32")
-            ),
+            collection_name=index.collection,
+            url=index.url,
+            api_key=index.api_key,
+            prefer_grpc=index.prefer_grpc,
+            timeout=self._config.worker.indexing_timeout_seconds,
+            embedder=OpenRouterTransport(base_url=model.openrouter_base_url),
+            semantic_contextualizer=contextualizer,
+            embedding_batch_size=index.embedding_batch_size,
         )
-        self._storage = _object_storage()
         return IngestionActivity(
             get_session_factory(),
             self._index,
-            self._storage,
+            self._runtime.object_storage(),
             credential_encryption_key=(
-                os.getenv("BOTHESIS_INTEGRATION_ENCRYPTION_KEY") or None
+                self._config.integration.credential_encryption_key
             ),
-            preview=KnowledgePreview(
-                self._storage,
-                max_source_bytes=int(
-                    os.getenv("BOTHESIS_PREVIEW_MAX_SOURCE_BYTES", "104857600")
-                ),
-                max_pages=int(os.getenv("BOTHESIS_PREVIEW_MAX_PAGES", "50")),
-                max_dimension=int(os.getenv("BOTHESIS_PREVIEW_MAX_DIMENSION", "1600")),
-                webp_quality=int(os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")),
-            ),
+            preview=self._runtime.knowledge_preview(),
         )
 
     async def _close(self) -> None:
@@ -122,77 +111,7 @@ class TemporalWorker:
             await self._contextualization_transport.aclose()
         if self._index is not None:
             await self._index.aclose()
-        if self._storage is not None:
-            await self._storage.aclose()
-
-
-def _object_storage() -> S3DocumentStorage:
-    provider = (os.getenv("BOTHESIS_OBJECT_STORAGE_PROVIDER") or "aws_s3").strip()
-    if provider == "cloudflare_r2":
-        return S3DocumentStorage.for_cloudflare_r2(
-            bucket=(
-                os.getenv("BOTHESIS_R2_BUCKET")
-                or os.getenv("BOTHESIS_OBJECT_STORAGE_BUCKET")
-                or ""
-            ),
-            account_id=os.getenv("BOTHESIS_R2_ACCOUNT_ID") or None,
-            endpoint_url=os.getenv("BOTHESIS_R2_ENDPOINT_URL") or None,
-            access_key_id=os.getenv("BOTHESIS_R2_ACCESS_KEY_ID") or None,
-            secret_access_key=os.getenv("BOTHESIS_R2_SECRET_ACCESS_KEY") or None,
-            timeout_seconds=float(os.getenv("BOTHESIS_R2_TIMEOUT_SECONDS", "20")),
-            max_pool_connections=int(
-                os.getenv("BOTHESIS_R2_MAX_POOL_CONNECTIONS", "20")
-            ),
-        )
-    if provider != "aws_s3":
-        raise RuntimeError(
-            "BOTHESIS_OBJECT_STORAGE_PROVIDER must be aws_s3 or cloudflare_r2"
-        )
-    return S3DocumentStorage(
-        bucket=(
-            os.getenv("BOTHESIS_S3_BUCKET")
-            or os.getenv("BOTHESIS_OBJECT_STORAGE_BUCKET")
-            or ""
-        ),
-        region=(
-            os.getenv("BOTHESIS_S3_REGION")
-            or os.getenv("AWS_REGION")
-            or os.getenv("AWS_DEFAULT_REGION")
-            or None
-        ),
-        endpoint_url=(
-            os.getenv("BOTHESIS_S3_ENDPOINT_URL")
-            or os.getenv("BOTHESIS_OBJECT_STORAGE_ENDPOINT")
-            or None
-        ),
-        addressing_style=(os.getenv("BOTHESIS_S3_ADDRESSING_STYLE") or "auto").strip(),
-        timeout_seconds=float(os.getenv("BOTHESIS_S3_TIMEOUT_SECONDS", "20")),
-        max_pool_connections=int(os.getenv("BOTHESIS_S3_MAX_POOL_CONNECTIONS", "20")),
-    )
-
-
-def _environment_boolean(name: str, *, default: bool = False) -> bool:
-    raw_value = os.getenv(name)
-    if raw_value is None:
-        return default
-    try:
-        value = json.loads(raw_value)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"{name} must be a JSON boolean") from exc
-    if not isinstance(value, bool):
-        raise RuntimeError(  # noqa: TRY004 - invalid process configuration
-            f"{name} must be a JSON boolean"
-        )
-    return value
-
-
-def _optional_float(value: str | None) -> float | None:
-    if value is None or not value.strip():
-        return None
-    parsed = float(value)
-    if parsed <= 0:
-        raise ValueError("Temporal Activity rate limit must be positive")
-    return parsed
+        await self._runtime.aclose()
 
 
 async def _main() -> None:

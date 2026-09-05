@@ -400,10 +400,14 @@ class LangfuseTracing:
         self._client.flush()
 
 
-def create_langfuse_tracing() -> LangfuseTracing | None:
+def create_langfuse_tracing(
+    public_key: str | None = None,
+    secret_key: str | None = None,
+) -> LangfuseTracing | None:
     """Create tracing only when both project keys are configured."""
-    public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
-    secret_key = os.getenv("LANGFUSE_SECRET_KEY")
+
+    public_key = public_key or os.getenv("LANGFUSE_PUBLIC_KEY")
+    secret_key = secret_key or os.getenv("LANGFUSE_SECRET_KEY")
     if not public_key and not secret_key:
         return None
     if not public_key or not secret_key:
