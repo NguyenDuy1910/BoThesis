@@ -286,13 +286,21 @@ async def test_citation_markers_become_annotations_and_leave_the_text_clean() ->
     ]
     response = events[-1].response
 
-    assert "".join(deltas) == "Leave is 20 days  per year."
-    assert "[[cite:" not in "".join(deltas)
+    # The internal marker becomes the reader-facing chip in place, so the
+    # citation stays attached to the claim instead of moving to the end.
+    answer = "".join(deltas)
+    assert answer == "Leave is 20 days [1] per year."
+    assert "[[cite:" not in answer
     assert len(annotations) == 1
-    assert annotations[0].annotation["type"] == "bothesis:document_citation"
-    assert annotations[0].annotation["citation"]["spans"][0]["page"] == 3
+    annotation = annotations[0].annotation
+    assert annotation["type"] == "bothesis:document_citation"
+    assert annotation["citation"]["spans"][0]["page"] == 3
+    assert annotation["citation"]["number"] == 1
+    assert annotation["citation"]["reference"] == "ev-1"
     assert annotations[0].annotation_index == 0
-    assert response.final_answer_text == "Leave is 20 days  per year."
+    # The index range brackets exactly the marker it belongs to.
+    assert answer[annotation["start_index"] : annotation["end_index"]] == "[1]"
+    assert response.final_answer_text == "Leave is 20 days [1] per year."
     assert response.output_annotations[0]["citation"]["id"] == "ev-1"
 
 
@@ -346,11 +354,13 @@ async def test_a_partial_citation_marker_is_the_only_text_held_back() -> None:
 
     release.set()
     remaining = [event async for event in stream]
+    # The marker completes only in the second delta, and the chip is emitted
+    # whole — a client never receives a half-written citation.
     assert [
         event.delta
         for event in remaining
         if event.type == "response.output_text.delta"
-    ] == [" applies"]
+    ] == ["[1]", " applies"]
 
 
 @pytest.mark.asyncio

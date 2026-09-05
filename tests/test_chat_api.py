@@ -64,7 +64,7 @@ class ScriptedTransport(native.ScriptedResponsesTransport):
                         output_index=0,
                         deltas=[
                             "Employees receive 20 days of annual leave "
-                            "[[cite:chunk-1]]."
+                            "[[cite:ref_1]]."
                         ],
                         phase="final_answer",
                     ),
@@ -208,7 +208,7 @@ class InterleavedTransport(native.ScriptedResponsesTransport):
                     *native.message(
                         item_id="msg_2",
                         output_index=0,
-                        deltas=["Employees receive 20 days ", "[[cite:chunk-1]]."],
+                        deltas=["Employees receive 20 days ", "[[cite:ref_1]]."],
                         phase="final_answer",
                     ),
                     *native.completed("resp_b"),
@@ -281,6 +281,21 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
 
     monkeypatch.setattr(api_app._workspace_api, "_resolve_access", resolve_access)
     monkeypatch.setattr(api_app._workspace_api, "_session_factory", _SessionContext)
+
+    class ConversationRecorder:
+        def __init__(self) -> None:
+            self.started: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+            self.finished: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        async def start_turn(self, *_: Any, **__: Any) -> None:
+            self.started.append((_, __))
+            return None
+
+        async def finish_turn(self, *_: Any, **__: Any) -> None:
+            self.finished.append((_, __))
+            return None
+
+    monkeypatch.setattr(api_app._workspace_api, "_conversations", ConversationRecorder())
     async def allowed_collections(*_: Any, **__: Any) -> tuple[UUID, ...]:
         return (UUID(int=12), UUID(int=14))
 
@@ -550,7 +565,15 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     assert annotation["type"] == "bothesis:document_citation"
     assert annotation["citation"]["item_id"] == "doc-1"
     assert annotation["citation"]["chunk_id"] == "chunk-1"
+    assert annotation["citation"]["reference"] == "ref_1"
+    assert annotation["citation"]["number"] == 1
     assert annotation["citation"]["source"]["provider"] == "confluence"
+    conversations = api_app._workspace_api._conversations
+    assert conversations is not None
+    assert len(conversations.started) == 1
+    assert conversations.started[0][1]["content"] == "What is the leave policy?"
+    assert len(conversations.finished) == 1
+    assert conversations.finished[0][1]["content"] == "Employees receive 20 days of annual leave [1]."
     assert len(retriever.contexts) == 1
     assert len(retriever.contexts[0].collection_item_ids) == 1
     # ``/responses`` takes instructions as a request parameter, so the input is
@@ -620,7 +643,7 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
     """
 
     chunk = _indexed_chunk()
-    reference = source_reference(chunk.item_id, chunk.id)
+    reference = "ref_1"
     captured_context: list[str] = []
 
     class ContextCapturingSearch(KnowledgeSearch):
@@ -680,13 +703,15 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
     assert chunk.id not in captured_context[0]
     assert chunk.item_id not in captured_context[0]
 
-    # The marker is never visible to the reader.
+    # The internal marker never reaches the reader; the chip stands where the
+    # model put it, inline with the claim it supports.
     answer = "".join(
         event["delta"]
         for event in events
         if event["type"] == "response.output_text.delta"
     )
-    assert answer == "Employees receive 20 days ."
+    assert answer == "Employees receive 20 days [1]."
+    assert "[[cite:" not in answer
 
     # The citation the client receives is built from canonical metadata.
     annotation = next(
@@ -696,6 +721,10 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
     )
     citation = annotation["citation"]
     assert annotation["type"] == "bothesis:document_citation"
+    # The index range brackets the marker, so position survives serialization.
+    assert answer[annotation["start_index"] : annotation["end_index"]] == "[1]"
+    assert citation["number"] == 1
+    assert citation["reference"] == reference
     assert citation["id"] == reference
     assert citation["item_id"] == chunk.item_id
     assert citation["chunk_id"] == chunk.id
@@ -706,6 +735,129 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
     )
     # No infrastructure detail reaches the client.
     assert not {"collection_name", "point_id", "storage_key", "vector"} & set(citation)
+
+
+class TwoChunkIndex:
+    """Two indexed chunks of the same document, as the index returns them."""
+
+    def __init__(self, chunks: list[ContextualChunk]) -> None:
+        self._chunks = chunks
+
+    async def search_item_content(
+        self,
+        query: str,
+        *,
+        limit: int,
+        tenant_id: str,
+        collection_item_ids: tuple[str, ...],
+    ) -> list[ContextualChunk]:
+        return self._chunks
+
+
+def test_chat_api_places_repeated_and_multiple_citations_inline(monkeypatch) -> None:
+    """The acceptance case: a chip after each supported claim.
+
+    The same source cited twice keeps one number, a second source gets the
+    next, and two markers may sit together on one claim.
+    """
+
+    first = _indexed_chunk()
+    second = first.model_copy(
+        update={
+            "id": "9f1c2d34-0000-4000-8000-000000000001:13",
+            "chunk_index": 13,
+            "chunk_text": "Four endpoints serve the streaming API.",
+            "relevance_score": 0.81,
+        }
+    )
+    registry = ToolRegistry()
+    registry.register(
+        KnowledgeSearch(ItemKnowledgeRetriever(TwoChunkIndex([first, second])))  # type: ignore[arg-type]
+    )
+    transport = native.ScriptedResponsesTransport(
+        [
+            [*native.created("resp_a"), *search_call(), *native.completed("resp_a")],
+            [
+                *native.created("resp_b"),
+                *native.message(
+                    item_id="msg_1",
+                    output_index=0,
+                    deltas=[
+                        "You must create one VPC endpoint for each service name.",
+                        " [[cite:ref_1]] One endpoint is used for the REST API",
+                        " and four are used for the streaming API. [[cite:ref_1]]",
+                        "[[cite:ref_2]]",
+                    ],
+                    phase="final_answer",
+                ),
+                *native.completed("resp_b"),
+            ],
+        ]
+    )
+    monkeypatch.setattr(
+        api_app._workspace_api,
+        "_agent",
+        Agent(
+            transport,
+            registry,
+            config=AgentConfig(max_model_turns=3, max_tool_rounds=2),
+        ),
+    )
+    user_id, tenant_id = _install_access(monkeypatch)
+
+    with TestClient(api_app.app) as client:
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={
+                "message": "How many VPC endpoints do I need?",
+                "tenant_id": str(tenant_id),
+                "user_id": str(user_id),
+                "knowledge_mode": "selected",
+                "collection_item_ids": [str(UUID(int=12))],
+            },
+        )
+
+    assert response.status_code == 200
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    answer = "".join(
+        event["delta"]
+        for event in events
+        if event["type"] == "response.output_text.delta"
+    )
+    annotations = [
+        event["annotation"]
+        for event in events
+        if event["type"] == "response.output_text.annotation.added"
+    ]
+
+    assert answer == (
+        "You must create one VPC endpoint for each service name. [1] "
+        "One endpoint is used for the REST API and four are used for the "
+        "streaming API. [1][2]"
+    )
+    # Three occurrences, two distinct sources; the repeat reuses its number.
+    assert [annotation["citation"]["number"] for annotation in annotations] == [1, 1, 2]
+    assert [annotation["citation"]["reference"] for annotation in annotations] == [
+        "ref_1",
+        "ref_1",
+        "ref_2",
+    ]
+    # Every annotation brackets its own marker, in order of appearance.
+    assert [
+        answer[annotation["start_index"] : annotation["end_index"]]
+        for annotation in annotations
+    ] == ["[1]", "[1]", "[2]"]
+    assert [annotation["start_index"] for annotation in annotations] == sorted(
+        annotation["start_index"] for annotation in annotations
+    )
+    # The repeat resolves to the same chunk, the new number to the other.
+    assert annotations[0]["citation"]["chunk_id"] == first.id
+    assert annotations[1]["citation"]["chunk_id"] == first.id
+    assert annotations[2]["citation"]["chunk_id"] == second.id
 
 
 def test_document_search_api_uses_authorized_retrieval_scope(monkeypatch) -> None:

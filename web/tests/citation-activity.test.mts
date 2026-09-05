@@ -95,6 +95,34 @@ test("re-clicking the open citation is a no-op, another citation replaces it", (
   );
 });
 
+test("an inline chip opens the panel at the cited page of the right document", () => {
+  // The chip click path: the answer's citation carries only identity plus the
+  // cited page, and the panel re-resolves the document from that.
+  const activity = knowledgeDocumentActivity(source({
+    id: "ref_1",
+    index: 1,
+    itemId: "item-7",
+    chunkId: "item-7:31",
+    page: 7,
+  }));
+
+  assert.equal(activity.type, "knowledge_document");
+  assert.equal(activity.itemId, "item-7");
+  assert.equal(activity.page, 7);
+  // Nothing about the preview is copied into activity state.
+  assert.equal("preview" in activity, false);
+  assert.equal("spans" in activity, false);
+});
+
+test("clicking a second chip in the same document switches page in place", () => {
+  const first = knowledgeDocumentActivity(source({ id: "ref_1", chunkId: "d:1", page: 3 }));
+  const second = knowledgeDocumentActivity(source({ id: "ref_2", chunkId: "d:9", page: 8 }));
+
+  assert.equal(isSameActivity(first, second), false);
+  assert.equal(first.itemId, second.itemId);
+  assert.equal(second.page, 8);
+});
+
 // --- citation -> page ------------------------------------------------------
 
 test("span pages win, and a chunk page range is used when spans carry none", () => {
@@ -153,6 +181,19 @@ test("identical regions are painted once", () => {
   );
 
   assert.equal(regions.length, 1);
+});
+
+test("only the cited chunk's own spans are highlighted on the page", () => {
+  // A page footer or page-number element belongs to the page, not to this
+  // chunk, so it has no span here and must stay unhighlighted.
+  const cited = citation({
+    spans: [{ page: 7, bounding_box: { x: 0.1, y: 0.2, width: 0.6, height: 0.06 } }],
+  });
+
+  const regions = citationRegions(cited, 7, preview([7]));
+
+  assert.equal(regions.length, 1);
+  assert.deepEqual(regions[0], { x: 0.1, y: 0.2, width: 0.6, height: 0.06 });
 });
 
 test("an unrecognized coordinate space paints no highlight", () => {

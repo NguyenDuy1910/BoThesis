@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import nullcontext
+from dataclasses import replace
 from time import perf_counter
 from typing import Any
 
@@ -130,7 +131,15 @@ class KnowledgeSearch(Tool):
                 if item.id in seen_evidence_ids:
                     continue
                 seen_evidence_ids.add(item.id)
-                evidence.append(item)
+                # The compact reference is what the model is allowed to cite,
+                # and it is assigned before the context is built so the model
+                # never sees an Item or chunk identifier it could echo back.
+                evidence.append(
+                    replace(
+                        item,
+                        id=ctx.references.reference(item.item_id, item.chunk_id),
+                    )
+                )
 
         duration_ms = self._duration_ms(started_at)
         if not evidence:

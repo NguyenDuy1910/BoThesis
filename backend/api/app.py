@@ -42,7 +42,7 @@ from bothesis.services import (
     DocumentNotFoundError,
     IdentityInactiveError,
     IdentityNotFoundError,
-    KnowledgePreview,
+    KnowledgePreviewView,
     UploadConflictError,
     UploadTooLargeError,
     UploadValidationError,
@@ -200,7 +200,7 @@ class DocumentMetadata(BaseModel):
     upload_status: Literal["pending", "available", "failed"] | None = None
     created_at: str
     uploaded_at: str | None = None
-    preview: KnowledgePreview | None = None
+    preview: KnowledgePreviewView | None = None
 
 
 class DocumentUploadStartResponse(BaseModel):
@@ -280,7 +280,7 @@ class KnowledgeItemViewer(BaseModel):
     status: Literal["pending", "processing", "ready", "failed", "unsupported", "deleted"]
     external_url: str | None = None
     document_url: str | None = None
-    preview: KnowledgePreview | None = None
+    preview: KnowledgePreviewView | None = None
     elements: list[ViewerElement]
     focus: ViewerFocus | None = None
 
@@ -294,7 +294,7 @@ class KnowledgeCitationResponse(BaseModel):
     content_type: str
     document_url: str | None = None
     external_url: str | None = None
-    preview: KnowledgePreview | None = None
+    preview: KnowledgePreviewView | None = None
     citation: CitationInfo
 
 

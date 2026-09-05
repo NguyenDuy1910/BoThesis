@@ -145,6 +145,32 @@ test("span pages take precedence over the chunk page range", () => {
   assert.equal(sources[0]?.locator, "p. 8");
 });
 
+test("the backend number drives the chip and the summary list alike", () => {
+  // The answer cites its second retrieved source first, so numbering follows
+  // first use — not retrieval order.
+  const sources = answerSources(turnWithAnnotations([
+    annotation({ id: "ref_2", reference: "ref_2", number: 1, item_id: "i2", chunk_id: "c2" }),
+    annotation({ id: "ref_1", reference: "ref_1", number: 2, item_id: "i1", chunk_id: "c1" }),
+    annotation({ id: "ref_2", reference: "ref_2", number: 1, item_id: "i2", chunk_id: "c2" }),
+  ]));
+
+  // A repeated citation is one entry, keeping its number.
+  assert.equal(sources.length, 2);
+  assert.deepEqual(sources.map((source) => [source.id, source.index]), [
+    ["ref_2", 1],
+    ["ref_1", 2],
+  ]);
+});
+
+test("conversations saved before numbering still resolve in order", () => {
+  const sources = answerSources(turnWithAnnotations([
+    annotation({ id: "a", item_id: "i1", chunk_id: "c1" }),
+    annotation({ id: "b", item_id: "i2", chunk_id: "c2" }),
+  ]));
+
+  assert.deepEqual(sources.map((source) => source.index), [1, 2]);
+});
+
 function annotation(citation: NonNullable<OutputTextAnnotation["citation"]>): OutputTextAnnotation {
   return { type: DOCUMENT_CITATION_TYPE, citation };
 }

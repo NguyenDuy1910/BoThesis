@@ -18,11 +18,11 @@ from bothesis.services.access_requests import AccessRequestService
 from bothesis.services.audit import AuditService
 from bothesis.services.collection_access import CollectionAccessService
 from bothesis.services.groups import GroupService
-from bothesis.services.integration import IntegrationService
+from bothesis.services.ingestion_sources import IngestionSourceService
+from bothesis.services.integration_connections import IntegrationConnectionService
 from bothesis.services.item_catalog import ItemCatalogService
 from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services.roles import RoleService
-from bothesis.services.tenant_overview import TenantOverviewService
 from bothesis.services.tenants import TenantService
 from bothesis.services.users import UserService
 from bothesis.services import (
@@ -52,23 +52,23 @@ class AdministrationApi:
 
     async def overview(self, identity: RequestIdentity) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await TenantOverviewService(session).overview(actor)
+            return await TenantService(session).overview(actor)
 
     async def list_spaces(self, identity: RequestIdentity) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await TenantService(session).list_spaces(actor)
+            return await TenantService(session).list_tenants(actor)
 
     async def get_space(
         self, identity: RequestIdentity, tenant_id: UUID
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await TenantService(session).get_space(actor, tenant_id)
+            return await TenantService(session).get_tenant(actor, tenant_id)
 
     async def update_space(
         self, identity: RequestIdentity, tenant_id: UUID, changes: dict[str, Any]
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await TenantService(session).update_space(
+            return await TenantService(session).update_tenant(
                 actor, tenant_id, **changes
             )
 
@@ -166,25 +166,25 @@ class AdministrationApi:
 
     async def connector_capabilities(self, identity: RequestIdentity) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await self._integrations(session).capabilities(actor)
+            return await self._connections(session).capabilities(actor)
 
     async def list_integration_connections(
         self, identity: RequestIdentity, **filters: Any
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await self._integrations(session).list_connections(actor, **filters)
+            return await self._connections(session).list_connections(actor, **filters)
 
     async def create_integration_connection(
         self, identity: RequestIdentity, values: dict[str, Any]
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await self._integrations(session).create_connection(actor, **values)
+            return await self._connections(session).create_connection(actor, **values)
 
     async def get_integration_connection(
         self, identity: RequestIdentity, integration_connection_id: UUID
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await self._integrations(session).get_connection(
+            return await self._connections(session).get_connection(
                 actor, integration_connection_id
             )
 
@@ -195,7 +195,7 @@ class AdministrationApi:
         changes: dict[str, Any],
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await self._integrations(session).update_connection(
+            return await self._connections(session).update_connection(
                 actor, integration_connection_id, **changes
             )
 
@@ -206,7 +206,7 @@ class AdministrationApi:
             source_ids: list[str] = []
             page = 1
             while True:
-                ingestion_sources = await self._integrations(session).list_sources(
+                ingestion_sources = await self._sources(session).list_sources(
                     actor,
                     integration_connection_id=integration_connection_id,
                     page=page,
@@ -216,7 +216,7 @@ class AdministrationApi:
                 if len(source_ids) >= ingestion_sources["total"]:
                     break
                 page += 1
-            await self._integrations(session).delete_connection(
+            await self._connections(session).delete_connection(
                 actor, integration_connection_id
             )
         await asyncio.gather(
@@ -227,7 +227,7 @@ class AdministrationApi:
         self, identity: RequestIdentity, integration_connection_id: UUID
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            return await self._integrations(session).validate_connection(
+            return await self._connections(session).validate_connection(
                 actor, integration_connection_id
             )
 
@@ -235,7 +235,7 @@ class AdministrationApi:
         self, identity: RequestIdentity, **filters: Any
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            result = await self._integrations(session).list_sources(actor, **filters)
+            result = await self._sources(session).list_sources(actor, **filters)
         schedules = await asyncio.gather(
             *(
                 self._workflows.describe_schedule(source["id"])
@@ -255,7 +255,7 @@ class AdministrationApi:
         values = dict(values)
         schedule = values.pop("schedule", None)
         async with self._request(identity) as (session, actor):
-            source = await self._integrations(session).create_source(
+            source = await self._sources(session).create_source(
                 actor, integration_connection_id, **values
             )
             workflow_input = self._workflow_input(source, actor)
@@ -267,7 +267,7 @@ class AdministrationApi:
         self, identity: RequestIdentity, source_id: UUID
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            source = await self._integrations(session).get_source(actor, source_id)
+            source = await self._sources(session).get_source(actor, source_id)
         source["schedule"] = await self._workflows.describe_schedule(str(source_id))
         return source
 
@@ -278,7 +278,7 @@ class AdministrationApi:
         schedule = changes.pop("schedule", None)
         clear_schedule = bool(changes.pop("clear_schedule", False))
         async with self._request(identity) as (session, actor):
-            source = await self._integrations(session).update_source(
+            source = await self._sources(session).update_source(
                 actor, source_id, **changes
             )
             workflow_input = self._workflow_input(source, actor)
@@ -295,14 +295,14 @@ class AdministrationApi:
         self, identity: RequestIdentity, source_id: UUID
     ) -> None:
         async with self._request(identity) as (session, actor):
-            await self._integrations(session).delete_source(actor, source_id)
+            await self._sources(session).delete_source(actor, source_id)
         await self._workflows.delete_schedule(str(source_id))
 
     async def ingest_source(
         self, identity: RequestIdentity, source_id: UUID
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            source = await self._integrations(session).get_source(actor, source_id)
+            source = await self._sources(session).get_source(actor, source_id)
             workflow_input = self._workflow_input(source, actor)
         result = await self._workflows.start_ingestion(workflow_input)
         async with self._request(identity) as (session, actor):
@@ -371,7 +371,7 @@ class AdministrationApi:
         self, identity: RequestIdentity, source_id: UUID, **filters: Any
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            await self._integrations(session).get_source(actor, source_id)
+            await self._sources(session).get_source(actor, source_id)
             tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
         return await self._workflows.list_ingestions(
             tenant_id=str(tenant_id),
@@ -394,7 +394,7 @@ class AdministrationApi:
         self, identity: RequestIdentity, source_id: UUID
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            source = await self._integrations(session).get_source(actor, source_id)
+            source = await self._sources(session).get_source(actor, source_id)
             tenant_id = require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
         return {
             "source_id": str(source_id),
@@ -422,7 +422,7 @@ class AdministrationApi:
         values: dict[str, Any],
     ) -> dict[str, Any]:
         async with self._request(identity) as (session, actor):
-            source = await self._integrations(session).get_source(actor, source_id)
+            source = await self._sources(session).get_source(actor, source_id)
             workflow_input = self._workflow_input(source, actor)
         return await self._upsert_schedule(workflow_input, values)
 
@@ -663,8 +663,15 @@ class AdministrationApi:
             ) from exc
 
     @staticmethod
-    def _integrations(session: Any) -> IntegrationService:
-        return IntegrationService(
+    def _connections(session: Any) -> IntegrationConnectionService:
+        return IntegrationConnectionService(
+            session,
+            credential_encryption_key=os.getenv("BOTHESIS_INTEGRATION_ENCRYPTION_KEY"),
+        )
+
+    @staticmethod
+    def _sources(session: Any) -> IngestionSourceService:
+        return IngestionSourceService(
             session,
             credential_encryption_key=os.getenv("BOTHESIS_INTEGRATION_ENCRYPTION_KEY"),
         )

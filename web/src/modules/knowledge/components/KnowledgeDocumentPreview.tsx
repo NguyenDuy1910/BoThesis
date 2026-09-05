@@ -43,6 +43,10 @@ export function KnowledgeDocumentPreview({
   // A page that has not painted yet must not carry a highlight over blank space.
   const [renderedPage, setRenderedPage] = useState<number>();
   const [pageError, setPageError] = useState<number>();
+  // Preview URLs are short-lived. A page that fails to load is retried once
+  // against freshly signed URLs before it is reported as unavailable.
+  const [refresh, setRefresh] = useState(0);
+  const refreshedRef = useRef(false);
   const requestRef = useRef(0);
 
   useEffect(() => {
@@ -63,7 +67,7 @@ export function KnowledgeDocumentPreview({
         setError(cause instanceof Error ? cause.message : "Could not open this source.");
       });
     return () => controller.abort();
-  }, [chunkId, citedPage, itemId]);
+  }, [chunkId, citedPage, itemId, refresh]);
 
   const preview = viewer?.preview;
   const asset = page === undefined ? undefined : previewPage(preview, page);
@@ -79,6 +83,15 @@ export function KnowledgeDocumentPreview({
     if (target === undefined) return;
     setPageError(undefined);
     setPage(target);
+  }, []);
+
+  const onPageLoadFailed = useCallback((failed: number | undefined) => {
+    if (refreshedRef.current) {
+      setPageError(failed);
+      return;
+    }
+    refreshedRef.current = true;
+    setRefresh((value) => value + 1);
   }, []);
 
   // Keep a neighbour each way warm so paging feels immediate, without pulling
@@ -137,7 +150,7 @@ export function KnowledgeDocumentPreview({
               // slow image cannot paint over a newer one, while a refreshed URL
               // for the page on screen swaps in without blanking it.
               key={page}
-              onError={() => setPageError(page)}
+              onError={() => onPageLoadFailed(page)}
               onLoad={() => setRenderedPage(page)}
               src={asset.url}
             />

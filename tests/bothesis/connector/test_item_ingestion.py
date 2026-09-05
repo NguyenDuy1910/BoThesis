@@ -37,10 +37,9 @@ from bothesis.services import (
     UploadTooLargeError,
 )
 from bothesis.services.item_ingestion import ItemIngestionService
-from bothesis.services.native_upload import NativeUploadService
+from bothesis.services.document_upload import DocumentUploadService
 from bothesis.services.stored_file_content import StoredFileContentService
-from bothesis.services.preview import KnowledgePreviewService
-from bothesis.services.preview_renderer import KnowledgePreviewRenderer
+from bothesis.services.preview import KnowledgePreview
 from PIL import Image
 
 
@@ -202,7 +201,7 @@ def _document(
 
 
 def test_upload_limits_reject_oversize_objects() -> None:
-    uploads = NativeUploadService(
+    uploads = DocumentUploadService(
         cast(Any, None),
         object_storage=cast(Any, SimpleNamespace()),
         ingestion_service=cast(Any, SimpleNamespace()),
@@ -758,7 +757,7 @@ def _preview_document(content_type: str, source: bytes, *, file_name: str) -> It
 
 
 @pytest.mark.asyncio
-async def test_preview_service_derives_versioned_webp_without_replacing_original(
+async def test_knowledge_preview_derives_versioned_webp_without_replacing_original(
     tmp_path: Path,
 ) -> None:
     source_buffer = BytesIO()
@@ -767,9 +766,9 @@ async def test_preview_service_derives_versioned_webp_without_replacing_original
     source_path = tmp_path / "source.png"
     source_path.write_bytes(source)
     storage = _PreviewStorage(source, content_type="image/png")
-    service = KnowledgePreviewService(
+    service = KnowledgePreview(
         cast(Any, storage),
-        renderer=KnowledgePreviewRenderer(max_dimension=800),
+        max_dimension=800,
     )
     document = _preview_document("image/png", source, file_name="photo.png")
 
@@ -808,7 +807,7 @@ async def test_office_preview_uses_the_consistent_original_representation() -> N
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
     storage = _PreviewStorage(source, content_type=content_type)
-    service = KnowledgePreviewService(cast(Any, storage))
+    service = KnowledgePreview(cast(Any, storage))
     document = _preview_document(content_type, source, file_name="report.docx")
 
     manifest = await service.generate(document)
@@ -832,7 +831,7 @@ def test_pdf_preview_pages_are_bounded_and_keep_one_based_page_mapping(
         first.close()
         second.close()
 
-    preview = KnowledgePreviewRenderer(max_pages=1, max_dimension=600).render(
+    preview = KnowledgePreview(cast(Any, object()), max_pages=1, max_dimension=600).render(
         pdf_path,
         file_name="report.pdf",
         content_type="application/pdf",

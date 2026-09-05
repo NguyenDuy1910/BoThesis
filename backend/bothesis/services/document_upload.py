@@ -39,7 +39,7 @@ from bothesis.services import (
 log = logging.getLogger(__name__)
 
 
-class NativeUploadService:
+class DocumentUploadService:
     """Create Item metadata first, then upload original bytes to object storage."""
 
     def __init__(
@@ -458,7 +458,7 @@ def _validate_stored_object(
         )
 
 
-__all__ = ["NativeUploadService"]
+__all__ = ["DocumentUploadService"]
 
 
 def _document_type(content_type: str) -> str:

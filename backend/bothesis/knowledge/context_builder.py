@@ -25,12 +25,13 @@ class EvidenceContextBuilder:
 
     def build(self, evidence: Sequence[Evidence]) -> EvidenceContext:
         introduction = (
-            "Retrieved access-permitted enterprise evidence. Use the canonical "
-            "Evidence text for factual claims, and cite the source reference of "
-            "the evidence that supports each claim with [[cite:source-id]] "
-            "immediately after that claim. Only reference IDs listed below "
-            "exist; never invent a reference, a page, or a document "
-            "identifier.\n\n"
+            "Retrieved access-permitted enterprise evidence.\n"
+            "Cite with [[cite:ref_id]] immediately after each claim it "
+            "supports, never collected at the end. Repeat it on every claim, "
+            "and place several together when a claim rests on several "
+            "sources.\n"
+            "Only the references below exist. Never invent one, and never "
+            "write a page, URL, chunk ID, or coordinate.\n\n"
         )
         blocks: list[str] = []
         included: list[Evidence] = []

@@ -2681,6 +2681,45 @@ details.assistant-turn__reasoning {
   overflow-wrap: anywhere;
 }
 
+/* Inline citation chip, rendered where the model placed the marker */
+.answer-citation-chip {
+  display: inline-flex;
+  min-width: 1.125rem;
+  height: 1.125rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-hairline);
+  border-radius: 0.3125rem;
+  background: var(--bg-subtle);
+  padding: 0 0.25rem;
+  margin-inline-start: 0.1875rem;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.625rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: 0.1875rem;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.answer-citation-chip:hover {
+  border-color: var(--brand-accent);
+  background: var(--brand-accent-soft);
+  color: var(--brand-accent-strong);
+}
+
+.answer-citation-chip--active {
+  border-color: var(--brand-accent);
+  background: var(--brand-accent);
+  color: var(--text-on-brand);
+}
+
+.answer-citation-chip:focus-visible {
+  outline: 2px solid var(--brand-accent);
+  outline-offset: 1px;
+}
+
 /* Clickable citation markers on a finished answer */
 .answer-citations {
   display: grid;

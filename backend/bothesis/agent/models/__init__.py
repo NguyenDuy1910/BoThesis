@@ -52,11 +52,48 @@ class AgentContext:
     model_extra_body: Mapping[str, Any] | None = None
 
 
+@dataclass(slots=True)
+class CitationReferences:
+    """Run-scoped reference IDs and reader-facing numbers for one turn.
+
+    Retrieval order assigns the compact ``ref_N`` the model is allowed to cite.
+    First appearance in the answer assigns the ``[n]`` the reader sees. Both are
+    scoped to one run and keyed by the identity they stand for, so the same
+    chunk keeps one reference across retrieval rounds and concurrent tool calls
+    without any process-wide state.
+    """
+
+    _references: dict[tuple[str, str], str] = field(default_factory=dict)
+    _numbers: dict[str, int] = field(default_factory=dict)
+
+    def reference(self, item_id: str, chunk_id: str) -> str:
+        """Return this chunk's model-facing reference, assigning one if new."""
+
+        identity = (item_id, chunk_id)
+        existing = self._references.get(identity)
+        if existing is not None:
+            return existing
+        assigned = f"ref_{len(self._references) + 1}"
+        self._references[identity] = assigned
+        return assigned
+
+    def number(self, reference: str) -> int:
+        """Return the reader-facing number for a reference, by first use."""
+
+        existing = self._numbers.get(reference)
+        if existing is not None:
+            return existing
+        assigned = len(self._numbers) + 1
+        self._numbers[reference] = assigned
+        return assigned
+
+
 @dataclass(frozen=True, slots=True)
 class ToolContext:
     """Authenticated runtime context supplied to one tool execution."""
 
     agent_context: AgentContext
+    references: CitationReferences = field(default_factory=CitationReferences)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,10 +146,12 @@ class ConversationRun:
     evidence: dict[str, Evidence] = field(default_factory=dict)
     used_evidence_ids: set[str] = field(default_factory=set)
     executed_tool_signatures: set[str] = field(default_factory=set)
+    references: CitationReferences = field(default_factory=CitationReferences)
 
 
 __all__ = [
     "AgentContext",
+    "CitationReferences",
     "ConversationDocument",
     "ConversationMessage",
     "ConversationRun",

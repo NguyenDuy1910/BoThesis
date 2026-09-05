@@ -21,8 +21,7 @@ from bothesis.document_index import ItemIndex, SemanticContextualizer
 from bothesis.storage import S3DocumentStorage
 from bothesis.services.workflow.ingestion_activity import IngestionActivity
 from bothesis.services.workflow.ingestion_workflow import IngestionWorkflow
-from bothesis.services.preview import KnowledgePreviewService
-from bothesis.services.preview_renderer import KnowledgePreviewRenderer
+from bothesis.services.preview import KnowledgePreview
 from bothesis.services.workflow import TemporalSettings
 from bothesis.services.workflow.client import TemporalClientProvider
 
@@ -107,18 +106,14 @@ class TemporalWorker:
             credential_encryption_key=(
                 os.getenv("BOTHESIS_INTEGRATION_ENCRYPTION_KEY") or None
             ),
-            preview_service=KnowledgePreviewService(
+            preview=KnowledgePreview(
                 self._storage,
-                renderer=KnowledgePreviewRenderer(
-                    max_pages=int(os.getenv("BOTHESIS_PREVIEW_MAX_PAGES", "50")),
-                    max_dimension=int(
-                        os.getenv("BOTHESIS_PREVIEW_MAX_DIMENSION", "1600")
-                    ),
-                    webp_quality=int(os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")),
-                ),
                 max_source_bytes=int(
                     os.getenv("BOTHESIS_PREVIEW_MAX_SOURCE_BYTES", "104857600")
                 ),
+                max_pages=int(os.getenv("BOTHESIS_PREVIEW_MAX_PAGES", "50")),
+                max_dimension=int(os.getenv("BOTHESIS_PREVIEW_MAX_DIMENSION", "1600")),
+                webp_quality=int(os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")),
             ),
         )
 

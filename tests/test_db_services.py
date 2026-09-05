@@ -37,11 +37,11 @@ from bothesis.services.access_requests import AccessRequestService
 from bothesis.services.identity_store import IdentityStoreService
 from bothesis.services.citation import CitationService
 from bothesis.services.collection_access import CollectionAccessService
-from bothesis.services.integration import IntegrationService
+from bothesis.services.integration_connections import IntegrationConnectionService
 from bothesis.services.integration_credential import IntegrationCredentialService
 from bothesis.services.item import ItemService
 from bothesis.services.item_catalog import ItemCatalogService
-from bothesis.services.native_upload import NativeUploadService
+from bothesis.services.document_upload import DocumentUploadService
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -354,7 +354,7 @@ async def test_integration_list_eager_loads_optional_credentials(
         )
 
     async with session_factory.begin() as session:
-        result = await IntegrationService(session).list_connections(
+        result = await IntegrationConnectionService(session).list_connections(
             actor,
             page_size=100,
         )
@@ -635,8 +635,8 @@ def _uploads(
     session_factory: async_sessionmaker[AsyncSession],
     storage: _UploadStorage,
     **kwargs: object,
-) -> NativeUploadService:
-    return NativeUploadService(
+) -> DocumentUploadService:
+    return DocumentUploadService(
         session_factory,
         object_storage=storage,
         ingestion_service=_UnavailableIngestion(),  # type: ignore[arg-type]

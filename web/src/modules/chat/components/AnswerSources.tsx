@@ -4,51 +4,28 @@ import clsx from "clsx";
 import { BookOpen, ChevronRight, ExternalLink } from "lucide-react";
 import { memo } from "react";
 
-import { answerSources, sourcesLabel, type AnswerSource } from "../sources";
-import type { TurnState } from "../types";
+import { sourcesLabel, type AnswerSource } from "../sources";
 
 /**
- * Citations attached to a finished answer.
+ * The optional source summary under a finished answer.
  *
- * Grounding is only grounding if the reader can inspect it, so the numbered
- * markers stay visible and open the source beside the conversation. The full
- * list below them stays one quiet line until asked, so it never competes with
- * the answer above it.
+ * Citations themselves are inline, next to the claims they support. This stays
+ * one quiet line until asked, so a reader who wants the whole provenance list
+ * can open it without it competing with the answer above.
  */
 export const AnswerSources = memo(function AnswerSources({
   activeCitationId,
   onOpenSource,
-  turn,
+  sources,
 }: {
   activeCitationId?: string;
   onOpenSource?: (source: AnswerSource) => void;
-  turn?: TurnState;
+  sources: readonly AnswerSource[];
 }) {
-  const sources = answerSources(turn);
   if (!sources.length) return null;
 
   return (
     <div className="answer-citations">
-      <ul className="answer-citations__markers">
-        {sources.map((source) => (
-          <li key={source.id}>
-            <button
-              aria-label={`Show source ${source.index}: ${source.title}`}
-              aria-pressed={activeCitationId === source.id}
-              className={clsx(
-                "answer-citations__marker",
-                activeCitationId === source.id && "answer-citations__marker--active",
-              )}
-              onClick={() => onOpenSource?.(source)}
-              title={[source.title, source.locator].filter(Boolean).join(" · ")}
-              type="button"
-            >
-              {source.index}
-            </button>
-          </li>
-        ))}
-      </ul>
-
       <details className="answer-sources">
         <summary>
           <ChevronRight aria-hidden="true" className="answer-sources__caret" size={13} />

@@ -22,7 +22,7 @@ from bothesis.connector.protocol import (
     TablePart,
     TextPart,
 )
-from bothesis.services.integration import IntegrationService
+from bothesis.connector.registry import ConnectorRegistry
 
 
 def test_confluence_cql_escapes_configured_values() -> None:
@@ -61,7 +61,7 @@ async def test_integration_factory_adapts_confluence_to_the_async_contract(
         lambda _self, storage: configured_storage.append(storage),
     )
 
-    connector = IntegrationService._confluence_factory(
+    connector = ConnectorRegistry._confluence_factory(
         {
             "wiki_base": "https://example.atlassian.net/wiki",
             "is_cloud": True,

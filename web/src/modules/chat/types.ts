@@ -33,6 +33,10 @@ export type ResponseStatus =
 
 export interface CitationReference {
   id?: string;
+  /** The compact reference retrieval issued and the model was allowed to cite. */
+  reference?: string;
+  /** The reader-facing number, assigned by first use within the answer. */
+  number?: number;
   item_id?: string;
   chunk_id?: string;
   title?: string;

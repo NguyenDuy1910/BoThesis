@@ -307,7 +307,7 @@ class ResolvedPreviewAsset(BaseModel):
     page: int | None = Field(default=None, ge=1)
 
 
-class KnowledgePreview(BaseModel):
+class KnowledgePreviewView(BaseModel):
     """Consistent UX representation for an authorized knowledge asset.
 
     Citation spans use the same one-based ``page`` values as assets and
@@ -429,7 +429,7 @@ __all__ = [
     "IdentityInactiveError",
     "IdentityNotFoundError",
     "InvalidDocumentStateError",
-    "KnowledgePreview",
+    "KnowledgePreviewView",
     "PreviewAsset",
     "PreviewGenerationError",
     "PreviewManifest",

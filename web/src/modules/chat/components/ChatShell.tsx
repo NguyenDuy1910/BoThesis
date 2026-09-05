@@ -18,7 +18,7 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { AppShell } from "@/components/ui/AppShell";
@@ -50,7 +50,7 @@ import {
   knowledgeDocumentActivity,
   type RightActivity,
 } from "@/modules/chat/activity";
-import type { AnswerSource } from "@/modules/chat/sources";
+import { answerSources, type AnswerSource } from "@/modules/chat/sources";
 import { AppSidebar } from "./AppSidebar";
 import { AnswerSources } from "./AnswerSources";
 import { AssistantTurn } from "./AssistantTurn";
@@ -582,6 +582,9 @@ const MessageView = memo(function MessageView({
   onRegenerate: (messageId: string) => void;
 }) {
   const { copy, copied } = useClipboard();
+  // Collected once per message and shared by the inline chips and the summary
+  // list, so both always agree on numbering.
+  const sources = useMemo(() => answerSources(message.turn), [message.turn]);
   // The answer keeps easing onto screen for a moment after the stream ends, so
   // the sources and the action row wait for the text rather than for the socket.
   const [isRevealing, setIsRevealing] = useState(false);
@@ -617,9 +620,12 @@ const MessageView = memo(function MessageView({
     <div className="message-row assistant">
       <div className="message-body">
         <AssistantTurn
+          activeCitationId={activeCitationId}
           activityConnectorLabel={activityConnectorLabel}
           isStreaming={isStreaming}
+          onOpenSource={onOpenSource}
           onRevealingChange={setIsRevealing}
+          sources={sources}
           turn={message.turn}
         />
         {streamError && <div className="error-box" role="alert">{streamError}</div>}
@@ -627,7 +633,7 @@ const MessageView = memo(function MessageView({
           <AnswerSources
             activeCitationId={activeCitationId}
             onOpenSource={onOpenSource}
-            turn={message.turn}
+            sources={sources}
           />
         )}
         {hasSettled && (text || streamError) && (

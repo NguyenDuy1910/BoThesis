@@ -30,7 +30,7 @@ from bothesis.services import (
     DocumentProcessingError,
     DocumentUnavailableError,
 )
-from bothesis.services.preview import KnowledgePreviewService
+from bothesis.services.preview import KnowledgePreview
 
 log = logging.getLogger(__name__)
 
@@ -50,12 +50,12 @@ class ItemIngestionService:
         *,
         index: ItemIndex,
         ingestion_source_id: UUID | None = None,
-        preview_service: KnowledgePreviewService | None = None,
+        preview: KnowledgePreview | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._index = index
         self._ingestion_source_id = ingestion_source_id
-        self._preview_service = preview_service
+        self._preview = preview
 
     # ---- Upload-facing ----
 
@@ -474,10 +474,10 @@ class ItemIngestionService:
             return stored, source, external_resource
 
     async def _persist_preview(self, stored: Item) -> None:
-        if self._preview_service is None or not stored.storage_key:
+        if self._preview is None or not stored.storage_key:
             return
         try:
-            manifest = await self._preview_service.generate(stored)
+            manifest = await self._preview.generate(stored)
             if manifest is None:
                 return
             preview_metadata = manifest.model_dump(mode="json")

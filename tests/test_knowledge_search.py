@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from bothesis.agent.models import AgentContext, ToolContext
+from bothesis.agent.models import AgentContext, CitationReferences, ToolContext
 from bothesis.agent.protocol import FunctionTool
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
@@ -443,19 +443,23 @@ async def test_knowledge_search_returns_bounded_evidence_and_source_metadata() -
     retriever = StubRetriever([EVIDENCE])
     tool = KnowledgeSearch(retriever, result_limit=3)
 
-    result = await tool.execute({"queries": ["annual leave"]}, TOOL_CONTEXT)
+    result = await tool.execute(
+        {"queries": ["annual leave"]},
+        ToolContext(agent_context=CONTEXT),
+    )
 
     assert retriever.calls == [("annual leave", 3)]
     assert result.error is None
     assert result.metadata["result_count"] == 1
-    # The model context carries the source reference and nothing that would
-    # let the model invent an Item or chunk identifier.
-    assert f"Source reference: {EVIDENCE.id}" in result.content
+    # The tool assigns the compact reference before building the context, and
+    # the context carries nothing that would let the model invent an Item or
+    # chunk identifier.
+    assert "Source reference: ref_1" in result.content
     assert "chunk-1" not in result.content
     assert "doc-1" not in result.content
     assert len(result.evidence) == 1
     evidence = result.evidence[0]
-    assert evidence is EVIDENCE
+    assert evidence.id == "ref_1"
     assert evidence.source is not None
     assert evidence.source.provider.value == "confluence"
     assert evidence.source.url == "https://knowledge.example/leave-policy"
@@ -721,4 +725,43 @@ def test_context_builder_reports_the_page_the_model_may_cite() -> None:
     built = EvidenceContextBuilder().build([paged])
 
     assert "Page: 7-9" in built.text
-    assert "[[cite:source-id]]" in built.text
+    assert "[[cite:ref_id]]" in built.text
+
+
+@pytest.mark.asyncio
+async def test_references_are_compact_stable_and_shared_across_tool_calls() -> None:
+    """One run numbers each distinct chunk once, in retrieval order.
+
+    Two calls in the same run — a second retrieval round, or two concurrent
+    calls — must reuse a chunk's reference rather than renumbering it, so a
+    marker the model emitted earlier still resolves.
+    """
+
+    second = _chunk(chunk_id="chunk-2", score=0.4)
+    tool = KnowledgeSearch(StubRetriever([EVIDENCE, _evidence(second)]), result_limit=5)
+    references = CitationReferences()
+    context = ToolContext(agent_context=CONTEXT, references=references)
+
+    first_result = await tool.execute({"queries": ["annual leave"]}, context)
+    second_result = await tool.execute({"queries": ["carry over"]}, context)
+
+    assert [item.id for item in first_result.evidence] == ["ref_1", "ref_2"]
+    # The same chunks keep the same references on the next round.
+    assert [item.id for item in second_result.evidence] == ["ref_1", "ref_2"]
+    # Canonical identity is preserved beside the reference.
+    assert [(item.item_id, item.chunk_id) for item in first_result.evidence] == [
+        ("doc-1", "chunk-1"),
+        ("doc-1", "chunk-2"),
+    ]
+
+
+def test_reader_facing_numbers_follow_first_use_not_retrieval_order() -> None:
+    references = CitationReferences()
+    references.reference("doc-1", "chunk-1")  # ref_1
+    references.reference("doc-1", "chunk-2")  # ref_2
+
+    # The answer happens to cite the second source first.
+    assert references.number("ref_2") == 1
+    assert references.number("ref_1") == 2
+    # Repeated use reuses the number rather than allocating another.
+    assert references.number("ref_2") == 1

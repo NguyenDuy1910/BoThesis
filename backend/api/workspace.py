@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext, ConversationMessage
+from bothesis.agent.protocol import Response, ResponseCompletedEvent
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
 from bothesis.agent.transports.openrouter import OpenRouterTransport
@@ -34,9 +35,10 @@ from bothesis.observability import create_langfuse_tracing
 from bothesis.services.audit import AuditService
 from bothesis.services.citation import CitationService
 from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.conversation import ConversationService
 from bothesis.services.item import ItemService
 from bothesis.services.item_ingestion import ItemIngestionService
-from bothesis.services.native_upload import NativeUploadService
+from bothesis.services.document_upload import DocumentUploadService
 from bothesis.services.stored_file_content import StoredFileContentService
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
@@ -48,8 +50,7 @@ from bothesis.services import (
     DocumentNotFoundError,
     require_tenant_permission,
 )
-from bothesis.services.preview import KnowledgePreviewService
-from bothesis.services.preview_renderer import KnowledgePreviewRenderer
+from bothesis.services.preview import KnowledgePreview
 from api.identity import RequestIdentity, resolve_auth_context
 
 log = logging.getLogger(__name__)
@@ -92,10 +93,11 @@ class WorkspaceApi:
         self._session_factory: Any | None = None
         self._storage: Any | None = None
         self._storage_initialized = False
-        self._uploads: NativeUploadService | None = None
-        self._previews: KnowledgePreviewService | None = None
+        self._uploads: DocumentUploadService | None = None
+        self._preview: KnowledgePreview | None = None
         self._index: ItemIndex | None = None
         self._ingestion: ItemIngestionService | None = None
+        self._conversations: ConversationService | None = None
         self._agent: Agent | None = None
         self._agent_transport: OpenRouterTransport | None = None
         self._retriever: ItemKnowledgeRetriever | None = None
@@ -157,16 +159,41 @@ class WorkspaceApi:
             allowed_tool_names=allowed_tool_names,
         )
         agent = self._get_agent()
+        conversations = self._conversation_service()
+        await conversations.start_turn(
+            resolved_conversation_id,
+            access=access,
+            content=message,
+            document_ids=(),
+            request_id=context.request_id or "",
+        )
 
         async def event_stream() -> AsyncIterator[str]:
             stream = agent.run(message, context)
+            final_answer: str | None = None
+            referenced_document_ids: tuple[UUID, ...] = ()
             try:
                 async for event in stream:
                     if await is_disconnected():
                         break
+                    if isinstance(event, ResponseCompletedEvent):
+                        answer = event.response.final_answer_text.strip()
+                        if answer:
+                            final_answer = answer
+                            referenced_document_ids = self._referenced_item_ids(
+                                event.response
+                            )
                     yield event.model_dump_json()
             finally:
                 await stream.aclose()
+            if final_answer:
+                await conversations.finish_turn(
+                    resolved_conversation_id,
+                    access=access,
+                    content=final_answer,
+                    referenced_document_ids=referenced_document_ids,
+                    request_id=context.request_id or "",
+                )
 
         return event_stream()
 
@@ -592,7 +619,32 @@ class WorkspaceApi:
             self._session_factory = get_session_factory()
         return self._session_factory
 
-    def _upload_service(self) -> NativeUploadService:
+    def _conversation_service(self) -> ConversationService:
+        if self._conversations is None:
+            self._conversations = ConversationService(self._sessions())
+        return self._conversations
+
+    @staticmethod
+    def _referenced_item_ids(response: Response) -> tuple[UUID, ...]:
+        """Extract durable Item identities from the answer's citations only."""
+
+        result: list[UUID] = []
+        seen: set[UUID] = set()
+        for annotation in response.output_annotations:
+            citation = annotation.get("citation")
+            if not isinstance(citation, Mapping):
+                continue
+            raw_item_id = citation.get("item_id")
+            try:
+                item_id = UUID(str(raw_item_id))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if item_id not in seen:
+                result.append(item_id)
+                seen.add(item_id)
+        return tuple(result)
+
+    def _upload_service(self) -> DocumentUploadService:
         if self._uploads is None:
             processing_max_bytes = int(
                 os.getenv(
@@ -600,7 +652,7 @@ class WorkspaceApi:
                     str(DEFAULT_PROCESSING_MAX_BYTES),
                 )
             )
-            self._uploads = NativeUploadService(
+            self._uploads = DocumentUploadService(
                 self._sessions(),
                 object_storage=self._object_storage(),
                 ingestion_service=self._ingestion_service(),
@@ -624,25 +676,21 @@ class WorkspaceApi:
             )
         return self._uploads
 
-    def _preview_service(self) -> KnowledgePreviewService:
-        if self._previews is None:
-            self._previews = KnowledgePreviewService(
+    def _knowledge_preview(self) -> KnowledgePreview:
+        if self._preview is None:
+            self._preview = KnowledgePreview(
                 self._object_storage(),
-                renderer=KnowledgePreviewRenderer(
-                    max_pages=int(os.getenv("BOTHESIS_PREVIEW_MAX_PAGES", "50")),
-                    max_dimension=int(
-                        os.getenv("BOTHESIS_PREVIEW_MAX_DIMENSION", "1600")
-                    ),
-                    webp_quality=int(os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")),
-                ),
                 max_source_bytes=int(
                     os.getenv(
                         "BOTHESIS_PREVIEW_MAX_SOURCE_BYTES",
                         str(DEFAULT_MAX_UPLOAD_BYTES),
                     )
                 ),
+                max_pages=int(os.getenv("BOTHESIS_PREVIEW_MAX_PAGES", "50")),
+                max_dimension=int(os.getenv("BOTHESIS_PREVIEW_MAX_DIMENSION", "1600")),
+                webp_quality=int(os.getenv("BOTHESIS_PREVIEW_WEBP_QUALITY", "80")),
             )
-        return self._previews
+        return self._preview
 
     def _object_storage(self) -> Any:
         if self._storage_initialized:
@@ -769,7 +817,7 @@ class WorkspaceApi:
             self._ingestion = ItemIngestionService(
                 self._sessions(),
                 index=self._item_index(),
-                preview_service=self._preview_service(),
+                preview=self._knowledge_preview(),
             )
         return self._ingestion
 
@@ -889,7 +937,7 @@ class WorkspaceApi:
         if getattr(document, "status", None) == "deleted":
             return None
         try:
-            preview = self._preview_service().resolve(
+            preview = self._knowledge_preview().resolve(
                 document,
                 expires_seconds=max(
                     1,

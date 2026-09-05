@@ -7,48 +7,153 @@ import hashlib
 import logging
 import tempfile
 from collections.abc import Mapping
+from io import BytesIO
 from pathlib import Path
+
+import pypdfium2 as pdfium
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from bothesis.db.models import Item
 from bothesis.services import (
+    DEFAULT_PREVIEW_MAX_DIMENSION,
+    DEFAULT_PREVIEW_MAX_PAGES,
     DEFAULT_PREVIEW_MAX_SOURCE_BYTES,
+    DEFAULT_PREVIEW_WEBP_QUALITY,
     PREVIEW_RENDERER_VERSION,
     PREVIEW_SCHEMA_VERSION,
-    KnowledgePreview,
+    KnowledgePreviewView,
     PreviewAsset,
     PreviewGenerationError,
     PreviewManifest,
     PreviewOriginal,
+    RenderedPreview,
+    RenderedPreviewAsset,
     ResolvedPreviewAsset,
 )
-from bothesis.services.preview_renderer import KnowledgePreviewRenderer
 from bothesis.storage import DocumentStorage, StoredObject
 
 log = logging.getLogger(__name__)
 
+_PDF_CONTENT_TYPES = frozenset({"application/pdf"})
+_PDF_EXTENSIONS = frozenset({".pdf"})
+_IMAGE_CONTENT_TYPES = frozenset(
+    {"image/avif", "image/bmp", "image/gif", "image/jpeg", "image/png", "image/tiff", "image/webp"}
+)
+_IMAGE_EXTENSIONS = frozenset(
+    {".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+)
 
-class KnowledgePreviewService:
-    """Generate, store, and permission-neutrally resolve preview renditions.
 
-    Callers remain responsible for authorizing the Item and persisting the
-    returned manifest in ``Item.metadata_["preview"]``. Keeping those concerns
-    outside this service lets connector ingestion and native uploads reuse the
-    same presentation layer without crossing permission or indexing boundaries.
-    """
+class KnowledgePreview:
+    """Render, store, and resolve bounded previews for one knowledge Item."""
 
     def __init__(
         self,
         object_storage: DocumentStorage,
         *,
-        renderer: KnowledgePreviewRenderer | None = None,
         max_source_bytes: int = DEFAULT_PREVIEW_MAX_SOURCE_BYTES,
+        max_pages: int = DEFAULT_PREVIEW_MAX_PAGES,
+        max_dimension: int = DEFAULT_PREVIEW_MAX_DIMENSION,
+        webp_quality: int = DEFAULT_PREVIEW_WEBP_QUALITY,
+        max_image_pixels: int = 40_000_000,
     ) -> None:
-        if max_source_bytes < 1:
-            raise ValueError("preview source limit must be greater than zero")
+        if min(max_source_bytes, max_pages, max_dimension, max_image_pixels) < 1:
+            raise ValueError("preview limits must be greater than zero")
+        if not 1 <= webp_quality <= 100:
+            raise ValueError("webp_quality must be between 1 and 100")
         self._object_storage = object_storage
-        self._renderer = renderer or KnowledgePreviewRenderer()
         self._max_source_bytes = max_source_bytes
+        self.max_pages = max_pages
+        self.max_dimension = max_dimension
+        self.webp_quality = webp_quality
+        self.max_image_pixels = max_image_pixels
 
+    def render(self, source_path: Path, *, file_name: str, content_type: str | None) -> RenderedPreview:
+        source = Path(source_path)
+        if not source.is_file():
+            raise PreviewGenerationError(f"preview source is not a file: {source}")
+        normalized_type = (content_type or "").split(";", 1)[0].strip().casefold()
+        extension = Path(file_name).suffix.casefold() or source.suffix.casefold()
+        if normalized_type in _PDF_CONTENT_TYPES or extension in _PDF_EXTENSIONS:
+            return self._render_pdf(source)
+        if normalized_type in _IMAGE_CONTENT_TYPES or extension in _IMAGE_EXTENSIONS:
+            return self._render_image(source)
+        return RenderedPreview(representation="original")
+
+    @staticmethod
+    def supports(*, file_name: str, content_type: str | None) -> bool:
+        normalized_type = (content_type or "").split(";", 1)[0].strip().casefold()
+        extension = Path(file_name).suffix.casefold()
+        return normalized_type in _PDF_CONTENT_TYPES or normalized_type in _IMAGE_CONTENT_TYPES or extension in _PDF_EXTENSIONS or extension in _IMAGE_EXTENSIONS
+
+    def _render_image(self, source: Path) -> RenderedPreview:
+        try:
+            with Image.open(source) as opened:
+                self._validate_dimensions(*opened.size)
+                image = ImageOps.exif_transpose(opened).copy()
+        except (OSError, UnidentifiedImageError, ValueError) as exc:
+            raise PreviewGenerationError("image preview rendering failed") from exc
+        try:
+            return RenderedPreview(representation="image", assets=(self._webp_asset(image, page=1),), page_count=1)
+        finally:
+            image.close()
+
+    def _render_pdf(self, source: Path) -> RenderedPreview:
+        try:
+            document = pdfium.PdfDocument(str(source))
+        except Exception as exc:
+            raise PreviewGenerationError("PDF preview rendering failed") from exc
+        try:
+            page_count = len(document)
+            if page_count < 1:
+                raise PreviewGenerationError("PDF preview source has no pages")
+            assets: list[RenderedPreviewAsset] = []
+            for page_index in range(min(page_count, self.max_pages)):
+                page = document[page_index]
+                try:
+                    width, height = page.get_size()
+                    if width <= 0 or height <= 0:
+                        raise PreviewGenerationError("PDF page has invalid dimensions")
+                    bitmap = page.render(scale=max(min(2.0, self.max_dimension / width, self.max_dimension / height), 0.0001))
+                    try:
+                        image = bitmap.to_pil()
+                        try:
+                            assets.append(self._webp_asset(image, page=page_index + 1))
+                        finally:
+                            image.close()
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+            return RenderedPreview(representation="pages", assets=tuple(assets), page_count=page_count, truncated=page_count > self.max_pages)
+        except PreviewGenerationError:
+            raise
+        except Exception as exc:
+            raise PreviewGenerationError("PDF preview rendering failed") from exc
+        finally:
+            document.close()
+
+    def _webp_asset(self, image: Image.Image, *, page: int) -> RenderedPreviewAsset:
+        self._validate_dimensions(*image.size)
+        image.thumbnail((self.max_dimension, self.max_dimension), Image.Resampling.LANCZOS)
+        converted = image.convert("RGBA" if "A" in image.getbands() else "RGB") if image.mode not in {"RGB", "RGBA"} else None
+        rendered = converted or image
+        try:
+            output = BytesIO()
+            rendered.save(output, format="WEBP", quality=self.webp_quality, method=4)
+            data = output.getvalue()
+            if not data:
+                raise PreviewGenerationError("WebP encoder returned an empty preview")
+            return RenderedPreviewAsset(data=data, content_type="image/webp", width=rendered.width, height=rendered.height, page=page)
+        finally:
+            if converted is not None:
+                converted.close()
+
+    def _validate_dimensions(self, width: int, height: int) -> None:
+        if width < 1 or height < 1:
+            raise PreviewGenerationError("preview source has invalid dimensions")
+        if width * height > self.max_image_pixels:
+            raise PreviewGenerationError("preview source exceeds the image pixel limit")
     async def generate(
         self,
         document: Item,
@@ -81,7 +186,7 @@ class KnowledgePreviewService:
                 representation="original",
             )
         content_type = _text(getattr(document, "mime_type", None)) or stored.content_type
-        if not self._renderer.supports(
+        if not self.supports(
             file_name=_file_name(document),
             content_type=content_type,
         ):
@@ -127,7 +232,7 @@ class KnowledgePreviewService:
         document: Item,
         *,
         expires_seconds: int,
-    ) -> KnowledgePreview | None:
+    ) -> KnowledgePreviewView | None:
         """Resolve short-lived URLs after the caller has authorized the Item."""
 
         if expires_seconds < 1:
@@ -168,7 +273,7 @@ class KnowledgePreviewService:
                 )
         if representation != "original" and not assets:
             representation = "original"
-        return KnowledgePreview(
+        return KnowledgePreviewView(
             representation=representation,
             original=PreviewOriginal(
                 url=original_request.url,
@@ -193,7 +298,7 @@ class KnowledgePreviewService:
         source_version: str,
     ) -> PreviewManifest:
         rendered = await asyncio.to_thread(
-            self._renderer.render,
+            self.render,
             source,
             file_name=_file_name(document),
             content_type=(
@@ -311,4 +416,4 @@ def _text(value: object) -> str | None:
     return normalized or None
 
 
-__all__ = ["KnowledgePreviewService"]
+__all__ = ["KnowledgePreview"]

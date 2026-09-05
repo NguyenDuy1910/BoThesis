@@ -46,7 +46,13 @@ export function answerSources(turn: TurnState | undefined): AnswerSource[] {
       }
     }
   }
-  return order.map((id, position) => ({ ...sources.get(id)!, index: position + 1 }));
+  // The backend numbers citations by first use so the inline chip and this
+  // list always agree. First-appearance order here is the fallback for
+  // conversations saved before citations carried a number.
+  return order.map((id, position) => {
+    const source = sources.get(id)!;
+    return { ...source, index: source.index || position + 1 };
+  });
 }
 
 function toAnswerSource(citation: CitationReference): AnswerSource | null {
@@ -60,8 +66,10 @@ function toAnswerSource(citation: CitationReference): AnswerSource | null {
   const originalUrl = citation.original_url?.trim() || citation.source?.url?.trim() || undefined;
   return {
     id,
-    // Ordering is applied once every annotation has been collected.
-    index: 0,
+    // Zero means unnumbered; collection order fills it in as the fallback.
+    index: typeof citation.number === "number" && citation.number > 0
+      ? citation.number
+      : 0,
     itemId,
     chunkId,
     title: citation.title?.trim() || citation.source?.provider?.trim() || "Untitled source",
@@ -78,7 +86,7 @@ function toAnswerSource(citation: CitationReference): AnswerSource | null {
 function mergeSource(existing: AnswerSource, next: AnswerSource): AnswerSource {
   return {
     id: existing.id,
-    index: existing.index,
+    index: existing.index || next.index,
     itemId: existing.itemId,
     chunkId: existing.chunkId,
     title: next.title || existing.title,
@@ -127,6 +135,6 @@ function locatorLabel(
   return values.length ? values.join(" · ") : undefined;
 }
 
-export function sourcesLabel(sources: AnswerSource[]): string {
+export function sourcesLabel(sources: readonly AnswerSource[]): string {
   return `${sources.length} ${sources.length === 1 ? "source" : "sources"}`;
 }

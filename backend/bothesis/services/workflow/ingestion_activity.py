@@ -21,14 +21,14 @@ from bothesis.connector.registry import ConnectorRegistry
 from bothesis.db.models import ExternalResource, IngestionSource, Item
 from bothesis.document_index import ItemIndex
 from bothesis.storage import DocumentStorage
-from bothesis.services.integration import IntegrationService
+from bothesis.services.ingestion_sources import IngestionSourceService
 from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (
     AdminNotFoundError,
     AdminValidationError,
     InvalidDocumentStateError,
 )
-from bothesis.services.preview import KnowledgePreviewService
+from bothesis.services.preview import KnowledgePreview
 from bothesis.services.workflow import (
     INGESTION_ACTIVITY_NAME,
     IngestionResult,
@@ -52,7 +52,7 @@ class IngestionActivity:
         registry: ConnectorRegistry | None = None,
         credential_encryption_key: str | None = None,
         pipeline_config: ConnectorPipelineConfig | None = None,
-        preview_service: KnowledgePreviewService | None = None,
+        preview: KnowledgePreview | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._index = index
@@ -60,7 +60,7 @@ class IngestionActivity:
         self._registry = registry
         self._credential_encryption_key = credential_encryption_key
         self._pipeline_config = pipeline_config
-        self._preview_service = preview_service
+        self._preview = preview
 
     @activity.defn(name=INGESTION_ACTIVITY_NAME)
     async def ingest_items(self, input: IngestionWorkflowInput) -> IngestionResult:
@@ -127,7 +127,7 @@ class IngestionActivity:
         self, source_id: UUID, *, test_connection: bool
     ) -> PipelineResult:
         async with self._session_factory() as session:
-            source, connector = await IntegrationService(
+            source, connector = await IngestionSourceService(
                 session,
                 registry=self._registry,
                 credential_encryption_key=self._credential_encryption_key,
@@ -155,9 +155,7 @@ class IngestionActivity:
             self._session_factory,
             index=self._index,
             ingestion_source_id=resolved_source_id,
-            preview_service=(
-                self._preview_service or KnowledgePreviewService(self._raw_storage)
-            ),
+            preview=self._preview or KnowledgePreview(self._raw_storage),
         )
         pipeline = ConnectorPipeline(
             connector,

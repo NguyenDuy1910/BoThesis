@@ -174,9 +174,10 @@ async def test_citation_renderer_never_grounds_an_unknown_source_reference() -> 
         )
     ]
 
+    # The invented reference is dropped entirely: it must not become a
+    # citation, and it must not leak an internal marker into the prose.
     assert events == [
         ("Policy ", None),
-        ("[[cite:source-ffffffff]]", None),
         (" and ", None),
         ("", "source-a1b2c3d4"),
         (" apply", None),
