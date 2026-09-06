@@ -1,7 +1,18 @@
 "use client";
 
 import clsx from "clsx";
-import { Check, ChevronRight, Database, LoaderCircle, Search, Wrench } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  Database,
+  FileDown,
+  FilePenLine,
+  FilePlus2,
+  LayoutTemplate,
+  LoaderCircle,
+  Search,
+  Wrench,
+} from "lucide-react";
 import { memo, useMemo } from "react";
 
 import { assistantTurnItems, type AssistantTurnItem } from "../assistant-turn";
@@ -136,6 +147,38 @@ function toolPresentation(
         ? "Data query could not complete"
         : completed ? "Queried data" : "Querying data…",
       icon: Database,
+    };
+  }
+  if (name === "template_search") {
+    return {
+      label: state === "error"
+        ? "Template search could not complete"
+        : completed ? "Searched templates" : "Searching templates…",
+      icon: LayoutTemplate,
+    };
+  }
+  if (name === "artifact_create") {
+    return {
+      label: state === "error"
+        ? "Document could not be created"
+        : completed ? "Created document" : "Creating document…",
+      icon: FilePlus2,
+    };
+  }
+  if (name === "artifact_edit") {
+    return {
+      label: state === "error"
+        ? "Document could not be updated"
+        : completed ? "Updated document" : "Updating document…",
+      icon: FilePenLine,
+    };
+  }
+  if (name === "artifact_export") {
+    return {
+      label: state === "error"
+        ? "Document could not be exported"
+        : completed ? "Exported document" : "Exporting document…",
+      icon: FileDown,
     };
   }
   if (state === "error") return { label: "Tool could not complete", icon: Wrench };

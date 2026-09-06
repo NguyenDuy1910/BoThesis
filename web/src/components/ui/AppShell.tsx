@@ -4,18 +4,12 @@ interface AppShellProps {
   children: React.ReactNode;
   className?: string;
   sidebar: React.ReactNode;
-  variant?: "workspace" | "admin";
 }
 
-/** Shared product frame; feature shells keep ownership of their navigation behavior. */
-export function AppShell({
-  children,
-  className,
-  sidebar,
-  variant = "workspace",
-}: AppShellProps) {
+/** Frame for the knowledge workspace; the shell owns its own navigation. */
+export function AppShell({ children, className, sidebar }: AppShellProps) {
   return (
-    <div className={cn(variant === "admin" ? "admin-shell" : "app-shell", className)}>
+    <div className={cn("app-shell", className)}>
       {sidebar}
       {children}
     </div>

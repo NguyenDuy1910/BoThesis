@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from bothesis.connector.protocol import BoundingBox, Chunk, CitationInfo, CitationSpan
 from bothesis.db.models import (
+    ArtifactRevision,
     AuditLog,
     Base,
     Citation,
@@ -24,8 +25,12 @@ from bothesis.db.models import (
     Message,
     MessageItem,
 )
-from bothesis.storage import ObjectStorageError, StoredObject
+from bothesis.agent.models import AgentContext
+from bothesis.knowledge import Evidence
+from bothesis.sandbox import SandboxRequest, SandboxResult
+from bothesis.storage import ObjectStorageError, PresignedRequest, StoredObject
 from bothesis.services import (
+    ArtifactValidationError,
     AuthContext,
     AuthorizationError,
     DocumentNotFoundError,
@@ -34,6 +39,8 @@ from bothesis.services import (
     UploadValidationError,
 )
 from bothesis.services.access_requests import AccessRequestService
+from bothesis.services.artifact import ArtifactService
+from bothesis.services.template import TemplateService
 from bothesis.services.identity_store import IdentityStoreService
 from bothesis.services.citation import CitationService
 from bothesis.services.collection_access import CollectionAccessService
@@ -545,6 +552,20 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
             created_by_user_id=owner.id,
         )
         assert listed["total"] == 1
+
+        nested = await ItemCatalogService(session).create_collection(
+            actor,
+            title="Engineering runbooks",
+            parent_item_id=UUID(created["id"]),
+            inherit_access=True,
+        )
+        scoped = await ItemCatalogService(session).list_items(
+            actor,
+            item_type="collection",
+            parent_item_id=UUID(created["id"]),
+        )
+        assert scoped["total"] == 1
+        assert scoped["items"][0]["id"] == nested["id"]
         assert listed["items"][0]["item_count"] == 0
         assert listed["items"][0]["source_count"] == 0
         assert listed["items"][0]["created_by_user_id"] == str(owner.id)
@@ -896,3 +917,252 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
         item = await session.get(Item, failed.item_id)
     assert failed.status == "failed"
     assert item is not None and item.status == "failed"
+
+
+class InProcessSandbox:
+    """Apply the runner's file semantics in-process, recording every request.
+
+    The Docker executor and the runner have their own suites; here only the
+    service's use of the sandbox boundary is under test.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[SandboxRequest] = []
+
+    async def run(self, request: SandboxRequest) -> SandboxResult:
+        self.requests.append(request)
+        arguments = dict(request.arguments)
+        if request.operation == "write":
+            files = {arguments["file_name"]: str(arguments["content"]).encode("utf-8")}
+        elif request.operation == "replace":
+            text = request.files[0].data.decode("utf-8")
+            for edit in arguments["edits"]:
+                assert text.count(edit["find"]) == 1, edit
+                text = text.replace(edit["find"], edit["replace"], 1)
+            files = {arguments["file_name"]: text.encode("utf-8")}
+        elif request.operation == "import":
+            files = {arguments["target_file_name"]: request.files[0].data}
+        elif request.operation == "export_pdf":
+            files = {f"{Path(arguments['file_name']).stem}.pdf": b"%PDF-1.4 rendered"}
+        else:
+            raise AssertionError(f"unexpected operation {request.operation}")
+        return SandboxResult(
+            operation=request.operation,
+            result={"status": "ok", "operation": request.operation},
+            files=files,
+            duration_ms=1,
+        )
+
+
+class InMemoryObjectStorage:
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[bytes, str | None]] = {}
+
+    def put_bytes(self, data: bytes, key: str, *, content_type: str | None = None) -> StoredObject:
+        self.objects[key] = (data, content_type)
+        return StoredObject(size_bytes=len(data), content_type=content_type)
+
+    def presign_download(self, key: str, *, expires_seconds: int) -> PresignedRequest:
+        return PresignedRequest(
+            url=f"https://storage.test/{key}", method="GET", headers={}, expires_at=datetime.now(UTC)
+        )
+
+    async def read(self, key: str, *, max_bytes: int) -> bytes:
+        return self.objects[key][0]
+
+
+class TemplateRetriever:
+    def __init__(self, evidence: list[Evidence]) -> None:
+        self.evidence = evidence
+        self.contexts: list[AgentContext] = []
+
+    async def search(self, query: str, *, limit: int, ctx: AgentContext) -> list[Evidence]:
+        self.contexts.append(ctx)
+        return self.evidence
+
+
+@pytest.mark.asyncio
+async def test_artifacts_keep_every_revision_under_the_owners_private_collection(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = InMemoryObjectStorage()
+    sandbox = InProcessSandbox()
+    async with session_factory.begin() as session:
+        auth = IdentityStoreService(session)
+        tenant = await auth.create_tenant("artifacts", "Artifacts")
+        writer = await auth.create_user("writer@example.com")
+        reader = await auth.create_user("reader@example.com")
+        role = await auth.create_role(
+            tenant.id, "member", "Member", permission_codes=["knowledge.read", "access.manage"]
+        )
+        await auth.assign_membership(writer.id, tenant.id, role.id)
+        await auth.assign_membership(reader.id, tenant.id, role.id)
+        writer_context = await auth.get_context(writer.id, tenant_id=tenant.id)
+        reader_context = await auth.get_context(reader.id, tenant_id=tenant.id)
+
+        items = ItemService(session)
+        library = await items.create_collection(
+            tenant_id=tenant.id,
+            title="Legal templates",
+            created_by_user_id=writer.id,
+            metadata={"template_library": True},
+        )
+        await CollectionAccessService(session).grant(
+            library.id, principal_type="user", principal_id=writer.id, role="editor", actor=writer_context
+        )
+        template = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=library.id,
+            title="NDA template",
+            document_type="markdown",
+            created_by_user_id=writer.id,
+            mime_type="text/markdown",
+            size_bytes=30,
+            storage_key=f"tenants/{tenant.id}/items/template/raw",
+            metadata={"file_name": "nda-template.md"},
+            status="ready",
+        )
+        conversation = Conversation(tenant_id=tenant.id, user_id=writer.id, title="Draft")
+        session.add(conversation)
+        await session.flush()
+    storage.objects[template.storage_key] = (b"# NDA\n\nBetween [A] and [B].\n", "text/markdown")
+
+    service = ArtifactService(
+        session_factory,
+        object_storage=lambda: storage,
+        sandbox=sandbox,
+        uploads=lambda: None,  # type: ignore[arg-type, return-value]
+        max_content_bytes=1_000_000,
+        download_url_seconds=60,
+    )
+
+    created = await service.create_from_content(
+        writer_context,
+        title="Q3 memo",
+        content="# Q3 memo\n\nDate: 2026-09-01\n",
+        conversation_id=conversation.id,
+        request_id="req-1",
+    )
+    artifact_id = UUID(created["id"])
+    first_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/1/Q3-memo.md"
+    assert created["revision"] == 1
+    assert created["file_name"] == "Q3-memo.md"
+    assert created["download_url"] == f"https://storage.test/{first_key}"
+    assert sandbox.requests[0].operation == "write"
+    assert storage.objects[first_key][0] == b"# Q3 memo\n\nDate: 2026-09-01\n"
+
+    edited = await service.edit(
+        writer_context,
+        artifact_id,
+        summary="Changed the date",
+        edits=[{"find": "2026-09-01", "replace": "2026-09-06"}],
+        conversation_id=conversation.id,
+        request_id="req-2",
+    )
+    second_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/2/Q3-memo.md"
+    assert edited["revision"] == 2
+    assert edited["content"] == "# Q3 memo\n\nDate: 2026-09-06\n"
+    # The sandbox received the current revision as its input file.
+    assert sandbox.requests[1].operation == "replace"
+    assert sandbox.requests[1].files[0].data == storage.objects[first_key][0]
+    # A revision never overwrites the previous object.
+    assert storage.objects[first_key][0] == b"# Q3 memo\n\nDate: 2026-09-01\n"
+    assert storage.objects[second_key][0] == b"# Q3 memo\n\nDate: 2026-09-06\n"
+
+    exported = await service.export(writer_context, artifact_id, format="pdf")
+    assert exported["exports"]["pdf"]["download_url"].endswith("/revisions/2/Q3-memo.pdf")
+    assert exported["revisions"][1]["exports"]["pdf"]["size_bytes"] == len(b"%PDF-1.4 rendered")
+    # Exporting again reuses the stored rendition instead of running the sandbox.
+    await service.export(writer_context, artifact_id, format="pdf")
+    assert [request.operation for request in sandbox.requests] == ["write", "replace", "export_pdf"]
+
+    detail = await service.get(writer_context, artifact_id)
+    assert [revision["revision"] for revision in detail["revisions"]] == [1, 2]
+    assert detail["revisions"][0]["summary"] == "Created from the conversation"
+    assert detail["revisions"][1]["summary"] == "Changed the date"
+    assert detail["conversation_id"] == str(conversation.id)
+    first_content = await service.content(writer_context, artifact_id, revision=1)
+    assert "2026-09-01" in first_content["content"]
+
+    working = await service.conversation_artifacts(
+        writer_context, conversation.id, content_characters=12
+    )
+    assert [artifact.id for artifact in working] == [str(artifact_id)]
+    assert working[0].revision == 2
+    assert working[0].content_truncated is True
+    assert working[0].content.startswith("# Q3 memo")
+
+    from_template = await service.create_from_template(
+        writer_context,
+        title=None,
+        template_item_id=template.id,
+        conversation_id=conversation.id,
+        request_id="req-3",
+    )
+    assert from_template["title"] == "NDA template"
+    assert from_template["template_item_id"] == str(template.id)
+    assert from_template["content"].startswith("# NDA")
+    assert sandbox.requests[-1].operation == "import"
+    assert sandbox.requests[-1].files[0].name == "nda-template.md"
+
+    resolved = await service.resolve_access(
+        AgentContext(user_id=str(writer.id), tenant_id=str(tenant.id), roles=[])
+    )
+    assert resolved.user_id == writer.id and resolved.tenant_id == tenant.id
+
+    # The reader shares the tenant but not the writer's private collection.
+    with pytest.raises(DocumentNotFoundError):
+        await service.get(reader_context, artifact_id)
+    # Publishing needs a template library, not just any writable collection.
+    with pytest.raises(ArtifactValidationError, match="template library"):
+        await service.publish(
+            writer_context,
+            artifact_id,
+            collection_id=ItemService.artifact_collection_id(tenant.id, writer.id),
+        )
+
+    async with session_factory() as session:
+        item = await session.get(Item, artifact_id)
+        assert item is not None
+        assert item.parent_item_id == ItemService.artifact_collection_id(tenant.id, writer.id)
+        assert item.storage_key == second_key
+        assert item.metadata_["artifact"]["current_revision"] == 2
+        revisions = list(
+            await session.scalars(
+                select(ArtifactRevision.revision_number)
+                .where(ArtifactRevision.item_id == artifact_id)
+                .order_by(ArtifactRevision.revision_number)
+            )
+        )
+        assert revisions == [1, 2]
+        actions = set(
+            await session.scalars(
+                select(AuditLog.action).where(AuditLog.resource_id == str(artifact_id))
+            )
+        )
+        assert {"artifact.created", "artifact.revised", "artifact.exported"} <= actions
+
+    retriever = TemplateRetriever(
+        [
+            Evidence(
+                id="ev-1",
+                item_id=str(template.id),
+                chunk_id="chunk-1",
+                title="NDA template",
+                content="Between [A] and [B].",
+                collection_item_id=str(library.id),
+                relevance_score=0.8,
+            )
+        ]
+    )
+    templates = TemplateService(session_factory, retriever=retriever, result_limit=3)
+    assert await templates.library_collections(writer_context) == [
+        {"id": str(library.id), "title": "Legal templates"}
+    ]
+    results = await templates.search(writer_context, ["nda", "non-disclosure agreement"])
+    assert [result["id"] for result in results] == [str(template.id)]
+    assert results[0]["collection_title"] == "Legal templates"
+    # Retrieval is scoped to the template libraries only.
+    assert retriever.contexts[0].collection_item_ids == (str(library.id),)
+    # The reader has no library access, so nothing is searched.
+    assert await templates.search(reader_context, ["nda"]) == []

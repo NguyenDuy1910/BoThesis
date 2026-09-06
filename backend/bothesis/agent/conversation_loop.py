@@ -27,6 +27,7 @@ from time import perf_counter
 from typing import Any
 
 from bothesis.agent import AgentConfig, AgentExecutionError, duration_ms
+from bothesis.agent.artifact_stream import ArtifactProjection
 from bothesis.agent.citation_stream import CitationProjection
 from bothesis.agent.conversation_compression import ConversationMemory
 from bothesis.agent.models import (
@@ -202,6 +203,7 @@ class ConversationLoop:
         started_at = perf_counter()
         reducer = ResponseReducer()
         projection = CitationProjection(state.evidence, references=state.references)
+        artifact_projection = ArtifactProjection(state.artifacts)
         trace_context = (
             self._tracing.model_turn(
                 messages=_traced_items(request.input),
@@ -223,22 +225,23 @@ class ConversationLoop:
                         self._config.sampling_retry_base_delay_seconds
                     ),
                 ):
-                    for projected in projection.project(event):
-                        reduced = reducer.apply(projected)
-                        if (
-                            not first_token_seen
-                            and isinstance(reduced, ResponseOutputTextDeltaEvent)
-                            and reduced.delta
-                        ):
-                            first_token_seen = True
-                            if generation_trace is not None:
-                                generation_trace.mark_first_token()
-                        settled = (
-                            reducer.response
-                            if reduced.type in _SETTLING_TYPES
-                            else None
-                        )
-                        yield reduced, settled
+                    for cited in projection.project(event):
+                        for projected in artifact_projection.project(cited):
+                            reduced = reducer.apply(projected)
+                            if (
+                                not first_token_seen
+                                and isinstance(reduced, ResponseOutputTextDeltaEvent)
+                                and reduced.delta
+                            ):
+                                first_token_seen = True
+                                if generation_trace is not None:
+                                    generation_trace.mark_first_token()
+                            settled = (
+                                reducer.response
+                                if reduced.type in _SETTLING_TYPES
+                                else None
+                            )
+                            yield reduced, settled
             except AgentExecutionError:
                 if generation_trace is not None:
                     generation_trace.fail(
@@ -281,6 +284,7 @@ class ConversationLoop:
             previous_signatures=state.executed_tool_signatures,
             evidence=state.evidence,
             allowed_tool_names=ctx.allowed_tool_names,
+            artifacts=state.artifacts,
         )
         state.tool_call_count += batch.executed_call_count
         state.tool_duration_ms += batch.duration_ms

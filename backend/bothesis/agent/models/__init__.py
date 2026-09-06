@@ -34,6 +34,59 @@ class ConversationDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationArtifact:
+    """A document the agent created or revised for the user.
+
+    It travels two ways. On :attr:`AgentContext.artifacts` it is the working
+    set of this conversation, with a bounded ``content`` so the model can make
+    precise edits. On :attr:`ToolOutput.artifacts` it is the revision a tool
+    just produced, without content, which the stream projects onto the answer
+    as a ``bothesis:artifact`` annotation.
+    """
+
+    id: str
+    title: str
+    file_name: str
+    mime_type: str
+    revision: int
+    size_bytes: int
+    updated_at: str
+    exports: tuple[str, ...] = ()
+    content: str | None = None
+    content_truncated: bool = False
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> ConversationArtifact:
+        """Build the reference an artifact service payload describes."""
+
+        exports = payload.get("exports")
+        return cls(
+            id=str(payload["id"]),
+            title=str(payload["title"]),
+            file_name=str(payload["file_name"]),
+            mime_type=str(payload["mime_type"]),
+            revision=int(payload["revision"]),
+            size_bytes=int(payload["size_bytes"]),
+            updated_at=str(payload["updated_at"]),
+            exports=tuple(sorted(exports)) if isinstance(exports, Mapping) else (),
+        )
+
+    def annotation_payload(self) -> dict[str, Any]:
+        """The client-facing description; never the content."""
+
+        return {
+            "id": self.id,
+            "title": self.title,
+            "file_name": self.file_name,
+            "mime_type": self.mime_type,
+            "revision": self.revision,
+            "size_bytes": self.size_bytes,
+            "updated_at": self.updated_at,
+            "exports": list(self.exports),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AgentContext:
     """The authenticated scope for a single agent request."""
 
@@ -49,6 +102,7 @@ class AgentContext:
     retrieval_round: int = 0
     retrieval_query_count: int = 0
     documents: tuple[ConversationDocument, ...] = ()
+    artifacts: tuple[ConversationArtifact, ...] = ()
     model_extra_body: Mapping[str, Any] | None = None
 
 
@@ -104,6 +158,7 @@ class ToolOutput:
     evidence: list[Evidence] = field(default_factory=list)
     error: str | None = None
     metadata: dict[str, str | int | float | bool] = field(default_factory=dict)
+    artifacts: tuple[ConversationArtifact, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,11 +202,13 @@ class ConversationRun:
     used_evidence_ids: set[str] = field(default_factory=set)
     executed_tool_signatures: set[str] = field(default_factory=set)
     references: CitationReferences = field(default_factory=CitationReferences)
+    artifacts: dict[str, ConversationArtifact] = field(default_factory=dict)
 
 
 __all__ = [
     "AgentContext",
     "CitationReferences",
+    "ConversationArtifact",
     "ConversationDocument",
     "ConversationMessage",
     "ConversationRun",

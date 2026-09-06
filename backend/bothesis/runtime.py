@@ -13,7 +13,11 @@ from config import AppConfig, get_config
 
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.tools import ToolRegistry
+from bothesis.agent.tools.artifact_create import ArtifactCreate
+from bothesis.agent.tools.artifact_edit import ArtifactEdit
+from bothesis.agent.tools.artifact_export import ArtifactExport
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
+from bothesis.agent.tools.template_search import TemplateSearch
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.connector.file import FileProcessor
 from bothesis.db.engine import LazySessionFactory, SessionFactory
@@ -21,7 +25,9 @@ from bothesis.document_index import ItemIndex, SemanticContextualizer
 from bothesis.health import HealthService, HealthSettings
 from bothesis.knowledge import ItemKnowledgeRetriever, SemanticReranker
 from bothesis.observability import create_langfuse_tracing
+from bothesis.sandbox import DockerSandboxExecutor, SandboxExecutor
 from bothesis.services.admin_console import AdminConsoleService
+from bothesis.services.artifact import ArtifactService
 from bothesis.services.chat import ChatService
 from bothesis.services.conversation import ConversationService
 from bothesis.services.document_presentation import DocumentPresenter
@@ -31,6 +37,7 @@ from bothesis.services.knowledge_query import KnowledgeQueryService
 from bothesis.services.knowledge_view import KnowledgeViewService
 from bothesis.services.preview import KnowledgePreview
 from bothesis.services.stored_file_content import StoredFileContentService
+from bothesis.services.template import TemplateService
 from bothesis.services.workflow.service import TemporalWorkflowService
 from bothesis.services.workspace_documents import WorkspaceDocumentService
 from bothesis.storage import S3DocumentStorage
@@ -50,6 +57,9 @@ class AppRuntime:
         self._ingestion: ItemIngestionService | None = None
         self._uploads: DocumentUploadService | None = None
         self._conversations: ConversationService | None = None
+        self._sandbox: SandboxExecutor | None = None
+        self._artifacts: ArtifactService | None = None
+        self._templates: TemplateService | None = None
         self._agent: Agent | None = None
         self._retriever: ItemKnowledgeRetriever | None = None
         self._model_transport: OpenRouterTransport | None = None
@@ -66,6 +76,8 @@ class AppRuntime:
             self.sessions(),
             agent=self.agent(),
             conversations=self.conversation_service(),
+            artifacts=self.artifact_service(),
+            artifact_context_characters=self._config.artifact.context_characters,
         )
 
     def knowledge_query_service(self) -> KnowledgeQueryService:
@@ -143,6 +155,43 @@ class AppRuntime:
         if self._conversations is None:
             self._conversations = ConversationService(self.sessions())
         return self._conversations
+
+    def sandbox_executor(self) -> SandboxExecutor:
+        if self._sandbox is None:
+            sandbox = self._config.sandbox
+            self._sandbox = DockerSandboxExecutor(
+                image=sandbox.image,
+                timeout_seconds=sandbox.timeout_seconds,
+                memory_bytes=sandbox.memory_bytes,
+                cpu_count=sandbox.cpu_count,
+                pids_limit=sandbox.pids_limit,
+                max_output_bytes=sandbox.max_output_bytes,
+            )
+        return self._sandbox
+
+    def artifact_service(self) -> ArtifactService:
+        if self._artifacts is None:
+            artifact = self._config.artifact
+            # Storage and uploads are resolved lazily: the agent is composed
+            # at startup, while object storage is only required by a request.
+            self._artifacts = ArtifactService(
+                self.sessions(),
+                object_storage=self.object_storage,
+                sandbox=self.sandbox_executor(),
+                uploads=self.upload_service,
+                max_content_bytes=artifact.max_content_bytes,
+                download_url_seconds=artifact.download_url_seconds,
+            )
+        return self._artifacts
+
+    def template_service(self) -> TemplateService:
+        if self._templates is None:
+            self._templates = TemplateService(
+                self.sessions(),
+                retriever=self.knowledge_retriever(),
+                result_limit=self._config.retrieval.final_top_k,
+            )
+        return self._templates
 
     def object_storage(self) -> Any:
         if self._storage is None:
@@ -251,6 +300,7 @@ class AppRuntime:
                 self._config.observability.langfuse_public_key,
                 self._config.observability.langfuse_secret_key,
             )
+            artifact = self._config.artifact
             registry = ToolRegistry()
             registry.register(
                 KnowledgeSearch(
@@ -260,6 +310,22 @@ class AppRuntime:
                     tracing=tracing,
                 )
             )
+            registry.register(TemplateSearch(self.template_service(), tracing=tracing))
+            registry.register(
+                ArtifactCreate(
+                    self.artifact_service(),
+                    max_content_characters=artifact.max_content_bytes,
+                    max_result_characters=artifact.result_characters,
+                )
+            )
+            registry.register(
+                ArtifactEdit(
+                    self.artifact_service(),
+                    max_content_characters=artifact.max_content_bytes,
+                    max_result_characters=artifact.result_characters,
+                )
+            )
+            registry.register(ArtifactExport(self.artifact_service()))
             self._agent = Agent(
                 model=self.model_transport(),
                 tools=registry,

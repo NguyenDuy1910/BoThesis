@@ -26,6 +26,7 @@ truth.
 | Capability | How BoThesis approaches it |
 | --- | --- |
 | Grounded answers | Retrieves tenant-scoped evidence and returns citations back to canonical source Items. |
+| Working documents | Drafts documents from Knowledge Base templates or grounded content, revises them through the conversation, and exports them; every edit runs in a disposable Docker sandbox and is kept as a revision. |
 | Contextual hybrid retrieval | Uses contextual chunk text with dense embeddings and Qdrant BM25, fused for retrieval and filtered before evidence is exposed. |
 | Governed ingestion | Ingests managed files and Confluence content through connector-owned normalization, ACL mapping, checkpoints, and retry-safe replacement. |
 | Clear storage ownership | PostgreSQL holds business state; S3-compatible storage holds original bytes; Qdrant is a rebuildable retrieval projection. |
@@ -83,11 +84,13 @@ backend/
     ├── document_index/        Contextualization, embeddings, Qdrant projection
     ├── knowledge/             Retrieval, ACL filtering, evidence, reranking
     ├── agent/                 Conversation loop, tools, model transports
+    ├── sandbox/               Disposable Docker sandbox for document operations
     ├── db/                    SQLAlchemy models and database engine
     └── tui/                   Terminal chat client
 web/                           Next.js workspace for chat and administration
 app/bothesis/                  Flutter client scaffold
 deployment/                    Local PostgreSQL, Qdrant, and MinIO Compose stack
+                               plus the artifact sandbox image
 docs/                          Architecture, setup, operations, and reference docs
 tests/                         Backend and integration tests
 ```
@@ -121,7 +124,8 @@ make init
 `make init` creates missing local environment files, starts PostgreSQL, Qdrant,
 MinIO, and Temporal, creates the raw-object bucket, rebuilds the local database
 schema, seeds a development administrator, recreates the derived Qdrant
-collection, and registers Temporal Search Attributes.
+collection, registers Temporal Search Attributes, and builds the Docker sandbox
+image the assistant uses to draft and revise documents.
 
 > **Local-development reset:** `make init` intentionally resets the application
 > schema, Temporal persistence, and Qdrant collection. Do not use it against an
@@ -196,6 +200,7 @@ make db-init     # reset only the local PostgreSQL schema
 make db-seed     # seed the development administrator
 make db-reset    # reset PostgreSQL and seed the development administrator
 make qdrant-init # recreate only the derived Qdrant collection
+make sandbox-image # build the artifact sandbox image
 ```
 
 Run the verification suite from the repository root:

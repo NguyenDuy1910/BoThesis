@@ -1,91 +1,119 @@
 "use client";
 
+import { AlertTriangle, CheckCircle2, Info, X, XCircle } from "lucide-react";
 import { createContext, useCallback, useContext, useState } from "react";
-import { cn } from "@/lib/cn";
-import { CheckCircle2, XCircle, Info, X } from "lucide-react";
 
-type ToastVariant = "success" | "error" | "info";
+import { ui } from "@/components/ui/design-system";
+import { cn } from "@/lib/cn";
+
+type ToastVariant = "success" | "error" | "warning" | "info";
 
 interface ToastItem {
   id: string;
   title: string;
   description?: string;
   variant: ToastVariant;
+  action?: { label: string; onClick: () => void };
 }
 
-interface ToastContextValue {
-  toast: (opts: { title: string; description?: string; variant?: ToastVariant; duration?: number }) => void;
+interface ToastOptions {
+  title: string;
+  description?: string;
+  variant?: ToastVariant;
+  duration?: number;
+  /** One follow-up, e.g. "View collection" after a create. */
+  action?: { label: string; onClick: () => void };
 }
 
-const ToastContext = createContext<ToastContextValue | null>(null);
+const ToastContext = createContext<{ toast: (options: ToastOptions) => void } | null>(
+  null,
+);
 
 export function useToast() {
-  const ctx = useContext(ToastContext);
-  if (!ctx) throw new Error("useToast must be used within ToastProvider");
-  return ctx;
+  const context = useContext(ToastContext);
+  if (!context) throw new Error("useToast must be used within ToastProvider");
+  return context;
 }
 
-const VARIANT_STYLES: Record<ToastVariant, { icon: React.ReactNode; border: string }> = {
-  success: { icon: <CheckCircle2 aria-hidden="true" className="h-4 w-4 text-[var(--success)]" />, border: "border-l-[var(--success)]" },
-  error: { icon: <XCircle aria-hidden="true" className="h-4 w-4 text-[var(--danger)]" />, border: "border-l-[var(--danger)]" },
-  info: { icon: <Info aria-hidden="true" className="h-4 w-4 text-[var(--brand-accent)]" />, border: "border-l-[var(--brand-accent)]" },
+const variantIcon: Record<ToastVariant, React.ReactNode> = {
+  success: (
+    <CheckCircle2 aria-hidden="true" className="h-4 w-4 text-[var(--success)]" />
+  ),
+  error: <XCircle aria-hidden="true" className="h-4 w-4 text-[var(--danger)]" />,
+  warning: (
+    <AlertTriangle aria-hidden="true" className="h-4 w-4 text-[var(--warning)]" />
+  ),
+  info: <Info aria-hidden="true" className="h-4 w-4 text-[var(--info)]" />,
 };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
-  const toast = useCallback(
-    ({ title, description, variant = "info", duration = 4000 }: { title: string; description?: string; variant?: ToastVariant; duration?: number }) => {
-      const id = Math.random().toString(36).slice(2);
-      setToasts((prev) => [...prev, { id, title, description, variant }]);
-      setTimeout(() => {
-        setToasts((prev) => prev.filter((t) => t.id !== id));
-      }, duration);
-    },
-    []
-  );
+  const dismiss = useCallback((id: string) => {
+    setToasts((current) => current.filter((entry) => entry.id !== id));
+  }, []);
 
-  const dismiss = (id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  };
+  const toast = useCallback(
+    ({ title, description, variant = "info", duration, action }: ToastOptions) => {
+      const id = Math.random().toString(36).slice(2);
+      setToasts((current) => [...current, { id, title, description, variant, action }]);
+      // Failures stay until dismissed: an admin who missed the toast has no
+      // other way to find out what went wrong.
+      const life = duration ?? (variant === "error" ? 10_000 : 4500);
+      setTimeout(() => dismiss(id), life);
+    },
+    [dismiss],
+  );
 
   return (
     <ToastContext.Provider value={{ toast }}>
       {children}
       <div
         aria-label="Notifications"
-        className="fixed bottom-4 right-4 z-[100] flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2"
+        className="pointer-events-none fixed bottom-4 right-4 z-[100] flex w-[22rem] max-w-[calc(100vw-2rem)] flex-col gap-2"
       >
-        {toasts.map((t) => {
-          const style = VARIANT_STYLES[t.variant];
-          return (
-            <div
-              key={t.id}
-              role={t.variant === "error" ? "alert" : "status"}
-              className={cn(
-                "flex items-start gap-3 rounded-lg border border-l-4 border-[var(--border)] bg-[var(--surface)] p-3 text-[var(--text)] shadow-[var(--shadow-lg)]",
-                "animate-in slide-in-from-right-full fade-in-0 duration-200",
-                style.border
+        {toasts.map((entry) => (
+          <div
+            className={cn(
+              "pointer-events-auto flex items-start gap-2.5 rounded-[var(--adm-r-md)] bg-[var(--adm-raised)] p-3",
+              "shadow-[var(--adm-e3)] motion-safe:animate-[adm-pop_var(--adm-base)_var(--adm-ease)_both]",
+            )}
+            key={entry.id}
+            role={entry.variant === "error" ? "alert" : "status"}
+          >
+            <span className="mt-px shrink-0">{variantIcon[entry.variant]}</span>
+            <div className="min-w-0 flex-1">
+              <p className="text-[0.8125rem] font-semibold text-[var(--text)]">
+                {entry.title}
+              </p>
+              {entry.description && (
+                <p className="mt-0.5 text-[0.75rem] leading-4 text-[var(--text-muted)]">
+                  {entry.description}
+                </p>
               )}
-            >
-              <div className="mt-0.5 shrink-0">{style.icon}</div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-[var(--text)]">{t.title}</p>
-                {t.description && (
-                  <p className="mt-0.5 text-sm leading-5 text-[var(--text-muted)]">{t.description}</p>
-                )}
-              </div>
-              <button
-                aria-label={`Dismiss ${t.title} notification`}
-                onClick={() => dismiss(t.id)}
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
-                type="button"
-              >
-                <X aria-hidden="true" className="h-3.5 w-3.5" />
-              </button>
+              {entry.action && (
+                <button
+                  className="mt-1.5 text-[0.75rem] font-semibold text-[var(--brand-accent)] underline-offset-4 hover:underline"
+                  onClick={() => {
+                    entry.action?.onClick();
+                    dismiss(entry.id);
+                  }}
+                  type="button"
+                >
+                  {entry.action.label}
+                </button>
+              )}
             </div>
-          );
-        })}
+            <button
+              aria-label={`Dismiss ${entry.title}`}
+              className={cn(ui.iconButton, "h-6 w-6 shrink-0")}
+              onClick={() => dismiss(entry.id)}
+              type="button"
+            >
+              <X aria-hidden="true" className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ))}
       </div>
     </ToastContext.Provider>
   );

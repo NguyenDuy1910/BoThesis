@@ -5,6 +5,7 @@ import { useEffect } from "react";
 
 import { KnowledgeDocumentPreview } from "@/modules/knowledge/components/KnowledgeDocumentPreview";
 import type { RightActivity } from "../activity";
+import { ArtifactPreview } from "./ArtifactPreview";
 
 /**
  * The contextual workspace beside the conversation.
@@ -29,15 +30,18 @@ export function RightActivityPanel({
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [onClose]);
 
+  const isArtifact = activity.type === "artifact";
+  const eyebrow = isArtifact ? "Document" : "Source";
+
   return (
-    <aside aria-label="Source panel" className="activity-panel">
+    <aside aria-label={`${eyebrow} panel`} className="activity-panel">
       <header className="activity-panel__header">
         <div className="activity-panel__identity">
-          <span className="activity-panel__eyebrow">Source</span>
+          <span className="activity-panel__eyebrow">{eyebrow}</span>
           <h2 className="activity-panel__title" title={activity.title}>{activity.title}</h2>
         </div>
         <button
-          aria-label="Close source panel"
+          aria-label={`Close ${eyebrow.toLowerCase()} panel`}
           className="activity-panel__close"
           onClick={onClose}
           title="Close"
@@ -47,14 +51,22 @@ export function RightActivityPanel({
         </button>
       </header>
       <div className="activity-panel__body">
-        <KnowledgeDocumentPreview
-          chunkId={activity.chunkId}
-          // Keyed by document: two citations in one source reuse the loaded
-          // viewer and just navigate, while another source starts clean.
-          key={activity.itemId}
-          itemId={activity.itemId}
-          page={activity.page}
-        />
+        {activity.type === "artifact" ? (
+          <ArtifactPreview
+            artifactId={activity.artifactId}
+            key={`${activity.artifactId}:${activity.revision}`}
+            revision={activity.revision}
+          />
+        ) : (
+          <KnowledgeDocumentPreview
+            chunkId={activity.chunkId}
+            // Keyed by document: two citations in one source reuse the loaded
+            // viewer and just navigate, while another source starts clean.
+            key={activity.itemId}
+            itemId={activity.itemId}
+            page={activity.page}
+          />
+        )}
       </div>
     </aside>
   );

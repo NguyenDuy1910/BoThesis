@@ -1,3 +1,4 @@
+import type { TurnArtifact } from "./artifacts";
 import type { AnswerSource } from "./sources";
 
 /**
@@ -18,7 +19,30 @@ export interface KnowledgeDocumentActivity {
   page?: number;
 }
 
-export type RightActivity = KnowledgeDocumentActivity;
+/**
+ * A document the assistant produced, opened for reading beside the chat.
+ *
+ * Only identity travels here: the panel fetches the revision's content through
+ * the authorized artifact API, so nothing stored duplicates the document.
+ */
+export interface ArtifactPreviewActivity {
+  type: "artifact";
+  artifactId: string;
+  title: string;
+  revision: number;
+}
+
+export type RightActivity = KnowledgeDocumentActivity | ArtifactPreviewActivity;
+
+/** Open one of a turn's documents in the activity panel. */
+export function artifactPreviewActivity(artifact: TurnArtifact): ArtifactPreviewActivity {
+  return {
+    type: "artifact",
+    artifactId: artifact.id,
+    title: artifact.title,
+    revision: artifact.revision,
+  };
+}
 
 /** Open one of an answer's citations in the activity panel. */
 export function knowledgeDocumentActivity(
@@ -46,6 +70,12 @@ export function isSameActivity(
   next: RightActivity,
 ): boolean {
   if (!current || current.type !== next.type) return false;
+  if (current.type === "artifact" && next.type === "artifact") {
+    return current.artifactId === next.artifactId && current.revision === next.revision;
+  }
+  if (current.type !== "knowledge_document" || next.type !== "knowledge_document") {
+    return false;
+  }
   return (
     current.itemId === next.itemId
     && current.chunkId === next.chunkId

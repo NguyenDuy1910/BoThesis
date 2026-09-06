@@ -13,6 +13,7 @@ from bothesis.agent import AgentConfig, ConversationMemory
 from bothesis.agent.citation import CitationRenderer
 from bothesis.agent.models import (
     AgentContext,
+    ConversationArtifact,
     ConversationDocument,
     ConversationMessage,
     Evidence,
@@ -254,3 +255,135 @@ async def test_tool_executor_runs_independent_calls_concurrently_and_matches_cal
     assert blocked.output_items[0].output == (
         "Tool error: Tool is not available for this request."
     )
+
+
+@pytest.mark.asyncio
+async def test_conversation_context_supplies_working_artifacts() -> None:
+    context = AgentContext(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        roles=[],
+        artifacts=(
+            ConversationArtifact(
+                id="artifact-1",
+                title="Memo <v2>",
+                file_name="memo.md",
+                mime_type="text/markdown",
+                revision=2,
+                size_bytes=10,
+                updated_at="2026-09-06T00:00:00+00:00",
+                content="# Memo <draft>",
+                content_truncated=True,
+            ),
+        ),
+    )
+
+    prepared = await ConversationMemory(config=AgentConfig()).prepare(
+        "Change the date", context
+    )
+
+    assert "<conversation_artifact_policy>" in prepared.instructions
+    assert "<artifact_id>artifact-1</artifact_id>" in prepared.instructions
+    assert "Memo &lt;v2&gt;" in prepared.instructions
+    assert "<revision>2</revision>" in prepared.instructions
+    texts = [
+        part.text
+        for item in prepared.items
+        for part in item.content
+        if isinstance(part, InputText)
+    ]
+    assert texts[0] == "<user_message>Change the date</user_message>"
+    assert texts[1].startswith("<conversation_artifact>")
+    assert "<truncated>true</truncated>" in texts[1]
+    assert "<content># Memo &lt;draft&gt;</content>" in texts[1]
+
+
+def test_tool_registry_validates_nullable_and_enum_fields() -> None:
+    class DocumentTool(Tool):
+        @property
+        def definition(self) -> ToolDefinition:
+            return ToolDefinition(
+                name="artifact_create",
+                description="Create a document.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "minLength": 1},
+                        "template_id": {"type": ["string", "null"]},
+                        "format": {"type": "string", "enum": ["pdf"]},
+                    },
+                    "required": ["title", "template_id", "format"],
+                    "additionalProperties": False,
+                },
+            )
+
+        async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolOutput:
+            return ToolOutput(content="")
+
+    registry = ToolRegistry()
+    registry.register(DocumentTool())
+
+    assert registry.arguments_are_valid(
+        "artifact_create", {"title": "Memo", "template_id": None, "format": "pdf"}
+    )
+    assert registry.arguments_are_valid(
+        "artifact_create", {"title": "Memo", "template_id": "tpl-1", "format": "pdf"}
+    )
+    assert not registry.arguments_are_valid(
+        "artifact_create", {"title": "Memo", "template_id": 3, "format": "pdf"}
+    )
+    assert not registry.arguments_are_valid(
+        "artifact_create", {"title": "Memo", "template_id": None, "format": "docx"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_keeps_the_newest_artifact_revision() -> None:
+    class RevisionTool(Tool):
+        @property
+        def definition(self) -> ToolDefinition:
+            return ToolDefinition(
+                name="artifact_edit",
+                description="Revise a document.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"revision": {"type": "integer"}},
+                    "required": ["revision"],
+                    "additionalProperties": False,
+                },
+            )
+
+        async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolOutput:
+            revision = int(arguments["revision"])  # type: ignore[arg-type]
+            return ToolOutput(
+                content=f"revision {revision}",
+                artifacts=(
+                    ConversationArtifact(
+                        id="artifact-1",
+                        title="Memo",
+                        file_name="memo.md",
+                        mime_type="text/markdown",
+                        revision=revision,
+                        size_bytes=10,
+                        updated_at="2026-09-06T00:00:00+00:00",
+                    ),
+                ),
+            )
+
+    registry = ToolRegistry()
+    registry.register(RevisionTool())
+    artifacts: dict[str, ConversationArtifact] = {}
+    await ToolExecutor(registry, timeout_seconds=1, max_output_characters=100).execute(
+        (
+            FunctionCallItem(call_id="second", name="artifact_edit", arguments='{"revision":2}'),
+            FunctionCallItem(call_id="first", name="artifact_edit", arguments='{"revision":1}'),
+        ),
+        context=ToolContext(agent_context=AgentContext(user_id="u", tenant_id="t", roles=[])),
+        remaining_calls=2,
+        previous_signatures=set(),
+        evidence={},
+        artifacts=artifacts,
+    )
+
+    assert list(artifacts) == ["artifact-1"]
+    assert artifacts["artifact-1"].revision == 2

@@ -34,6 +34,7 @@ from native_responses import (
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import (
     AgentContext,
+    ConversationArtifact,
     ConversationDocument,
     Evidence,
     ToolContext,
@@ -469,3 +470,140 @@ def test_the_shared_script_builders_describe_one_provider_stream() -> None:
 
     assert isinstance(commentary_then_tool_call(), list)
     assert isinstance(final_answer(), Sequence)
+
+
+class DocumentTool(Tool):
+    """A tool that produces one artifact revision per call."""
+
+    def __init__(self, revision: int = 1) -> None:
+        self.revision = revision
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="artifact_create",
+            description="Create a document.",
+            input_schema={
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+        )
+
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolContext
+    ) -> ToolOutput:
+        artifact = ConversationArtifact(
+            id="artifact-1",
+            title=str(arguments["title"]),
+            file_name="memo.md",
+            mime_type="text/markdown",
+            revision=self.revision,
+            size_bytes=42,
+            updated_at="2026-09-06T00:00:00+00:00",
+        )
+        return ToolOutput(content="Created document", artifacts=(artifact,))
+
+
+def registry_with_document_tool(revision: int = 1) -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(DocumentTool(revision))
+    return registry
+
+
+def document_call() -> list[Any]:
+    return [
+        *created("resp_a"),
+        *message(
+            item_id="msg_1", output_index=0, deltas=["Writing it now. "], phase="commentary"
+        ),
+        *function_call(
+            item_id="fc_1",
+            output_index=1,
+            call_id="call-1",
+            name="artifact_create",
+            argument_deltas=['{"title":"Memo"}'],
+        ),
+        *completed("resp_a"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_artifact_produced_by_a_tool_is_annotated_on_the_answer() -> None:
+    transport = ScriptedResponsesTransport(
+        [document_call(), final_answer("The memo is ready.")]
+    )
+
+    events = await run(Agent(transport, registry_with_document_tool()))
+    annotations = [
+        event for event in events if event.type == "response.output_text.annotation.added"
+    ]
+    settled = [event.response for event in events if event.type == "response.completed"]
+
+    # One annotation, on the answer that presents the document, placed after
+    # its text — the same shape as a provider's generated-file citation.
+    assert len(annotations) == 1
+    annotation = annotations[0].annotation
+    assert annotation["type"] == "bothesis:artifact"
+    assert annotation["artifact"]["id"] == "artifact-1"
+    assert annotation["artifact"]["revision"] == 1
+    assert "content" not in annotation["artifact"]
+    assert annotation["start_index"] == annotation["end_index"] == len("The memo is ready.")
+    assert annotations[0].annotation_index == 0
+    # The commentary emitted before the tool ran is untouched.
+    assert settled[0].output_annotations == ()
+    # The settled snapshot carries what the deltas assembled.
+    assert settled[1].output_annotations == (annotation,)
+    assert settled[1].final_answer_text == "The memo is ready."
+    # The annotation is a client concern: it is not replayed to the provider.
+    assert transport.requests[1]["input"][-1]["type"] == "function_call_output"
+
+
+@pytest.mark.asyncio
+async def test_artifact_annotations_follow_citation_annotations_in_one_part() -> None:
+    evidence = Evidence(
+        id="ev-1", item_id="doc-1", chunk_id="chunk-1", title="Policy", content="Grounded"
+    )
+    document = ConversationDocument(
+        id="doc-1",
+        title="Policy",
+        content_type="text/plain",
+        mode="indexed",
+        citation_id="ev-1",
+        evidence=(evidence,),
+    )
+    transport = ScriptedResponsesTransport(
+        [
+            document_call(),
+            [
+                *created("resp_b"),
+                *message(
+                    item_id="msg_2",
+                    output_index=0,
+                    deltas=["Based on the policy [[cite:ev-1]], the memo is ready."],
+                    phase="final_answer",
+                ),
+                *completed("resp_b"),
+            ],
+        ]
+    )
+
+    events = await run(
+        Agent(transport, registry_with_document_tool()), documents=(document,)
+    )
+    annotations = [
+        event for event in events if event.type == "response.output_text.annotation.added"
+    ]
+    answer = events[-1].response.final_answer_text
+
+    assert [event.annotation["type"] for event in annotations] == [
+        "bothesis:document_citation",
+        "bothesis:artifact",
+    ]
+    assert [event.annotation_index for event in annotations] == [0, 1]
+    assert annotations[1].annotation["start_index"] == len(answer)
+    assert [annotation["type"] for annotation in events[-1].response.output_annotations] == [
+        "bothesis:document_citation",
+        "bothesis:artifact",
+    ]

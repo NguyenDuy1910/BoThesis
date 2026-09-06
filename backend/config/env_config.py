@@ -365,6 +365,80 @@ class AgentRuntimeConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SandboxConfig:
+    """Isolation limits for the disposable Docker sandbox that edits artifacts."""
+
+    image: str = "bothesis-sandbox:local"
+    timeout_seconds: float = 30.0
+    memory_bytes: int = 256 * 1024 * 1024
+    cpu_count: float = 1.0
+    pids_limit: int = 64
+    max_output_bytes: int = 20 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        if not self.image.strip():
+            raise RuntimeError("BOTHESIS_SANDBOX_IMAGE must not be blank")
+        if self.timeout_seconds <= 0 or self.cpu_count <= 0:
+            raise RuntimeError("sandbox timeout and CPU limits must be positive")
+        if min(self.memory_bytes, self.pids_limit, self.max_output_bytes) < 1:
+            raise RuntimeError("sandbox memory, pid, and output limits must be positive")
+
+    @classmethod
+    def from_environment(cls) -> SandboxConfig:
+        return cls(
+            image=text("BOTHESIS_SANDBOX_IMAGE", "bothesis-sandbox:local"),
+            timeout_seconds=number("BOTHESIS_SANDBOX_TIMEOUT_SECONDS", default=30.0),
+            memory_bytes=integer(
+                "BOTHESIS_SANDBOX_MEMORY_BYTES", default=256 * 1024 * 1024
+            ),
+            cpu_count=number("BOTHESIS_SANDBOX_CPUS", default=1.0),
+            pids_limit=integer("BOTHESIS_SANDBOX_PIDS_LIMIT", default=64),
+            max_output_bytes=integer(
+                "BOTHESIS_SANDBOX_MAX_OUTPUT_BYTES", default=20 * 1024 * 1024
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactConfig:
+    """Size and lifetime limits for conversation artifacts."""
+
+    max_content_bytes: int = 2 * 1024 * 1024
+    context_characters: int = 20_000
+    result_characters: int = 8_000
+    download_url_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        if (
+            min(
+                self.max_content_bytes,
+                self.context_characters,
+                self.result_characters,
+                self.download_url_seconds,
+            )
+            < 1
+        ):
+            raise RuntimeError("artifact limits must be positive")
+
+    @classmethod
+    def from_environment(cls) -> ArtifactConfig:
+        return cls(
+            max_content_bytes=integer(
+                "BOTHESIS_ARTIFACT_MAX_CONTENT_BYTES", default=2 * 1024 * 1024
+            ),
+            context_characters=integer(
+                "BOTHESIS_ARTIFACT_CONTEXT_CHARACTERS", default=20_000
+            ),
+            result_characters=integer(
+                "BOTHESIS_ARTIFACT_RESULT_CHARACTERS", default=8_000
+            ),
+            download_url_seconds=integer(
+                "BOTHESIS_ARTIFACT_DOWNLOAD_URL_SECONDS", default=300
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class UploadConfig:
     """Native upload size limits and presigned URL lifetimes."""
 
@@ -506,6 +580,8 @@ class AppConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     agent: AgentRuntimeConfig = field(default_factory=AgentRuntimeConfig)
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
+    artifact: ArtifactConfig = field(default_factory=ArtifactConfig)
     upload: UploadConfig = field(default_factory=UploadConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
     integration: IntegrationConfig = field(default_factory=IntegrationConfig)
@@ -524,6 +600,8 @@ class AppConfig:
             model=ModelConfig.from_environment(),
             retrieval=RetrievalConfig.from_environment(),
             agent=AgentRuntimeConfig.from_environment(),
+            sandbox=SandboxConfig.from_environment(),
+            artifact=ArtifactConfig.from_environment(),
             upload=UploadConfig.from_environment(),
             preview=PreviewConfig.from_environment(),
             integration=IntegrationConfig.from_environment(),
@@ -553,6 +631,7 @@ __all__ = [
     "OPENROUTER_DEFAULT_BASE_URL",
     "AgentRuntimeConfig",
     "AppConfig",
+    "ArtifactConfig",
     "IdentityConfig",
     "IntegrationConfig",
     "ModelConfig",
@@ -560,6 +639,7 @@ __all__ = [
     "ObservabilityConfig",
     "PreviewConfig",
     "RetrievalConfig",
+    "SandboxConfig",
     "ServerConfig",
     "UploadConfig",
     "VectorIndexConfig",

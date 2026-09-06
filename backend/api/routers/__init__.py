@@ -217,6 +217,79 @@ class DocumentDetail(BaseModel):
     indexed_at: str
 
 
+# --- Conversation artifacts ---
+
+
+class ArtifactExportView(BaseModel):
+    file_name: str
+    size_bytes: int = Field(ge=0)
+    download_url: str | None = None
+
+
+class ArtifactRevisionView(BaseModel):
+    revision: int = Field(ge=1)
+    summary: str | None = None
+    size_bytes: int = Field(ge=0)
+    created_at: str | None = None
+    download_url: str | None = None
+    exports: dict[str, ArtifactExportView] = Field(default_factory=dict)
+
+
+class ArtifactDetail(BaseModel):
+    """One conversation artifact with its current revision and history."""
+
+    id: str
+    title: str
+    file_name: str
+    mime_type: str
+    size_bytes: int = Field(ge=0)
+    revision: int = Field(ge=1)
+    revision_count: int = Field(ge=1)
+    conversation_id: str | None = None
+    template_item_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    download_url: str | None = None
+    exports: dict[str, ArtifactExportView] = Field(default_factory=dict)
+    revisions: list[ArtifactRevisionView]
+
+
+class ArtifactContent(BaseModel):
+    artifact_id: str
+    revision: int = Field(ge=1)
+    mime_type: str
+    content: str
+    truncated: bool = False
+
+
+class ArtifactExportRequest(BaseModel):
+    format: Literal["pdf"] = "pdf"
+
+
+class ArtifactPublishRequest(BaseModel):
+    collection_id: UUID
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ArtifactPublishResponse(BaseModel):
+    artifact_id: str
+    revision: int = Field(ge=1)
+    item_id: str
+    collection_id: str
+    title: str
+    status: str
+    created: bool
+
+
+class TemplateLibrary(BaseModel):
+    id: str
+    title: str
+
+
+class TemplateLibraryList(BaseModel):
+    items: list[TemplateLibrary]
+
+
 # --- Citations and document viewer ---
 
 
@@ -479,6 +552,13 @@ __all__ = [
     "AdminRequest",
     "AdminRoleCreate",
     "AdminRoleUpdate",
+    "ArtifactContent",
+    "ArtifactDetail",
+    "ArtifactExportRequest",
+    "ArtifactExportView",
+    "ArtifactPublishRequest",
+    "ArtifactPublishResponse",
+    "ArtifactRevisionView",
     "BIQueryRequest",
     "BIQueryResponse",
     "ChatHistoryMessage",
@@ -524,6 +604,8 @@ __all__ = [
     "SearchRequest",
     "SearchResponse",
     "SpaceUpdate",
+    "TemplateLibrary",
+    "TemplateLibraryList",
     "Thread",
     "ThreadCreate",
     "ThreadDetail",

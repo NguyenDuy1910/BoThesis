@@ -33,6 +33,7 @@ orchestration, document transformation, or application decisions.
 | `preview` | Derived knowledge-asset rendering, versioned preview manifests, and short-lived preview URLs. |
 | `knowledge` | Tenant and ACL filtering, retrieval, reranking, and evidence construction. |
 | `agent` | Conversation orchestration, model transports, tool execution, streaming, and cited answers. |
+| `sandbox` | Disposable, isolated execution of the fixed document operations the agent may request; never the source of truth. |
 | `db` | SQLAlchemy schema and database engine composition. |
 | `tui` | A terminal API client; it does not bypass the HTTP boundary. |
 

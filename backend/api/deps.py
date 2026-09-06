@@ -12,9 +12,11 @@ from bothesis.health import HealthService
 from bothesis.runtime import AppRuntime
 from bothesis.services import AuthContext
 from bothesis.services.admin_console import AdminConsoleService
+from bothesis.services.artifact import ArtifactService
 from bothesis.services.chat import ChatService
 from bothesis.services.knowledge_query import KnowledgeQueryService
 from bothesis.services.knowledge_view import KnowledgeViewService
+from bothesis.services.template import TemplateService
 from bothesis.services.workspace_documents import WorkspaceDocumentService
 
 from api.identity import RequestIdentity, resolve_auth_context
@@ -103,6 +105,18 @@ def get_admin_console_service(
     return runtime.admin_console_service()
 
 
+def get_artifact_service(
+    runtime: Annotated[AppRuntime, Depends(get_runtime)],
+) -> ArtifactService:
+    return runtime.artifact_service()
+
+
+def get_template_service(
+    runtime: Annotated[AppRuntime, Depends(get_runtime)],
+) -> TemplateService:
+    return runtime.template_service()
+
+
 def get_health_service(
     runtime: Annotated[AppRuntime, Depends(get_runtime)],
 ) -> HealthService:
@@ -119,10 +133,13 @@ Documents = Annotated[
     WorkspaceDocumentService, Depends(get_workspace_document_service)
 ]
 AdminConsole = Annotated[AdminConsoleService, Depends(get_admin_console_service)]
+Artifacts = Annotated[ArtifactService, Depends(get_artifact_service)]
+Templates = Annotated[TemplateService, Depends(get_template_service)]
 Health = Annotated[HealthService, Depends(get_health_service)]
 
 __all__ = [
     "AdminConsole",
+    "Artifacts",
     "Caller",
     "Chat",
     "ChatCaller",
@@ -131,8 +148,11 @@ __all__ = [
     "KnowledgeQuery",
     "KnowledgeView",
     "Runtime",
+    "Templates",
+    "get_artifact_service",
     "get_auth_context",
     "get_chat_auth_context",
     "get_request_identity",
     "get_runtime",
+    "get_template_service",
 ]

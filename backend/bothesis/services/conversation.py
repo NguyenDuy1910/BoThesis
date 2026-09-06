@@ -95,6 +95,7 @@ class ConversationService:
         content: str,
         referenced_document_ids: Iterable[UUID],
         request_id: str,
+        artifact_ids: Iterable[UUID] = (),
     ) -> Message | None:
         normalized_content = content.strip()
         if not normalized_content:
@@ -102,6 +103,7 @@ class ConversationService:
         if access.tenant_id is None:
             raise DocumentNotFoundError(f"conversation not found: {conversation_id}")
         unique_references = list(dict.fromkeys(referenced_document_ids))
+        unique_artifacts = list(dict.fromkeys(artifact_ids))
         async with self._session_factory.begin() as session:
             conversation = await session.scalar(
                 select(Conversation)
@@ -134,6 +136,15 @@ class ConversationService:
                     message.id,
                     document_id,
                     "reference",
+                    access=access,
+                    position=position,
+                )
+            # A document the turn created or revised is the answer's output.
+            for position, artifact_id in enumerate(unique_artifacts):
+                await items.link_message(
+                    message.id,
+                    artifact_id,
+                    "output",
                     access=access,
                     position=position,
                 )

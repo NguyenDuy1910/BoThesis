@@ -73,15 +73,38 @@ export interface CitationSource {
   url?: string | null;
 }
 
-/** The one BoThesis annotation type; the specification only defines url_citation. */
+/** The BoThesis citation annotation type; the specification only defines url_citation. */
 export const DOCUMENT_CITATION_TYPE = "bothesis:document_citation";
 
-/** An opaque protocol annotation. Document citations carry `citation`. */
+/**
+ * The BoThesis artifact annotation type: a document the turn created or
+ * revised, attached to the answer that presents it. Zero-width at the end of
+ * the text, the way a provider attaches a sandbox-generated file to a message.
+ */
+export const ARTIFACT_ANNOTATION_TYPE = "bothesis:artifact";
+
+/** The description of one artifact revision; never its content. */
+export interface ArtifactReference {
+  id: string;
+  title: string;
+  file_name: string;
+  mime_type: string;
+  revision: number;
+  size_bytes: number;
+  updated_at: string;
+  exports?: string[];
+}
+
+/**
+ * An opaque protocol annotation. Document citations carry `citation`;
+ * artifacts carry `artifact`.
+ */
 export interface OutputTextAnnotation {
   type: string;
   start_index?: number;
   end_index?: number;
   citation?: CitationReference;
+  artifact?: ArtifactReference;
   [key: string]: unknown;
 }
 

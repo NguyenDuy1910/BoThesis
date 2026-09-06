@@ -15,11 +15,21 @@ from bothesis.services import (
     AuthContext,
     require_tenant_permission,
 )
+from bothesis.services.artifact import ArtifactService, produced_artifact_ids
 from bothesis.services.collection_access import CollectionAccessService
 from bothesis.services.conversation import ConversationService
 
 KnowledgeMode = Literal["auto", "selected", "off"]
 HistoryTurn = tuple[Literal["user", "assistant"], str]
+
+# Retrieval tools follow the knowledge mode; document tools are always available
+# because a document can be written from the conversation alone.
+KNOWLEDGE_TOOL_NAMES: tuple[str, ...] = ("knowledge_search", "template_search")
+ARTIFACT_TOOL_NAMES: tuple[str, ...] = (
+    "artifact_create",
+    "artifact_edit",
+    "artifact_export",
+)
 
 
 class ChatService:
@@ -31,10 +41,16 @@ class ChatService:
         *,
         agent: Agent,
         conversations: ConversationService,
+        artifacts: ArtifactService,
+        artifact_context_characters: int = 20_000,
     ) -> None:
+        if artifact_context_characters < 1:
+            raise ValueError("artifact_context_characters must be at least one")
         self._sessions = session_factory
         self._agent = agent
         self._conversations = conversations
+        self._artifacts = artifacts
+        self._artifact_context_characters = artifact_context_characters
 
     async def stream_turn(
         self,
@@ -52,12 +68,22 @@ class ChatService:
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         if access.tenant_id is None:
             raise PermissionError("an active tenant membership is required for chat")
-        selected_ids, allowed_tool_names = await self._resolve_knowledge_scope(
+        selected_ids, knowledge_tools = await self._resolve_knowledge_scope(
             access,
             knowledge_mode=knowledge_mode,
             collection_item_ids=collection_item_ids,
         )
         resolved_conversation_id = conversation_id or uuid4()
+        # A brand-new conversation has no working documents yet.
+        artifacts = (
+            await self._artifacts.conversation_artifacts(
+                access,
+                resolved_conversation_id,
+                content_characters=self._artifact_context_characters,
+            )
+            if conversation_id is not None
+            else ()
+        )
         context = AgentContext(
             user_id=str(access.user_id),
             tenant_id=str(access.tenant_id),
@@ -69,7 +95,8 @@ class ChatService:
                 ConversationMessage(role=role, content=content)
                 for role, content in history
             ),
-            allowed_tool_names=allowed_tool_names,
+            allowed_tool_names=(*knowledge_tools, *ARTIFACT_TOOL_NAMES),
+            artifacts=artifacts,
         )
         await self._conversations.start_turn(
             resolved_conversation_id,
@@ -98,6 +125,7 @@ class ChatService:
         stream = self._agent.run(message, context)
         final_answer: str | None = None
         referenced_document_ids: tuple[UUID, ...] = ()
+        artifact_ids: tuple[UUID, ...] = ()
         try:
             async for event in stream:
                 if await is_disconnected():
@@ -107,6 +135,9 @@ class ChatService:
                     if answer:
                         final_answer = answer
                         referenced_document_ids = referenced_item_ids(event.response)
+                        artifact_ids = produced_artifact_ids(
+                            event.response.output_annotations
+                        )
                 yield event.model_dump_json()
         finally:
             await stream.aclose()
@@ -117,6 +148,7 @@ class ChatService:
                 content=final_answer,
                 referenced_document_ids=referenced_document_ids,
                 request_id=context.request_id or "",
+                artifact_ids=artifact_ids,
             )
 
     async def _resolve_knowledge_scope(
@@ -135,12 +167,12 @@ class ChatService:
                 access
             )
         if knowledge_mode == "auto":
-            return allowed_ids, ("knowledge_search",)
+            return allowed_ids, KNOWLEDGE_TOOL_NAMES
         if not collection_item_ids or not set(collection_item_ids).issubset(
             set(allowed_ids)
         ):
             raise PermissionError("one or more selected Collections are unavailable")
-        return tuple(dict.fromkeys(collection_item_ids)), ("knowledge_search",)
+        return tuple(dict.fromkeys(collection_item_ids)), KNOWLEDGE_TOOL_NAMES
 
 
 def referenced_item_ids(response: Response) -> tuple[UUID, ...]:
@@ -162,4 +194,11 @@ def referenced_item_ids(response: Response) -> tuple[UUID, ...]:
     return tuple(result)
 
 
-__all__ = ["ChatService", "HistoryTurn", "KnowledgeMode", "referenced_item_ids"]
+__all__ = [
+    "ARTIFACT_TOOL_NAMES",
+    "KNOWLEDGE_TOOL_NAMES",
+    "ChatService",
+    "HistoryTurn",
+    "KnowledgeMode",
+    "referenced_item_ids",
+]

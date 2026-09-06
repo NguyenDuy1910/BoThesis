@@ -9,7 +9,13 @@ from contextlib import nullcontext
 from time import perf_counter
 from typing import Any
 
-from bothesis.agent.models import Evidence, ToolContext, ToolObservation, ToolOutput
+from bothesis.agent.models import (
+    ConversationArtifact,
+    Evidence,
+    ToolContext,
+    ToolObservation,
+    ToolOutput,
+)
 from bothesis.agent.protocol import FunctionCallItem, FunctionCallOutputItem
 from bothesis.agent.tools import ToolExecutionBatch
 from bothesis.agent.tools.registry import ToolRegistry
@@ -57,6 +63,7 @@ class ToolExecutor:
         previous_signatures: set[str],
         evidence: dict[str, Evidence],
         allowed_tool_names: Sequence[str] | None = None,
+        artifacts: dict[str, ConversationArtifact] | None = None,
     ) -> ToolExecutionBatch:
         """Execute all safe independent calls and preserve model call order."""
 
@@ -135,6 +142,13 @@ class ToolExecutor:
                     )
                 ):
                     evidence[source.id] = source
+            if artifacts is not None:
+                # The newest revision of an artifact is the one the answer
+                # presents; an older one from a parallel call must not win.
+                for artifact in observation.output.artifacts:
+                    existing = artifacts.get(artifact.id)
+                    if existing is None or artifact.revision >= existing.revision:
+                        artifacts[artifact.id] = artifact
         return ToolExecutionBatch(
             output_items=tuple(
                 _output_item(observation, self._max_output_characters)

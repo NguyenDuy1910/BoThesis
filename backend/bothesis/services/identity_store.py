@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from bothesis.db.engine import SessionFactory
 from bothesis.db.models import (
     Group,
     GroupMembership,
@@ -404,6 +405,26 @@ class IdentityStoreService:
         return memberships[0] if memberships else None
 
 
+async def resolve_agent_access(
+    session_factory: SessionFactory, *, user_id: str, tenant_id: str
+) -> AuthContext:
+    """Re-resolve the authenticated caller behind an agent tool call.
+
+    A tool receives only the tenant and user identifiers the chat request was
+    authenticated with. Item-level authorization also needs the caller's admin
+    state and group membership, so those are read back fail-closed from the
+    database rather than trusted from the model-facing context.
+    """
+
+    try:
+        user = UUID(user_id)
+        tenant = UUID(tenant_id)
+    except (TypeError, ValueError) as exc:
+        raise AuthorizationError("agent context carries an invalid identity") from exc
+    async with session_factory() as session:
+        return await IdentityStoreService(session).get_context(user, tenant_id=tenant)
+
+
 def _normalize_email(value: str) -> str:
     email = _required_text(value, "email", 255).casefold()
     if "@" not in email:
@@ -442,4 +463,4 @@ def _optional_text(
     return _required_text(value, field_name, max_length)
 
 
-__all__ = ["IdentityStoreService"]
+__all__ = ["IdentityStoreService", "resolve_agent_access"]

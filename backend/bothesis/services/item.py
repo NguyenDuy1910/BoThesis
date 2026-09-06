@@ -50,6 +50,10 @@ class ItemService:
     def upload_collection_id(tenant_id: UUID, user_id: UUID) -> UUID:
         return uuid5(NAMESPACE_URL, f"bothesis:upload-collection:{tenant_id}:{user_id}")
 
+    @staticmethod
+    def artifact_collection_id(tenant_id: UUID, user_id: UUID) -> UUID:
+        return uuid5(NAMESPACE_URL, f"bothesis:artifact-collection:{tenant_id}:{user_id}")
+
     async def create_collection(
         self,
         *,
@@ -146,15 +150,54 @@ class ItemService:
         if size_bytes < 1:
             raise ValueError("upload size must be greater than zero")
 
-        collection_id = self.upload_collection_id(tenant_id, owner_user_id)
+        collection_id = await self.ensure_personal_collection(
+            owner_user_id,
+            tenant_id,
+            collection_id=self.upload_collection_id(tenant_id, owner_user_id),
+            title="My uploads",
+            system_kind="personal_uploads",
+        )
+
+        item_id = uuid5(
+            NAMESPACE_URL,
+            f"bothesis:upload:{tenant_id}:{owner_user_id}:{normalized_key}",
+        )
+        return await self._create_or_get_upload(
+            item_id=item_id,
+            owner_user_id=owner_user_id,
+            tenant_id=tenant_id,
+            collection_id=collection_id,
+            idempotency_key=normalized_key,
+            file_name=normalized_name,
+            mime_type=normalized_mime,
+            size_bytes=size_bytes,
+            document_type=document_type,
+            metadata=metadata,
+        )
+
+    async def ensure_personal_collection(
+        self,
+        owner_user_id: UUID,
+        tenant_id: UUID,
+        *,
+        collection_id: UUID,
+        title: str,
+        system_kind: str,
+    ) -> UUID:
+        """Create one user-private system Collection on first use, idempotently.
+
+        The Collection does not inherit access, and the only grant is the
+        owner's, so its Documents are visible to that user and admins alone.
+        """
+
         await self._session.execute(
             insert(Item)
             .values(
                 id=collection_id,
                 tenant_id=tenant_id,
                 item_type="collection",
-                title="My uploads",
-                metadata_={"system_kind": "personal_uploads"},
+                title=title,
+                metadata_={"system_kind": system_kind},
                 inherit_access=False,
                 status="ready",
                 created_by_user_id=owner_user_id,
@@ -179,23 +222,7 @@ class ItemService:
                 set_={"role": "owner", "deleted_at": None},
             )
         )
-
-        item_id = uuid5(
-            NAMESPACE_URL,
-            f"bothesis:upload:{tenant_id}:{owner_user_id}:{normalized_key}",
-        )
-        return await self._create_or_get_upload(
-            item_id=item_id,
-            owner_user_id=owner_user_id,
-            tenant_id=tenant_id,
-            collection_id=collection_id,
-            idempotency_key=normalized_key,
-            file_name=normalized_name,
-            mime_type=normalized_mime,
-            size_bytes=size_bytes,
-            document_type=document_type,
-            metadata=metadata,
-        )
+        return collection_id
 
     async def create_or_get_collection_upload(
         self,

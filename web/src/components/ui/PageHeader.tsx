@@ -4,34 +4,39 @@ import { cn } from "@/lib/cn";
 
 interface PageHeaderProps {
   title: string;
+  /** Small label above the title — the section this page belongs to. */
+  eyebrow?: React.ReactNode;
   description?: string;
+  /** Facts about the record, shown beside the title. */
   metadata?: React.ReactNode;
+  /** Exactly one primary action; everything else secondary or in a menu. */
   actions?: React.ReactNode;
-  sticky?: boolean;
   className?: string;
 }
 
-export function PageHeader({ title, description, metadata, actions, sticky = false, className }: PageHeaderProps) {
+export function PageHeader({
+  title,
+  eyebrow,
+  description,
+  metadata,
+  actions,
+  className,
+}: PageHeaderProps) {
   return (
-    <div
-      className={cn(
-        "mb-4 flex min-h-14 flex-col gap-2 border-b border-[var(--border)] pb-3 sm:flex-row sm:items-center sm:justify-between",
-        sticky && "sticky top-12 z-10 bg-[var(--bg-panel)] pt-1 backdrop-blur",
-        className
-      )}
-    >
-      <div className="min-w-0">
-        <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h1 className="min-w-0 text-balance text-2xl font-semibold leading-8 text-[var(--text)]">{title}</h1>
+    <header className={cn("adm-head", className)}>
+      <div className="adm-head__text">
+        {eyebrow && <p className="adm-head__eyebrow">{eyebrow}</p>}
+        <h1 className="adm-head__title">
+          <span className="min-w-0 text-balance">{title}</span>
           {metadata && (
-            <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-[var(--text-muted)]">
+            <span className="flex min-w-0 flex-wrap items-center gap-2 text-[0.8125rem] font-normal text-[var(--text-muted)]">
               {metadata}
-            </div>
+            </span>
           )}
-        </div>
-        {description && <p className="mt-0.5 max-w-3xl text-pretty text-sm leading-5 text-[var(--text-muted)]">{description}</p>}
+        </h1>
+        {description && <p className="adm-head__desc">{description}</p>}
       </div>
-      {actions && <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">{actions}</div>}
-    </div>
+      {actions && <div className="adm-head__actions">{actions}</div>}
+    </header>
   );
 }

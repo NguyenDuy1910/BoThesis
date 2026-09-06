@@ -5,7 +5,7 @@ import {
   COLLECTION_UPLOAD_MAX_BYTES,
   collectionUploadFailure,
   validateCollectionUploadFile,
-} from "../web/src/modules/knowledge-management/collection-upload.ts";
+} from "../web/src/modules/admin/collection-upload.ts";
 
 test("accepts supported collection files within the client-side limit", () => {
   assert.equal(
@@ -42,7 +42,7 @@ test("maps API permission and capability failures to actionable upload states", 
   });
   assert.deepEqual(collectionUploadFailure(404, "not found"), {
     status: "unavailable",
-    message: "Uploading directly to this knowledge base is not available in this environment.",
+    message: "Uploading directly to this collection is not available in this environment.",
   });
   assert.deepEqual(collectionUploadFailure(422, "unsupported file type: .exe"), {
     status: "unsupported",

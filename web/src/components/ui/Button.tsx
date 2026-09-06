@@ -4,24 +4,51 @@ import { cn } from "@/lib/cn";
 import { Loader2 } from "lucide-react";
 import { forwardRef } from "react";
 
-type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
-type ButtonSize = "sm" | "md" | "lg";
+/**
+ * One action hierarchy for the whole product.
+ *
+ * primary      one per screen — the action the page exists for
+ * secondary    outlined; supporting actions of equal weight to each other
+ * tertiary     soft fill; toolbar and inline actions that must not compete
+ * ghost        chromeless; row actions, icon actions, dismissals
+ * destructive  solid red; only inside a confirmation, never on a list row
+ * danger       outlined red; the row-level entry point into a destructive flow
+ */
+export type ButtonVariant =
+  | "primary"
+  | "secondary"
+  | "tertiary"
+  | "ghost"
+  | "destructive"
+  | "danger";
+
+export type ButtonSize = "sm" | "md" | "lg";
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    "border border-[var(--primary)] bg-[var(--primary)] text-[var(--text-on-brand)] hover:border-[var(--primary-hover)] hover:bg-[var(--primary-hover)] active:border-[var(--primary-pressed)] active:bg-[var(--primary-pressed)]",
+    "bg-[var(--primary)] text-[var(--text-on-brand)] shadow-[var(--adm-e1)] hover:bg-[var(--primary-hover)] active:bg-[var(--primary-pressed)]",
   secondary:
-    "border border-[var(--border)] bg-[var(--surface)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-panel)] hover:text-[var(--text)] active:bg-[var(--surface-selected)]",
+    "bg-[var(--adm-surface)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--adm-hairline-strong)] hover:bg-[var(--adm-inset)] hover:text-[var(--text)] hover:shadow-[inset_0_0_0_1px_var(--border-strong)] active:bg-[var(--surface-hover)]",
+  tertiary:
+    "bg-[var(--adm-inset)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--adm-hairline)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
   ghost:
-    "border border-transparent text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] active:bg-[var(--surface-selected)]",
+    "text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] active:bg-[var(--surface-selected)]",
+  destructive:
+    "bg-[var(--danger)] text-white shadow-[var(--adm-e1)] hover:brightness-95 active:brightness-90",
   danger:
-    "border border-[var(--danger-border)] bg-[var(--surface)] text-[var(--danger)] hover:bg-[var(--danger-soft)] active:opacity-85",
+    "bg-transparent text-[var(--danger-text)] shadow-[inset_0_0_0_1px_var(--danger-border)] hover:bg-[var(--danger-soft)]",
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
-  sm: "h-9 gap-1.5 rounded-md px-2.5 text-sm",
-  md: "h-10 gap-2 rounded-md px-3.5 text-sm",
-  lg: "h-11 gap-2 rounded-md px-4 text-sm",
+  sm: "h-8 gap-1.5 rounded-[var(--adm-r-sm)] px-2.5 text-[0.8125rem]",
+  md: "h-9 gap-1.5 rounded-[var(--adm-r-sm)] px-3 text-[0.8125rem]",
+  lg: "h-10 gap-2 rounded-[var(--adm-r-md)] px-4 text-sm",
+};
+
+const iconOnlySizeClasses: Record<ButtonSize, string> = {
+  sm: "h-8 w-8 rounded-[var(--adm-r-sm)] px-0",
+  md: "h-9 w-9 rounded-[var(--adm-r-sm)] px-0",
+  lg: "h-10 w-10 rounded-[var(--adm-r-md)] px-0",
 };
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -29,42 +56,56 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   size?: ButtonSize;
   loading?: boolean;
   icon?: React.ReactNode;
+  iconAfter?: React.ReactNode;
+  /** Renders a square control. Pass `aria-label` — the label is not visible. */
+  iconOnly?: boolean;
   selected?: boolean;
 }
 
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button({
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  {
     variant = "primary",
     size = "md",
     loading = false,
     icon,
+    iconAfter,
+    iconOnly = false,
     selected,
     children,
     className,
     disabled,
     type = "button",
     ...props
-  }, ref) {
-    return (
-      <button
-        ref={ref}
-        aria-busy={loading || undefined}
-        className={cn(
-          "inline-flex shrink-0 items-center justify-center font-medium leading-none transition-[background-color,border-color,color,box-shadow,opacity,transform] duration-[var(--duration-base)] ease-[var(--ease-standard)]",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-accent)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)]",
-          "disabled:pointer-events-none disabled:border-[var(--border)] disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)] disabled:opacity-50 disabled:shadow-none",
-          variantClasses[variant],
-          sizeClasses[size],
-          selected && variant !== "primary" && "border-[var(--border-strong)] bg-[var(--surface-selected)] text-[var(--brand-accent)]",
-          className
-        )}
-        disabled={disabled || loading}
-        type={type}
-        {...props}
-      >
-        {loading && <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />}
-        {!loading && icon}
-        {children}
-      </button>
-    );
   },
-);
+  ref,
+) {
+  return (
+    <button
+      ref={ref}
+      aria-busy={loading || undefined}
+      className={cn(
+        "inline-flex shrink-0 items-center justify-center font-medium leading-none",
+        "transition-[background-color,color,box-shadow,opacity] duration-[var(--adm-fast)] ease-[var(--adm-ease)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--adm-canvas)]",
+        "disabled:pointer-events-none disabled:opacity-45",
+        variantClasses[variant],
+        iconOnly ? iconOnlySizeClasses[size] : sizeClasses[size],
+        selected &&
+          variant !== "primary" &&
+          "bg-[var(--surface-selected)] text-[var(--brand-accent)]",
+        className,
+      )}
+      disabled={disabled || loading}
+      type={type}
+      {...props}
+    >
+      {loading ? (
+        <Loader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin" />
+      ) : (
+        icon
+      )}
+      {!iconOnly && children}
+      {!iconOnly && !loading && iconAfter}
+    </button>
+  );
+});

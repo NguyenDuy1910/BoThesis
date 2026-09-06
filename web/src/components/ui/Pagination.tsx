@@ -1,7 +1,9 @@
 "use client";
 
-import { cn } from "@/lib/cn";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+
+import { ui } from "@/components/ui/design-system";
+import { cn } from "@/lib/cn";
 
 interface PaginationProps {
   page: number;
@@ -11,7 +13,28 @@ interface PaginationProps {
   className?: string;
 }
 
-export function Pagination({ page, pageSize, total, onPageChange, className }: PaginationProps) {
+/** Page numbers around the current page, with the ends always reachable. */
+function pageWindow(page: number, totalPages: number): (number | "gap")[] {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, index) => index + 1);
+  }
+  const pages = new Set<number>([1, totalPages, page, page - 1, page + 1]);
+  const sorted = [...pages].filter((value) => value >= 1 && value <= totalPages).sort((a, b) => a - b);
+  const result: (number | "gap")[] = [];
+  sorted.forEach((value, index) => {
+    if (index > 0 && value - (sorted[index - 1] as number) > 1) result.push("gap");
+    result.push(value);
+  });
+  return result;
+}
+
+export function Pagination({
+  page,
+  pageSize,
+  total,
+  onPageChange,
+  className,
+}: PaginationProps) {
   const totalPages = Math.ceil(total / pageSize);
   if (totalPages <= 1) return null;
 
@@ -19,59 +42,64 @@ export function Pagination({ page, pageSize, total, onPageChange, className }: P
   const end = Math.min(page * pageSize, total);
 
   return (
-    <div className={cn("flex min-h-11 flex-col gap-2 border-b border-[var(--border)] bg-[var(--surface)] px-3 py-2 sm:flex-row sm:items-center sm:justify-between", className)}>
-      <p className="text-xs text-[var(--text-muted)]">
-        Showing {start}–{end} of {total}
+    <nav
+      aria-label="Pagination"
+      className={cn(
+        "flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between",
+        className,
+      )}
+    >
+      <p className="text-[0.75rem] tabular-nums text-[var(--text-muted)]">
+        {start.toLocaleString()}–{end.toLocaleString()} of {total.toLocaleString()}
       </p>
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-0.5">
         <button
           aria-label="Previous page"
-          onClick={() => onPageChange(page - 1)}
+          className={cn(ui.iconButton, "h-7 w-7")}
           disabled={page <= 1}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:pointer-events-none disabled:opacity-40"
+          onClick={() => onPageChange(page - 1)}
           type="button"
         >
           <ChevronLeft aria-hidden="true" className="h-4 w-4" />
         </button>
-        {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
-          let pageNum: number;
-          if (totalPages <= 5) {
-            pageNum = i + 1;
-          } else if (page <= 3) {
-            pageNum = i + 1;
-          } else if (page >= totalPages - 2) {
-            pageNum = totalPages - 4 + i;
-          } else {
-            pageNum = page - 2 + i;
-          }
-          return (
+        {pageWindow(page, totalPages).map((entry, index) =>
+          entry === "gap" ? (
+            <span
+              aria-hidden="true"
+              className="px-1 text-[0.75rem] text-[var(--text-muted)]"
+              key={`gap-${index}`}
+            >
+              …
+            </span>
+          ) : (
             <button
-              key={pageNum}
-              aria-current={page === pageNum ? "page" : undefined}
-              aria-label={`Page ${pageNum}`}
-              onClick={() => onPageChange(pageNum)}
+              aria-current={page === entry ? "page" : undefined}
+              aria-label={`Page ${entry}`}
               className={cn(
-                "inline-flex h-7 w-7 items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
-                page === pageNum
+                "inline-flex h-7 min-w-7 items-center justify-center rounded-[var(--adm-r-xs)] px-1.5 text-[0.75rem] font-medium tabular-nums transition-colors",
+                ui.focus,
+                page === entry
                   ? "bg-[var(--primary)] text-[var(--text-on-brand)]"
-                  : "text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+                  : "text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
               )}
+              key={entry}
+              onClick={() => onPageChange(entry)}
               type="button"
             >
-              {pageNum}
+              {entry}
             </button>
-          );
-        })}
+          ),
+        )}
         <button
           aria-label="Next page"
-          onClick={() => onPageChange(page + 1)}
+          className={cn(ui.iconButton, "h-7 w-7")}
           disabled={page >= totalPages}
-          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:pointer-events-none disabled:opacity-40"
+          onClick={() => onPageChange(page + 1)}
           type="button"
         >
           <ChevronRight aria-hidden="true" className="h-4 w-4" />
         </button>
       </div>
-    </div>
+    </nav>
   );
 }

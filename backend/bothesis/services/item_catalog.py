@@ -89,6 +89,7 @@ class ItemCatalogService:
         search: str | None = None,
         status: str | None = None,
         item_type: str | None = None,
+        parent_item_id: UUID | None = None,
         ingestion_source_id: UUID | None = None,
         created_by_user_id: UUID | None = None,
         sort: str = "updated_at",
@@ -124,6 +125,8 @@ class ItemCatalogService:
             if normalized_type not in {"collection", "document"}:
                 raise AdminValidationError("unsupported item type")
             filters.append(Item.item_type == normalized_type)
+        if parent_item_id is not None:
+            filters.append(Item.parent_item_id == parent_item_id)
         if ingestion_source_id is not None:
             filters.append(
                 Item.id.in_(

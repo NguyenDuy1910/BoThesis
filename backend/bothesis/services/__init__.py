@@ -55,6 +55,13 @@ DEFAULT_PREVIEW_MAX_PAGES = 50
 DEFAULT_PREVIEW_MAX_DIMENSION = 1_600
 DEFAULT_PREVIEW_WEBP_QUALITY = 80
 
+ARTIFACT_COLLECTION_KIND = "conversation_artifacts"
+ARTIFACT_COLLECTION_TITLE = "My documents"
+ARTIFACT_MIME_TYPE = "text/markdown"
+ARTIFACT_DOCUMENT_TYPE = "markdown"
+ARTIFACT_EXPORT_FORMATS = frozenset({"pdf"})
+TEMPLATE_LIBRARY_METADATA_KEY = "template_library"
+
 PreviewRepresentation = Literal["original", "image", "pages"]
 
 
@@ -169,6 +176,10 @@ class DocumentProcessingError(RuntimeError):
 
 class DocumentUnavailableError(DocumentProcessingError):
     """Raised when an authorized Item's durable source is unavailable."""
+
+
+class ArtifactValidationError(DocumentServiceError):
+    """Raised when an artifact request or state transition is invalid."""
 
 
 class NativeUploadError(RuntimeError):
@@ -388,6 +399,11 @@ __all__ = [
     "ACTIVE_STATUS",
     "ADMIN_PERMISSION",
     "ADMIN_PERMISSION_CATALOG",
+    "ARTIFACT_COLLECTION_KIND",
+    "ARTIFACT_COLLECTION_TITLE",
+    "ARTIFACT_DOCUMENT_TYPE",
+    "ARTIFACT_EXPORT_FORMATS",
+    "ARTIFACT_MIME_TYPE",
     "AUDIT_READ_PERMISSION",
     "CHUNKER_VERSION",
     "DEFAULT_MAX_UPLOAD_BYTES",
@@ -407,6 +423,7 @@ __all__ = [
     "PREVIEW_SCHEMA_VERSION",
     "ROLE_MANAGE_PERMISSION",
     "SOURCE_MANAGE_PERMISSION",
+    "TEMPLATE_LIBRARY_METADATA_KEY",
     "TENANT_MANAGE_PERMISSION",
     "USER_MANAGE_PERMISSION",
     "AdminConflictError",
@@ -414,6 +431,7 @@ __all__ = [
     "AdminNotFoundError",
     "AdministrationError",
     "AdminValidationError",
+    "ArtifactValidationError",
     "AsyncUploadStream",
     "AuthContext",
     "IdentityServiceError",

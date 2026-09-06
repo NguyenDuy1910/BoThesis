@@ -64,6 +64,7 @@ and no per-provider stream reconstruction.
 | `transports/responses_adapter.py` | The one adapter: renders a `ResponseRequest` into the native `/responses` request and projects native events onto canonical events, one native event at a time. |
 | `reducer.py` | `ResponseReducer` — the only component that reconstructs a `Response` from its event stream. |
 | `citation_stream.py` | `CitationProjection` — rewrites the canonical stream so internal citation markers become annotations. Canonical in, canonical out. |
+| `artifact_stream.py` | `ArtifactProjection` — attaches the documents a turn produced to the answer text as annotations. Canonical in, canonical out. |
 | `sampling.py` | `sample()` — retries one sampling request when the transport failed with nothing emitted. |
 | `conversation_loop.py` | `ConversationLoop` — orchestrates one user turn as a chain of responses. |
 | `tools/` | Tool declarations, registry, execution policy, validation, limits, and evidence projection. |
@@ -231,15 +232,19 @@ inferred or deferred: the adapter forwards each `output_item.added`,
 
 The specification requires implementer-specific types to be slug-prefixed and
 permits optional fields on standard types when documented. BoThesis adds exactly
-two things, both because OpenResponses does not cover the requirement:
+two things, both annotations, both because OpenResponses does not cover the
+requirement:
 
 | Extension | Why |
 | --- | --- |
 | `bothesis:document_citation` annotation | The specification defines only `url_citation`, which cannot carry enterprise document lineage (document id, page, section, access source). |
+| `bothesis:artifact` annotation | A document the turn created or revised is attached to the answer that presents it — the same shape as a provider's `container_file_citation` for a sandbox-generated file. It is zero-width at the end of the text and carries the artifact's description (id, title, revision, size, exports), never its content. |
 
-That is the entire extension surface. A reasoning item, in particular, needs no
-BoThesis-specific field: `summary` plus `encrypted_content` are what every
-provider uses to continue a reasoning session.
+That is the entire extension surface. There is no artifact event: the client
+learns about a document from the answer's annotations, exactly as it learns
+about citations. A reasoning item, in particular, needs no BoThesis-specific
+field: `summary` plus `encrypted_content` are what every provider uses to
+continue a reasoning session.
 
 Before adding anything else, check whether an existing item, annotation, content
 part, `ExtensionItem`, `ExtensionTool`, or `ResponseRequest.provider_options`
@@ -288,6 +293,31 @@ roles, reader IDs, and admin state, never a model-supplied identity.
 `ScopedKnowledgeRetriever`, queries only access-permitted evidence, preserves
 document and source lineage, bounds content, and returns evidence IDs the
 citation projection can resolve.
+
+### Documents and templates
+
+Four tools let the model work on documents without ever running a command:
+
+| Tool | What it does |
+| --- | --- |
+| `template_search` | Searches Collections flagged as template libraries through the same permission-scoped retriever as `knowledge_search`. |
+| `artifact_create` | Starts a document from a template id or from Markdown the model wrote. |
+| `artifact_edit` | Revises an existing document with exact find/replace edits, or a full rewrite, as a new revision of the same artifact. |
+| `artifact_export` | Renders the current revision to PDF, attached to that revision. |
+
+The tools call `ArtifactService` / `TemplateService`, which re-resolve the
+authenticated caller from the identifiers in `AgentContext`, apply Item ACLs,
+and hand every file operation to a `SandboxExecutor`. The Docker executor runs a
+fixed runner (`write`, `replace`, `import`, `export_pdf`) in a disposable,
+non-root, network-less, read-only container; only its output is persisted, as an
+`ArtifactRevision` object in storage plus a row in PostgreSQL.
+
+A produced revision travels back as `ToolOutput.artifacts`. `ConversationRun`
+keeps the newest revision per artifact, and `ArtifactProjection` annotates the
+answer with it. On the next turn `ChatService` loads the conversation's working
+documents into `AgentContext.artifacts`, and `ConversationMemory` supplies their
+bounded content so a follow-up such as "change the date" becomes one precise
+`artifact_edit` on the same artifact.
 
 ## Prompt roles
 

@@ -46,13 +46,16 @@ import type {
   ConversationDocument,
 } from "@/modules/chat/types";
 import {
+  artifactPreviewActivity,
   isSameActivity,
   knowledgeDocumentActivity,
   type RightActivity,
 } from "@/modules/chat/activity";
+import { turnArtifacts, type TurnArtifact } from "@/modules/chat/artifacts";
 import { answerSources, type AnswerSource } from "@/modules/chat/sources";
 import { AppSidebar } from "./AppSidebar";
 import { AnswerSources } from "./AnswerSources";
+import { ArtifactCards } from "./ArtifactCard";
 import { AssistantTurn } from "./AssistantTurn";
 import { RightActivityPanel } from "./RightActivityPanel";
 
@@ -435,6 +438,18 @@ function ChatConversation({
     setActivity((current) => (isSameActivity(current, next) ? current : next));
   }, []);
 
+  const previewArtifact = useCallback((artifact: TurnArtifact) => {
+    const next = artifactPreviewActivity(artifact);
+    setActivity((current) => (isSameActivity(current, next) ? current : next));
+  }, []);
+
+  // Editing happens through the conversation: the next message revises the
+  // same document, so "Edit" hands the reader the composer, addressed to it.
+  const editArtifact = useCallback((artifact: TurnArtifact) => {
+    setInput((current) => current.trim() ? current : `Update "${artifact.title}": `);
+    textareaRef.current?.focus();
+  }, []);
+
   const closeActivity = useCallback(() => setActivity(null), []);
 
   const { hasMoreBelow, jumpToLatest } = useJumpToLatest(chatScrollRef, messageStackRef);
@@ -477,12 +492,15 @@ function ChatConversation({
                   <Welcome onSelect={submit} />
                 ) : (
                   <MessageList
-                    activeCitationId={activity?.citationId}
+                    activeArtifactId={activity?.type === "artifact" ? activity.artifactId : undefined}
+                    activeCitationId={activity?.type === "knowledge_document" ? activity.citationId : undefined}
                     activityConnectorLabel={activeConnectorLabel}
                     isStreaming={isStreaming}
                     lastMessageId={lastMessage?.id}
                     messages={messages}
+                    onEditArtifact={editArtifact}
                     onOpenSource={openSource}
+                    onPreviewArtifact={previewArtifact}
                     onRegenerate={handleRegenerate}
                     stackRef={messageStackRef}
                   />
@@ -531,21 +549,27 @@ function ChatConversation({
 }
 
 function MessageList({
+  activeArtifactId,
   activeCitationId,
   activityConnectorLabel,
   isStreaming,
   lastMessageId,
   messages,
+  onEditArtifact,
   onOpenSource,
+  onPreviewArtifact,
   onRegenerate,
   stackRef,
 }: {
+  activeArtifactId?: string;
   activeCitationId?: string;
   activityConnectorLabel?: string;
   isStreaming: boolean;
   lastMessageId?: string;
   messages: ChatMessage[];
+  onEditArtifact: (artifact: TurnArtifact) => void;
   onOpenSource: (source: AnswerSource) => void;
+  onPreviewArtifact: (artifact: TurnArtifact) => void;
   onRegenerate: (messageId: string) => void;
   stackRef: RefObject<HTMLDivElement | null>;
 }) {
@@ -553,12 +577,15 @@ function MessageList({
     <div className="message-stack" ref={stackRef}>
       {messages.map((message) => (
         <MessageView
+          activeArtifactId={activeArtifactId}
           activeCitationId={activeCitationId}
           activityConnectorLabel={isStreaming && message.id === lastMessageId ? activityConnectorLabel : undefined}
           isStreaming={isStreaming && message.id === lastMessageId}
           key={message.id}
           message={message}
+          onEditArtifact={onEditArtifact}
           onOpenSource={onOpenSource}
+          onPreviewArtifact={onPreviewArtifact}
           onRegenerate={onRegenerate}
         />
       ))}
@@ -567,24 +594,32 @@ function MessageList({
 }
 
 const MessageView = memo(function MessageView({
+  activeArtifactId,
   activeCitationId,
   activityConnectorLabel,
   isStreaming,
   message,
+  onEditArtifact,
   onOpenSource,
+  onPreviewArtifact,
   onRegenerate,
 }: {
+  activeArtifactId?: string;
   activeCitationId?: string;
   activityConnectorLabel?: string;
   isStreaming: boolean;
   message: ChatMessage;
+  onEditArtifact: (artifact: TurnArtifact) => void;
   onOpenSource: (source: AnswerSource) => void;
+  onPreviewArtifact: (artifact: TurnArtifact) => void;
   onRegenerate: (messageId: string) => void;
 }) {
   const { copy, copied } = useClipboard();
   // Collected once per message and shared by the inline chips and the summary
   // list, so both always agree on numbering.
   const sources = useMemo(() => answerSources(message.turn), [message.turn]);
+  // The documents this answer produced, from the same annotations as citations.
+  const artifacts = useMemo(() => turnArtifacts(message.turn), [message.turn]);
   // The answer keeps easing onto screen for a moment after the stream ends, so
   // the sources and the action row wait for the text rather than for the socket.
   const [isRevealing, setIsRevealing] = useState(false);
@@ -628,6 +663,14 @@ const MessageView = memo(function MessageView({
           sources={sources}
           turn={message.turn}
         />
+        {artifacts.length > 0 && (
+          <ArtifactCards
+            activeArtifactId={activeArtifactId}
+            artifacts={artifacts}
+            onEdit={onEditArtifact}
+            onPreview={onPreviewArtifact}
+          />
+        )}
         {streamError && <div className="error-box" role="alert">{streamError}</div>}
         {hasSettled && (
           <AnswerSources

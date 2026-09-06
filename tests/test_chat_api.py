@@ -27,6 +27,7 @@ import bothesis.services.workspace_documents as workspace_documents_module
 from bothesis.agent import Agent, AgentConfig
 from bothesis.agent.models import AgentContext
 from bothesis.agent.tools import ToolRegistry
+from bothesis.agent.tools.artifact_create import ArtifactCreate
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
 from bothesis.connector.protocol import (
     CitationInfo,
@@ -117,6 +118,10 @@ def test_default_agent_composes_the_openrouter_transport(
 
     assert isinstance(agent.model, TestOpenRouterTransport)
     assert agent.tools.has("knowledge_search")
+    # Document tools ride the same registry; none of them touches Docker,
+    # storage, or the database until a call is actually executed.
+    for name in ("template_search", "artifact_create", "artifact_edit", "artifact_export"):
+        assert agent.tools.has(name), name
 
 
 class PermissionDeniedTransport:
@@ -318,6 +323,14 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
             return None
 
     monkeypatch.setattr(api_deps.get_runtime(), "_conversations", ConversationRecorder())
+
+    class ArtifactStore:
+        """No working documents: the turn must not touch the database for them."""
+
+        async def conversation_artifacts(self, *_: Any, **__: Any) -> tuple[Any, ...]:
+            return ()
+
+    monkeypatch.setattr(api_deps.get_runtime(), "_artifacts", ArtifactStore())
     async def allowed_collections(*_: Any, **__: Any) -> tuple[UUID, ...]:
         return (UUID(int=12), UUID(int=14))
 
@@ -1092,3 +1105,222 @@ def test_chat_request_requires_a_bounded_explicit_collection_selection() -> None
     )
 
     assert request.collection_item_ids == [UUID(int=12), UUID(int=14)]
+
+
+class StubArtifactService:
+    """Stand in for ArtifactService: no sandbox, storage, or database."""
+
+    def __init__(self, artifact_id: UUID) -> None:
+        self.artifact_id = artifact_id
+        self.created: list[dict[str, Any]] = []
+
+    async def resolve_access(self, scope: Any) -> AuthContext:
+        return AuthContext(
+            user_id=UUID(scope.user_id),
+            email="person@example.test",
+            display_name="Person",
+            tenant_id=UUID(scope.tenant_id),
+            role_id=None,
+            role_code="analyst",
+            permission_codes=("knowledge.read",),
+            group_ids=(),
+        )
+
+    async def create_from_content(self, access: AuthContext, **values: Any) -> dict[str, Any]:
+        self.created.append(values)
+        return {
+            "id": str(self.artifact_id),
+            "title": values["title"],
+            "file_name": "memo.md",
+            "mime_type": "text/markdown",
+            "size_bytes": 24,
+            "revision": 1,
+            "revision_count": 1,
+            "conversation_id": str(values["conversation_id"]),
+            "template_item_id": None,
+            "created_at": "2026-09-06T00:00:00+00:00",
+            "updated_at": "2026-09-06T00:00:00+00:00",
+            "download_url": None,
+            "exports": {},
+            "revisions": [],
+        }
+
+
+class ArtifactTurnTransport(native.ScriptedResponsesTransport):
+    """Create a document, then present it."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            [
+                [
+                    *native.created("resp_a"),
+                    *native.message(
+                        item_id="msg_1",
+                        output_index=0,
+                        deltas=["Drafting the memo now."],
+                        phase="commentary",
+                    ),
+                    *native.function_call(
+                        item_id="fc_1",
+                        output_index=1,
+                        call_id="create-1",
+                        name="artifact_create",
+                        argument_deltas=[
+                            '{"title":"Q3 memo","template_id":null,'
+                            '"content":"# Q3 memo\\n\\nDraft."}'
+                        ],
+                    ),
+                    *native.completed("resp_a"),
+                ],
+                [
+                    *native.created("resp_b"),
+                    *native.message(
+                        item_id="msg_2",
+                        output_index=0,
+                        deltas=["The memo is ready."],
+                        phase="final_answer",
+                    ),
+                    *native.completed("resp_b"),
+                ],
+            ]
+        )
+
+
+def test_chat_api_presents_a_created_artifact_on_the_answer(monkeypatch) -> None:
+    artifact_id = uuid4()
+    artifacts = StubArtifactService(artifact_id)
+    registry = ToolRegistry()
+    registry.register(ArtifactCreate(artifacts))  # type: ignore[arg-type]
+    agent = Agent(
+        ArtifactTurnTransport(),
+        registry,
+        config=AgentConfig(max_model_turns=3, max_tool_rounds=2),
+    )
+    monkeypatch.setattr(api_deps.get_runtime(), "_agent", agent)
+    user_id, tenant_id = _install_access(monkeypatch)
+    conversation_id = uuid4()
+
+    with TestClient(api_app.app) as client:
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={
+                "message": "Draft a Q3 memo",
+                "tenant_id": str(tenant_id),
+                "user_id": str(user_id),
+                "conversation_id": str(conversation_id),
+                "history": [],
+                "knowledge_mode": "off",
+                "collection_item_ids": [],
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    # The tool ran under the authenticated caller and the conversation identity.
+    assert artifacts.created[0]["conversation_id"] == conversation_id
+    assert artifacts.created[0]["title"] == "Q3 memo"
+    # The artifact is presented as an annotation on the answer text, exactly
+    # the way citations are: no new event type, no second vocabulary.
+    annotations = [
+        event for event in events if event["type"] == "response.output_text.annotation.added"
+    ]
+    assert len(annotations) == 1
+    annotation = annotations[0]["annotation"]
+    assert annotation["type"] == "bothesis:artifact"
+    assert annotation["artifact"]["id"] == str(artifact_id)
+    assert annotation["artifact"]["revision"] == 1
+    assert annotation["start_index"] == annotation["end_index"] == len("The memo is ready.")
+    assert "content" not in annotation["artifact"]
+    # The commentary that preceded the tool call is not annotated: the
+    # document did not exist yet when that response settled.
+    settled = [event["response"] for event in events if event["type"] == "response.completed"]
+    assert settled[0]["output"][0]["content"][0]["annotations"] == []
+    assert settled[1]["output"][0]["content"][0]["annotations"][0]["type"] == "bothesis:artifact"
+    # The assistant message is linked to the document as its output.
+    conversations = api_deps.get_runtime()._conversations
+    assert conversations.finished[0][1]["artifact_ids"] == (artifact_id,)
+
+
+def test_artifact_routes_delegate_to_the_service_and_map_missing_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bothesis.services import DocumentNotFoundError
+
+    artifact_id = uuid4()
+    access = AuthContext(
+        user_id=uuid4(),
+        email="person@example.test",
+        display_name="Person",
+        tenant_id=uuid4(),
+        role_id=None,
+        role_code="analyst",
+        permission_codes=("knowledge.read",),
+        group_ids=(),
+    )
+    detail = {
+        "id": str(artifact_id),
+        "title": "Q3 memo",
+        "file_name": "Q3-memo.md",
+        "mime_type": "text/markdown",
+        "size_bytes": 24,
+        "revision": 2,
+        "revision_count": 2,
+        "conversation_id": str(uuid4()),
+        "template_item_id": None,
+        "created_at": "2026-09-06T00:00:00+00:00",
+        "updated_at": "2026-09-06T00:01:00+00:00",
+        "download_url": "https://storage.example/memo.md",
+        "exports": {"pdf": {"file_name": "Q3-memo.pdf", "size_bytes": 2030, "download_url": "https://storage.example/memo.pdf"}},
+        "revisions": [
+            {"revision": 1, "summary": "Created from the conversation", "size_bytes": 20, "created_at": "2026-09-06T00:00:00+00:00", "download_url": None, "exports": {}},
+            {"revision": 2, "summary": "Changed the date", "size_bytes": 24, "created_at": "2026-09-06T00:01:00+00:00", "download_url": None, "exports": {}},
+        ],
+    }
+
+    async def resolve_access(*_: Any, **__: Any) -> AuthContext:
+        return access
+
+    class Artifacts:
+        exported: list[tuple[UUID, str]] = []
+
+        async def get(self, caller: AuthContext, requested: UUID) -> dict[str, Any]:
+            assert caller is access
+            if requested != artifact_id:
+                raise DocumentNotFoundError("artifact not found")
+            return detail
+
+        async def export(self, caller: AuthContext, requested: UUID, *, format: str) -> dict[str, Any]:
+            self.exported.append((requested, format))
+            return detail
+
+        async def content(self, caller: AuthContext, requested: UUID, *, revision: int | None) -> dict[str, Any]:
+            return {"artifact_id": str(requested), "revision": revision, "mime_type": "text/markdown", "content": "# Q3 memo", "truncated": False}
+
+    class TemplateLibraries:
+        async def library_collections(self, caller: AuthContext) -> list[dict[str, Any]]:
+            return [{"id": str(UUID(int=7)), "title": "Legal templates"}]
+
+    _override_caller(monkeypatch, resolve_access)
+    monkeypatch.setitem(api_app.app.dependency_overrides, api_deps.get_artifact_service, Artifacts)
+    monkeypatch.setitem(api_app.app.dependency_overrides, api_deps.get_template_service, TemplateLibraries)
+    headers = {"X-Bothesis-Tenant-Id": str(access.tenant_id), "X-Bothesis-User-Id": str(access.user_id)}
+    with TestClient(api_app.app) as client:
+        found = client.get(f"/api/v1/artifacts/{artifact_id}", headers=headers)
+        missing = client.get(f"/api/v1/artifacts/{uuid4()}", headers=headers)
+        exported = client.post(f"/api/v1/artifacts/{artifact_id}/export", json={"format": "pdf"}, headers=headers)
+        content = client.get(f"/api/v1/artifacts/{artifact_id}/revisions/2/content", headers=headers)
+        libraries = client.get("/api/v1/artifacts/template-libraries", headers=headers)
+
+    assert found.status_code == 200, found.text
+    assert found.json()["revision"] == 2
+    assert found.json()["exports"]["pdf"]["download_url"] == "https://storage.example/memo.pdf"
+    assert [row["revision"] for row in found.json()["revisions"]] == [1, 2]
+    assert missing.status_code == 404
+    assert exported.status_code == 200 and Artifacts.exported == [(artifact_id, "pdf")]
+    assert content.status_code == 200 and content.json()["content"] == "# Q3 memo"
+    assert libraries.status_code == 200
+    assert libraries.json()["items"][0]["title"] == "Legal templates"

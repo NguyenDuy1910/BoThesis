@@ -89,7 +89,7 @@ export function collectionUploadFailure(
   if (statusCode === 404) {
     return {
       status: "unavailable",
-      message: "Uploading directly to this knowledge base is not available in this environment.",
+      message: "Uploading directly to this collection is not available in this environment.",
     };
   }
   if (statusCode === 413) {

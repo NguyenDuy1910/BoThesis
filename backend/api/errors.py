@@ -5,11 +5,13 @@ from __future__ import annotations
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
+from bothesis.sandbox import SandboxError
 from bothesis.services import (
     AdminConflictError,
     AdminExternalUnavailableError,
     AdminNotFoundError,
     AdminValidationError,
+    ArtifactValidationError,
     AuthorizationError,
     DocumentNotFoundError,
     IdentityInactiveError,
@@ -36,6 +38,7 @@ _STATUS_BY_ERROR: tuple[tuple[type[Exception], int], ...] = (
     (AdminConflictError, status.HTTP_409_CONFLICT),
     (UploadConflictError, status.HTTP_409_CONFLICT),
     (AdminValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    (ArtifactValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
     (UploadValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
     (UploadTooLargeError, status.HTTP_413_CONTENT_TOO_LARGE),
     (IdentityInactiveError, status.HTTP_401_UNAUTHORIZED),
@@ -50,6 +53,7 @@ HANDLED_ERRORS: tuple[type[Exception], ...] = (
     AdminConflictError,
     UploadConflictError,
     AdminValidationError,
+    ArtifactValidationError,
     UploadValidationError,
     UploadTooLargeError,
     AuthorizationError,
@@ -58,6 +62,7 @@ HANDLED_ERRORS: tuple[type[Exception], ...] = (
     PermissionError,
     AdminExternalUnavailableError,
     ObjectStorageError,
+    SandboxError,
     RuntimeError,
     ValueError,
 )
@@ -80,6 +85,8 @@ def status_for(exc: Exception) -> int:
 def detail_for(exc: Exception) -> str:
     if isinstance(exc, ObjectStorageError):
         return "document storage is temporarily unavailable"
+    if isinstance(exc, SandboxError):
+        return "document editing is temporarily unavailable"
     return str(exc)
 
 

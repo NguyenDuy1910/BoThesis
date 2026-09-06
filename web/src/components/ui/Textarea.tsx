@@ -14,11 +14,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
       <textarea
         aria-invalid={error || ariaInvalid || undefined}
         ref={ref}
-        className={cn(
-          ui.textarea,
-          error && "border-[var(--danger-border)] focus:border-[var(--danger)] focus:ring-[var(--danger-soft)]",
-          className
-        )}
+        className={cn(ui.textarea, className)}
         {...props}
       />
     );

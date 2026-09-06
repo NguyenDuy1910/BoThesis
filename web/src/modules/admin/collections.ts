@@ -1,3 +1,9 @@
+/**
+ * Domain types for the knowledge side of the Admin console: collections, the
+ * documents inside them, the sources that fill them and the grants that decide
+ * who can read them.
+ */
+
 export interface Paginated<T> {
   items: T[];
   total: number;
@@ -140,4 +146,10 @@ export interface CollectionUploadResponse {
   };
   ingestion_status: "ready" | "failed";
   created: boolean;
+}
+
+/** Collections carry their description in metadata rather than a column. */
+export function collectionDescription(item: KnowledgeItem) {
+  const description = item.metadata?.description;
+  return typeof description === "string" ? description : "";
 }
