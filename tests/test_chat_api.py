@@ -120,7 +120,7 @@ def test_default_agent_composes_the_openrouter_transport(
     assert agent.tools.has("knowledge_search")
     # Document tools ride the same registry; none of them touches Docker,
     # storage, or the database until a call is actually executed.
-    for name in ("template_search", "artifact_create", "artifact_edit", "artifact_export"):
+    for name in ("artifact_create", "artifact_edit", "artifact_export"):
         assert agent.tools.has(name), name
 
 
@@ -321,6 +321,9 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
         async def finish_turn(self, *_: Any, **__: Any) -> None:
             self.finished.append((_, __))
             return None
+
+        async def referenced_documents(self, *_: Any, **__: Any) -> tuple[Any, ...]:
+            return ()
 
     monkeypatch.setattr(api_deps.get_runtime(), "_conversations", ConversationRecorder())
 
@@ -745,10 +748,12 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
         if line.startswith("data: ")
     ]
 
-    # The model context offers the reference and withholds internal identifiers.
+    # The model context offers the citation reference and the canonical
+    # Document ID (provenance for artifact_create), but withholds the raw
+    # chunk identifier — only the compact reference may ever be cited.
     assert f"Source reference: {reference}" in captured_context[0]
+    assert f"Document ID: {chunk.item_id}" in captured_context[0]
     assert chunk.id not in captured_context[0]
-    assert chunk.item_id not in captured_context[0]
 
     # The internal marker never reaches the reader; the chip stands where the
     # model put it, inline with the claim it supports.
@@ -1137,7 +1142,7 @@ class StubArtifactService:
             "revision": 1,
             "revision_count": 1,
             "conversation_id": str(values["conversation_id"]),
-            "template_item_id": None,
+            "source_document_id": None,
             "created_at": "2026-09-06T00:00:00+00:00",
             "updated_at": "2026-09-06T00:00:00+00:00",
             "download_url": None,
@@ -1166,7 +1171,7 @@ class ArtifactTurnTransport(native.ScriptedResponsesTransport):
                         call_id="create-1",
                         name="artifact_create",
                         argument_deltas=[
-                            '{"title":"Q3 memo","template_id":null,'
+                            '{"title":"Q3 memo","source_document_id":null,'
                             '"content":"# Q3 memo\\n\\nDraft."}'
                         ],
                     ),
@@ -1270,7 +1275,7 @@ def test_artifact_routes_delegate_to_the_service_and_map_missing_documents(
         "revision": 2,
         "revision_count": 2,
         "conversation_id": str(uuid4()),
-        "template_item_id": None,
+        "source_document_id": None,
         "created_at": "2026-09-06T00:00:00+00:00",
         "updated_at": "2026-09-06T00:01:00+00:00",
         "download_url": "https://storage.example/memo.md",
@@ -1300,20 +1305,14 @@ def test_artifact_routes_delegate_to_the_service_and_map_missing_documents(
         async def content(self, caller: AuthContext, requested: UUID, *, revision: int | None) -> dict[str, Any]:
             return {"artifact_id": str(requested), "revision": revision, "mime_type": "text/markdown", "content": "# Q3 memo", "truncated": False}
 
-    class TemplateLibraries:
-        async def library_collections(self, caller: AuthContext) -> list[dict[str, Any]]:
-            return [{"id": str(UUID(int=7)), "title": "Legal templates"}]
-
     _override_caller(monkeypatch, resolve_access)
     monkeypatch.setitem(api_app.app.dependency_overrides, api_deps.get_artifact_service, Artifacts)
-    monkeypatch.setitem(api_app.app.dependency_overrides, api_deps.get_template_service, TemplateLibraries)
     headers = {"X-Bothesis-Tenant-Id": str(access.tenant_id), "X-Bothesis-User-Id": str(access.user_id)}
     with TestClient(api_app.app) as client:
         found = client.get(f"/api/v1/artifacts/{artifact_id}", headers=headers)
         missing = client.get(f"/api/v1/artifacts/{uuid4()}", headers=headers)
         exported = client.post(f"/api/v1/artifacts/{artifact_id}/export", json={"format": "pdf"}, headers=headers)
         content = client.get(f"/api/v1/artifacts/{artifact_id}/revisions/2/content", headers=headers)
-        libraries = client.get("/api/v1/artifacts/template-libraries", headers=headers)
 
     assert found.status_code == 200, found.text
     assert found.json()["revision"] == 2
@@ -1322,5 +1321,3 @@ def test_artifact_routes_delegate_to_the_service_and_map_missing_documents(
     assert missing.status_code == 404
     assert exported.status_code == 200 and Artifacts.exported == [(artifact_id, "pdf")]
     assert content.status_code == 200 and content.json()["content"] == "# Q3 memo"
-    assert libraries.status_code == 200
-    assert libraries.json()["items"][0]["title"] == "Legal templates"

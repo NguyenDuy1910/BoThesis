@@ -1,22 +1,24 @@
 """The script executed inside the artifact sandbox container.
 
-It is copied into ``/workspace/context`` on every run and executed with the
-sandbox image's own Python, so it must stay standalone: no BoThesis imports,
-standard library only, plus the optional document libraries the image installs
-(``python-docx`` for DOCX templates, ``markdown`` and ``xhtml2pdf`` for PDF
-export). Every outcome — success or failure — is written to
-``output/result.json``; nothing is raised out of ``main``.
+It is copied into ``/workspace/context`` on every run — together with the
+capability modules under ``context/skills/`` — and executed with the sandbox
+image's own Python, so it must stay standalone: no BoThesis imports, standard
+library only. Document-format knowledge lives in the skills (``skills/docx.py``
+turns Word documents into Markdown, ``skills/pdf.py`` renders Markdown to
+PDF); this runner only parses the request, dispatches the operation, selects
+the skill a file format calls for, and reports the outcome. Every outcome —
+success or failure — is written to ``output/result.json``; nothing is raised
+out of ``main``.
 
 Operations are deliberately fixed and small. The model chooses one and its
-arguments; it never supplies code or shell commands.
+arguments; it never supplies code or shell commands, and it never selects a
+skill — the source file's format does, deterministically.
 """
 
 from __future__ import annotations
 
-import html
-import io
+import importlib.util
 import json
-import re
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -25,12 +27,23 @@ from typing import Any
 INPUT_DIRECTORY = "input"
 CONTEXT_DIRECTORY = "context"
 OUTPUT_DIRECTORY = "output"
+SKILLS_DIRECTORY = "skills"
 REQUEST_FILE_NAME = "request.json"
 RESULT_FILE_NAME = "result.json"
 DEFAULT_DOCUMENT_NAME = "document.md"
 MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".txt", ".text"})
+MARKDOWN_CONTENT_TYPE = "text/markdown"
+PDF_SUFFIX = ".pdf"
+PDF_CONTENT_TYPE = "application/pdf"
+# Source formats that convert to Markdown via a skill, keyed by file suffix.
+# PDF is not here: it keeps its own strategy (preserve a fillable form,
+# extract a flat document) inside _import_pdf.
+IMPORT_SKILLS: dict[str, str] = {".docx": "docx"}
 MAX_EDITS = 50
 MAX_FILE_NAME_LENGTH = 240
+MAX_FILL_FIELDS = 200
+MAX_CONTEXT_FIELDS = 200
+MAX_CONTEXT_TEXT_CHARACTERS = 40_000
 
 
 class OperationError(ValueError):
@@ -118,141 +131,229 @@ def replace(workspace: Path, arguments: Mapping[str, Any]) -> dict[str, Any]:
     return {**_write_output(workspace, file_name, _normalized(content)), "applied": len(edits)}
 
 
-def import_template(workspace: Path, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Turn a Knowledge Base template file into an editable Markdown document."""
+def import_document(workspace: Path, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Turn a source document (a template, form, or any other file) into
+    an editable Markdown document, converting via the format's skill."""
 
     source_name = _file_name(arguments.get("file_name"))
     target_name = _file_name(arguments.get("target_file_name") or DEFAULT_DOCUMENT_NAME)
     source = workspace / INPUT_DIRECTORY / source_name
     if not source.is_file():
-        raise OperationError(f"template file is missing: {source_name}")
+        raise OperationError(f"source file is missing: {source_name}")
     suffix = source.suffix.casefold()
+    if suffix == PDF_SUFFIX:
+        return _import_pdf(workspace, source, target_name)
     if suffix in MARKDOWN_SUFFIXES:
         text = source.read_bytes().decode("utf-8", errors="replace")
-    elif suffix == ".docx":
-        text = _docx_to_markdown(source)
+    elif suffix in IMPORT_SKILLS:
+        skill = _load_skill(IMPORT_SKILLS[suffix])
+        try:
+            text = skill.to_markdown(source)
+        except ValueError as exc:
+            raise OperationError(str(exc)) from exc
     else:
+        supported = ", ".join(
+            sorted(MARKDOWN_SUFFIXES | set(IMPORT_SKILLS) | {PDF_SUFFIX})
+        )
         raise OperationError(
-            f"unsupported template format: {suffix or 'no extension'} "
-            "(supported: .md, .markdown, .txt, .docx)"
+            f"unsupported source format: {suffix or 'no extension'} "
+            f"(supported: {supported})"
         )
     if not text.strip():
-        raise OperationError("the template has no readable text content")
+        raise OperationError("the source has no readable text content")
     return {
         **_write_output(workspace, target_name, _normalized(text)),
+        "content_type": MARKDOWN_CONTENT_TYPE,
         "source_format": suffix.lstrip("."),
     }
 
 
+def _import_pdf(workspace: Path, source: Path, target_name: str) -> dict[str, Any]:
+    """Choose the PDF strategy from the document itself.
+
+    A fillable form keeps the original PDF as the artifact — layout intact,
+    values set later through ``fill_pdf`` — described to the caller by a
+    context file. A flat PDF is extracted to editable Markdown. A scanned PDF
+    with neither fields nor text is reported, not guessed at.
+    """
+
+    skill = _load_skill("pdf")
+    try:
+        description = skill.inspect(source)
+    except ValueError as exc:
+        raise OperationError(str(exc)) from exc
+    fields = list(description.get("fields") or [])
+    text = str(description.get("text") or "")
+    stem = Path(target_name).stem or "document"
+    if fields:
+        artifact_name = f"{stem}{PDF_SUFFIX}"
+        data = source.read_bytes()
+        (workspace / OUTPUT_DIRECTORY / artifact_name).write_bytes(data)
+        context_name = _write_form_context(workspace, artifact_name, fields, text)
+        return {
+            "file_name": artifact_name,
+            "size_bytes": len(data),
+            "content_type": PDF_CONTENT_TYPE,
+            "artifact_kind": "pdf_form",
+            "context_file_name": context_name,
+            "field_count": len(fields),
+            "source_format": "pdf",
+        }
+    if not text.strip():
+        raise OperationError(
+            "the PDF has no fillable form fields and no extractable text "
+            "(it may be scanned images), so it cannot be imported"
+        )
+    return {
+        **_write_output(workspace, f"{stem}.md", _normalized(text)),
+        "content_type": MARKDOWN_CONTENT_TYPE,
+        "source_format": "pdf",
+    }
+
+
+def fill_pdf(workspace: Path, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Set form field values on the input PDF, preserving its layout."""
+
+    file_name = _file_name(arguments.get("file_name"))
+    raw_fields = arguments.get("fields")
+    if not isinstance(raw_fields, Mapping) or not raw_fields:
+        raise OperationError("fields must be a non-empty object of field names to values")
+    if len(raw_fields) > MAX_FILL_FIELDS:
+        raise OperationError(f"at most {MAX_FILL_FIELDS} fields are accepted per revision")
+    values: dict[str, str] = {}
+    for name, value in raw_fields.items():
+        if not isinstance(name, str) or not name.strip():
+            raise OperationError("field names must be non-empty text")
+        if not isinstance(value, str):
+            raise OperationError(f"field {name!r}: the value must be text")
+        values[name] = value
+    source = workspace / INPUT_DIRECTORY / file_name
+    if not source.is_file():
+        raise OperationError(f"input file is missing: {file_name}")
+    skill = _load_skill("pdf")
+    target = workspace / OUTPUT_DIRECTORY / file_name
+    try:
+        applied = skill.fill(source, values, target)
+        description = skill.inspect(target)
+    except ValueError as exc:
+        raise OperationError(str(exc)) from exc
+    context_name = _write_form_context(
+        workspace,
+        file_name,
+        list(description.get("fields") or []),
+        str(description.get("text") or ""),
+    )
+    return {
+        "file_name": file_name,
+        "size_bytes": target.stat().st_size,
+        "content_type": PDF_CONTENT_TYPE,
+        "artifact_kind": "pdf_form",
+        "context_file_name": context_name,
+        "applied": applied,
+    }
+
+
+def _write_form_context(
+    workspace: Path,
+    artifact_name: str,
+    fields: list[Any],
+    text: str,
+) -> str:
+    """Write the model-facing description of a fillable PDF artifact."""
+
+    context_name = f"{artifact_name}.context.md"
+    lines = [
+        f"# {artifact_name} — fillable PDF form",
+        "",
+        "This document is the original PDF; its layout is preserved. Change it",
+        'by calling artifact_edit with "fields" entries that map the exact',
+        "field names below to their new values. A button or choice field only",
+        "accepts one of its listed states.",
+        "",
+        "## Form fields",
+    ]
+    for field in fields[:MAX_CONTEXT_FIELDS]:
+        if not isinstance(field, Mapping):
+            continue
+        line = (
+            f'- name: "{field.get("name", "")}" | type: {field.get("type", "text")}'
+            f' | value: "{field.get("value", "")}"'
+        )
+        states = field.get("states")
+        if states:
+            line += " | states: " + ", ".join(f'"{state}"' for state in states)
+        lines.append(line)
+    if len(fields) > MAX_CONTEXT_FIELDS:
+        lines.append(f"… and {len(fields) - MAX_CONTEXT_FIELDS} more fields")
+    lines.extend(("", "## Document text", ""))
+    if len(text) > MAX_CONTEXT_TEXT_CHARACTERS:
+        text = f"{text[:MAX_CONTEXT_TEXT_CHARACTERS].rstrip()}\n…[text truncated]…"
+    lines.append(text)
+    (workspace / OUTPUT_DIRECTORY / context_name).write_text(
+        "\n".join(lines), "utf-8"
+    )
+    return context_name
+
+
 def export_pdf(workspace: Path, arguments: Mapping[str, Any]) -> dict[str, Any]:
-    """Render the Markdown input document to a PDF."""
+    """Render the Markdown input document to a PDF via the PDF skill."""
 
     file_name = _file_name(arguments.get("file_name"))
     title = arguments.get("title")
     text = _read_input_text(workspace, file_name)
-    try:
-        import markdown  # type: ignore[import-not-found]
-        from xhtml2pdf import pisa  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise OperationError(
-            "PDF export needs the markdown and xhtml2pdf packages in the sandbox image"
-        ) from exc
-    body = markdown.markdown(
-        text, extensions=["tables", "fenced_code", "sane_lists"], output_format="html"
-    )
-    document_title = html.escape(str(title) if isinstance(title, str) and title else Path(file_name).stem)
-    page = (
-        "<html><head><meta charset='utf-8'>"
-        f"<title>{document_title}</title><style>{_PDF_STYLE}</style></head>"
-        f"<body>{body}</body></html>"
-    )
     target_name = f"{Path(file_name).stem}.pdf"
     target = workspace / OUTPUT_DIRECTORY / target_name
-    with target.open("wb") as handle:
-        status = pisa.CreatePDF(io.StringIO(page), dest=handle, encoding="utf-8")
-    if getattr(status, "err", 0):
-        raise OperationError("PDF rendering failed")
+    skill = _load_skill("pdf")
+    try:
+        skill.export(
+            text,
+            title=str(title) if isinstance(title, str) and title else Path(file_name).stem,
+            target=target,
+        )
+    except ValueError as exc:
+        raise OperationError(str(exc)) from exc
     return {"file_name": target_name, "size_bytes": target.stat().st_size}
 
 
 OPERATIONS: dict[str, Callable[[Path, Mapping[str, Any]], dict[str, Any]]] = {
     "write": write,
     "replace": replace,
-    "import": import_template,
+    "import": import_document,
+    "fill_pdf": fill_pdf,
     "export_pdf": export_pdf,
 }
 
 
-# --- DOCX ------------------------------------------------------------------
+# --- Skills ----------------------------------------------------------------
+
+_SKILL_CACHE: dict[str, Any] = {}
 
 
-def _docx_to_markdown(path: Path) -> str:
-    try:
-        import docx  # type: ignore[import-not-found]
-        from docx.table import Table  # type: ignore[import-not-found]
-        from docx.text.paragraph import Paragraph  # type: ignore[import-not-found]
-    except ImportError as exc:
-        raise OperationError(
-            "DOCX templates need the python-docx package in the sandbox image"
-        ) from exc
-    document = docx.Document(str(path))
-    lines: list[str] = []
-    # Walk the body in order so tables keep their place between paragraphs.
-    for child in document.element.body.iterchildren():
-        tag = child.tag.rsplit("}", 1)[-1]
-        if tag == "p":
-            lines.append(_paragraph_markdown(Paragraph(child, document)))
-        elif tag == "tbl":
-            lines.extend(_table_markdown(Table(child, document)))
-            lines.append("")
-    return "\n".join(lines)
+def _load_skill(name: str) -> Any:
+    """Load one capability module shipped next to this runner.
 
+    Skills live in ``skills/`` beside this file — ``/workspace/context/skills``
+    inside the container — and are plain standalone modules, so they are
+    loaded by file path rather than through ``sys.path``.
+    """
 
-def _paragraph_markdown(paragraph: Any) -> str:
-    text = " ".join(paragraph.text.split())
-    style = ""
-    if paragraph.style is not None and paragraph.style.name:
-        style = str(paragraph.style.name)
-    if not text:
-        return ""
-    heading = re.fullmatch(r"Heading (\d)", style)
-    if heading:
-        return f"{'#' * int(heading.group(1))} {text}\n"
-    if style == "Title":
-        return f"# {text}\n"
-    if "List" in style:
-        return f"- {text}"
-    return f"{text}\n"
-
-
-def _table_markdown(table: Any) -> list[str]:
-    rows = [
-        [" ".join(cell.text.split()).replace("|", "\\|") for cell in row.cells]
-        for row in table.rows
-    ]
-    if not rows:
-        return []
-    width = max(len(row) for row in rows)
-    rows = [row + [""] * (width - len(row)) for row in rows]
-    lines = [
-        "| " + " | ".join(rows[0]) + " |",
-        "| " + " | ".join("---" for _ in range(width)) + " |",
-    ]
-    lines.extend("| " + " | ".join(row) + " |" for row in rows[1:])
-    return lines
+    module = _SKILL_CACHE.get(name)
+    if module is None:
+        path = Path(__file__).resolve().parent / SKILLS_DIRECTORY / f"{name}.py"
+        spec = (
+            importlib.util.spec_from_file_location(f"bothesis_sandbox_skill_{name}", path)
+            if path.is_file()
+            else None
+        )
+        if spec is None or spec.loader is None:
+            raise OperationError(f"skill is not available: {name}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _SKILL_CACHE[name] = module
+    return module
 
 
 # --- Helpers ---------------------------------------------------------------
-
-_PDF_STYLE = (
-    "@page { size: A4; margin: 2cm; }"
-    "body { font-family: Helvetica, Arial, sans-serif; font-size: 11pt; line-height: 1.4; }"
-    "h1 { font-size: 20pt; } h2 { font-size: 16pt; } h3 { font-size: 13pt; }"
-    "table { border-collapse: collapse; width: 100%; margin: 8pt 0; }"
-    "th, td { border: 1px solid #999; padding: 4pt 6pt; text-align: left; }"
-    "code, pre { font-family: Courier, monospace; font-size: 9.5pt; }"
-    "blockquote { border-left: 3px solid #bbb; margin: 8pt 0; padding-left: 8pt; color: #444; }"
-)
 
 
 def _file_name(value: object) -> str:

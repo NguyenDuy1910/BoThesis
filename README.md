@@ -26,7 +26,7 @@ truth.
 | Capability | How BoThesis approaches it |
 | --- | --- |
 | Grounded answers | Retrieves tenant-scoped evidence and returns citations back to canonical source Items. |
-| Working documents | Drafts documents from Knowledge Base templates or grounded content, revises them through the conversation, and exports them; every edit runs in a disposable Docker sandbox and is kept as a revision. |
+| Working documents | Starts an editable artifact from any indexed document (found via the same `knowledge_search`, e.g. a template or form) or from written content, revises it through the conversation, and exports it; every edit runs in a disposable Docker sandbox and is kept as a revision. |
 | Contextual hybrid retrieval | Uses contextual chunk text with dense embeddings and Qdrant BM25, fused for retrieval and filtered before evidence is exposed. |
 | Governed ingestion | Ingests managed files and Confluence content through connector-owned normalization, ACL mapping, checkpoints, and retry-safe replacement. |
 | Clear storage ownership | PostgreSQL holds business state; S3-compatible storage holds original bytes; Qdrant is a rebuildable retrieval projection. |

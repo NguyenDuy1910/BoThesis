@@ -294,23 +294,42 @@ roles, reader IDs, and admin state, never a model-supplied identity.
 document and source lineage, bounds content, and returns evidence IDs the
 citation projection can resolve.
 
-### Documents and templates
+### Documents and artifacts
 
-Four tools let the model work on documents without ever running a command:
+Everything ingested into BoThesis is knowledge: a template or form is an
+ordinary indexed document with useful metadata (`document_type`, tags), not a
+separate retrieval domain. `knowledge_search` is the only search tool, and it
+is the entry point for both grounded answers and document sources — each
+result carries a `Document ID` (the canonical Item id) alongside the compact
+citation reference. Three tools then let the model work on documents without
+ever running a command:
 
 | Tool | What it does |
 | --- | --- |
-| `template_search` | Searches Collections flagged as template libraries through the same permission-scoped retriever as `knowledge_search`. |
-| `artifact_create` | Starts a document from a template id or from Markdown the model wrote. |
+| `artifact_create` | Starts a document from a source Document ID (an editable copy of that document) or from Markdown the model wrote. |
 | `artifact_edit` | Revises an existing document with exact find/replace edits, or a full rewrite, as a new revision of the same artifact. |
 | `artifact_export` | Renders the current revision to PDF, attached to that revision. |
 
-The tools call `ArtifactService` / `TemplateService`, which re-resolve the
-authenticated caller from the identifiers in `AgentContext`, apply Item ACLs,
-and hand every file operation to a `SandboxExecutor`. The Docker executor runs a
-fixed runner (`write`, `replace`, `import`, `export_pdf`) in a disposable,
-non-root, network-less, read-only container; only its output is persisted, as an
+`artifact_create`'s `source_document_id` is exactly the `Document ID` a
+`knowledge_search` result exposed — there is no second document identity.
+Creating an artifact never modifies the source; it copies the source's bytes
+into a new Item under the caller's private artifact Collection. The tools call
+`ArtifactService`, which re-resolves the authenticated caller from the
+identifiers in `AgentContext`, applies the same Item ACL that gated the
+original `knowledge_search`/`require_item_access` read, and hands every file
+operation to a `SandboxExecutor`. The Docker executor runs a fixed runner
+(`write`, `replace`, `import`, `export_pdf`) in a disposable, non-root,
+network-less, read-only container; only its output is persisted, as an
 `ArtifactRevision` object in storage plus a row in PostgreSQL.
+
+Document-format knowledge lives in sandbox **skills**, not in the runner, the
+tools, or `ArtifactService`: `bothesis/sandbox/skills/` holds one standalone
+module per format capability (`docx.py` converts Word sources to Markdown,
+`pdf.py` renders Markdown exports), shipped into `/workspace/context/skills/`
+alongside the runner. The runner selects a skill deterministically from the
+file format of the operation — the model never chooses code, a skill, or a
+command. Supporting a new format (for example xlsx or pptx) is additive: a new
+skill module, a runner table entry, and the libraries in the sandbox image.
 
 A produced revision travels back as `ToolOutput.artifacts`. `ConversationRun`
 keeps the newest revision per artifact, and `ArtifactProjection` annotates the
@@ -318,6 +337,26 @@ answer with it. On the next turn `ChatService` loads the conversation's working
 documents into `AgentContext.artifacts`, and `ConversationMemory` supplies their
 bounded content so a follow-up such as "change the date" becomes one precise
 `artifact_edit` on the same artifact.
+
+Referenced knowledge documents persist the same way. `ConversationService`
+records the documents an answer cited as durable `MessageItem` links, and on
+the next turn `ConversationService.referenced_documents` loads those identities
+back — ACL-checked again at read time — into
+`AgentContext.document_references`, which `ConversationMemory` renders as a
+compact system block (Document ID, title, type; never content). So a follow-up
+such as "fill that form for me" resolves the Document ID the conversation
+already surfaced and goes straight to `artifact_create`, without a second
+search. The whole flow is conversation-native:
+
+```text
+find knowledge (knowledge_search)
+  → discuss it (citations persist MessageItem references)
+    → user asks to act on "that document"
+      → resolve its Document ID from conversation document references
+        → artifact_create(source_document_id) — ACL re-checked
+          → sandbox materializes and transforms it via the format's skill
+            → ArtifactRevision persisted → artifact annotation on the answer
+```
 
 ## Prompt roles
 

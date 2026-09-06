@@ -24,7 +24,7 @@ HistoryTurn = tuple[Literal["user", "assistant"], str]
 
 # Retrieval tools follow the knowledge mode; document tools are always available
 # because a document can be written from the conversation alone.
-KNOWLEDGE_TOOL_NAMES: tuple[str, ...] = ("knowledge_search", "template_search")
+KNOWLEDGE_TOOL_NAMES: tuple[str, ...] = ("knowledge_search",)
 ARTIFACT_TOOL_NAMES: tuple[str, ...] = (
     "artifact_create",
     "artifact_edit",
@@ -74,12 +74,19 @@ class ChatService:
             collection_item_ids=collection_item_ids,
         )
         resolved_conversation_id = conversation_id or uuid4()
-        # A brand-new conversation has no working documents yet.
+        # A brand-new conversation has no working documents or references yet.
         artifacts = (
             await self._artifacts.conversation_artifacts(
                 access,
                 resolved_conversation_id,
                 content_characters=self._artifact_context_characters,
+            )
+            if conversation_id is not None
+            else ()
+        )
+        document_references = (
+            await self._conversations.referenced_documents(
+                resolved_conversation_id, access=access
             )
             if conversation_id is not None
             else ()
@@ -96,6 +103,7 @@ class ChatService:
                 for role, content in history
             ),
             allowed_tool_names=(*knowledge_tools, *ARTIFACT_TOOL_NAMES),
+            document_references=document_references,
             artifacts=artifacts,
         )
         await self._conversations.start_turn(

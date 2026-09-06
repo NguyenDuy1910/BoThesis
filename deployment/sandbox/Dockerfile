@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir \
         python-docx==1.2.0 \
         markdown==3.9 \
         xhtml2pdf==0.2.17 \
+        pypdf==6.17.0 \
     && mkdir -p /workspace \
     && chown 65534:65534 /workspace
 

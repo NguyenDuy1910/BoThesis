@@ -60,7 +60,6 @@ ARTIFACT_COLLECTION_TITLE = "My documents"
 ARTIFACT_MIME_TYPE = "text/markdown"
 ARTIFACT_DOCUMENT_TYPE = "markdown"
 ARTIFACT_EXPORT_FORMATS = frozenset({"pdf"})
-TEMPLATE_LIBRARY_METADATA_KEY = "template_library"
 
 PreviewRepresentation = Literal["original", "image", "pages"]
 
@@ -423,7 +422,6 @@ __all__ = [
     "PREVIEW_SCHEMA_VERSION",
     "ROLE_MANAGE_PERMISSION",
     "SOURCE_MANAGE_PERMISSION",
-    "TEMPLATE_LIBRARY_METADATA_KEY",
     "TENANT_MANAGE_PERMISSION",
     "USER_MANAGE_PERMISSION",
     "AdminConflictError",

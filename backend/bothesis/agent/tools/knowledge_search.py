@@ -77,13 +77,17 @@ class KnowledgeSearch(Tool):
             name="knowledge_search",
             description=(
                 "Search access-permitted enterprise knowledge base for source-grounded "
-                "evidence. ONLY use this tool when you need enterprise-specific "
-                "information. Use focused, specific queries with exact entity names, "
-                "identifiers, or dates. If the query is too vague or generic, ask "
-                "the user for clarification BEFORE using this tool. Results include "
-                "the source references to cite. If no results are found, explicitly "
-                "tell the user that information was not found in the knowledge base - "
-                "never fabricate an answer."
+                "evidence. This is the only search tool: it covers every ingested "
+                "document, including templates and forms, not just prose. ONLY use "
+                "this tool when you need enterprise-specific information. Use focused, "
+                "specific queries with exact entity names, identifiers, or dates. If "
+                "the query is too vague or generic, ask the user for clarification "
+                "BEFORE using this tool. Results include a source reference to cite "
+                "and a Document ID; pass a Document ID to artifact_create as "
+                "source_document_id to start an editable copy of that exact document "
+                "(for example, when the user wants to fill in a form or template). If "
+                "no results are found, explicitly tell the user that information was "
+                "not found in the knowledge base - never fabricate an answer."
             ),
             input_schema={
                 "type": "object",

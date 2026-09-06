@@ -146,6 +146,9 @@ async def test_a_run_is_isolated_and_round_trips_the_workspace() -> None:
         }
         assert tar.extractfile(members["input/memo.md"]).read() == b"a\n"
         assert b"def main(" in tar.extractfile(members["context/runner.py"]).read()
+        # The format skills ship with the runner; the container loads no other code.
+        assert b"def to_markdown(" in tar.extractfile(members["context/skills/docx.py"]).read()
+        assert b"def export(" in tar.extractfile(members["context/skills/pdf.py"]).read()
     assert container.started is True
     # The container and its anonymous volume are always removed.
     assert container.removed == (True, True)

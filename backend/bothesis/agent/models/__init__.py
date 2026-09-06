@@ -34,6 +34,22 @@ class ConversationDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationDocumentReference:
+    """A knowledge document an earlier turn of this conversation referenced.
+
+    Only the access-checked identity travels here — never content. It lets a
+    follow-up such as "fill that form for me" resolve the Document ID the
+    conversation already surfaced, without a second search; every use of the
+    id (for example ``artifact_create``) is re-checked against the caller's
+    Item ACL at execution time.
+    """
+
+    id: str
+    title: str
+    document_type: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ConversationArtifact:
     """A document the agent created or revised for the user.
 
@@ -52,6 +68,7 @@ class ConversationArtifact:
     size_bytes: int
     updated_at: str
     exports: tuple[str, ...] = ()
+    source_document_id: str | None = None
     content: str | None = None
     content_truncated: bool = False
 
@@ -60,6 +77,7 @@ class ConversationArtifact:
         """Build the reference an artifact service payload describes."""
 
         exports = payload.get("exports")
+        source_document_id = payload.get("source_document_id")
         return cls(
             id=str(payload["id"]),
             title=str(payload["title"]),
@@ -69,6 +87,9 @@ class ConversationArtifact:
             size_bytes=int(payload["size_bytes"]),
             updated_at=str(payload["updated_at"]),
             exports=tuple(sorted(exports)) if isinstance(exports, Mapping) else (),
+            source_document_id=(
+                str(source_document_id) if source_document_id else None
+            ),
         )
 
     def annotation_payload(self) -> dict[str, Any]:
@@ -102,6 +123,7 @@ class AgentContext:
     retrieval_round: int = 0
     retrieval_query_count: int = 0
     documents: tuple[ConversationDocument, ...] = ()
+    document_references: tuple[ConversationDocumentReference, ...] = ()
     artifacts: tuple[ConversationArtifact, ...] = ()
     model_extra_body: Mapping[str, Any] | None = None
 
@@ -210,6 +232,7 @@ __all__ = [
     "CitationReferences",
     "ConversationArtifact",
     "ConversationDocument",
+    "ConversationDocumentReference",
     "ConversationMessage",
     "ConversationRun",
     "Evidence",

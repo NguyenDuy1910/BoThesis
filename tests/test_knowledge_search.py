@@ -496,12 +496,13 @@ async def test_knowledge_search_returns_bounded_evidence_and_source_metadata() -
     assert retriever.calls == [("annual leave", 3)]
     assert result.error is None
     assert result.metadata["result_count"] == 1
-    # The tool assigns the compact reference before building the context, and
-    # the context carries nothing that would let the model invent an Item or
-    # chunk identifier.
+    # The tool assigns the compact reference before building the context.
+    # The canonical Document ID is deliberately exposed (it is the source
+    # provenance artifact_create consumes), but the raw chunk id stays hidden
+    # since only the compact reference may ever be echoed back as a citation.
     assert "Source reference: ref_1" in result.content
+    assert "Document ID: doc-1" in result.content
     assert "chunk-1" not in result.content
-    assert "doc-1" not in result.content
     assert len(result.evidence) == 1
     evidence = result.evidence[0]
     assert evidence.id == "ref_1"
@@ -638,7 +639,8 @@ def test_knowledge_search_declares_itself_as_a_protocol_function_tool() -> None:
     assert declaration.name == "knowledge_search"
     assert declaration.parameters["required"] == ["queries"]
     assert "access-permitted" in declaration.description
-    assert "source references to cite" in declaration.description
+    assert "a source reference to cite" in declaration.description
+    assert "source_document_id" in declaration.description
     assert (
         "Do not use generic terms"
         in declaration.parameters["properties"]["queries"]["description"]
@@ -777,13 +779,14 @@ async def test_reranking_failure_falls_back_to_candidate_order() -> None:
 def test_context_builder_is_bounded_deduplicated_and_canonical() -> None:
     evidence = _evidence(DOCUMENT)
     built = EvidenceContextBuilder(
-        max_characters=600,
+        max_characters=700,
         max_evidence_characters=200,
     ).build([evidence, evidence])
 
-    assert len(built.text) <= 600
+    assert len(built.text) <= 700
     assert built.evidence == (evidence,)
     assert built.text.count(f"Source reference: {evidence.id}") == 1
+    assert built.text.count(f"Document ID: {evidence.item_id}") == 1
     assert evidence.content in built.text
     assert "Document: Leave policy\nSection:" not in built.text
 
@@ -839,6 +842,7 @@ def test_context_builder_reports_the_page_the_model_may_cite() -> None:
     built = EvidenceContextBuilder().build([paged])
 
     assert "Page: 7-9" in built.text
+    assert "Document ID: doc-1" in built.text
     assert "[[cite:ref_id]]" in built.text
 
 

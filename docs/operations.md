@@ -112,13 +112,19 @@ and swap capped, CPU and pid limits, all capabilities dropped,
 `no-new-privileges`, a read-only root filesystem, and no environment beyond
 Python hygiene: no application, database, or cloud credential reaches it. The
 workspace goes in and comes out as a tar stream, so nothing is bind-mounted.
+The runner ships with its format skills (`backend/bothesis/sandbox/skills/`,
+copied to `/workspace/context/skills/`); the container loads no other code,
+and adding a document format means adding a skill module there plus its
+libraries to the sandbox image.
 Keep `BOTHESIS_TOOL_TIMEOUT_SECONDS` above `BOTHESIS_SANDBOX_TIMEOUT_SECONDS`
 so an operation can report its own outcome. Revisions are stored under
 `tenants/<tenant>/items/<artifact>/revisions/<n>/` in object storage; the
 `artifact_revisions` table records them.
 
-Templates are the documents of any Collection whose metadata has
-`template_library: true` (the collection creation dialog offers this flag).
+There is no separate template setup: index a document normally (upload or
+connector) and it becomes findable via `knowledge_search` like anything else.
+The agent uses a result's `Document ID` as `artifact_create`'s
+`source_document_id` to start an editable copy of it.
 
 ## Identity and credentials
 

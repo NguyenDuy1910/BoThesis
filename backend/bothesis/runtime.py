@@ -17,7 +17,6 @@ from bothesis.agent.tools.artifact_create import ArtifactCreate
 from bothesis.agent.tools.artifact_edit import ArtifactEdit
 from bothesis.agent.tools.artifact_export import ArtifactExport
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
-from bothesis.agent.tools.template_search import TemplateSearch
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.connector.file import FileProcessor
 from bothesis.db.engine import LazySessionFactory, SessionFactory
@@ -37,7 +36,6 @@ from bothesis.services.knowledge_query import KnowledgeQueryService
 from bothesis.services.knowledge_view import KnowledgeViewService
 from bothesis.services.preview import KnowledgePreview
 from bothesis.services.stored_file_content import StoredFileContentService
-from bothesis.services.template import TemplateService
 from bothesis.services.workflow.service import TemporalWorkflowService
 from bothesis.services.workspace_documents import WorkspaceDocumentService
 from bothesis.storage import S3DocumentStorage
@@ -59,7 +57,6 @@ class AppRuntime:
         self._conversations: ConversationService | None = None
         self._sandbox: SandboxExecutor | None = None
         self._artifacts: ArtifactService | None = None
-        self._templates: TemplateService | None = None
         self._agent: Agent | None = None
         self._retriever: ItemKnowledgeRetriever | None = None
         self._model_transport: OpenRouterTransport | None = None
@@ -184,15 +181,6 @@ class AppRuntime:
             )
         return self._artifacts
 
-    def template_service(self) -> TemplateService:
-        if self._templates is None:
-            self._templates = TemplateService(
-                self.sessions(),
-                retriever=self.knowledge_retriever(),
-                result_limit=self._config.retrieval.final_top_k,
-            )
-        return self._templates
-
     def object_storage(self) -> Any:
         if self._storage is None:
             self._storage = self._build_object_storage()
@@ -310,7 +298,6 @@ class AppRuntime:
                     tracing=tracing,
                 )
             )
-            registry.register(TemplateSearch(self.template_service(), tracing=tracing))
             registry.register(
                 ArtifactCreate(
                     self.artifact_service(),

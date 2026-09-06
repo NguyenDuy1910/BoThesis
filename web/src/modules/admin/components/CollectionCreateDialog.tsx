@@ -42,7 +42,6 @@ export function CollectionCreateDialog({
   const nameRef = useRef<HTMLInputElement | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [templateLibrary, setTemplateLibrary] = useState(false);
   const [touched, setTouched] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -54,7 +53,6 @@ export function CollectionCreateDialog({
   function reset() {
     setName("");
     setDescription("");
-    setTemplateLibrary(false);
     setTouched(false);
     setSubmitError(null);
   }
@@ -82,10 +80,7 @@ export function CollectionCreateDialog({
         body: JSON.stringify({
           title: trimmedName,
           inherit_access: true,
-          metadata: {
-            ...(description.trim() ? { description: description.trim() } : {}),
-            ...(templateLibrary ? { template_library: true } : {}),
-          },
+          metadata: description.trim() ? { description: description.trim() } : {},
         }),
       });
       toast({
@@ -171,22 +166,6 @@ export function CollectionCreateDialog({
             value={description}
           />
         </FormField>
-        <label className="flex items-start gap-2 text-[0.8125rem] leading-5 text-[var(--text)]" htmlFor="collection-template-library">
-          <input
-            checked={templateLibrary}
-            className="mt-1"
-            id="collection-template-library"
-            onChange={(event) => setTemplateLibrary(event.target.checked)}
-            type="checkbox"
-          />
-          <span>
-            <span className="block font-medium">Template library</span>
-            <span className="block text-[var(--text-muted)]">
-              Documents here are offered as templates when the assistant drafts a
-              document, and users can publish their drafts into it.
-            </span>
-          </span>
-        </label>
       </form>
     </Dialog>
   );

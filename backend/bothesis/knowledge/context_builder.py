@@ -29,7 +29,8 @@ class EvidenceContextBuilder:
             "Cite with [[cite:ref_id]] immediately after each claim it "
             "supports, never collected at the end. Repeat it on every claim, "
             "and place several together when a claim rests on several "
-            "sources.\n"
+            "sources. Cite using the Source reference value, never the "
+            "Document ID.\n"
             "Only the references below exist. Never invent one, and never "
             "write a page, URL, chunk ID, or coordinate.\n\n"
         )
@@ -69,11 +70,17 @@ class EvidenceContextBuilder:
         )
 
     def _header(self, item: Evidence) -> str:
-        # Internal Item and chunk identifiers stay out of the model context.
-        # The source reference is the only identity the model can cite, and the
-        # backend resolves it back to canonical citation metadata.
+        # The chunk-level source reference is a compact, per-run id: it is the
+        # only thing the model may echo back as a citation marker, and a
+        # fabricated one simply fails to resolve. The document id is the real,
+        # stable Item identity; it is exposed so the model can pass it to
+        # artifact_create as provenance for a working copy. That is safe
+        # because every use of it is independently re-checked against the
+        # caller's Item ACL at execution time, and it is never accepted as a
+        # citation marker, so it carries no ability to fabricate grounding.
         lines = [
             f"--- Document: {item.title or 'Untitled source'} ---",
+            f"Document ID: {item.item_id}",
             f"Source reference: {item.id}",
         ]
         if item.section_path:

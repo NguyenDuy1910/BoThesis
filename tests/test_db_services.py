@@ -5,6 +5,8 @@ import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,9 +28,13 @@ from bothesis.db.models import (
     MessageItem,
 )
 from bothesis.agent.models import AgentContext
-from bothesis.knowledge import Evidence
 from bothesis.sandbox import SandboxRequest, SandboxResult
-from bothesis.storage import ObjectStorageError, PresignedRequest, StoredObject
+from bothesis.storage import (
+    ObjectNotFoundError,
+    ObjectStorageError,
+    PresignedRequest,
+    StoredObject,
+)
 from bothesis.services import (
     ArtifactValidationError,
     AuthContext,
@@ -40,10 +46,10 @@ from bothesis.services import (
 )
 from bothesis.services.access_requests import AccessRequestService
 from bothesis.services.artifact import ArtifactService
-from bothesis.services.template import TemplateService
 from bothesis.services.identity_store import IdentityStoreService
 from bothesis.services.citation import CitationService
 from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.conversation import ConversationService
 from bothesis.services.integration_connections import IntegrationConnectionService
 from bothesis.services.integration_credential import IntegrationCredentialService
 from bothesis.services.item import ItemService
@@ -186,6 +192,131 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
         assert await session.scalar(
             select(MessageItem).where(MessageItem.item_id == item.id)
         )
+
+
+@pytest.mark.asyncio
+async def test_referenced_documents_resolve_prior_turns_under_current_access(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A follow-up like "fill that form" resolves earlier Document IDs.
+
+    Only "attachment"/"reference" links come back — artifact "output" links
+    travel as working documents — newest reference first, and only while the
+    caller can still read the document's Collection.
+    """
+
+    async with session_factory.begin() as session:
+        auth = IdentityStoreService(session)
+        tenant = await auth.create_tenant("provenance", "Provenance")
+        owner = await auth.create_user("owner@example.com")
+        other = await auth.create_user("other@example.com")
+        role = await auth.create_role(
+            tenant.id,
+            "member",
+            "Member",
+            permission_codes=["knowledge.read", "access.manage"],
+        )
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        await auth.assign_membership(other.id, tenant.id, role.id)
+        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
+        other_actor = await auth.get_context(other.id, tenant_id=tenant.id)
+
+        items = ItemService(session)
+        access = CollectionAccessService(session)
+        forms = await items.create_collection(
+            tenant_id=tenant.id, title="Forms", created_by_user_id=owner.id
+        )
+        restricted = await items.create_collection(
+            tenant_id=tenant.id, title="Restricted", created_by_user_id=owner.id
+        )
+        for collection in (forms, restricted):
+            await access.grant(
+                collection.id,
+                principal_type="user",
+                principal_id=owner.id,
+                role="owner",
+                actor=actor,
+            )
+        expense_form = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=forms.id,
+            title="Expense report form",
+            document_type="file",
+            created_by_user_id=owner.id,
+        )
+        leave_policy = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=forms.id,
+            title="Leave policy",
+            document_type="file",
+            created_by_user_id=owner.id,
+        )
+        secret = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=restricted.id,
+            title="Restricted budget",
+            document_type="file",
+            created_by_user_id=owner.id,
+        )
+        draft = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=forms.id,
+            title="Filled expense report",
+            document_type="file",
+            created_by_user_id=owner.id,
+        )
+
+        conversation = Conversation(
+            tenant_id=tenant.id, user_id=owner.id, title="Expenses"
+        )
+        session.add(conversation)
+        await session.flush()
+        messages = []
+        for sequence, message_role in enumerate(
+            ("user", "assistant", "assistant"), start=1
+        ):
+            message = Message(
+                conversation_id=conversation.id,
+                role=message_role,
+                content=f"turn {sequence}",
+                sequence_number=sequence,
+            )
+            session.add(message)
+            messages.append(message)
+        await session.flush()
+        await items.link_message(
+            messages[0].id, expense_form.id, "attachment", access=actor
+        )
+        await items.link_message(messages[1].id, secret.id, "reference", access=actor)
+        await items.link_message(
+            messages[1].id, leave_policy.id, "reference", access=actor
+        )
+        await items.link_message(
+            messages[2].id, expense_form.id, "reference", access=actor
+        )
+        # The answer's produced document is an output, not a reference.
+        await items.link_message(messages[2].id, draft.id, "output", access=actor)
+        # Access revoked between turns must remove the document from context.
+        await access.revoke(
+            restricted.id, principal_type="user", principal_id=owner.id, actor=actor
+        )
+        conversation_id = conversation.id
+
+    conversations = ConversationService(session_factory)
+    references = await conversations.referenced_documents(
+        conversation_id, access=actor
+    )
+    assert [reference.title for reference in references] == [
+        "Expense report form",
+        "Leave policy",
+    ]
+    assert references[0].id == str(expense_form.id)
+    assert references[0].document_type == "file"
+    # A conversation is private to its user: another member resolves nothing.
+    assert (
+        await conversations.referenced_documents(conversation_id, access=other_actor)
+        == ()
+    )
 
 
 @pytest.mark.asyncio
@@ -968,17 +1099,47 @@ class InMemoryObjectStorage:
         )
 
     async def read(self, key: str, *, max_bytes: int) -> bytes:
+        if key not in self.objects:
+            raise ObjectNotFoundError(f"object not found: {key}")
         return self.objects[key][0]
 
 
-class TemplateRetriever:
-    def __init__(self, evidence: list[Evidence]) -> None:
-        self.evidence = evidence
-        self.contexts: list[AgentContext] = []
+class StubUploads:
+    """Stand in for ``DocumentUploadService.upload_to_collection``.
 
-    async def search(self, query: str, *, limit: int, ctx: AgentContext) -> list[Evidence]:
-        self.contexts.append(ctx)
-        return self.evidence
+    ``ArtifactService.publish`` only needs the shape of the result
+    (``item.id``/``item.title``/``item.status`` and ``created``); the real
+    upload/ingestion path is exercised by its own tests.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def upload_to_collection(
+        self,
+        access: AuthContext,
+        collection_id: UUID,
+        *,
+        idempotency_key: str,
+        file_name: str,
+        content_type: str,
+        content: Any,
+    ) -> Any:
+        data = await content.read()
+        self.calls.append(
+            {
+                "access": access,
+                "collection_id": collection_id,
+                "idempotency_key": idempotency_key,
+                "file_name": file_name,
+                "content_type": content_type,
+                "data": data,
+            }
+        )
+        return SimpleNamespace(
+            item=SimpleNamespace(id=uuid4(), title=file_name, status="ready"),
+            created=True,
+        )
 
 
 @pytest.mark.asyncio
@@ -1001,16 +1162,18 @@ async def test_artifacts_keep_every_revision_under_the_owners_private_collection
         reader_context = await auth.get_context(reader.id, tenant_id=tenant.id)
 
         items = ItemService(session)
+        # An ordinary Collection: no "template library" flag exists any more.
+        # It is a valid artifact_create source and a valid publish
+        # destination purely because the writer has editor access to it.
         library = await items.create_collection(
             tenant_id=tenant.id,
-            title="Legal templates",
+            title="Legal documents",
             created_by_user_id=writer.id,
-            metadata={"template_library": True},
         )
         await CollectionAccessService(session).grant(
             library.id, principal_type="user", principal_id=writer.id, role="editor", actor=writer_context
         )
-        template = await items.create_document(
+        source_document = await items.create_document(
             tenant_id=tenant.id,
             parent_item_id=library.id,
             title="NDA template",
@@ -1018,20 +1181,31 @@ async def test_artifacts_keep_every_revision_under_the_owners_private_collection
             created_by_user_id=writer.id,
             mime_type="text/markdown",
             size_bytes=30,
-            storage_key=f"tenants/{tenant.id}/items/template/raw",
+            storage_key=f"tenants/{tenant.id}/items/source-document/raw",
             metadata={"file_name": "nda-template.md"},
             status="ready",
+        )
+        # A Collection the writer can only view, not edit — the real guard
+        # publish() has left once the "template library" flag is gone.
+        viewer_only = await items.create_collection(
+            tenant_id=tenant.id,
+            title="Reader's private notes",
+            created_by_user_id=reader.id,
+        )
+        await CollectionAccessService(session).grant(
+            viewer_only.id, principal_type="user", principal_id=writer.id, role="viewer", actor=reader_context
         )
         conversation = Conversation(tenant_id=tenant.id, user_id=writer.id, title="Draft")
         session.add(conversation)
         await session.flush()
-    storage.objects[template.storage_key] = (b"# NDA\n\nBetween [A] and [B].\n", "text/markdown")
+    storage.objects[source_document.storage_key] = (b"# NDA\n\nBetween [A] and [B].\n", "text/markdown")
 
+    uploads = StubUploads()
     service = ArtifactService(
         session_factory,
         object_storage=lambda: storage,
         sandbox=sandbox,
-        uploads=lambda: None,  # type: ignore[arg-type, return-value]
+        uploads=lambda: uploads,
         max_content_bytes=1_000_000,
         download_url_seconds=60,
     )
@@ -1069,6 +1243,17 @@ async def test_artifacts_keep_every_revision_under_the_owners_private_collection
     assert storage.objects[first_key][0] == b"# Q3 memo\n\nDate: 2026-09-01\n"
     assert storage.objects[second_key][0] == b"# Q3 memo\n\nDate: 2026-09-06\n"
 
+    # Form fills are for fillable PDFs; a text document rejects them clearly.
+    with pytest.raises(ArtifactValidationError, match="only to fillable PDF"):
+        await service.edit(
+            writer_context,
+            artifact_id,
+            summary="Fill fields",
+            fields={"date": "2026-09-06"},
+            conversation_id=conversation.id,
+            request_id="req-2b",
+        )
+
     exported = await service.export(writer_context, artifact_id, format="pdf")
     assert exported["exports"]["pdf"]["download_url"].endswith("/revisions/2/Q3-memo.pdf")
     assert exported["revisions"][1]["exports"]["pdf"]["size_bytes"] == len(b"%PDF-1.4 rendered")
@@ -1092,16 +1277,16 @@ async def test_artifacts_keep_every_revision_under_the_owners_private_collection
     assert working[0].content_truncated is True
     assert working[0].content.startswith("# Q3 memo")
 
-    from_template = await service.create_from_template(
+    from_document = await service.create_from_document(
         writer_context,
         title=None,
-        template_item_id=template.id,
+        source_document_id=source_document.id,
         conversation_id=conversation.id,
         request_id="req-3",
     )
-    assert from_template["title"] == "NDA template"
-    assert from_template["template_item_id"] == str(template.id)
-    assert from_template["content"].startswith("# NDA")
+    assert from_document["title"] == "NDA template"
+    assert from_document["source_document_id"] == str(source_document.id)
+    assert from_document["content"].startswith("# NDA")
     assert sandbox.requests[-1].operation == "import"
     assert sandbox.requests[-1].files[0].name == "nda-template.md"
 
@@ -1113,13 +1298,24 @@ async def test_artifacts_keep_every_revision_under_the_owners_private_collection
     # The reader shares the tenant but not the writer's private collection.
     with pytest.raises(DocumentNotFoundError):
         await service.get(reader_context, artifact_id)
-    # Publishing needs a template library, not just any writable collection.
-    with pytest.raises(ArtifactValidationError, match="template library"):
-        await service.publish(
-            writer_context,
-            artifact_id,
-            collection_id=ItemService.artifact_collection_id(tenant.id, writer.id),
-        )
+
+    # Any Collection the caller can edit is a valid publish destination now —
+    # there is no "template library" flag to check.
+    published = await service.publish(writer_context, artifact_id, collection_id=library.id)
+    assert published["collection_id"] == str(library.id)
+    assert published["created"] is True
+    assert uploads.calls[0]["collection_id"] == library.id
+    assert uploads.calls[0]["content_type"] == "text/markdown"
+    assert uploads.calls[0]["data"] == storage.objects[second_key][0]
+
+    # The real remaining guard is authorization: a Collection the caller can
+    # only view, not edit, is not a valid publish destination.
+    with pytest.raises(AuthorizationError):
+        await service.publish(writer_context, artifact_id, collection_id=viewer_only.id)
+
+    # Publishing into a document (not a Collection) is rejected too.
+    with pytest.raises(ArtifactValidationError, match="must be a Collection"):
+        await service.publish(writer_context, artifact_id, collection_id=source_document.id)
 
     async with session_factory() as session:
         item = await session.get(Item, artifact_id)
@@ -1140,29 +1336,177 @@ async def test_artifacts_keep_every_revision_under_the_owners_private_collection
                 select(AuditLog.action).where(AuditLog.resource_id == str(artifact_id))
             )
         )
-        assert {"artifact.created", "artifact.revised", "artifact.exported"} <= actions
+        assert {
+            "artifact.created",
+            "artifact.revised",
+            "artifact.exported",
+            "artifact.published",
+        } <= actions
 
-    retriever = TemplateRetriever(
-        [
-            Evidence(
-                id="ev-1",
-                item_id=str(template.id),
-                chunk_id="chunk-1",
-                title="NDA template",
-                content="Between [A] and [B].",
-                collection_item_id=str(library.id),
-                relevance_score=0.8,
-            )
-        ]
+
+class ScriptedPdfFormSandbox:
+    """Return runner-shaped results for a fillable PDF, recording requests.
+
+    The real strategy decision and pypdf work are the runner suite's concern;
+    here only the service's handling of a binary artifact is under test.
+    """
+
+    ORIGINAL = b"%PDF-1.4 original form"
+    FILLED = b"%PDF-1.4 filled form"
+    CONTEXT_EMPTY = "# form.pdf — fillable PDF form\n- name: \"ho_ten\" | value: \"\"\n"
+    CONTEXT_FILLED = "# form.pdf — fillable PDF form\n- name: \"ho_ten\" | value: \"Tran A\"\n"
+
+    def __init__(self) -> None:
+        self.requests: list[SandboxRequest] = []
+
+    async def run(self, request: SandboxRequest) -> SandboxResult:
+        self.requests.append(request)
+        stem = Path(str(dict(request.arguments)["file_name"])).stem
+        if request.operation == "import":
+            stem = Path(str(dict(request.arguments)["target_file_name"])).stem
+            name, data, context = f"{stem}.pdf", self.ORIGINAL, self.CONTEXT_EMPTY
+            extra = {"field_count": 1}
+        elif request.operation == "fill_pdf":
+            assert request.files[0].data == self.ORIGINAL
+            name, data, context = f"{stem}.pdf", self.FILLED, self.CONTEXT_FILLED
+            extra = {"applied": len(dict(request.arguments)["fields"])}
+        else:
+            raise AssertionError(f"unexpected operation {request.operation}")
+        return SandboxResult(
+            operation=request.operation,
+            result={
+                "status": "ok",
+                "operation": request.operation,
+                "file_name": name,
+                "content_type": "application/pdf",
+                "artifact_kind": "pdf_form",
+                "context_file_name": f"{name}.context.md",
+                **extra,
+            },
+            files={name: data, f"{name}.context.md": context.encode("utf-8")},
+            duration_ms=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_pdf_form_artifacts_preserve_the_original_and_fill_fields(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fillable PDF source stays a PDF: field fills, no text rewrites.
+
+    The model sees the stored description, never PDF bytes decoded as text,
+    and export/publish carry the real mime type and file name.
+    """
+
+    storage = InMemoryObjectStorage()
+    sandbox = ScriptedPdfFormSandbox()
+    async with session_factory.begin() as session:
+        auth = IdentityStoreService(session)
+        tenant = await auth.create_tenant("pdfforms", "PDF forms")
+        owner = await auth.create_user("owner@pdf.example.com")
+        role = await auth.create_role(
+            tenant.id, "member", "Member", permission_codes=["knowledge.read", "access.manage"]
+        )
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
+        items = ItemService(session)
+        forms = await items.create_collection(
+            tenant_id=tenant.id, title="Forms", created_by_user_id=owner.id
+        )
+        await CollectionAccessService(session).grant(
+            forms.id, principal_type="user", principal_id=owner.id, role="editor", actor=actor
+        )
+        source = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=forms.id,
+            title="Leave request form",
+            document_type="pdf",
+            created_by_user_id=owner.id,
+            mime_type="application/pdf",
+            size_bytes=len(ScriptedPdfFormSandbox.ORIGINAL),
+            storage_key=f"tenants/{tenant.id}/items/leave-form/raw",
+            metadata={"file_name": "leave-form.pdf"},
+            status="ready",
+        )
+        conversation = Conversation(tenant_id=tenant.id, user_id=owner.id, title="Leave")
+        session.add(conversation)
+        await session.flush()
+    storage.objects[source.storage_key] = (
+        ScriptedPdfFormSandbox.ORIGINAL, "application/pdf"
     )
-    templates = TemplateService(session_factory, retriever=retriever, result_limit=3)
-    assert await templates.library_collections(writer_context) == [
-        {"id": str(library.id), "title": "Legal templates"}
-    ]
-    results = await templates.search(writer_context, ["nda", "non-disclosure agreement"])
-    assert [result["id"] for result in results] == [str(template.id)]
-    assert results[0]["collection_title"] == "Legal templates"
-    # Retrieval is scoped to the template libraries only.
-    assert retriever.contexts[0].collection_item_ids == (str(library.id),)
-    # The reader has no library access, so nothing is searched.
-    assert await templates.search(reader_context, ["nda"]) == []
+
+    uploads = StubUploads()
+    service = ArtifactService(
+        session_factory,
+        object_storage=lambda: storage,
+        sandbox=sandbox,
+        uploads=lambda: uploads,
+        max_content_bytes=1_000_000,
+        download_url_seconds=60,
+    )
+
+    created = await service.create_from_document(
+        actor,
+        title=None,
+        source_document_id=source.id,
+        conversation_id=conversation.id,
+        request_id="req-1",
+    )
+    artifact_id = UUID(created["id"])
+    first_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/1/Leave-request-form.pdf"
+    assert created["mime_type"] == "application/pdf"
+    assert created["file_name"] == "Leave-request-form.pdf"
+    # The artifact is the original PDF, and the model sees its description.
+    assert storage.objects[first_key] == (ScriptedPdfFormSandbox.ORIGINAL, "application/pdf")
+    assert storage.objects[f"{first_key}.context.md"][0].decode() == (
+        ScriptedPdfFormSandbox.CONTEXT_EMPTY
+    )
+    assert created["content"] == ScriptedPdfFormSandbox.CONTEXT_EMPTY
+
+    # Text edits do not apply to a fillable PDF; the message says what does.
+    with pytest.raises(ArtifactValidationError, match="fillable PDF"):
+        await service.edit(
+            actor,
+            artifact_id,
+            summary="Try a text edit",
+            edits=[{"find": "a", "replace": "b"}],
+            conversation_id=conversation.id,
+            request_id="req-2",
+        )
+
+    filled = await service.edit(
+        actor,
+        artifact_id,
+        summary="Filled the name",
+        fields={"ho_ten": "Tran A"},
+        conversation_id=conversation.id,
+        request_id="req-3",
+    )
+    second_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/2/Leave-request-form.pdf"
+    assert filled["revision"] == 2
+    assert filled["content"] == ScriptedPdfFormSandbox.CONTEXT_FILLED
+    assert storage.objects[second_key][0] == ScriptedPdfFormSandbox.FILLED
+    assert sandbox.requests[-1].operation == "fill_pdf"
+    assert dict(sandbox.requests[-1].arguments)["fields"] == {"ho_ten": "Tran A"}
+
+    # Context supply and previews use the description, never decoded PDF bytes.
+    working = await service.conversation_artifacts(
+        actor, conversation.id, content_characters=10_000
+    )
+    assert working[0].content == ScriptedPdfFormSandbox.CONTEXT_FILLED
+    preview = await service.content(actor, artifact_id)
+    assert preview["content"] == ScriptedPdfFormSandbox.CONTEXT_FILLED
+    assert preview["mime_type"] == "application/pdf"
+
+    # The revision already is a PDF: exporting registers it without a sandbox run.
+    exported = await service.export(actor, artifact_id, format="pdf")
+    assert exported["exports"]["pdf"]["download_url"].endswith(
+        "/revisions/2/Leave-request-form.pdf"
+    )
+    assert [request.operation for request in sandbox.requests] == ["import", "fill_pdf"]
+
+    published = await service.publish(actor, artifact_id, collection_id=forms.id)
+    assert published["created"] is True
+    assert uploads.calls[0]["content_type"] == "application/pdf"
+    assert uploads.calls[0]["file_name"].endswith(".pdf")
+    assert uploads.calls[0]["data"] == ScriptedPdfFormSandbox.FILLED

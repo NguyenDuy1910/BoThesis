@@ -15,10 +15,10 @@ import { memo, useCallback, useState } from "react";
 import {
   exportArtifact,
   getArtifact,
-  listTemplateLibraries,
+  listCollections,
   publishArtifact,
   type ArtifactDetail,
-  type TemplateLibrary,
+  type Collection,
 } from "../api";
 import { artifactFormatLabel, artifactSizeLabel, type TurnArtifact } from "../artifacts";
 
@@ -73,8 +73,8 @@ function ArtifactCard({
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
-  const [libraries, setLibraries] = useState<TemplateLibrary[]>();
-  const [libraryId, setLibraryId] = useState("");
+  const [collections, setCollections] = useState<Collection[]>();
+  const [collectionId, setCollectionId] = useState("");
   const hasPdf = artifact.exports.includes("pdf") || Boolean(detail?.exports.pdf?.download_url);
 
   const run = useCallback(async (kind: Busy, action: () => Promise<void>) => {
@@ -104,25 +104,25 @@ function ArtifactCard({
   }), [artifact.id, run]);
 
   const startPublish = useCallback(() => run("publish", async () => {
-    const available = await listTemplateLibraries();
+    const available = await listCollections();
     if (!available.length) {
-      throw new Error("No template library is available to you. Ask an administrator to create one.");
+      throw new Error("No collection is available to publish into. Ask an administrator for access.");
     }
-    setLibraries(available);
-    setLibraryId(available[0]?.id ?? "");
+    setCollections(available);
+    setCollectionId(available[0]?.id ?? "");
   }), [run]);
 
   const confirmPublish = useCallback(() => run("publish", async () => {
-    const library = libraries?.find((candidate) => candidate.id === libraryId);
-    if (!library) throw new Error("Choose a template library.");
-    const published = await publishArtifact(artifact.id, library.id);
-    setLibraries(undefined);
+    const collection = collections?.find((candidate) => candidate.id === collectionId);
+    if (!collection) throw new Error("Choose a destination collection.");
+    const published = await publishArtifact(artifact.id, collection.id);
+    setCollections(undefined);
     setNotice(
       published.created
-        ? `Published to ${library.title} as a template.`
-        : `Already published to ${library.title}.`,
+        ? `Published to ${collection.title}.`
+        : `Already published to ${collection.title}.`,
     );
-  }), [artifact.id, libraries, libraryId, run]);
+  }), [artifact.id, collections, collectionId, run]);
 
   return (
     <div className={clsx("artifact-card", active && "artifact-card--active")}>
@@ -158,13 +158,13 @@ function ArtifactCard({
             onClick={exportPdf}
           />
           <ActionButton
-            busy={busy === "publish" && !libraries}
+            busy={busy === "publish" && !collections}
             icon={BookUp}
-            label="Publish as template"
+            label="Publish to Knowledge Base"
             onClick={startPublish}
           />
         </div>
-        {libraries && (
+        {collections && (
           <form
             className="artifact-card__publish"
             onSubmit={(event) => {
@@ -173,16 +173,16 @@ function ArtifactCard({
             }}
           >
             <label className="artifact-card__publish-label" htmlFor={`publish-${artifact.id}`}>
-              Template library
+              Destination collection
             </label>
             <select
               className="artifact-card__publish-select"
               id={`publish-${artifact.id}`}
-              onChange={(event) => setLibraryId(event.target.value)}
-              value={libraryId}
+              onChange={(event) => setCollectionId(event.target.value)}
+              value={collectionId}
             >
-              {libraries.map((library) => (
-                <option key={library.id} value={library.id}>{library.title}</option>
+              {collections.map((collection) => (
+                <option key={collection.id} value={collection.id}>{collection.title}</option>
               ))}
             </select>
             <button className="artifact-card__action artifact-card__action--primary" disabled={busy !== null} type="submit">
@@ -192,7 +192,7 @@ function ArtifactCard({
             <button
               className="artifact-card__action"
               disabled={busy !== null}
-              onClick={() => setLibraries(undefined)}
+              onClick={() => setCollections(undefined)}
               type="button"
             >
               Cancel

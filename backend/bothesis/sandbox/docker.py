@@ -23,6 +23,7 @@ from bothesis.sandbox import (
     RESULT_FILE_NAME,
     RUNNER_FILE_NAME,
     SANDBOX_USER,
+    SKILLS_DIRECTORY,
     WORKSPACE_DIRECTORIES,
     WORKSPACE_ROOT,
     SandboxError,
@@ -36,6 +37,7 @@ from bothesis.sandbox import (
 log = logging.getLogger(__name__)
 
 _RUNNER_PATH = Path(__file__).with_name(RUNNER_FILE_NAME)
+_SKILLS_PATH = Path(__file__).with_name(SKILLS_DIRECTORY)
 _SANDBOX_UID = int(SANDBOX_USER.split(":")[0])
 _LOG_TAIL_BYTES = 4_096
 
@@ -81,6 +83,11 @@ class DockerSandboxExecutor:
         self._max_output_bytes = max_output_bytes
         self._client = client
         self._runner_source = _RUNNER_PATH.read_bytes()
+        # The capability modules the runner selects by file format; shipped
+        # with it so the container never loads code from anywhere else.
+        self._skill_sources = tuple(
+            (path.name, path.read_bytes()) for path in sorted(_SKILLS_PATH.glob("*.py"))
+        )
 
     async def run(self, request: SandboxRequest) -> SandboxResult:
         # The Docker SDK is synchronous; the thread keeps the event loop free
@@ -89,7 +96,7 @@ class DockerSandboxExecutor:
 
     def _run(self, request: SandboxRequest) -> SandboxResult:
         client = self._docker()
-        archive = _workspace_archive(request, self._runner_source)
+        archive = _workspace_archive(request, self._runner_source, self._skill_sources)
         started_at = perf_counter()
         try:
             container = client.containers.create(
@@ -217,7 +224,11 @@ class DockerSandboxExecutor:
         return files
 
 
-def _workspace_archive(request: SandboxRequest, runner_source: bytes) -> bytes:
+def _workspace_archive(
+    request: SandboxRequest,
+    runner_source: bytes,
+    skill_sources: tuple[tuple[str, bytes], ...],
+) -> bytes:
     """Build the tar stream extracted into ``/workspace`` inside the container."""
 
     payload = json.dumps(
@@ -228,8 +239,13 @@ def _workspace_archive(request: SandboxRequest, runner_source: bytes) -> bytes:
     with tarfile.open(fileobj=buffer, mode="w") as archive:
         for directory in WORKSPACE_DIRECTORIES:
             _add_directory(archive, directory)
+        _add_directory(archive, f"{CONTEXT_DIRECTORY}/{SKILLS_DIRECTORY}")
         _add_file(archive, f"{CONTEXT_DIRECTORY}/{RUNNER_FILE_NAME}", runner_source)
         _add_file(archive, f"{CONTEXT_DIRECTORY}/{REQUEST_FILE_NAME}", payload)
+        for name, source in skill_sources:
+            _add_file(
+                archive, f"{CONTEXT_DIRECTORY}/{SKILLS_DIRECTORY}/{name}", source
+            )
         for file in request.files:
             _add_file(archive, f"{INPUT_DIRECTORY}/{_input_name(file.name)}", file.data)
     return buffer.getvalue()

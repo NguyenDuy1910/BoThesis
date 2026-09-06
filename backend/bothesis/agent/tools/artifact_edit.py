@@ -18,9 +18,11 @@ if TYPE_CHECKING:
 
 
 class ArtifactEdit(Tool):
-    """Apply find/replace edits or a rewrite; the sandbox produces the file."""
+    """Apply find/replace edits, a rewrite, or PDF form fills; the sandbox
+    produces the file."""
 
     _MAX_EDITS = 50
+    _MAX_FIELDS = 100
 
     def __init__(
         self,
@@ -38,12 +40,17 @@ class ArtifactEdit(Tool):
             description=(
                 "Revise an existing artifact of this conversation (its id and "
                 "current content are in the conversation artifacts context or in "
-                "a previous artifact result). Prefer targeted edits: each find must "
-                "match the current content exactly once and is replaced by replace. "
-                "Use content for a complete rewrite only when most of the document "
-                "changes; set the unused one to null or an empty list. Every call "
-                "creates a new revision of the SAME artifact; never create a second "
-                "artifact for a follow-up change."
+                "a previous artifact result). For a text document, prefer targeted "
+                "edits: each find must match the current content exactly once and "
+                "is replaced by replace; use content for a complete rewrite only "
+                "when most of the document changes. For a fillable PDF document "
+                "(its content lists its form fields), use fields instead: the "
+                "exact field names with the values to write — the original PDF "
+                "layout is preserved and edits/content do not apply. Provide "
+                "exactly one of edits, content, or fields; set the unused ones to "
+                "null or an empty list. Every call creates a new revision of the "
+                "SAME artifact; never create a second artifact for a follow-up "
+                "change."
             ),
             input_schema={
                 "type": "object",
@@ -82,11 +89,30 @@ class ArtifactEdit(Tool):
                         "maxLength": max_content_characters,
                         "description": (
                             "The complete new document in Markdown for a rewrite, "
-                            "or null when using edits."
+                            "or null when using edits or fields."
                         ),
                     },
+                    "fields": {
+                        "type": ["array", "null"],
+                        "description": (
+                            "For a fillable PDF artifact only: the form fields to "
+                            "set, using the exact field names from the artifact's "
+                            "field list. A button or choice field accepts only "
+                            "one of its listed states. Null for text documents."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "minLength": 1},
+                                "value": {"type": "string"},
+                            },
+                            "required": ["name", "value"],
+                            "additionalProperties": False,
+                        },
+                        "maxItems": self._MAX_FIELDS,
+                    },
                 },
-                "required": ["artifact_id", "summary", "edits", "content"],
+                "required": ["artifact_id", "summary", "edits", "content", "fields"],
                 "additionalProperties": False,
             },
             activity_label="Edit document",
@@ -101,14 +127,20 @@ class ArtifactEdit(Tool):
         summary = arguments.get("summary")
         edits = arguments.get("edits")
         content = arguments.get("content")
+        raw_fields = arguments.get("fields")
         if artifact_id is None:
             return _invalid("artifact_id must be the id of an artifact in this conversation.")
         if not isinstance(summary, str) or not summary.strip():
             return _invalid("artifact_edit requires a summary of the change.")
         if not isinstance(edits, list):
             return _invalid("edits must be a list of find/replace pairs.")
-        if (content is None) == (not edits):
-            return _invalid("artifact_edit needs either edits or content, not both.")
+        fields, fields_error = _validated_fields(raw_fields)
+        if fields_error is not None:
+            return _invalid(fields_error)
+        if sum((bool(edits), content is not None, fields is not None)) != 1:
+            return _invalid(
+                "artifact_edit needs exactly one of edits, content, or fields."
+            )
 
         scope = ctx.agent_context
         try:
@@ -123,6 +155,7 @@ class ArtifactEdit(Tool):
                     if isinstance(edit, dict)
                 ],
                 content=str(content) if content is not None else None,
+                fields=fields,
                 conversation_id=uuid_or_none(scope.conversation_id),
                 request_id=scope.request_id,
             )
@@ -142,6 +175,33 @@ class ArtifactEdit(Tool):
                 "shown to them as a card, so do not repeat it."
             ),
         )
+
+
+def _validated_fields(value: Any) -> tuple[dict[str, str] | None, str | None]:
+    """Turn the fields argument into a name→value map, or explain what's wrong.
+
+    An absent or empty list means "not using fields", mirroring how edits are
+    treated, so a model sending fields=[] alongside edits is not rejected.
+    """
+
+    if value is None or value == []:
+        return None, None
+    if not isinstance(value, list):
+        return None, "fields must be a list of {name, value} objects."
+    fields: dict[str, str] = {}
+    for position, entry in enumerate(value, start=1):
+        if not isinstance(entry, dict):
+            return None, f"field {position} must be an object with name and value."
+        name = entry.get("name")
+        field_value = entry.get("value")
+        if not isinstance(name, str) or not name.strip():
+            return None, f"field {position}: name must be non-empty text."
+        if not isinstance(field_value, str):
+            return None, f"field {position}: value must be text."
+        if name in fields:
+            return None, f"field {position}: duplicate name {name!r}."
+        fields[name] = field_value
+    return fields, None
 
 
 def _invalid(message: str) -> ToolOutput:

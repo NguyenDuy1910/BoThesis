@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
@@ -17,7 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bothesis.agent.models import AgentContext, ConversationArtifact
 from bothesis.db.engine import SessionFactory
 from bothesis.db.models import ArtifactRevision, Item
-from bothesis.sandbox import SandboxExecutor, SandboxFile, SandboxRequest
+from bothesis.sandbox import (
+    SandboxExecutor,
+    SandboxFile,
+    SandboxRequest,
+    SandboxResult,
+)
 from bothesis.services import (
     ARTIFACT_COLLECTION_KIND,
     ARTIFACT_COLLECTION_TITLE,
@@ -25,7 +30,6 @@ from bothesis.services import (
     ARTIFACT_EXPORT_FORMATS,
     ARTIFACT_MIME_TYPE,
     KNOWLEDGE_READ_PERMISSION,
-    TEMPLATE_LIBRARY_METADATA_KEY,
     ArtifactValidationError,
     AuthContext,
     DocumentNotFoundError,
@@ -37,14 +41,19 @@ from bothesis.services.collection_access import CollectionAccessService
 from bothesis.services.document_upload import DocumentUploadService
 from bothesis.services.identity_store import resolve_agent_access
 from bothesis.services.item import ItemService
-from bothesis.storage import DocumentStorage
+from bothesis.storage import DocumentStorage, ObjectNotFoundError
 
 log = logging.getLogger(__name__)
 
 _MAX_TITLE_LENGTH = 200
-_MAX_TEMPLATE_BYTES = 20 * 1024 * 1024
+_MAX_SOURCE_DOCUMENT_BYTES = 20 * 1024 * 1024
 _PDF_CONTENT_TYPE = "application/pdf"
 _TRUNCATION_MARKER = "\n…[content truncated]…\n"
+# The model-facing description of a binary revision (for example a fillable
+# PDF's field list) lives beside the revision object under this suffix, so no
+# schema change is needed and the pair can never drift apart.
+_CONTEXT_SUFFIX = ".context.md"
+_CONTEXT_CONTENT_TYPE = "text/markdown"
 
 
 class ArtifactService:
@@ -125,7 +134,7 @@ class ArtifactService:
         references: list[ConversationArtifact] = []
         for item in items:
             current = revisions[item.id][-1]
-            text, truncated = await self._text(current.storage_key, content_characters)
+            text, truncated = await self._model_text(current, content_characters)
             reference = ConversationArtifact.from_payload(
                 self._payload(item, revisions[item.id])
             )
@@ -154,69 +163,77 @@ class ArtifactService:
         produced = await self._sandbox.run(
             SandboxRequest("write", {"file_name": file_name, "content": content})
         )
+        document = _produced_document(produced, default_name=file_name)
         return await self._create(
             access,
             tenant_id,
             title=normalized_title,
-            file_name=file_name,
-            data=produced.file(file_name),
+            document=document,
             summary="Created from the conversation",
             conversation_id=conversation_id,
             request_id=request_id,
-            template_item_id=None,
+            source_document_id=None,
         )
 
-    async def create_from_template(
+    async def create_from_document(
         self,
         access: AuthContext,
         *,
         title: str | None,
-        template_item_id: UUID,
+        source_document_id: UUID,
         conversation_id: UUID | None,
         request_id: str | None,
     ) -> dict[str, Any]:
-        """Instantiate a Knowledge Base template as a new, editable artifact."""
+        """Start a new, editable artifact as a copy of an indexed source document.
+
+        Any document Item the caller can read is a valid source — a template
+        or form is just an ordinary document with useful metadata, not a
+        separate kind of thing. The source is never modified; a Collection
+        access check at read time is the only authorization this needs.
+        """
 
         tenant_id = require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         async with self._sessions() as session:
-            template = await CollectionAccessService(session).require_item_access(
-                template_item_id, access=access
+            source = await CollectionAccessService(session).require_item_access(
+                source_document_id, access=access
             )
-            if template.item_type != "document" or not template.storage_key:
-                raise ArtifactValidationError("template is not an available document")
-            template_title = template.title
-            template_key = template.storage_key
+            if source.item_type != "document" or not source.storage_key:
+                raise ArtifactValidationError("source is not an available document")
+            source_title = source.title
+            source_key = source.storage_key
             source_name = _input_name(
-                str(template.metadata_.get("file_name") or template.title),
-                mime_type=template.mime_type,
+                str(source.metadata_.get("file_name") or source.title),
+                mime_type=source.mime_type,
             )
-        source = await self._object_storage().read(
-            template_key, max_bytes=_MAX_TEMPLATE_BYTES
+        source_bytes = await self._object_storage().read(
+            source_key, max_bytes=_MAX_SOURCE_DOCUMENT_BYTES
         )
-        normalized_title = _title(title or template_title)
+        normalized_title = _title(title or source_title)
         file_name = _file_name(normalized_title)
+        # The sandbox decides the import strategy from the document itself
+        # (keep a fillable PDF intact, extract everything else to Markdown)
+        # and reports what it produced; the host never inspects file formats.
         produced = await self._sandbox.run(
             SandboxRequest(
                 "import",
                 {"file_name": source_name, "target_file_name": file_name},
-                files=(SandboxFile(source_name, source),),
+                files=(SandboxFile(source_name, source_bytes),),
             )
         )
-        data = produced.file(file_name)
+        document = _produced_document(produced, default_name=file_name)
         payload = await self._create(
             access,
             tenant_id,
             title=normalized_title,
-            file_name=file_name,
-            data=data,
-            summary=f"Created from template “{template_title}”",
+            document=document,
+            summary=f"Created from “{source_title}”",
             conversation_id=conversation_id,
             request_id=request_id,
-            template_item_id=template_item_id,
+            source_document_id=source_document_id,
         )
-        # The template's text is new to the model; it needs it to fill the
-        # document in. Content the model wrote itself is not echoed back.
-        return {**payload, "content": data.decode("utf-8", errors="replace")}
+        # The source document's text is new to the model; it needs it to fill
+        # the document in. Content the model wrote itself is not echoed back.
+        return {**payload, "content": document.model_text()}
 
     async def edit(
         self,
@@ -226,20 +243,44 @@ class ArtifactService:
         summary: str,
         edits: Sequence[Mapping[str, str]] = (),
         content: str | None = None,
+        fields: Mapping[str, str] | None = None,
         conversation_id: UUID | None,
         request_id: str | None,
     ) -> dict[str, Any]:
-        """Apply targeted replacements or a full rewrite as a new revision."""
+        """Apply one change as a new revision.
+
+        A text document takes targeted find/replace ``edits`` or a full
+        rewrite ``content``. A fillable PDF takes ``fields`` — its form fields
+        are set in place and the original layout is preserved.
+        """
 
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
-        if (content is None) == (not edits):
+        if sum((bool(edits), content is not None, fields is not None)) != 1:
             raise ArtifactValidationError(
-                "provide either edits (find/replace pairs) or a complete content"
+                "provide exactly one of edits (find/replace pairs), content "
+                "(a complete rewrite), or fields (form values for a fillable PDF)"
             )
         normalized_summary = _summary(summary)
         item, current = await self._load(access, artifact_id, minimum_role="editor")
         file_name = _stored_file_name(item)
-        if content is not None:
+        if current.mime_type == _PDF_CONTENT_TYPE:
+            if fields is None:
+                raise ArtifactValidationError(
+                    "this document is a fillable PDF; change it with fields "
+                    "(form field names mapped to values), not text edits"
+                )
+            if not fields:
+                raise ArtifactValidationError("fields must not be empty")
+            request = SandboxRequest(
+                "fill_pdf",
+                {"file_name": file_name, "fields": dict(fields)},
+                files=(SandboxFile(file_name, await self._bytes(current.storage_key)),),
+            )
+        elif fields is not None:
+            raise ArtifactValidationError(
+                "fields applies only to fillable PDF documents; use edits or content"
+            )
+        elif content is not None:
             self._validate_content(content)
             request = SandboxRequest(
                 "write", {"file_name": file_name, "content": content}
@@ -257,17 +298,16 @@ class ArtifactService:
                 files=(SandboxFile(file_name, await self._bytes(current.storage_key)),),
             )
         produced = await self._sandbox.run(request)
-        data = produced.file(file_name)
+        document = _produced_document(produced, default_name=file_name)
         payload = await self._add_revision(
             access,
             item.id,
-            data=data,
-            file_name=file_name,
+            document=document,
             summary=normalized_summary,
             conversation_id=conversation_id,
             request_id=request_id,
         )
-        return {**payload, "content": data.decode("utf-8", errors="replace")}
+        return {**payload, "content": document.model_text()}
 
     async def export(
         self, access: AuthContext, artifact_id: UUID, *, format: str = "pdf"
@@ -283,19 +323,33 @@ class ArtifactService:
         if normalized_format in current.exports:
             return await self.get(access, artifact_id)
         file_name = _stored_file_name(item)
-        produced = await self._sandbox.run(
-            SandboxRequest(
-                "export_pdf",
-                {"file_name": file_name, "title": item.title},
-                files=(SandboxFile(file_name, await self._bytes(current.storage_key)),),
+        if current.mime_type == _PDF_CONTENT_TYPE:
+            # The revision already is a PDF: the export is the revision itself.
+            key = current.storage_key
+            export_name = file_name
+            size_bytes = current.size_bytes
+        else:
+            produced = await self._sandbox.run(
+                SandboxRequest(
+                    "export_pdf",
+                    {"file_name": file_name, "title": item.title},
+                    files=(
+                        SandboxFile(file_name, await self._bytes(current.storage_key)),
+                    ),
+                )
             )
-        )
-        export_name = f"{Path(file_name).stem}.pdf"
-        data = produced.file(export_name)
-        key = _revision_key(item.tenant_id, item.id, current.revision_number, export_name)
-        await asyncio.to_thread(
-            self._object_storage().put_bytes, data, key, content_type=_PDF_CONTENT_TYPE
-        )
+            export_name = f"{Path(file_name).stem}.pdf"
+            data = produced.file(export_name)
+            size_bytes = len(data)
+            key = _revision_key(
+                item.tenant_id, item.id, current.revision_number, export_name
+            )
+            await asyncio.to_thread(
+                self._object_storage().put_bytes,
+                data,
+                key,
+                content_type=_PDF_CONTENT_TYPE,
+            )
         async with self._sessions.begin() as session:
             revision = await session.get(ArtifactRevision, current.id, with_for_update=True)
             if revision is None:
@@ -306,7 +360,7 @@ class ArtifactService:
                     "file_name": export_name,
                     "content_type": _PDF_CONTENT_TYPE,
                     "storage_key": key,
-                    "size_bytes": len(data),
+                    "size_bytes": size_bytes,
                 },
             }
             await AuditService(session).record(
@@ -326,11 +380,15 @@ class ArtifactService:
         collection_id: UUID,
         title: str | None = None,
     ) -> dict[str, Any]:
-        """Copy the current revision into a template library as a KB document.
+        """Copy the current revision into a Collection as a KB document.
 
         This is the one deliberate step that turns a working document into
         Knowledge Base content: it goes through the ordinary governed upload,
-        so ACLs, indexing, previews, and audit are the upload's.
+        so ACLs, indexing, previews, and audit are the upload's. Editor access
+        on the destination Collection is the only gate — publishing does not
+        require a specially designated Collection; any indexed document is
+        already discoverable through knowledge_search regardless of which
+        Collection it lands in.
         """
 
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
@@ -339,19 +397,18 @@ class ArtifactService:
             target = await CollectionAccessService(session).require_item_access(
                 collection_id, access=access, minimum_role="editor"
             )
-            if target.item_type != "collection" or not target.metadata_.get(
-                TEMPLATE_LIBRARY_METADATA_KEY
-            ):
-                raise ArtifactValidationError(
-                    "the destination must be a Collection flagged as a template library"
-                )
-        file_name = _file_name(_title(title) if title else item.title)
+            if target.item_type != "collection":
+                raise ArtifactValidationError("the destination must be a Collection")
+        file_name = _file_name(
+            _title(title) if title else item.title,
+            suffix=Path(_stored_file_name(item)).suffix or ".md",
+        )
         upload = await self._uploads().upload_to_collection(
             access,
             collection_id,
             idempotency_key=f"artifact:{item.id}:r{current.revision_number}:{file_name}",
             file_name=file_name,
-            content_type=ARTIFACT_MIME_TYPE,
+            content_type=current.mime_type,
             content=_BytesStream(await self._bytes(current.storage_key)),
         )
         async with self._sessions.begin() as session:
@@ -401,7 +458,9 @@ class ArtifactService:
             if not matches:
                 raise DocumentNotFoundError(f"artifact revision not found: {revision}")
             selected = matches[0]
-        text, truncated = await self._text(selected.storage_key, self._max_content_bytes)
+        # For a binary revision (a fillable PDF) the preview is its stored
+        # description; the bytes themselves are reached via the download URL.
+        text, truncated = await self._model_text(selected, self._max_content_bytes)
         return {
             "artifact_id": str(item.id),
             "revision": selected.revision_number,
@@ -418,18 +477,15 @@ class ArtifactService:
         tenant_id: UUID,
         *,
         title: str,
-        file_name: str,
-        data: bytes,
+        document: _ProducedDocument,
         summary: str,
         conversation_id: UUID | None,
         request_id: str | None,
-        template_item_id: UUID | None,
+        source_document_id: UUID | None,
     ) -> dict[str, Any]:
         item_id = uuid4()
-        key = _revision_key(tenant_id, item_id, 1, file_name)
-        await asyncio.to_thread(
-            self._object_storage().put_bytes, data, key, content_type=ARTIFACT_MIME_TYPE
-        )
+        key = _revision_key(tenant_id, item_id, 1, document.file_name)
+        await self._store_revision_objects(document, key)
         async with self._sessions.begin() as session:
             items = ItemService(session)
             collection_id = await items.ensure_personal_collection(
@@ -443,18 +499,18 @@ class ArtifactService:
                 tenant_id=tenant_id,
                 parent_item_id=collection_id,
                 title=title,
-                document_type=ARTIFACT_DOCUMENT_TYPE,
+                document_type=_document_type(document.mime_type),
                 created_by_user_id=access.user_id,
-                mime_type=ARTIFACT_MIME_TYPE,
-                size_bytes=len(data),
+                mime_type=document.mime_type,
+                size_bytes=len(document.data),
                 storage_key=key,
                 metadata={
-                    "file_name": file_name,
+                    "file_name": document.file_name,
                     "artifact": {
                         "current_revision": 1,
                         "conversation_id": str(conversation_id) if conversation_id else None,
-                        "template_item_id": (
-                            str(template_item_id) if template_item_id else None
+                        "source_document_id": (
+                            str(source_document_id) if source_document_id else None
                         ),
                     },
                 },
@@ -465,8 +521,8 @@ class ArtifactService:
                 item_id=item.id,
                 revision_number=1,
                 storage_key=key,
-                mime_type=ARTIFACT_MIME_TYPE,
-                size_bytes=len(data),
+                mime_type=document.mime_type,
+                size_bytes=len(document.data),
                 summary=summary,
                 conversation_id=conversation_id,
                 request_id=request_id,
@@ -481,8 +537,10 @@ class ArtifactService:
                 resource_id=str(item.id),
                 details={
                     "conversation_id": str(conversation_id) if conversation_id else None,
-                    "template_item_id": str(template_item_id) if template_item_id else None,
-                    "size_bytes": len(data),
+                    "source_document_id": (
+                        str(source_document_id) if source_document_id else None
+                    ),
+                    "size_bytes": len(document.data),
                 },
             )
             return self._payload(item, [revision])
@@ -492,8 +550,7 @@ class ArtifactService:
         access: AuthContext,
         item_id: UUID,
         *,
-        data: bytes,
-        file_name: str,
+        document: _ProducedDocument,
         summary: str,
         conversation_id: UUID | None,
         request_id: str | None,
@@ -504,19 +561,14 @@ class ArtifactService:
                 raise DocumentNotFoundError(f"artifact not found: {item_id}")
             previous = await self._revisions(session, item.id)
             number = previous[-1].revision_number + 1
-            key = _revision_key(item.tenant_id, item.id, number, file_name)
-            await asyncio.to_thread(
-                self._object_storage().put_bytes,
-                data,
-                key,
-                content_type=ARTIFACT_MIME_TYPE,
-            )
+            key = _revision_key(item.tenant_id, item.id, number, document.file_name)
+            await self._store_revision_objects(document, key)
             revision = ArtifactRevision(
                 item_id=item.id,
                 revision_number=number,
                 storage_key=key,
-                mime_type=ARTIFACT_MIME_TYPE,
-                size_bytes=len(data),
+                mime_type=document.mime_type,
+                size_bytes=len(document.data),
                 summary=summary,
                 conversation_id=conversation_id,
                 request_id=request_id,
@@ -524,7 +576,7 @@ class ArtifactService:
             )
             session.add(revision)
             item.storage_key = key
-            item.size_bytes = len(data)
+            item.size_bytes = len(document.data)
             artifact_metadata = dict(item.metadata_.get("artifact") or {})
             artifact_metadata["current_revision"] = number
             item.metadata_ = {**dict(item.metadata_), "artifact": artifact_metadata}
@@ -537,10 +589,29 @@ class ArtifactService:
                 details={
                     "revision": number,
                     "conversation_id": str(conversation_id) if conversation_id else None,
-                    "size_bytes": len(data),
+                    "size_bytes": len(document.data),
                 },
             )
             return self._payload(item, [*previous, revision])
+
+    async def _store_revision_objects(
+        self, document: _ProducedDocument, key: str
+    ) -> None:
+        """Write one revision's bytes and, when present, its description."""
+
+        await asyncio.to_thread(
+            self._object_storage().put_bytes,
+            document.data,
+            key,
+            content_type=document.mime_type,
+        )
+        if document.context is not None:
+            await asyncio.to_thread(
+                self._object_storage().put_bytes,
+                document.context,
+                f"{key}{_CONTEXT_SUFFIX}",
+                content_type=_CONTEXT_CONTENT_TYPE,
+            )
 
     async def _load(
         self, access: AuthContext, artifact_id: UUID, *, minimum_role: str = "viewer"
@@ -598,6 +669,25 @@ class ArtifactService:
             return text, False
         return f"{text[:limit]}{_TRUNCATION_MARKER}", True
 
+    async def _model_text(
+        self, revision: ArtifactRevision, limit: int
+    ) -> tuple[str, bool]:
+        """The revision's text as the model (and previews) should see it.
+
+        A text revision is its own text. A binary revision (a fillable PDF)
+        is represented by the description stored beside it — never by its
+        bytes decoded as text.
+        """
+
+        if revision.mime_type.startswith("text/"):
+            return await self._text(revision.storage_key, limit)
+        try:
+            return await self._text(
+                f"{revision.storage_key}{_CONTEXT_SUFFIX}", limit
+            )
+        except ObjectNotFoundError:
+            return f"(binary document: {revision.mime_type}; no text preview)", False
+
     def _validate_content(self, content: str) -> None:
         if not content.strip():
             raise ArtifactValidationError("document content must not be empty")
@@ -620,7 +710,7 @@ class ArtifactService:
             "revision": current.revision_number,
             "revision_count": len(revisions),
             "conversation_id": artifact_metadata.get("conversation_id"),
-            "template_item_id": artifact_metadata.get("template_item_id"),
+            "source_document_id": artifact_metadata.get("source_document_id"),
             "created_at": timestamp(item.created_at),
             "updated_at": timestamp(current.created_at) or timestamp(item.updated_at),
             "download_url": self._presigned(current.storage_key),
@@ -662,6 +752,60 @@ class ArtifactService:
             return None
 
 
+@dataclass(frozen=True, slots=True)
+class _ProducedDocument:
+    """What one sandbox operation produced, as the runner reported it.
+
+    ``context`` is the model-facing description of a binary document (for
+    example a fillable PDF's field list); it is ``None`` for text documents,
+    whose data is its own description.
+    """
+
+    file_name: str
+    mime_type: str
+    data: bytes
+    context: bytes | None
+
+    def model_text(self) -> str:
+        source = self.context if self.context is not None else self.data
+        return source.decode("utf-8", errors="replace")
+
+
+def _produced_document(
+    produced: SandboxResult, *, default_name: str
+) -> _ProducedDocument:
+    """Read the runner's report of what it wrote, without trusting it blindly."""
+
+    file_name = _safe_produced_name(produced.result.get("file_name"), default_name)
+    mime_type = str(produced.result.get("content_type") or ARTIFACT_MIME_TYPE)
+    context_name = produced.result.get("context_file_name")
+    context = (
+        produced.file(_safe_produced_name(context_name, context_name.strip()))
+        if isinstance(context_name, str) and context_name.strip()
+        else None
+    )
+    return _ProducedDocument(
+        file_name=file_name,
+        mime_type=mime_type,
+        data=produced.file(file_name),
+        context=context,
+    )
+
+
+def _safe_produced_name(value: object, default: str) -> str:
+    """A bare file name from the runner result; anything else is the default."""
+
+    if isinstance(value, str):
+        name = value.strip()
+        if name and Path(name).name == name and name not in {".", ".."}:
+            return name
+    return default
+
+
+def _document_type(mime_type: str) -> str:
+    return "pdf" if mime_type == _PDF_CONTENT_TYPE else ARTIFACT_DOCUMENT_TYPE
+
+
 class _BytesStream:
     """Present in-memory bytes through the upload service's stream contract."""
 
@@ -700,9 +844,9 @@ def _summary(value: str) -> str:
     return normalized[:500]
 
 
-def _file_name(title: str) -> str:
+def _file_name(title: str, *, suffix: str = ".md") -> str:
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-._")[:120] or "document"
-    return f"{stem}.md"
+    return f"{stem}{suffix}"
 
 
 def _stored_file_name(item: Item) -> str:
@@ -722,12 +866,13 @@ def _input_name(value: str, *, mime_type: str | None) -> str:
             "text/markdown": ".md",
             "text/x-markdown": ".md",
             "text/plain": ".txt",
+            "application/pdf": ".pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document": (
                 ".docx"
             ),
         }.get((mime_type or "").split(";", 1)[0].strip().casefold(), "")
-        name = f"{name or 'template'}{extension}"
-    return name or "template"
+        name = f"{name or 'document'}{extension}"
+    return name or "document"
 
 
 def produced_artifact_ids(annotations: Sequence[Mapping[str, Any]]) -> tuple[UUID, ...]:

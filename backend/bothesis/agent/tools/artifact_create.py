@@ -1,4 +1,4 @@
-"""Start a new conversation artifact from a template or from written content."""
+"""Start a new conversation artifact from a source document or from written content."""
 
 from __future__ import annotations
 
@@ -36,10 +36,18 @@ class ArtifactCreate(Tool):
             name="artifact_create",
             description=(
                 "Create a new document artifact for the user in this conversation. "
-                "Provide EITHER template_id (from template_search) to start from "
-                "that template, OR content (the complete document in Markdown) to "
-                "write a new one; set the other to null. Enterprise facts written "
-                "into a document must come from knowledge_search results or the "
+                "Provide EITHER source_document_id (the Document ID of a document "
+                "found via knowledge_search or listed in the conversation document "
+                "references, for example a template or form) to start this "
+                "artifact as an editable working copy of that document, OR "
+                "content (the complete document in Markdown) to write a new one; "
+                "set the other to null. Every readable source format works, "
+                "including PDF: a fillable PDF form keeps its original layout and "
+                "is filled field by field with artifact_edit, and other documents "
+                "become editable text — never rewrite a source document yourself "
+                "instead of passing its Document ID. Creating an artifact never "
+                "modifies the source document. Enterprise facts written into a "
+                "document must come from knowledge_search results or the "
                 "conversation, never from guesses. Do not use this to change an "
                 "existing artifact: use artifact_edit for that."
             ),
@@ -52,11 +60,12 @@ class ArtifactCreate(Tool):
                         "maxLength": 200,
                         "description": "The document title shown to the user.",
                     },
-                    "template_id": {
+                    "source_document_id": {
                         "type": ["string", "null"],
                         "description": (
-                            "A template id returned by template_search, or null "
-                            "when writing the document from content."
+                            "The Document ID of a source document from a "
+                            "knowledge_search result, or null when writing the "
+                            "document from content instead."
                         ),
                     },
                     "content": {
@@ -64,11 +73,11 @@ class ArtifactCreate(Tool):
                         "maxLength": max_content_characters,
                         "description": (
                             "The complete document in Markdown, or null when "
-                            "starting from a template."
+                            "starting from source_document_id."
                         ),
                     },
                 },
-                "required": ["title", "template_id", "content"],
+                "required": ["title", "source_document_id", "content"],
                 "additionalProperties": False,
             },
             activity_label="Create document",
@@ -80,26 +89,31 @@ class ArtifactCreate(Tool):
 
     async def execute(self, arguments: dict[str, Any], ctx: ToolContext) -> ToolOutput:
         title = arguments.get("title")
-        template_id = arguments.get("template_id")
+        source_document_id = arguments.get("source_document_id")
         content = arguments.get("content")
         if not isinstance(title, str) or not title.strip():
             return _invalid("artifact_create requires a title.")
-        if (template_id is None) == (content is None):
+        if (source_document_id is None) == (content is None):
             return _invalid(
-                "artifact_create needs exactly one of template_id or content."
+                "artifact_create needs exactly one of source_document_id or content."
             )
-        template_item_id = uuid_or_none(template_id) if template_id is not None else None
-        if template_id is not None and template_item_id is None:
-            return _invalid("template_id must be an id returned by template_search.")
+        source_id = (
+            uuid_or_none(source_document_id) if source_document_id is not None else None
+        )
+        if source_document_id is not None and source_id is None:
+            return _invalid(
+                "source_document_id must be the Document ID of a document found "
+                "via knowledge_search."
+            )
 
         scope = ctx.agent_context
         try:
             access = await self._artifacts.resolve_access(scope)
-            if template_item_id is not None:
-                payload = await self._artifacts.create_from_template(
+            if source_id is not None:
+                payload = await self._artifacts.create_from_document(
                     access,
                     title=title,
-                    template_item_id=template_item_id,
+                    source_document_id=source_id,
                     conversation_id=uuid_or_none(scope.conversation_id),
                     request_id=scope.request_id,
                 )
@@ -120,17 +134,27 @@ class ArtifactCreate(Tool):
         return artifact_observation(
             reference,
             action="Created document",
-            # A template's text is new to the model; content it wrote is not.
-            content=payload.get("content") if template_item_id is not None else None,
+            # A source document's text is new to the model; content it wrote itself is not.
+            content=payload.get("content") if source_id is not None else None,
             max_characters=self._max_result_characters,
-            guidance=(
-                "Fill the template in with artifact_edit using facts from the "
-                "conversation or knowledge_search; leave placeholders you cannot "
-                "ground and tell the user."
-                if template_item_id is not None
-                else None
-            ),
+            guidance=_creation_guidance(reference) if source_id is not None else None,
         )
+
+
+def _creation_guidance(reference: ConversationArtifact) -> str:
+    if reference.mime_type == "application/pdf":
+        return (
+            "This is the original PDF with its layout preserved. Fill its form "
+            "fields with artifact_edit(fields=...) using the exact field names "
+            "in the content, grounded in the conversation or knowledge_search; "
+            "leave fields you cannot ground empty and tell the user which ones "
+            "still need their input."
+        )
+    return (
+        "Fill the document in with artifact_edit using facts from the "
+        "conversation or knowledge_search; leave placeholders you cannot "
+        "ground and tell the user."
+    )
 
 
 def _invalid(message: str) -> ToolOutput:

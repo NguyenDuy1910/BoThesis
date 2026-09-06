@@ -4,6 +4,7 @@ import json
 import sys
 import asyncio
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -15,6 +16,7 @@ from bothesis.agent.models import (
     AgentContext,
     ConversationArtifact,
     ConversationDocument,
+    ConversationDocumentReference,
     ConversationMessage,
     Evidence,
     ToolContext,
@@ -22,6 +24,7 @@ from bothesis.agent.models import (
 )
 from bothesis.agent.protocol import FunctionCallItem, InputText
 from bothesis.agent.tools import Tool, ToolDefinition, ToolExecutor, ToolRegistry
+from bothesis.agent.tools.artifact_edit import ArtifactEdit
 
 
 def test_conversation_policy_keeps_newest_content_within_budget() -> None:
@@ -298,6 +301,110 @@ async def test_conversation_context_supplies_working_artifacts() -> None:
     assert "<content># Memo &lt;draft&gt;</content>" in texts[1]
 
 
+@pytest.mark.asyncio
+async def test_conversation_context_lists_referenced_documents_without_content() -> None:
+    """Prior turns' Document IDs are supplied so "fill that form" needs no re-search."""
+
+    context = AgentContext(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        roles=[],
+        document_references=(
+            ConversationDocumentReference(
+                id="doc-1", title="Expense report <form>", document_type="file"
+            ),
+            ConversationDocumentReference(id="doc-2", title="Leave policy"),
+        ),
+        artifacts=(
+            ConversationArtifact(
+                id="artifact-1",
+                title="Filled expense report",
+                file_name="expense.md",
+                mime_type="text/markdown",
+                revision=1,
+                size_bytes=10,
+                updated_at="2026-09-06T00:00:00+00:00",
+                source_document_id="doc-1",
+            ),
+        ),
+    )
+
+    prepared = await ConversationMemory(config=AgentConfig()).prepare(
+        "Fill that form for me", context
+    )
+
+    assert "<conversation_document_references>" in prepared.instructions
+    assert "<document_id>doc-1</document_id>" in prepared.instructions
+    assert "Expense report &lt;form&gt;" in prepared.instructions
+    assert "<document_type>file</document_type>" in prepared.instructions
+    assert "<document_id>doc-2</document_id>" in prepared.instructions
+    # Identities only: referenced documents never inject content.
+    assert "<content>" not in prepared.instructions
+    # The working copy keeps its lineage to the knowledge document it came from.
+    assert "<source_document_id>doc-1</source_document_id>" in prepared.instructions
+
+
+@pytest.mark.asyncio
+async def test_artifact_edit_accepts_exactly_one_change_kind() -> None:
+    """edits, content, and fields are mutually exclusive; fields fill a PDF form."""
+
+    class RecordingArtifacts:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def resolve_access(self, scope: object) -> object:
+            return object()
+
+        async def edit(self, access: object, artifact_id: object, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            return {
+                "id": str(artifact_id),
+                "title": "Leave form",
+                "file_name": "leave-form.pdf",
+                "mime_type": "application/pdf",
+                "revision": 2,
+                "size_bytes": 10,
+                "updated_at": "2026-09-06T00:00:00+00:00",
+                "content": "filled description",
+            }
+
+    artifacts = RecordingArtifacts()
+    tool = ArtifactEdit(artifacts)  # type: ignore[arg-type]
+    ctx = ToolContext(
+        agent_context=AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[])
+    )
+    base = {"artifact_id": str(uuid4()), "summary": "Fill the name", "edits": []}
+
+    both = await tool.execute(
+        {**base, "content": "x", "fields": [{"name": "a", "value": "1"}]}, ctx
+    )
+    assert both.error is not None and "exactly one" in both.error
+    neither = await tool.execute({**base, "content": None, "fields": None}, ctx)
+    assert neither.error is not None and "exactly one" in neither.error
+    duplicate = await tool.execute(
+        {
+            **base,
+            "content": None,
+            "fields": [{"name": "a", "value": "1"}, {"name": "a", "value": "2"}],
+        },
+        ctx,
+    )
+    assert duplicate.error is not None and "duplicate" in duplicate.error
+    assert artifacts.calls == []
+
+    filled = await tool.execute(
+        {
+            **base,
+            "content": None,
+            "fields": [{"name": "ho_ten", "value": "Trần Văn A"}],
+        },
+        ctx,
+    )
+    assert filled.error is None
+    assert artifacts.calls[0]["fields"] == {"ho_ten": "Trần Văn A"}
+    assert filled.metadata["artifact_id"] == base["artifact_id"]
+
+
 def test_tool_registry_validates_nullable_and_enum_fields() -> None:
     class DocumentTool(Tool):
         @property
@@ -309,10 +416,10 @@ def test_tool_registry_validates_nullable_and_enum_fields() -> None:
                     "type": "object",
                     "properties": {
                         "title": {"type": "string", "minLength": 1},
-                        "template_id": {"type": ["string", "null"]},
+                        "source_document_id": {"type": ["string", "null"]},
                         "format": {"type": "string", "enum": ["pdf"]},
                     },
-                    "required": ["title", "template_id", "format"],
+                    "required": ["title", "source_document_id", "format"],
                     "additionalProperties": False,
                 },
             )
@@ -324,16 +431,16 @@ def test_tool_registry_validates_nullable_and_enum_fields() -> None:
     registry.register(DocumentTool())
 
     assert registry.arguments_are_valid(
-        "artifact_create", {"title": "Memo", "template_id": None, "format": "pdf"}
+        "artifact_create", {"title": "Memo", "source_document_id": None, "format": "pdf"}
     )
     assert registry.arguments_are_valid(
-        "artifact_create", {"title": "Memo", "template_id": "tpl-1", "format": "pdf"}
+        "artifact_create", {"title": "Memo", "source_document_id": "doc-1", "format": "pdf"}
     )
     assert not registry.arguments_are_valid(
-        "artifact_create", {"title": "Memo", "template_id": 3, "format": "pdf"}
+        "artifact_create", {"title": "Memo", "source_document_id": 3, "format": "pdf"}
     )
     assert not registry.arguments_are_valid(
-        "artifact_create", {"title": "Memo", "template_id": None, "format": "docx"}
+        "artifact_create", {"title": "Memo", "source_document_id": None, "format": "docx"}
     )
 
 

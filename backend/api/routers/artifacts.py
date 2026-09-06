@@ -6,26 +6,16 @@ from uuid import UUID
 
 from fastapi import APIRouter, status
 
-from api.deps import Artifacts, Caller, Templates
+from api.deps import Artifacts, Caller
 from api.routers import (
     ArtifactContent,
     ArtifactDetail,
     ArtifactExportRequest,
     ArtifactPublishRequest,
     ArtifactPublishResponse,
-    TemplateLibraryList,
 )
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
-
-
-@router.get("/template-libraries", response_model=TemplateLibraryList)
-async def list_template_libraries(
-    caller: Caller, templates: Templates
-) -> TemplateLibraryList:
-    """The template libraries the caller may publish a document into."""
-
-    return TemplateLibraryList(items=await templates.library_collections(caller))
 
 
 @router.get("/{artifact_id}", response_model=ArtifactDetail)
@@ -69,7 +59,7 @@ async def publish_artifact(
     caller: Caller,
     artifacts: Artifacts,
 ) -> ArtifactPublishResponse:
-    """Copy the current revision into a template library as a KB document."""
+    """Copy the current revision into a Collection as a KB document."""
 
     return ArtifactPublishResponse.model_validate(
         await artifacts.publish(

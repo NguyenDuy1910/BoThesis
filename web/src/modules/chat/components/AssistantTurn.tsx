@@ -8,7 +8,6 @@ import {
   FileDown,
   FilePenLine,
   FilePlus2,
-  LayoutTemplate,
   LoaderCircle,
   Search,
   Wrench,
@@ -147,14 +146,6 @@ function toolPresentation(
         ? "Data query could not complete"
         : completed ? "Queried data" : "Querying data…",
       icon: Database,
-    };
-  }
-  if (name === "template_search") {
-    return {
-      label: state === "error"
-        ? "Template search could not complete"
-        : completed ? "Searched templates" : "Searching templates…",
-      icon: LayoutTemplate,
     };
   }
   if (name === "artifact_create") {

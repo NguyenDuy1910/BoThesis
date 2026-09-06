@@ -246,7 +246,7 @@ class ArtifactDetail(BaseModel):
     revision: int = Field(ge=1)
     revision_count: int = Field(ge=1)
     conversation_id: str | None = None
-    template_item_id: str | None = None
+    source_document_id: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
     download_url: str | None = None
@@ -279,15 +279,6 @@ class ArtifactPublishResponse(BaseModel):
     title: str
     status: str
     created: bool
-
-
-class TemplateLibrary(BaseModel):
-    id: str
-    title: str
-
-
-class TemplateLibraryList(BaseModel):
-    items: list[TemplateLibrary]
 
 
 # --- Citations and document viewer ---
@@ -604,8 +595,6 @@ __all__ = [
     "SearchRequest",
     "SearchResponse",
     "SpaceUpdate",
-    "TemplateLibrary",
-    "TemplateLibraryList",
     "Thread",
     "ThreadCreate",
     "ThreadDetail",

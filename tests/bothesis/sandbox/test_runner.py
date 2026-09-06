@@ -84,12 +84,12 @@ def test_replace_refuses_missing_ambiguous_or_empty_matches(
     assert not (tmp_path / "output" / "memo.md").exists()
 
 
-def test_import_copies_markdown_templates(tmp_path: Path) -> None:
+def test_import_copies_markdown_documents(tmp_path: Path) -> None:
     exit_code, result = run(
         tmp_path,
         "import",
-        {"file_name": "template.md", "target_file_name": "nda.md"},
-        {"template.md": b"# NDA\n\nBetween [A] and [B].\n"},
+        {"file_name": "source.md", "target_file_name": "nda.md"},
+        {"source.md": b"# NDA\n\nBetween [A] and [B].\n"},
     )
 
     assert exit_code == 0
@@ -131,7 +131,7 @@ def test_import_rejects_formats_the_runner_cannot_read(tmp_path: Path) -> None:
     )
 
     assert exit_code == 1
-    assert "unsupported template format: .pptx" in result["error"]
+    assert "unsupported source format: .pptx" in result["error"]
 
 
 def test_export_pdf_renders_or_names_the_missing_libraries(tmp_path: Path) -> None:
@@ -161,3 +161,166 @@ def test_unknown_operations_and_bad_file_names_are_reported_not_raised(tmp_path:
     exit_code, result = run(tmp_path, "write", {"file_name": "../escape.md", "content": "x"})
     assert exit_code == 1
     assert "file_name is invalid" in result["error"]
+
+
+# --- PDF fixtures -----------------------------------------------------------
+#
+# Minimal but valid PDFs, assembled byte by byte so the tests need no PDF
+# writer: a page with one text line, optionally carrying one AcroForm text
+# field named "ho_ten".
+
+
+def _pdf_bytes(objects: list[bytes]) -> bytes:
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010} 00000 n \n".encode()
+    out += (
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref}\n%%EOF\n"
+    ).encode()
+    return bytes(out)
+
+
+def _content_stream(text: str) -> bytes:
+    content = f"BT /Helv 12 Tf 72 720 Td ({text}) Tj ET".encode()
+    return b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content)
+
+
+_FONT = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+
+
+def form_pdf() -> bytes:
+    """One page, the label "Ho ten:", and one empty AcroForm text field."""
+
+    return _pdf_bytes(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R] "
+            b"/DA (/Helv 0 Tf 0 g) /NeedAppearances true >> >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Annots [4 0 R] /Contents 5 0 R "
+            b"/Resources << /Font << /Helv 6 0 R >> >> >>",
+            b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (ho_ten) /V () "
+            b"/Rect [150 710 400 730] /DA (/Helv 12 Tf 0 g) >>",
+            _content_stream("Ho ten:"),
+            _FONT,
+        ]
+    )
+
+
+def flat_pdf(text: str = "Quy dinh nghi phep nam 2026") -> bytes:
+    """One page of plain text: no AcroForm, extractable content."""
+
+    return _pdf_bytes(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Contents 4 0 R /Resources << /Font << /Helv 5 0 R >> >> >>",
+            _content_stream(text),
+            _FONT,
+        ]
+    )
+
+
+def blank_pdf() -> bytes:
+    """One empty page: no fields, no text — the scanned-image shape."""
+
+    return _pdf_bytes(
+        [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        ]
+    )
+
+
+def test_import_keeps_a_fillable_pdf_and_describes_its_fields(tmp_path: Path) -> None:
+    pytest.importorskip("pypdf")
+    original = form_pdf()
+    exit_code, result = run(
+        tmp_path,
+        "import",
+        {"file_name": "don-mien-thi.pdf", "target_file_name": "don-mien-thi.md"},
+        {"don-mien-thi.pdf": original},
+    )
+
+    assert exit_code == 0, result
+    assert result["file_name"] == "don-mien-thi.pdf"
+    assert result["content_type"] == "application/pdf"
+    assert result["artifact_kind"] == "pdf_form"
+    assert result["field_count"] == 1
+    # The artifact is the original PDF, byte for byte: layout preserved.
+    assert (tmp_path / "output" / "don-mien-thi.pdf").read_bytes() == original
+    context = (tmp_path / "output" / result["context_file_name"]).read_text("utf-8")
+    assert 'name: "ho_ten"' in context
+    assert "Ho ten:" in context
+
+
+def test_import_extracts_a_flat_pdf_to_editable_markdown(tmp_path: Path) -> None:
+    pytest.importorskip("pypdf")
+    exit_code, result = run(
+        tmp_path,
+        "import",
+        {"file_name": "policy.pdf", "target_file_name": "policy.md"},
+        {"policy.pdf": flat_pdf()},
+    )
+
+    assert exit_code == 0, result
+    assert result["file_name"] == "policy.md"
+    assert result["content_type"] == "text/markdown"
+    assert result["source_format"] == "pdf"
+    text = (tmp_path / "output" / "policy.md").read_text("utf-8")
+    assert "Quy dinh nghi phep nam 2026" in text
+
+
+def test_import_reports_a_scanned_pdf_instead_of_guessing(tmp_path: Path) -> None:
+    pytest.importorskip("pypdf")
+    exit_code, result = run(
+        tmp_path,
+        "import",
+        {"file_name": "scan.pdf", "target_file_name": "scan.md"},
+        {"scan.pdf": blank_pdf()},
+    )
+
+    assert exit_code == 1
+    assert "no fillable form fields and no extractable text" in result["error"]
+
+
+def test_fill_pdf_sets_field_values_and_refreshes_the_description(tmp_path: Path) -> None:
+    pypdf = pytest.importorskip("pypdf")
+    exit_code, result = run(
+        tmp_path,
+        "fill_pdf",
+        {"file_name": "don.pdf", "fields": {"ho_ten": "Trần Văn A"}},
+        {"don.pdf": form_pdf()},
+    )
+
+    assert exit_code == 0, result
+    assert result["applied"] == 1
+    assert result["content_type"] == "application/pdf"
+    reader = pypdf.PdfReader(str(tmp_path / "output" / "don.pdf"))
+    assert reader.get_fields()["ho_ten"].value == "Trần Văn A"
+    context = (tmp_path / "output" / result["context_file_name"]).read_text("utf-8")
+    assert "Trần Văn A" in context
+
+
+def test_fill_pdf_rejects_unknown_fields_naming_the_real_ones(tmp_path: Path) -> None:
+    pytest.importorskip("pypdf")
+    exit_code, result = run(
+        tmp_path,
+        "fill_pdf",
+        {"file_name": "don.pdf", "fields": {"full_name": "A"}},
+        {"don.pdf": form_pdf()},
+    )
+
+    assert exit_code == 1
+    assert "unknown form fields: full_name" in result["error"]
+    assert "ho_ten" in result["error"]
+    assert not (tmp_path / "output" / "don.pdf").exists()
