@@ -101,6 +101,76 @@ test("multi-span citations highlight each normalized element independently", () 
   assert.deepEqual(resolveHighlightRange("two", citation, citation.spans[1]), { start: 0, end: 3 });
 });
 
+test("citation markers are numbered once, in the order they were first cited", () => {
+  const first = annotation({ id: "source-1111", item_id: "item-1", chunk_id: "c1" });
+  const second = annotation({ id: "source-2222", item_id: "item-2", chunk_id: "c2" });
+  const sources = answerSources(turnWithAnnotations([first, second, first]));
+
+  assert.deepEqual(sources.map((source) => source.index), [1, 2]);
+  assert.deepEqual(sources.map((source) => source.id), ["source-1111", "source-2222"]);
+});
+
+test("a cited page is read from the chunk page range when spans carry no geometry", () => {
+  // Retrieval supplies the chunk's page range; span geometry is resolved from
+  // canonical storage only once the citation is opened.
+  const sources = answerSources(turnWithAnnotations([
+    annotation({
+      id: "source-1111",
+      item_id: "item-1",
+      chunk_id: "c1",
+      section: "Annual leave",
+      page_start: 7,
+      page_end: 9,
+      spans: [],
+    }),
+  ]));
+
+  assert.equal(sources[0]?.page, 7);
+  assert.equal(sources[0]?.locator, "p. 7\u20139 \u00b7 Annual leave");
+});
+
+test("span pages take precedence over the chunk page range", () => {
+  const sources = answerSources(turnWithAnnotations([
+    annotation({
+      id: "source-1111",
+      item_id: "item-1",
+      chunk_id: "c1",
+      page_start: 7,
+      page_end: 9,
+      spans: [{ page: 8 }],
+    }),
+  ]));
+
+  assert.equal(sources[0]?.page, 8);
+  assert.equal(sources[0]?.locator, "p. 8");
+});
+
+test("the backend number drives the chip and the summary list alike", () => {
+  // The answer cites its second retrieved source first, so numbering follows
+  // first use — not retrieval order.
+  const sources = answerSources(turnWithAnnotations([
+    annotation({ id: "ref_2", reference: "ref_2", number: 1, item_id: "i2", chunk_id: "c2" }),
+    annotation({ id: "ref_1", reference: "ref_1", number: 2, item_id: "i1", chunk_id: "c1" }),
+    annotation({ id: "ref_2", reference: "ref_2", number: 1, item_id: "i2", chunk_id: "c2" }),
+  ]));
+
+  // A repeated citation is one entry, keeping its number.
+  assert.equal(sources.length, 2);
+  assert.deepEqual(sources.map((source) => [source.id, source.index]), [
+    ["ref_2", 1],
+    ["ref_1", 2],
+  ]);
+});
+
+test("conversations saved before numbering still resolve in order", () => {
+  const sources = answerSources(turnWithAnnotations([
+    annotation({ id: "a", item_id: "i1", chunk_id: "c1" }),
+    annotation({ id: "b", item_id: "i2", chunk_id: "c2" }),
+  ]));
+
+  assert.deepEqual(sources.map((source) => source.index), [1, 2]);
+});
+
 function annotation(citation: NonNullable<OutputTextAnnotation["citation"]>): OutputTextAnnotation {
   return { type: DOCUMENT_CITATION_TYPE, citation };
 }

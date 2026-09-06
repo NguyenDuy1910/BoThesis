@@ -5,46 +5,58 @@ import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
+from bothesis.connector.protocol import BoundingBox, Chunk, CitationInfo, CitationSpan
 from bothesis.db.models import (
+    ArtifactRevision,
     AuditLog,
     Base,
     Citation,
     Conversation,
-    Item,
     ExternalResource,
-    ItemUpload,
     IngestionSource,
-    Message,
-    MessageItem,
     IntegrationConnection,
     IntegrationCredential,
+    Item,
+    ItemUpload,
+    Message,
+    MessageItem,
 )
-from bothesis.connector.protocol import BoundingBox, Chunk, CitationInfo, CitationSpan
+from bothesis.agent.models import AgentContext
+from bothesis.sandbox import SandboxRequest, SandboxResult
+from bothesis.storage import (
+    ObjectNotFoundError,
+    ObjectStorageError,
+    PresignedRequest,
+    StoredObject,
+)
 from bothesis.services import (
-    AccessRequestService,
-    AdminItemService,
+    ArtifactValidationError,
     AuthContext,
-    AuthService,
     AuthorizationError,
-    CollectionAccessService,
-    CitationService,
     DocumentNotFoundError,
-    ItemService,
-    IntegrationCredentialService,
-    IntegrationService,
-    UploadService,
+    DocumentProcessingError,
     UploadTooLargeError,
     UploadValidationError,
 )
-from bothesis.document_index.raw_storage import ObjectStorageError, StoredObject
-
+from bothesis.services.access_requests import AccessRequestService
+from bothesis.services.artifact import ArtifactService
+from bothesis.services.identity_store import IdentityStoreService
+from bothesis.services.citation import CitationService
+from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.conversation import ConversationService
+from bothesis.services.integration_connections import IntegrationConnectionService
+from bothesis.services.integration_credential import IntegrationCredentialService
+from bothesis.services.item import ItemService
+from bothesis.services.item_catalog import ItemCatalogService
+from bothesis.services.document_upload import DocumentUploadService
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
@@ -82,7 +94,7 @@ async def test_identity_supports_multiple_tenant_memberships(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         first_tenant = await auth.create_tenant("acme", "Acme")
         second_tenant = await auth.create_tenant("labs", "Labs")
         user = await auth.create_user("USER@EXAMPLE.COM")
@@ -117,7 +129,7 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
         role = await auth.create_role(tenant.id, "member", "Member")
@@ -183,11 +195,136 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
 
 
 @pytest.mark.asyncio
+async def test_referenced_documents_resolve_prior_turns_under_current_access(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A follow-up like "fill that form" resolves earlier Document IDs.
+
+    Only "attachment"/"reference" links come back — artifact "output" links
+    travel as working documents — newest reference first, and only while the
+    caller can still read the document's Collection.
+    """
+
+    async with session_factory.begin() as session:
+        auth = IdentityStoreService(session)
+        tenant = await auth.create_tenant("provenance", "Provenance")
+        owner = await auth.create_user("owner@example.com")
+        other = await auth.create_user("other@example.com")
+        role = await auth.create_role(
+            tenant.id,
+            "member",
+            "Member",
+            permission_codes=["knowledge.read", "access.manage"],
+        )
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        await auth.assign_membership(other.id, tenant.id, role.id)
+        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
+        other_actor = await auth.get_context(other.id, tenant_id=tenant.id)
+
+        items = ItemService(session)
+        access = CollectionAccessService(session)
+        forms = await items.create_collection(
+            tenant_id=tenant.id, title="Forms", created_by_user_id=owner.id
+        )
+        restricted = await items.create_collection(
+            tenant_id=tenant.id, title="Restricted", created_by_user_id=owner.id
+        )
+        for collection in (forms, restricted):
+            await access.grant(
+                collection.id,
+                principal_type="user",
+                principal_id=owner.id,
+                role="owner",
+                actor=actor,
+            )
+        expense_form = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=forms.id,
+            title="Expense report form",
+            document_type="file",
+            created_by_user_id=owner.id,
+        )
+        leave_policy = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=forms.id,
+            title="Leave policy",
+            document_type="file",
+            created_by_user_id=owner.id,
+        )
+        secret = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=restricted.id,
+            title="Restricted budget",
+            document_type="file",
+            created_by_user_id=owner.id,
+        )
+        draft = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=forms.id,
+            title="Filled expense report",
+            document_type="file",
+            created_by_user_id=owner.id,
+        )
+
+        conversation = Conversation(
+            tenant_id=tenant.id, user_id=owner.id, title="Expenses"
+        )
+        session.add(conversation)
+        await session.flush()
+        messages = []
+        for sequence, message_role in enumerate(
+            ("user", "assistant", "assistant"), start=1
+        ):
+            message = Message(
+                conversation_id=conversation.id,
+                role=message_role,
+                content=f"turn {sequence}",
+                sequence_number=sequence,
+            )
+            session.add(message)
+            messages.append(message)
+        await session.flush()
+        await items.link_message(
+            messages[0].id, expense_form.id, "attachment", access=actor
+        )
+        await items.link_message(messages[1].id, secret.id, "reference", access=actor)
+        await items.link_message(
+            messages[1].id, leave_policy.id, "reference", access=actor
+        )
+        await items.link_message(
+            messages[2].id, expense_form.id, "reference", access=actor
+        )
+        # The answer's produced document is an output, not a reference.
+        await items.link_message(messages[2].id, draft.id, "output", access=actor)
+        # Access revoked between turns must remove the document from context.
+        await access.revoke(
+            restricted.id, principal_type="user", principal_id=owner.id, actor=actor
+        )
+        conversation_id = conversation.id
+
+    conversations = ConversationService(session_factory)
+    references = await conversations.referenced_documents(
+        conversation_id, access=actor
+    )
+    assert [reference.title for reference in references] == [
+        "Expense report form",
+        "Leave policy",
+    ]
+    assert references[0].id == str(expense_form.id)
+    assert references[0].document_type == "file"
+    # A conversation is private to its user: another member resolves nothing.
+    assert (
+        await conversations.referenced_documents(conversation_id, access=other_actor)
+        == ()
+    )
+
+
+@pytest.mark.asyncio
 async def test_citations_replace_geometry_by_stable_chunk_identity(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("citations", "Citations")
         owner = await auth.create_user("citations@example.com")
         collection = await ItemService(session).create_collection(
@@ -269,7 +406,7 @@ async def test_integration_credentials_are_encrypted_and_owner_models_are_explic
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
         role = await auth.create_role(tenant.id, "member", "Member")
@@ -310,11 +447,14 @@ async def test_integration_credentials_are_encrypted_and_owner_models_are_explic
             "access_token": "top-secret",
             "refresh_token": "refresh-secret",
         }
-        assert await session.scalar(
-            select(IntegrationCredential).where(
-                IntegrationCredential.integration_connection_id == personal.id
+        assert (
+            await session.scalar(
+                select(IntegrationCredential).where(
+                    IntegrationCredential.integration_connection_id == personal.id
+                )
             )
-        ) is record
+            is record
+        )
 
 
 def test_integration_encryption_key_accepts_unpadded_urlsafe_base64() -> None:
@@ -329,7 +469,7 @@ async def test_integration_list_eager_loads_optional_credentials(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
         role = await auth.create_role(
@@ -352,8 +492,9 @@ async def test_integration_list_eager_loads_optional_credentials(
         )
 
     async with session_factory.begin() as session:
-        result = await IntegrationService(session).list_connections(
-            actor, page_size=100,
+        result = await IntegrationConnectionService(session).list_connections(
+            actor,
+            page_size=100,
         )
 
     assert result["total"] == 1
@@ -361,11 +502,67 @@ async def test_integration_list_eager_loads_optional_credentials(
 
 
 @pytest.mark.asyncio
+async def test_authorized_item_is_projectable_without_further_database_io(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The knowledge viewer reads an authorized Item outside the await chain.
+
+    Its upload lifecycle must already be loaded: a lazy load would run asyncpg
+    I/O from synchronous code and fail the request with MissingGreenlet.
+    """
+
+    async with session_factory.begin() as session:
+        auth = IdentityStoreService(session)
+        tenant = await auth.create_tenant("viewer", "Viewer")
+        owner = await auth.create_user("viewer@example.com")
+        role = await auth.create_role(
+            tenant.id,
+            "reader",
+            "Reader",
+            permission_codes=["knowledge.read", "access.manage"],
+        )
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
+        items = ItemService(session)
+        collection = await items.create_collection(
+            tenant_id=tenant.id,
+            title="Policies",
+            created_by_user_id=owner.id,
+        )
+        await CollectionAccessService(session).grant(
+            collection.id,
+            principal_type="user",
+            principal_id=owner.id,
+            role="owner",
+            actor=actor,
+        )
+        # A connector-ingested document has no upload row at all.
+        ingested = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=collection.id,
+            title="Ingested policy",
+            document_type="pdf",
+            created_by_user_id=owner.id,
+        )
+        ingested_id = ingested.id
+
+    async with session_factory.begin() as session:
+        item = await ItemService(session).get_item_by_canonical_id(
+            str(ingested_id), access=actor
+        )
+        loaded = item
+
+    # Outside the session, reading the relationship must not touch the database.
+    assert loaded.upload is None
+    assert loaded.status == "pending"
+
+
+@pytest.mark.asyncio
 async def test_external_resource_mapping_preserves_canonical_item_identity(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("source-map", "Source mapping")
         owner = await auth.create_user("source-map@example.com")
         role = await auth.create_role(tenant.id, "source-manager", "Source Manager")
@@ -448,7 +645,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme-knowledge", "Acme Knowledge")
         owner = await auth.create_user("knowledge-owner@example.com")
         role = await auth.create_role(
@@ -460,7 +657,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         await auth.assign_membership(owner.id, tenant.id, role.id)
         actor = await auth.get_context(owner.id, tenant_id=tenant.id)
 
-        created = await AdminItemService(session).create_collection(
+        created = await ItemCatalogService(session).create_collection(
             actor,
             title="Engineering handbook",
             inherit_access=True,
@@ -470,9 +667,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         assert created["item_type"] == "collection"
         assert created["title"] == "Engineering handbook"
         assert created["inherit_access"] is True
-        assert created["metadata"] == {
-            "description": "Governed engineering knowledge"
-        }
+        assert created["metadata"] == {"description": "Governed engineering knowledge"}
         assert created["created_by_user_id"] == str(owner.id)
         assert created["collection_access"] == [
             {
@@ -481,13 +676,27 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
                 "role": "owner",
             }
         ]
-        listed = await AdminItemService(session).list_items(
+        listed = await ItemCatalogService(session).list_items(
             actor,
             item_type="collection",
             search="governed engineering",
             created_by_user_id=owner.id,
         )
         assert listed["total"] == 1
+
+        nested = await ItemCatalogService(session).create_collection(
+            actor,
+            title="Engineering runbooks",
+            parent_item_id=UUID(created["id"]),
+            inherit_access=True,
+        )
+        scoped = await ItemCatalogService(session).list_items(
+            actor,
+            item_type="collection",
+            parent_item_id=UUID(created["id"]),
+        )
+        assert scoped["total"] == 1
+        assert scoped["items"][0]["id"] == nested["id"]
         assert listed["items"][0]["item_count"] == 0
         assert listed["items"][0]["source_count"] == 0
         assert listed["items"][0]["created_by_user_id"] == str(owner.id)
@@ -500,7 +709,7 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         assert audit_event is not None
         assert audit_event.tenant_id == tenant.id
 
-        updated = await AdminItemService(session).update_collection(
+        updated = await ItemCatalogService(session).update_collection(
             actor,
             UUID(created["id"]),
             title="Engineering playbook",
@@ -540,7 +749,7 @@ class _AsyncUpload:
         if self._offset >= len(self._body):
             return b""
         end = len(self._body) if size < 0 else self._offset + size
-        chunk = self._body[self._offset:end]
+        chunk = self._body[self._offset : end]
         self._offset += len(chunk)
         return chunk
 
@@ -569,11 +778,30 @@ class _UploadStorage:
         )
 
 
+class _UnavailableIngestion:
+    async def index_upload(self, *_: object, **__: object) -> Item:
+        raise DocumentProcessingError("indexing is outside this integration test")
+
+
+def _uploads(
+    session_factory: async_sessionmaker[AsyncSession],
+    storage: _UploadStorage,
+    **kwargs: object,
+) -> DocumentUploadService:
+    return DocumentUploadService(
+        session_factory,
+        object_storage=storage,
+        ingestion_service=_UnavailableIngestion(),  # type: ignore[arg-type]
+        document_source=object(),  # type: ignore[arg-type]
+        **kwargs,
+    )
+
+
 async def _collection_upload_contexts(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> tuple[UUID, AuthContext, AuthContext, AuthContext]:
     async with session_factory.begin() as session:
-        auth = AuthService(session)
+        auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("upload-tenant", "Upload tenant")
         other_tenant = await auth.create_tenant("upload-other", "Other tenant")
         owner = await auth.create_user("upload-owner@example.com")
@@ -645,9 +873,11 @@ async def _collection_upload_contexts(
 async def test_collection_upload_is_authorized_parented_and_retry_safe(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    collection_id, editor, viewer, _ = await _collection_upload_contexts(session_factory)
+    collection_id, editor, viewer, _ = await _collection_upload_contexts(
+        session_factory
+    )
     storage = _UploadStorage()
-    uploads = UploadService(session_factory, object_storage=storage)
+    uploads = _uploads(session_factory, storage)
 
     first = await uploads.upload_to_collection(
         editor,
@@ -709,7 +939,7 @@ async def test_collection_upload_rejects_tenant_permission_and_collection_states
     collection_id, _, viewer, outsider = await _collection_upload_contexts(
         session_factory
     )
-    uploads = UploadService(session_factory, object_storage=_UploadStorage())
+    uploads = _uploads(session_factory, _UploadStorage())
     viewer_content = _AsyncUpload(b"viewer")
     outsider_content = _AsyncUpload(b"outsider")
 
@@ -775,9 +1005,9 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     collection_id, editor, _, _ = await _collection_upload_contexts(session_factory)
-    uploads = UploadService(
+    uploads = _uploads(
         session_factory,
-        object_storage=_UploadStorage(),
+        _UploadStorage(),
         max_upload_bytes=8,
     )
 
@@ -800,10 +1030,7 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
             content=_AsyncUpload(b"123456789"),
         )
 
-    failing_uploads = UploadService(
-        session_factory,
-        object_storage=_UploadStorage(fail=True),
-    )
+    failing_uploads = _uploads(session_factory, _UploadStorage(fail=True))
     with pytest.raises(ObjectStorageError):
         await failing_uploads.upload_to_collection(
             editor,
@@ -815,11 +1042,471 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
         )
     async with session_factory() as session:
         failed = await session.scalar(
-            select(ItemUpload).where(
-                ItemUpload.idempotency_key == "storage-failure"
-            )
+            select(ItemUpload).where(ItemUpload.idempotency_key == "storage-failure")
         )
         assert failed is not None
         item = await session.get(Item, failed.item_id)
     assert failed.status == "failed"
     assert item is not None and item.status == "failed"
+
+
+class InProcessSandbox:
+    """Apply the runner's file semantics in-process, recording every request.
+
+    The Docker executor and the runner have their own suites; here only the
+    service's use of the sandbox boundary is under test.
+    """
+
+    def __init__(self) -> None:
+        self.requests: list[SandboxRequest] = []
+
+    async def run(self, request: SandboxRequest) -> SandboxResult:
+        self.requests.append(request)
+        arguments = dict(request.arguments)
+        if request.operation == "write":
+            files = {arguments["file_name"]: str(arguments["content"]).encode("utf-8")}
+        elif request.operation == "replace":
+            text = request.files[0].data.decode("utf-8")
+            for edit in arguments["edits"]:
+                assert text.count(edit["find"]) == 1, edit
+                text = text.replace(edit["find"], edit["replace"], 1)
+            files = {arguments["file_name"]: text.encode("utf-8")}
+        elif request.operation == "import":
+            files = {arguments["target_file_name"]: request.files[0].data}
+        elif request.operation == "export_pdf":
+            files = {f"{Path(arguments['file_name']).stem}.pdf": b"%PDF-1.4 rendered"}
+        else:
+            raise AssertionError(f"unexpected operation {request.operation}")
+        return SandboxResult(
+            operation=request.operation,
+            result={"status": "ok", "operation": request.operation},
+            files=files,
+            duration_ms=1,
+        )
+
+
+class InMemoryObjectStorage:
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[bytes, str | None]] = {}
+
+    def put_bytes(self, data: bytes, key: str, *, content_type: str | None = None) -> StoredObject:
+        self.objects[key] = (data, content_type)
+        return StoredObject(size_bytes=len(data), content_type=content_type)
+
+    def presign_download(self, key: str, *, expires_seconds: int) -> PresignedRequest:
+        return PresignedRequest(
+            url=f"https://storage.test/{key}", method="GET", headers={}, expires_at=datetime.now(UTC)
+        )
+
+    async def read(self, key: str, *, max_bytes: int) -> bytes:
+        if key not in self.objects:
+            raise ObjectNotFoundError(f"object not found: {key}")
+        return self.objects[key][0]
+
+
+class StubUploads:
+    """Stand in for ``DocumentUploadService.upload_to_collection``.
+
+    ``ArtifactService.publish`` only needs the shape of the result
+    (``item.id``/``item.title``/``item.status`` and ``created``); the real
+    upload/ingestion path is exercised by its own tests.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def upload_to_collection(
+        self,
+        access: AuthContext,
+        collection_id: UUID,
+        *,
+        idempotency_key: str,
+        file_name: str,
+        content_type: str,
+        content: Any,
+    ) -> Any:
+        data = await content.read()
+        self.calls.append(
+            {
+                "access": access,
+                "collection_id": collection_id,
+                "idempotency_key": idempotency_key,
+                "file_name": file_name,
+                "content_type": content_type,
+                "data": data,
+            }
+        )
+        return SimpleNamespace(
+            item=SimpleNamespace(id=uuid4(), title=file_name, status="ready"),
+            created=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_artifacts_keep_every_revision_under_the_owners_private_collection(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    storage = InMemoryObjectStorage()
+    sandbox = InProcessSandbox()
+    async with session_factory.begin() as session:
+        auth = IdentityStoreService(session)
+        tenant = await auth.create_tenant("artifacts", "Artifacts")
+        writer = await auth.create_user("writer@example.com")
+        reader = await auth.create_user("reader@example.com")
+        role = await auth.create_role(
+            tenant.id, "member", "Member", permission_codes=["knowledge.read", "access.manage"]
+        )
+        await auth.assign_membership(writer.id, tenant.id, role.id)
+        await auth.assign_membership(reader.id, tenant.id, role.id)
+        writer_context = await auth.get_context(writer.id, tenant_id=tenant.id)
+        reader_context = await auth.get_context(reader.id, tenant_id=tenant.id)
+
+        items = ItemService(session)
+        # An ordinary Collection: no "template library" flag exists any more.
+        # It is a valid artifact_create source and a valid publish
+        # destination purely because the writer has editor access to it.
+        library = await items.create_collection(
+            tenant_id=tenant.id,
+            title="Legal documents",
+            created_by_user_id=writer.id,
+        )
+        await CollectionAccessService(session).grant(
+            library.id, principal_type="user", principal_id=writer.id, role="editor", actor=writer_context
+        )
+        source_document = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=library.id,
+            title="NDA template",
+            document_type="markdown",
+            created_by_user_id=writer.id,
+            mime_type="text/markdown",
+            size_bytes=30,
+            storage_key=f"tenants/{tenant.id}/items/source-document/raw",
+            metadata={"file_name": "nda-template.md"},
+            status="ready",
+        )
+        # A Collection the writer can only view, not edit — the real guard
+        # publish() has left once the "template library" flag is gone.
+        viewer_only = await items.create_collection(
+            tenant_id=tenant.id,
+            title="Reader's private notes",
+            created_by_user_id=reader.id,
+        )
+        await CollectionAccessService(session).grant(
+            viewer_only.id, principal_type="user", principal_id=writer.id, role="viewer", actor=reader_context
+        )
+        conversation = Conversation(tenant_id=tenant.id, user_id=writer.id, title="Draft")
+        session.add(conversation)
+        await session.flush()
+    storage.objects[source_document.storage_key] = (b"# NDA\n\nBetween [A] and [B].\n", "text/markdown")
+
+    uploads = StubUploads()
+    service = ArtifactService(
+        session_factory,
+        object_storage=lambda: storage,
+        sandbox=sandbox,
+        uploads=lambda: uploads,
+        max_content_bytes=1_000_000,
+        download_url_seconds=60,
+    )
+
+    created = await service.create_from_content(
+        writer_context,
+        title="Q3 memo",
+        content="# Q3 memo\n\nDate: 2026-09-01\n",
+        conversation_id=conversation.id,
+        request_id="req-1",
+    )
+    artifact_id = UUID(created["id"])
+    first_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/1/Q3-memo.md"
+    assert created["revision"] == 1
+    assert created["file_name"] == "Q3-memo.md"
+    assert created["download_url"] == f"https://storage.test/{first_key}"
+    assert sandbox.requests[0].operation == "write"
+    assert storage.objects[first_key][0] == b"# Q3 memo\n\nDate: 2026-09-01\n"
+
+    edited = await service.edit(
+        writer_context,
+        artifact_id,
+        summary="Changed the date",
+        edits=[{"find": "2026-09-01", "replace": "2026-09-06"}],
+        conversation_id=conversation.id,
+        request_id="req-2",
+    )
+    second_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/2/Q3-memo.md"
+    assert edited["revision"] == 2
+    assert edited["content"] == "# Q3 memo\n\nDate: 2026-09-06\n"
+    # The sandbox received the current revision as its input file.
+    assert sandbox.requests[1].operation == "replace"
+    assert sandbox.requests[1].files[0].data == storage.objects[first_key][0]
+    # A revision never overwrites the previous object.
+    assert storage.objects[first_key][0] == b"# Q3 memo\n\nDate: 2026-09-01\n"
+    assert storage.objects[second_key][0] == b"# Q3 memo\n\nDate: 2026-09-06\n"
+
+    # Form fills are for fillable PDFs; a text document rejects them clearly.
+    with pytest.raises(ArtifactValidationError, match="only to fillable PDF"):
+        await service.edit(
+            writer_context,
+            artifact_id,
+            summary="Fill fields",
+            fields={"date": "2026-09-06"},
+            conversation_id=conversation.id,
+            request_id="req-2b",
+        )
+
+    exported = await service.export(writer_context, artifact_id, format="pdf")
+    assert exported["exports"]["pdf"]["download_url"].endswith("/revisions/2/Q3-memo.pdf")
+    assert exported["revisions"][1]["exports"]["pdf"]["size_bytes"] == len(b"%PDF-1.4 rendered")
+    # Exporting again reuses the stored rendition instead of running the sandbox.
+    await service.export(writer_context, artifact_id, format="pdf")
+    assert [request.operation for request in sandbox.requests] == ["write", "replace", "export_pdf"]
+
+    detail = await service.get(writer_context, artifact_id)
+    assert [revision["revision"] for revision in detail["revisions"]] == [1, 2]
+    assert detail["revisions"][0]["summary"] == "Created from the conversation"
+    assert detail["revisions"][1]["summary"] == "Changed the date"
+    assert detail["conversation_id"] == str(conversation.id)
+    first_content = await service.content(writer_context, artifact_id, revision=1)
+    assert "2026-09-01" in first_content["content"]
+
+    working = await service.conversation_artifacts(
+        writer_context, conversation.id, content_characters=12
+    )
+    assert [artifact.id for artifact in working] == [str(artifact_id)]
+    assert working[0].revision == 2
+    assert working[0].content_truncated is True
+    assert working[0].content.startswith("# Q3 memo")
+
+    from_document = await service.create_from_document(
+        writer_context,
+        title=None,
+        source_document_id=source_document.id,
+        conversation_id=conversation.id,
+        request_id="req-3",
+    )
+    assert from_document["title"] == "NDA template"
+    assert from_document["source_document_id"] == str(source_document.id)
+    assert from_document["content"].startswith("# NDA")
+    assert sandbox.requests[-1].operation == "import"
+    assert sandbox.requests[-1].files[0].name == "nda-template.md"
+
+    resolved = await service.resolve_access(
+        AgentContext(user_id=str(writer.id), tenant_id=str(tenant.id), roles=[])
+    )
+    assert resolved.user_id == writer.id and resolved.tenant_id == tenant.id
+
+    # The reader shares the tenant but not the writer's private collection.
+    with pytest.raises(DocumentNotFoundError):
+        await service.get(reader_context, artifact_id)
+
+    # Any Collection the caller can edit is a valid publish destination now —
+    # there is no "template library" flag to check.
+    published = await service.publish(writer_context, artifact_id, collection_id=library.id)
+    assert published["collection_id"] == str(library.id)
+    assert published["created"] is True
+    assert uploads.calls[0]["collection_id"] == library.id
+    assert uploads.calls[0]["content_type"] == "text/markdown"
+    assert uploads.calls[0]["data"] == storage.objects[second_key][0]
+
+    # The real remaining guard is authorization: a Collection the caller can
+    # only view, not edit, is not a valid publish destination.
+    with pytest.raises(AuthorizationError):
+        await service.publish(writer_context, artifact_id, collection_id=viewer_only.id)
+
+    # Publishing into a document (not a Collection) is rejected too.
+    with pytest.raises(ArtifactValidationError, match="must be a Collection"):
+        await service.publish(writer_context, artifact_id, collection_id=source_document.id)
+
+    async with session_factory() as session:
+        item = await session.get(Item, artifact_id)
+        assert item is not None
+        assert item.parent_item_id == ItemService.artifact_collection_id(tenant.id, writer.id)
+        assert item.storage_key == second_key
+        assert item.metadata_["artifact"]["current_revision"] == 2
+        revisions = list(
+            await session.scalars(
+                select(ArtifactRevision.revision_number)
+                .where(ArtifactRevision.item_id == artifact_id)
+                .order_by(ArtifactRevision.revision_number)
+            )
+        )
+        assert revisions == [1, 2]
+        actions = set(
+            await session.scalars(
+                select(AuditLog.action).where(AuditLog.resource_id == str(artifact_id))
+            )
+        )
+        assert {
+            "artifact.created",
+            "artifact.revised",
+            "artifact.exported",
+            "artifact.published",
+        } <= actions
+
+
+class ScriptedPdfFormSandbox:
+    """Return runner-shaped results for a fillable PDF, recording requests.
+
+    The real strategy decision and pypdf work are the runner suite's concern;
+    here only the service's handling of a binary artifact is under test.
+    """
+
+    ORIGINAL = b"%PDF-1.4 original form"
+    FILLED = b"%PDF-1.4 filled form"
+    CONTEXT_EMPTY = "# form.pdf — fillable PDF form\n- name: \"ho_ten\" | value: \"\"\n"
+    CONTEXT_FILLED = "# form.pdf — fillable PDF form\n- name: \"ho_ten\" | value: \"Tran A\"\n"
+
+    def __init__(self) -> None:
+        self.requests: list[SandboxRequest] = []
+
+    async def run(self, request: SandboxRequest) -> SandboxResult:
+        self.requests.append(request)
+        stem = Path(str(dict(request.arguments)["file_name"])).stem
+        if request.operation == "import":
+            stem = Path(str(dict(request.arguments)["target_file_name"])).stem
+            name, data, context = f"{stem}.pdf", self.ORIGINAL, self.CONTEXT_EMPTY
+            extra = {"field_count": 1}
+        elif request.operation == "fill_pdf":
+            assert request.files[0].data == self.ORIGINAL
+            name, data, context = f"{stem}.pdf", self.FILLED, self.CONTEXT_FILLED
+            extra = {"applied": len(dict(request.arguments)["fields"])}
+        else:
+            raise AssertionError(f"unexpected operation {request.operation}")
+        return SandboxResult(
+            operation=request.operation,
+            result={
+                "status": "ok",
+                "operation": request.operation,
+                "file_name": name,
+                "content_type": "application/pdf",
+                "artifact_kind": "pdf_form",
+                "context_file_name": f"{name}.context.md",
+                **extra,
+            },
+            files={name: data, f"{name}.context.md": context.encode("utf-8")},
+            duration_ms=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_pdf_form_artifacts_preserve_the_original_and_fill_fields(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fillable PDF source stays a PDF: field fills, no text rewrites.
+
+    The model sees the stored description, never PDF bytes decoded as text,
+    and export/publish carry the real mime type and file name.
+    """
+
+    storage = InMemoryObjectStorage()
+    sandbox = ScriptedPdfFormSandbox()
+    async with session_factory.begin() as session:
+        auth = IdentityStoreService(session)
+        tenant = await auth.create_tenant("pdfforms", "PDF forms")
+        owner = await auth.create_user("owner@pdf.example.com")
+        role = await auth.create_role(
+            tenant.id, "member", "Member", permission_codes=["knowledge.read", "access.manage"]
+        )
+        await auth.assign_membership(owner.id, tenant.id, role.id)
+        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
+        items = ItemService(session)
+        forms = await items.create_collection(
+            tenant_id=tenant.id, title="Forms", created_by_user_id=owner.id
+        )
+        await CollectionAccessService(session).grant(
+            forms.id, principal_type="user", principal_id=owner.id, role="editor", actor=actor
+        )
+        source = await items.create_document(
+            tenant_id=tenant.id,
+            parent_item_id=forms.id,
+            title="Leave request form",
+            document_type="pdf",
+            created_by_user_id=owner.id,
+            mime_type="application/pdf",
+            size_bytes=len(ScriptedPdfFormSandbox.ORIGINAL),
+            storage_key=f"tenants/{tenant.id}/items/leave-form/raw",
+            metadata={"file_name": "leave-form.pdf"},
+            status="ready",
+        )
+        conversation = Conversation(tenant_id=tenant.id, user_id=owner.id, title="Leave")
+        session.add(conversation)
+        await session.flush()
+    storage.objects[source.storage_key] = (
+        ScriptedPdfFormSandbox.ORIGINAL, "application/pdf"
+    )
+
+    uploads = StubUploads()
+    service = ArtifactService(
+        session_factory,
+        object_storage=lambda: storage,
+        sandbox=sandbox,
+        uploads=lambda: uploads,
+        max_content_bytes=1_000_000,
+        download_url_seconds=60,
+    )
+
+    created = await service.create_from_document(
+        actor,
+        title=None,
+        source_document_id=source.id,
+        conversation_id=conversation.id,
+        request_id="req-1",
+    )
+    artifact_id = UUID(created["id"])
+    first_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/1/Leave-request-form.pdf"
+    assert created["mime_type"] == "application/pdf"
+    assert created["file_name"] == "Leave-request-form.pdf"
+    # The artifact is the original PDF, and the model sees its description.
+    assert storage.objects[first_key] == (ScriptedPdfFormSandbox.ORIGINAL, "application/pdf")
+    assert storage.objects[f"{first_key}.context.md"][0].decode() == (
+        ScriptedPdfFormSandbox.CONTEXT_EMPTY
+    )
+    assert created["content"] == ScriptedPdfFormSandbox.CONTEXT_EMPTY
+
+    # Text edits do not apply to a fillable PDF; the message says what does.
+    with pytest.raises(ArtifactValidationError, match="fillable PDF"):
+        await service.edit(
+            actor,
+            artifact_id,
+            summary="Try a text edit",
+            edits=[{"find": "a", "replace": "b"}],
+            conversation_id=conversation.id,
+            request_id="req-2",
+        )
+
+    filled = await service.edit(
+        actor,
+        artifact_id,
+        summary="Filled the name",
+        fields={"ho_ten": "Tran A"},
+        conversation_id=conversation.id,
+        request_id="req-3",
+    )
+    second_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/2/Leave-request-form.pdf"
+    assert filled["revision"] == 2
+    assert filled["content"] == ScriptedPdfFormSandbox.CONTEXT_FILLED
+    assert storage.objects[second_key][0] == ScriptedPdfFormSandbox.FILLED
+    assert sandbox.requests[-1].operation == "fill_pdf"
+    assert dict(sandbox.requests[-1].arguments)["fields"] == {"ho_ten": "Tran A"}
+
+    # Context supply and previews use the description, never decoded PDF bytes.
+    working = await service.conversation_artifacts(
+        actor, conversation.id, content_characters=10_000
+    )
+    assert working[0].content == ScriptedPdfFormSandbox.CONTEXT_FILLED
+    preview = await service.content(actor, artifact_id)
+    assert preview["content"] == ScriptedPdfFormSandbox.CONTEXT_FILLED
+    assert preview["mime_type"] == "application/pdf"
+
+    # The revision already is a PDF: exporting registers it without a sandbox run.
+    exported = await service.export(actor, artifact_id, format="pdf")
+    assert exported["exports"]["pdf"]["download_url"].endswith(
+        "/revisions/2/Leave-request-form.pdf"
+    )
+    assert [request.operation for request in sandbox.requests] == ["import", "fill_pdf"]
+
+    published = await service.publish(actor, artifact_id, collection_id=forms.id)
+    assert published["created"] is True
+    assert uploads.calls[0]["content_type"] == "application/pdf"
+    assert uploads.calls[0]["file_name"].endswith(".pdf")
+    assert uploads.calls[0]["data"] == ScriptedPdfFormSandbox.FILLED

@@ -2,31 +2,41 @@
 
 import { cn } from "@/lib/cn";
 
-type EmptyStateSize = "sm" | "md" | "lg";
-
-const sizeClasses: Record<EmptyStateSize, { wrapper: string; icon: string; title: string }> = {
-  sm: { wrapper: "py-6", icon: "mb-2", title: "text-sm" },
-  md: { wrapper: "py-8", icon: "mb-2", title: "text-sm" },
-  lg: { wrapper: "py-10", icon: "mb-3", title: "text-base" },
-};
-
 interface EmptyStateProps {
   icon?: React.ReactNode;
   title: string;
+  /** Say what this surface will hold and what to do next — never "No data". */
   description?: string;
+  /** The action that resolves the emptiness, plus at most one alternative. */
   action?: React.ReactNode;
-  size?: EmptyStateSize;
+  size?: "sm" | "md" | "lg";
   className?: string;
 }
 
-export function EmptyState({ icon, title, description, action, size = "lg", className }: EmptyStateProps) {
-  const s = sizeClasses[size];
+const sizePadding = {
+  sm: "py-6",
+  md: "py-10",
+  lg: "",
+} as const;
+
+export function EmptyState({
+  icon,
+  title,
+  description,
+  action,
+  size = "lg",
+  className,
+}: EmptyStateProps) {
   return (
-    <div className={cn("flex flex-col items-center justify-center text-center", s.wrapper, className)}>
-      {icon && <div aria-hidden="true" className={cn("rounded-md bg-[var(--primary-soft)] p-2.5 text-[var(--brand-accent)] ring-1 ring-inset ring-[var(--border)]", s.icon)}>{icon}</div>}
-      <h3 className={cn("font-semibold text-[var(--text)] text-balance", s.title)}>{title}</h3>
-      {description && <p className="mt-1 max-w-sm text-pretty text-sm leading-5 text-[var(--text-muted)]">{description}</p>}
-      {action && <div className="mt-3">{action}</div>}
+    <div className={cn("adm-empty", sizePadding[size], className)}>
+      {icon && (
+        <span aria-hidden="true" className="adm-empty__icon">
+          {icon}
+        </span>
+      )}
+      <h3 className="adm-empty__title text-balance">{title}</h3>
+      {description && <p className="adm-empty__desc text-pretty">{description}</p>}
+      {action && <div className="adm-empty__actions">{action}</div>}
     </div>
   );
 }

@@ -10,6 +10,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import Group, GroupMembership, Role, TenantMembership, User
+from bothesis.services.audit import AuditService
+from bothesis.services.identity_store import IdentityStoreService
 from bothesis.services import (
     ACTIVE_STATUS,
     INACTIVE_STATUS,
@@ -17,9 +19,7 @@ from bothesis.services import (
     AdminConflictError,
     AdminNotFoundError,
     AdminValidationError,
-    AuditService,
     AuthContext,
-    AuthService,
     IdentityConflictError,
     normalize_page,
     require_tenant_permission,
@@ -34,11 +34,11 @@ class UserService:
         self,
         session: AsyncSession,
         *,
-        auth: AuthService | None = None,
+        auth: IdentityStoreService | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._session = session
-        self._auth = auth or AuthService(session)
+        self._auth = auth or IdentityStoreService(session)
         self._audit = audit or AuditService(session)
 
     async def list_users(

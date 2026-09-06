@@ -10,8 +10,11 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bothesis.db.models import Conversation, Message
-from bothesis.services import AuthContext, DocumentNotFoundError, ItemService
+from bothesis.agent.models import ConversationDocumentReference
+from bothesis.db.models import Conversation, Item, Message, MessageItem
+from bothesis.services import AuthContext, DocumentNotFoundError
+from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.item import ItemService
 
 
 class ConversationService:
@@ -94,6 +97,7 @@ class ConversationService:
         content: str,
         referenced_document_ids: Iterable[UUID],
         request_id: str,
+        artifact_ids: Iterable[UUID] = (),
     ) -> Message | None:
         normalized_content = content.strip()
         if not normalized_content:
@@ -101,6 +105,7 @@ class ConversationService:
         if access.tenant_id is None:
             raise DocumentNotFoundError(f"conversation not found: {conversation_id}")
         unique_references = list(dict.fromkeys(referenced_document_ids))
+        unique_artifacts = list(dict.fromkeys(artifact_ids))
         async with self._session_factory.begin() as session:
             conversation = await session.scalar(
                 select(Conversation)
@@ -136,7 +141,80 @@ class ConversationService:
                     access=access,
                     position=position,
                 )
+            # A document the turn created or revised is the answer's output.
+            for position, artifact_id in enumerate(unique_artifacts):
+                await items.link_message(
+                    message.id,
+                    artifact_id,
+                    "output",
+                    access=access,
+                    position=position,
+                )
             return message
+
+    async def referenced_documents(
+        self,
+        conversation_id: UUID,
+        *,
+        access: AuthContext,
+        limit: int = 10,
+    ) -> tuple[ConversationDocumentReference, ...]:
+        """The knowledge documents earlier turns of this conversation referenced.
+
+        These are the durable ``MessageItem`` links ``start_turn`` and
+        ``finish_turn`` recorded ("attachment" and "reference" relations —
+        artifact "output" links are the working documents and travel
+        separately). Only identities the caller can still read are returned,
+        newest reference first, so a follow-up such as "fill that form for me"
+        can resolve the Document ID without a second search and without ever
+        leaking a since-revoked title.
+        """
+
+        if access.tenant_id is None or limit < 1:
+            return ()
+        async with self._session_factory() as session:
+            last_reference = func.max(Message.sequence_number)
+            rows = await session.execute(
+                select(Item)
+                .join(MessageItem, MessageItem.item_id == Item.id)
+                .join(Message, Message.id == MessageItem.message_id)
+                .join(Conversation, Conversation.id == Message.conversation_id)
+                .where(
+                    Message.conversation_id == conversation_id,
+                    Conversation.tenant_id == access.tenant_id,
+                    Conversation.user_id == access.user_id,
+                    MessageItem.relation_type.in_(("attachment", "reference")),
+                    MessageItem.deleted_at.is_(None),
+                    Item.tenant_id == access.tenant_id,
+                    Item.item_type == "document",
+                    Item.status != "deleted",
+                    Item.deleted_at.is_(None),
+                )
+                .group_by(Item.id)
+                .order_by(last_reference.desc(), Item.id)
+                .limit(limit)
+            )
+            candidates = list(rows.scalars())
+            # Access is re-checked at read time: a Collection permission
+            # revoked after the turn that referenced a document must remove
+            # it from context, not merely fail later tool calls.
+            collections = CollectionAccessService(session)
+            allowed = set(await collections.allowed_collection_ids(access))
+            references: list[ConversationDocumentReference] = []
+            for item in candidates:
+                collection_id = await collections.authorization_collection_id(
+                    item.id, tenant_id=access.tenant_id
+                )
+                if collection_id is None or collection_id not in allowed:
+                    continue
+                references.append(
+                    ConversationDocumentReference(
+                        id=str(item.id),
+                        title=item.title,
+                        document_type=item.document_type,
+                    )
+                )
+            return tuple(references)
 
 
 async def _next_sequence(session: AsyncSession, conversation_id: UUID) -> int:

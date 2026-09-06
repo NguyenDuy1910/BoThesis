@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from bothesis.agent.protocol import FunctionCallItem
-from bothesis.knowledge.models import Evidence
+from bothesis.knowledge import Evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +34,80 @@ class ConversationDocument:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationDocumentReference:
+    """A knowledge document an earlier turn of this conversation referenced.
+
+    Only the access-checked identity travels here — never content. It lets a
+    follow-up such as "fill that form for me" resolve the Document ID the
+    conversation already surfaced, without a second search; every use of the
+    id (for example ``artifact_create``) is re-checked against the caller's
+    Item ACL at execution time.
+    """
+
+    id: str
+    title: str
+    document_type: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationArtifact:
+    """A document the agent created or revised for the user.
+
+    It travels two ways. On :attr:`AgentContext.artifacts` it is the working
+    set of this conversation, with a bounded ``content`` so the model can make
+    precise edits. On :attr:`ToolOutput.artifacts` it is the revision a tool
+    just produced, without content, which the stream projects onto the answer
+    as a ``bothesis:artifact`` annotation.
+    """
+
+    id: str
+    title: str
+    file_name: str
+    mime_type: str
+    revision: int
+    size_bytes: int
+    updated_at: str
+    exports: tuple[str, ...] = ()
+    source_document_id: str | None = None
+    content: str | None = None
+    content_truncated: bool = False
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> ConversationArtifact:
+        """Build the reference an artifact service payload describes."""
+
+        exports = payload.get("exports")
+        source_document_id = payload.get("source_document_id")
+        return cls(
+            id=str(payload["id"]),
+            title=str(payload["title"]),
+            file_name=str(payload["file_name"]),
+            mime_type=str(payload["mime_type"]),
+            revision=int(payload["revision"]),
+            size_bytes=int(payload["size_bytes"]),
+            updated_at=str(payload["updated_at"]),
+            exports=tuple(sorted(exports)) if isinstance(exports, Mapping) else (),
+            source_document_id=(
+                str(source_document_id) if source_document_id else None
+            ),
+        )
+
+    def annotation_payload(self) -> dict[str, Any]:
+        """The client-facing description; never the content."""
+
+        return {
+            "id": self.id,
+            "title": self.title,
+            "file_name": self.file_name,
+            "mime_type": self.mime_type,
+            "revision": self.revision,
+            "size_bytes": self.size_bytes,
+            "updated_at": self.updated_at,
+            "exports": list(self.exports),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AgentContext:
     """The authenticated scope for a single agent request."""
 
@@ -49,7 +123,45 @@ class AgentContext:
     retrieval_round: int = 0
     retrieval_query_count: int = 0
     documents: tuple[ConversationDocument, ...] = ()
+    document_references: tuple[ConversationDocumentReference, ...] = ()
+    artifacts: tuple[ConversationArtifact, ...] = ()
     model_extra_body: Mapping[str, Any] | None = None
+
+
+@dataclass(slots=True)
+class CitationReferences:
+    """Run-scoped reference IDs and reader-facing numbers for one turn.
+
+    Retrieval order assigns the compact ``ref_N`` the model is allowed to cite.
+    First appearance in the answer assigns the ``[n]`` the reader sees. Both are
+    scoped to one run and keyed by the identity they stand for, so the same
+    chunk keeps one reference across retrieval rounds and concurrent tool calls
+    without any process-wide state.
+    """
+
+    _references: dict[tuple[str, str], str] = field(default_factory=dict)
+    _numbers: dict[str, int] = field(default_factory=dict)
+
+    def reference(self, item_id: str, chunk_id: str) -> str:
+        """Return this chunk's model-facing reference, assigning one if new."""
+
+        identity = (item_id, chunk_id)
+        existing = self._references.get(identity)
+        if existing is not None:
+            return existing
+        assigned = f"ref_{len(self._references) + 1}"
+        self._references[identity] = assigned
+        return assigned
+
+    def number(self, reference: str) -> int:
+        """Return the reader-facing number for a reference, by first use."""
+
+        existing = self._numbers.get(reference)
+        if existing is not None:
+            return existing
+        assigned = len(self._numbers) + 1
+        self._numbers[reference] = assigned
+        return assigned
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +169,7 @@ class ToolContext:
     """Authenticated runtime context supplied to one tool execution."""
 
     agent_context: AgentContext
+    references: CitationReferences = field(default_factory=CitationReferences)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +180,7 @@ class ToolOutput:
     evidence: list[Evidence] = field(default_factory=list)
     error: str | None = None
     metadata: dict[str, str | int | float | bool] = field(default_factory=dict)
+    artifacts: tuple[ConversationArtifact, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +207,7 @@ class ToolObservation:
             return "skipped"
         return "failed"
 
+
 @dataclass(slots=True)
 class ConversationRun:
     """Mutable accounting and grounded evidence for one user-initiated run."""
@@ -108,13 +223,18 @@ class ConversationRun:
     evidence: dict[str, Evidence] = field(default_factory=dict)
     used_evidence_ids: set[str] = field(default_factory=set)
     executed_tool_signatures: set[str] = field(default_factory=set)
+    references: CitationReferences = field(default_factory=CitationReferences)
+    artifacts: dict[str, ConversationArtifact] = field(default_factory=dict)
 
 
 __all__ = [
     "AgentContext",
-    "ConversationRun",
+    "CitationReferences",
+    "ConversationArtifact",
     "ConversationDocument",
+    "ConversationDocumentReference",
     "ConversationMessage",
+    "ConversationRun",
     "Evidence",
     "ToolContext",
     "ToolObservation",

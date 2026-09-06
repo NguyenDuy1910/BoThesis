@@ -103,17 +103,17 @@ export function Sheet({
         aria-labelledby={titleId}
         aria-modal="true"
         className={cn(
-          "relative z-10 flex h-full w-full max-w-xl flex-col overflow-hidden border-l border-[var(--border)] bg-[var(--surface)] shadow-[var(--shadow-popover)]",
+          "relative z-10 flex h-full w-full max-w-xl flex-col overflow-hidden bg-[var(--adm-surface)] shadow-[var(--adm-e3)]",
           "ui-sheet-panel",
           className,
         )}
         role="dialog"
       >
-        <div className="flex min-h-16 shrink-0 items-center justify-between gap-4 border-b border-[var(--border)] px-5 sm:px-6">
-          <h2 className="min-w-0 text-base font-semibold text-[var(--text)]" id={titleId}>{title}</h2>
+        <div className="flex min-h-14 shrink-0 items-center justify-between gap-4 border-b border-[var(--adm-hairline)] px-5 sm:px-6">
+          <h2 className="min-w-0 truncate text-[0.9375rem] font-semibold text-[var(--text)]" id={titleId}>{title}</h2>
           <button
             aria-label="Close setup panel"
-            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--adm-r-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
             onClick={onClose}
             type="button"
           >
@@ -121,7 +121,7 @@ export function Sheet({
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{children}</div>
-        {footer && <div className="shrink-0 border-t border-[var(--border)] bg-[var(--bg-panel)] px-5 py-3 sm:px-6">{footer}</div>}
+        {footer && <div className="shrink-0 border-t border-[var(--adm-hairline)] bg-[var(--adm-inset)] px-5 py-3 sm:px-6">{footer}</div>}
       </div>
     </div>,
     document.body,

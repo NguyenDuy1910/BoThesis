@@ -35,12 +35,72 @@ Primary source types:
   package-level constants in that package's `__init__.py`, and import them
   through the `bothesis.<package>` package boundary. This applies to all
   packages: `agent`, `chat`, `connector`, `document_index`, `services`, and
-  their sub-packages. (Example: `services/auth.py` defines only `AuthService`;
-  shared service types live in `services/__init__.py`.)
+  `storage`, including their sub-packages. (Example: `services/auth.py` defines
+  only `AuthService`; shared service types live in `services/__init__.py`.)
 - Separate ingestion, indexing, retrieval, agent orchestration, and BI logic.
 - Validate inputs at API boundaries.
 - Enforce permissions before retrieval results or BI data reach the agent.
 - Log operational events without leaking private content or secrets.
+
+## Application boundaries and naming
+- `backend/main.py` is executable bootstrap only: load local environment, configure
+  process logging, and start the ASGI application. It must not define HTTP
+  schemas, routers, request parsing, or business workflows.
+- `backend/api` owns the complete FastAPI boundary: request/response DTOs,
+  header and middleware identity extraction, validation, routers, HTTP error
+  mapping, application lifespan, and transport-specific application facades.
+  API modules may depend on services; services must never import FastAPI,
+  `Request`, `Response`, or API request DTOs.
+- Parse all environment configuration at an executable/composition boundary and
+  inject typed dependencies into application and service objects. Do not create
+  storage clients, model transports, index clients, or workflow clients inside
+  a domain service from environment variables.
+- `bothesis.services.__init__` contains only shared contracts, DTOs, errors,
+  and constants. Import concrete services from the module that owns them;
+  never re-export concrete service classes through the package barrel.
+- Name a service for the durable resource or lifecycle it owns, never for the
+  caller, screen, or transport. Examples: `NativeUploadService`,
+  `StoredFileContentService`, `ItemIngestionService`, and `ItemCatalogService`.
+  Avoid catch-all names such as `ApiService`, `AdminService`, or
+  `ChatDocumentSourceService`.
+- Keep raw native upload, stored-file canonicalization, and connector extraction
+  as distinct adapters into the same Item lifecycle. `ItemIngestionService` is
+  the single owner of Item processing state, preview persistence, citations,
+  index replacement, reprocessing, and tombstone coordination.
+- Temporal workflow definitions, activities, clients, and scheduling services
+  belong in `bothesis.services.workflow`. Keep their shared workflow contracts
+  in `bothesis.services.workflow.__init__`; API modules may call its services
+  but must not contain Temporal implementation details.
+
+## Item knowledge architecture
+- Read the current architecture and every affected call site before adding or
+  moving ingestion, indexing, or retrieval code.
+- Treat the existing `Item` model as the canonical identity and lifecycle
+  contract. Reuse its collection hierarchy, source lineage, chunks, previews,
+  assets, citations, metadata, and tombstone semantics.
+- Extend an existing cohesive component before creating another file or class.
+  Explain why each new file is required by a current behavior.
+- Keep user-action and cross-capability orchestration in `bothesis/services`.
+  `ItemIngestionService` owns Item persistence, processing order, status
+  transitions, citations, previews, reprocessing, and removal coordination.
+- Keep only Item content indexing, searching, replacement, and tombstoning in
+  `bothesis/document_index`. Storage payloads and vendor clients must remain
+  private implementation details.
+- Keep durable binary object access in `bothesis/storage`; parsing, Item
+  lifecycle orchestration, and indexed-content behavior belong elsewhere.
+- Keep tenant/authorization scoping, retrieval filtering, ranking, reranking,
+  evidence construction, and context budgeting in `bothesis/knowledge`.
+- Domain and application layers must never import or call vector database SDKs
+  directly. Domain-facing APIs and filenames must not expose vendor or
+  infrastructure terms such as Qdrant, vector store, or sink.
+- Do not design ingestion or retrieval as one class or file per step. Prefer a
+  single cohesive capability with only the small supporting types required by
+  current behavior.
+- Never add compatibility wrappers, obsolete-name aliases, speculative
+  repositories, factories, providers, protocols, or storage abstractions
+  without a demonstrated current requirement.
+- Prefer consolidating and deleting redundant code. Do not generate code
+  outside the requested scope.
 
 ## Verification rules
 - For behavior changes, run the smallest command or scenario that proves the changed path works.

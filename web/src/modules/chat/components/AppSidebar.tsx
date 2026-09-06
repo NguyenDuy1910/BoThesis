@@ -590,7 +590,7 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
       <Link
         aria-label={collapsed ? "Workspace settings" : undefined}
         className="sidebar-account-row sidebar-account-row--link"
-        href="/admin/workspace-settings"
+        href="/admin/settings"
         title={collapsed ? "Workspace settings" : undefined}
       >
         <Settings2 aria-hidden="true" size={17} />

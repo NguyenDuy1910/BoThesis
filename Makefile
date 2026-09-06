@@ -13,6 +13,7 @@ LOCAL_TEMPORAL_TARGET ?= 127.0.0.1:7233
 LOCAL_TEMPORAL_UI ?= http://127.0.0.1:8080
 QDRANT_COLLECTION ?= bothesis
 QDRANT_VECTOR_SIZE ?= 1536
+SANDBOX_IMAGE ?= bothesis-sandbox:local
 
 DEV_TENANT_ID ?= 00000000-0000-0000-0000-000000000001
 DEV_USER_ID ?= 00000000-0000-0000-0000-000000000002
@@ -20,14 +21,14 @@ DEV_ROLE_ID ?= 00000000-0000-0000-0000-000000000003
 DEV_TENANT_CODE ?= local
 DEV_USER_EMAIL ?= local-admin@bothesis.dev
 
-.PHONY: help init reset-all config services _temporal-reset db-init db-seed db-reset qdrant-init status
+.PHONY: help init reset-all config services _temporal-reset db-init db-seed db-reset qdrant-init sandbox-image status
 
 help: ## Show available local-development commands.
 	@echo "BoThesis local development"
 	@echo
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-init: reset-all ## Initialize the complete local BoThesis environment.
+init: reset-all sandbox-image ## Initialize the complete local BoThesis environment.
 	@echo
 	@echo "BoThesis local environment is ready."
 	@echo "  API:       http://127.0.0.1:8000"
@@ -38,7 +39,7 @@ init: reset-all ## Initialize the complete local BoThesis environment.
 	@echo "  User ID:   $$(sed -n 's/^NEXT_PUBLIC_BOTHESIS_USER_ID=//p' web/.env.local | tail -n 1)"
 	@echo
 	@echo "Start the API with: cd backend && uv run python main.py"
-	@echo "Start the worker with: cd backend && uv run python -m bothesis.workflow.worker"
+	@echo "Start the worker with: cd backend && uv run python -m bothesis.services.workflow.worker"
 
 reset-all: _temporal-reset db-reset qdrant-init status ## Reset all databases and Qdrant, apply the current design, and seed the admin.
 	@echo "PostgreSQL, Temporal, and Qdrant reset is complete."
@@ -160,6 +161,11 @@ qdrant-init: services ## Rebuild the derived contextual-hybrid Qdrant collection
 		-H 'Content-Type: application/json' \
 		-d '{"vectors":{"content":{"size":$(QDRANT_VECTOR_SIZE),"distance":"Cosine"}},"sparse_vectors":{"content_bm25":{"modifier":"idf"}}}' >/dev/null; \
 	echo "Rebuilt Qdrant collection $(QDRANT_COLLECTION) with content + content_bm25."
+
+sandbox-image: ## Build the disposable artifact sandbox image used by the API.
+	@set -euo pipefail
+	@docker build --quiet -t "$(SANDBOX_IMAGE)" deployment/sandbox >/dev/null
+	@echo "Built artifact sandbox image $(SANDBOX_IMAGE)."
 
 status: ## Show the current local dependency and application health.
 	@$(COMPOSE) ps

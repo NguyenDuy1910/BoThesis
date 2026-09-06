@@ -173,7 +173,7 @@ export function Dropdown({
           setOpen(true);
         }}
         className={cn(
-          "inline-flex h-9 items-center justify-center gap-2 rounded-md border border-[var(--border)] bg-[var(--surface)] px-3 text-sm font-medium text-[var(--text-secondary)] transition-[border-color,background-color,color] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:pointer-events-none disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)] disabled:opacity-50",
+          "inline-flex h-9 items-center justify-center gap-1.5 rounded-[var(--adm-r-sm)] bg-[var(--adm-surface)] px-3 text-[0.8125rem] font-medium text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--adm-hairline-strong)] transition-[background-color,color,box-shadow] hover:bg-[var(--adm-inset)] hover:text-[var(--text)] hover:shadow-[inset_0_0_0_1px_var(--border-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--adm-canvas)] disabled:pointer-events-none disabled:opacity-45",
           buttonClassName
         )}
       >
@@ -198,7 +198,7 @@ export function Dropdown({
             }}
             style={menuStyle}
             className={cn(
-              "ui-popover z-[60] min-w-48 overflow-y-auto overscroll-contain rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1 shadow-[var(--shadow-lg)]",
+              "ui-popover z-[60] min-w-52 overflow-y-auto overscroll-contain rounded-[var(--adm-r-md)] bg-[var(--adm-raised)] p-1 shadow-[var(--adm-e3)]",
               menuClassName
             )}
           >
@@ -254,9 +254,9 @@ export function DropdownItem({
       type={type}
       role="menuitem"
       className={cn(
-        "flex min-h-10 w-full items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
+        "flex min-h-9 w-full items-center gap-2.5 rounded-[var(--adm-r-sm)] px-2.5 py-1.5 text-left text-[0.8125rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
         destructive
-          ? "text-[var(--danger)] hover:bg-[var(--danger-soft)]"
+          ? "text-[var(--danger-text)] hover:bg-[var(--danger-soft)]"
           : selected
             ? "bg-[var(--surface-selected)] text-[var(--brand-accent)]"
             : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
@@ -266,4 +266,17 @@ export function DropdownItem({
       {...props}
     />
   );
+}
+
+/** Non-interactive grouping label inside a menu. */
+export function DropdownLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="px-2.5 pb-1 pt-2 text-[0.6875rem] font-semibold uppercase tracking-[0.04em] text-[var(--text-muted)]">
+      {children}
+    </p>
+  );
+}
+
+export function DropdownSeparator() {
+  return <div className="my-1 h-px bg-[var(--adm-hairline)]" role="separator" />;
 }

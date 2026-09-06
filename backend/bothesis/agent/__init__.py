@@ -49,7 +49,10 @@ class AgentConfig:
     max_tool_result_characters: int = 10_000
     max_tool_context_characters: int = 12_000
     max_user_message_characters: int = 4_000
-    tool_timeout_seconds: float = 8.0
+    # Wraps each tool execution, so it must stay above a tool's own budget
+    # (knowledge_search allows 25s) or the executor cancels before the tool can
+    # report its own timeout outcome.
+    tool_timeout_seconds: float = 30.0
     max_sampling_retries: int = 2
     sampling_retry_base_delay_seconds: float = 0.5
 

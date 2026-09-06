@@ -175,6 +175,149 @@ export async function releaseConversationDocument(documentId: string): Promise<v
   }
 }
 
+export interface ArtifactExport {
+  file_name: string;
+  size_bytes: number;
+  download_url: string | null;
+}
+
+export interface ArtifactRevision {
+  revision: number;
+  summary: string | null;
+  size_bytes: number;
+  created_at: string | null;
+  download_url: string | null;
+  exports: Record<string, ArtifactExport>;
+}
+
+export interface ArtifactDetail {
+  id: string;
+  title: string;
+  file_name: string;
+  mime_type: string;
+  size_bytes: number;
+  revision: number;
+  revision_count: number;
+  conversation_id: string | null;
+  source_document_id: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  download_url: string | null;
+  exports: Record<string, ArtifactExport>;
+  revisions: ArtifactRevision[];
+}
+
+export interface ArtifactContent {
+  artifact_id: string;
+  revision: number;
+  mime_type: string;
+  content: string;
+  truncated: boolean;
+}
+
+/** A Collection the caller may read — the publish destination picker's options. */
+export interface Collection {
+  id: string;
+  title: string;
+  parent_item_id: string | null;
+}
+
+export interface ArtifactPublishResult {
+  artifact_id: string;
+  revision: number;
+  item_id: string;
+  collection_id: string;
+  title: string;
+  status: string;
+  created: boolean;
+}
+
+/** Download URLs are short-lived, so the detail is fetched when it is acted on. */
+export async function getArtifact(
+  artifactId: string,
+  signal?: AbortSignal,
+): Promise<ArtifactDetail> {
+  return artifactRequest<ArtifactDetail>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactId)}`,
+    { signal },
+    "Could not load the document.",
+  );
+}
+
+export async function getArtifactContent(
+  artifactId: string,
+  revision: number,
+  signal?: AbortSignal,
+): Promise<ArtifactContent> {
+  return artifactRequest<ArtifactContent>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/revisions/${revision}/content`,
+    { signal },
+    "Could not load the document content.",
+  );
+}
+
+export async function exportArtifact(
+  artifactId: string,
+  format: "pdf" = "pdf",
+): Promise<ArtifactDetail> {
+  return artifactRequest<ArtifactDetail>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/export`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format }),
+    },
+    "Could not export the document.",
+  );
+}
+
+/**
+ * The Collections the caller may publish an artifact into.
+ *
+ * Reuses the same listing the chat knowledge-scope picker uses — there is no
+ * separate "template library" kind of Collection to enumerate; any Collection
+ * the caller can write to is a valid publish destination.
+ */
+export async function listCollections(signal?: AbortSignal): Promise<Collection[]> {
+  const result = await artifactRequest<{ items: Collection[] }>(
+    "/api/v1/agent/collections",
+    { signal },
+    "Could not load your collections.",
+  );
+  return result.items;
+}
+
+export async function publishArtifact(
+  artifactId: string,
+  collectionId: string,
+): Promise<ArtifactPublishResult> {
+  return artifactRequest<ArtifactPublishResult>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/publish`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ collection_id: collectionId }),
+    },
+    "Could not publish the document to the Knowledge Base.",
+  );
+}
+
+async function artifactRequest<T>(
+  path: string,
+  init: RequestInit,
+  fallback: string,
+): Promise<T> {
+  const configuration = getBothesisChatConfiguration();
+  if (!configuration) throw new ChatConfigurationError();
+  const response = await fetch(`${configuration.apiUrl}${path}`, {
+    ...init,
+    cache: "no-store",
+    headers: { ...(init.headers ?? {}), ...developmentIdentityHeaders(configuration) },
+  });
+  if (!response.ok) throw await responseError(response, fallback);
+  return await response.json() as T;
+}
+
 async function uploadToTarget(
   target: DocumentUploadTarget,
   file: File,

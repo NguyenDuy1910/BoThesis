@@ -25,9 +25,9 @@ export const sidebarNavigationItems: readonly SidebarNavigationItem[] = [
 ];
 
 export const sidebarSecondaryDestinations = [
-  { id: "knowledge", label: "Knowledge spaces", href: "/admin/knowledge-bases", icon: LibraryBig },
-  { id: "tools", label: "Plugins & tools", href: "/admin/sources", icon: PlugZap },
+  { id: "knowledge", label: "Collections", href: "/admin/collections", icon: LibraryBig },
+  { id: "tools", label: "Connectors", href: "/admin/connectors", icon: PlugZap },
   { id: "workflows", label: "Workflows", href: "/workflows", icon: Workflow },
-  { id: "sync", label: "Sync activity", href: "/admin/sync-activity", icon: RefreshCw },
-  { id: "admin", label: "Admin console", href: "/admin/overview", icon: ShieldCheck },
+  { id: "sync", label: "Sync activity", href: "/admin/activity", icon: RefreshCw },
+  { id: "admin", label: "Admin console", href: "/admin", icon: ShieldCheck },
 ] as const;

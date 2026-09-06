@@ -77,6 +77,15 @@ class ToolRegistry:
 
 def _matches_schema(value: object, schema: Mapping[str, Any]) -> bool:
     expected_type = schema.get("type")
+    if isinstance(expected_type, list):
+        # A type union such as ["string", "null"] is how strict function
+        # schemas express an optional field.
+        return any(
+            _matches_schema(value, {**schema, "type": member})
+            for member in expected_type
+        )
+    if expected_type == "null":
+        return value is None
     if expected_type == "object":
         if not isinstance(value, Mapping):
             return False
@@ -111,6 +120,9 @@ def _matches_schema(value: object, schema: Mapping[str, Any]) -> bool:
         )
     if expected_type == "string":
         if not isinstance(value, str):
+            return False
+        allowed = schema.get("enum")
+        if isinstance(allowed, list) and value not in allowed:
             return False
         minimum = schema.get("minLength")
         maximum = schema.get("maxLength")

@@ -86,6 +86,46 @@ remains authoritative. Bound rendering with `BOTHESIS_PREVIEW_MAX_SOURCE_BYTES`,
 `BOTHESIS_PREVIEW_WEBP_QUALITY`. Preview URLs are signed at read time and use
 `BOTHESIS_PREVIEW_URL_SECONDS`.
 
+## Conversation artifacts and the sandbox
+
+Documents the assistant drafts or revises are edited inside a disposable Docker
+container, never on the API host. The API talks to the local Docker daemon
+through the standard `DOCKER_HOST` / socket; build the image once with
+`make sandbox-image` (part of `make init`).
+
+```dotenv
+BOTHESIS_SANDBOX_IMAGE=bothesis-sandbox:local
+BOTHESIS_SANDBOX_TIMEOUT_SECONDS=30
+BOTHESIS_SANDBOX_MEMORY_BYTES=268435456
+BOTHESIS_SANDBOX_CPUS=1
+BOTHESIS_SANDBOX_PIDS_LIMIT=64
+BOTHESIS_SANDBOX_MAX_OUTPUT_BYTES=20971520
+
+BOTHESIS_ARTIFACT_MAX_CONTENT_BYTES=2097152
+BOTHESIS_ARTIFACT_CONTEXT_CHARACTERS=20000
+BOTHESIS_ARTIFACT_RESULT_CHARACTERS=8000
+BOTHESIS_ARTIFACT_DOWNLOAD_URL_SECONDS=300
+```
+
+Every container runs as an unprivileged user with networking disabled, memory
+and swap capped, CPU and pid limits, all capabilities dropped,
+`no-new-privileges`, a read-only root filesystem, and no environment beyond
+Python hygiene: no application, database, or cloud credential reaches it. The
+workspace goes in and comes out as a tar stream, so nothing is bind-mounted.
+The runner ships with its format skills (`backend/bothesis/sandbox/skills/`,
+copied to `/workspace/context/skills/`); the container loads no other code,
+and adding a document format means adding a skill module there plus its
+libraries to the sandbox image.
+Keep `BOTHESIS_TOOL_TIMEOUT_SECONDS` above `BOTHESIS_SANDBOX_TIMEOUT_SECONDS`
+so an operation can report its own outcome. Revisions are stored under
+`tenants/<tenant>/items/<artifact>/revisions/<n>/` in object storage; the
+`artifact_revisions` table records them.
+
+There is no separate template setup: index a document normally (upload or
+connector) and it becomes findable via `knowledge_search` like anything else.
+The agent uses a result's `Document ID` as `artifact_create`'s
+`source_document_id` to start an editable copy of it.
+
 ## Identity and credentials
 
 ```dotenv

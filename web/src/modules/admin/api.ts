@@ -1,7 +1,7 @@
 "use client";
 
 import { getBothesisChatConfiguration } from "@/lib/api/config";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export class AdminApiError extends Error {
   constructor(
@@ -76,27 +76,43 @@ export function useAdminQuery<T>(path: string) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [revision, setRevision] = useState(0);
   const reload = useCallback(() => setRevision((value) => value + 1), []);
+  const hasData = useRef(false);
 
   useEffect(() => {
     const controller = new AbortController();
-    setLoading(true);
+    // Only the first fetch for a path is "loading". A refresh keeps the
+    // current rows on screen: swapping them for a skeleton would unmount
+    // whatever the person is doing — an open upload queue, for instance.
+    if (hasData.current) setRefreshing(true);
+    else setLoading(true);
     setError(null);
     adminRequest<T>(path, { signal: controller.signal })
-      .then(setData)
+      .then((result) => {
+        hasData.current = true;
+        setData(result);
+      })
       .catch((caught) => {
         if (!controller.signal.aborted) {
           setError(caught instanceof Error ? caught.message : "The Admin request could not be completed.");
         }
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        if (controller.signal.aborted) return;
+        setLoading(false);
+        setRefreshing(false);
       });
     return () => controller.abort();
   }, [path, revision]);
 
-  return { data, error, loading, reload };
+  // A new path is a different question, so its first answer loads from scratch.
+  useEffect(() => {
+    hasData.current = false;
+  }, [path]);
+
+  return { data, error, loading, refreshing, reload };
 }
 
 /** Upload one managed-source file while exposing real browser upload progress. */

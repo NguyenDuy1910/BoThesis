@@ -19,7 +19,7 @@ Run the API and worker as separate processes:
 ```bash
 cd backend
 uv run python main.py
-uv run python -m bothesis.workflow.worker
+uv run python -m bothesis.services.workflow.worker
 ```
 
 For Temporal Cloud, set `BOTHESIS_TEMPORAL_TARGET`,

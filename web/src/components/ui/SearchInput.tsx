@@ -1,9 +1,10 @@
 "use client";
 
-import { cn } from "@/lib/cn";
-import { ui } from "@/components/ui/design-system";
-import { Search } from "lucide-react";
+import { Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
+
+import { ui } from "@/components/ui/design-system";
+import { cn } from "@/lib/cn";
 
 interface SearchInputProps {
   value: string;
@@ -20,37 +21,60 @@ export function SearchInput({
   placeholder = "Search…",
   ariaLabel = "Search",
   className,
-  debounceMs = 300,
+  debounceMs = 250,
 }: SearchInputProps) {
-  const [localValue, setLocalValue] = useState(value);
+  const [draft, setDraft] = useState(value);
 
   useEffect(() => {
-    setLocalValue(value);
+    setDraft(value);
   }, [value]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
-      if (localValue !== value) {
-        onChange(localValue);
-      }
+      if (draft !== value) onChange(draft);
     }, debounceMs);
     return () => clearTimeout(timer);
-  }, [localValue, debounceMs, onChange, value]);
+  }, [debounceMs, draft, onChange, value]);
 
   return (
     <div className={cn("relative", className)}>
-      <Search aria-hidden="true" className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+      <Search
+        aria-hidden="true"
+        className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--text-muted)]"
+      />
       <input
         aria-label={ariaLabel}
         autoComplete="off"
+        className={cn(ui.control, "pl-8", draft && "pr-8")}
         name="search"
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape" || !draft) return;
+          event.preventDefault();
+          setDraft("");
+          onChange("");
+        }}
+        placeholder={placeholder}
         spellCheck={false}
         type="text"
-        value={localValue}
-        onChange={(e) => setLocalValue(e.target.value)}
-        placeholder={placeholder}
-        className={cn(ui.control, "pl-9")}
+        value={draft}
       />
+      {draft && (
+        <button
+          aria-label="Clear search"
+          className={cn(
+            ui.iconButton,
+            "absolute right-1 top-1/2 h-7 w-7 -translate-y-1/2",
+          )}
+          onClick={() => {
+            setDraft("");
+            onChange("");
+          }}
+          type="button"
+        >
+          <X aria-hidden="true" className="h-3.5 w-3.5" />
+        </button>
+      )}
     </div>
   );
 }

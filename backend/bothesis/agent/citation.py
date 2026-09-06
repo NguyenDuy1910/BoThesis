@@ -78,12 +78,16 @@ def _process_citation_buffer(
         if before:
             emitted.append((before, None))
         evidence_id = marker[len(_CITATION_PREFIX) : -2]
-        if (
-            marker.startswith(_CITATION_PREFIX)
-            and evidence_id in evidence
-            and all(character.isalnum() or character in "_.:-" for character in evidence_id)
-        ):
-            emitted.append(("", evidence_id))
+        if marker.startswith(_CITATION_PREFIX):
+            # A citation marker only grounds anything when retrieval issued the
+            # reference. An invented or stale one is dropped rather than shown:
+            # the reader must never see an internal marker as prose, and it
+            # must never become a clickable citation.
+            if evidence_id in evidence and all(
+                character.isalnum() or character in "_.:-"
+                for character in evidence_id
+            ):
+                emitted.append(("", evidence_id))
         else:
             emitted.append((marker, None))
     return emitted, ""

@@ -5,6 +5,6 @@ export default async function AdminRoute({
 }: {
   params: Promise<{ path?: string[] }>;
 }) {
-  const { path = ["overview"] } = await params;
+  const { path = [] } = await params;
   return <AdminPage section={path.join("/")} />;
 }

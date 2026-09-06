@@ -22,14 +22,21 @@ export function ConnectorSection({
   const id = `connector-${title.toLocaleLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`;
   return (
     <section aria-labelledby={id}>
-      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
-        <div>
-          <h2 className="text-[0.9375rem] font-semibold tracking-[-0.01em] text-[var(--text)]" id={id}>{title}</h2>
-          {description && <p className="mt-1 text-xs text-[var(--text-muted)]">{description}</p>}
-        </div>
-        <span className="text-xs tabular-nums text-[var(--text-muted)]">{items.length}</span>
+      <div className="mb-2.5">
+        <h3
+          className="text-[0.8125rem] font-semibold text-[var(--text)]"
+          id={id}
+        >
+          {title}
+          <span className="ml-2 font-normal tabular-nums text-[var(--text-muted)]">
+            {items.length}
+          </span>
+        </h3>
+        {description && (
+          <p className="mt-0.5 text-[0.75rem] text-[var(--text-muted)]">{description}</p>
+        )}
       </div>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {items.map((item) => (
           <ConnectorCard
             connectionCount={item.connectionCount}

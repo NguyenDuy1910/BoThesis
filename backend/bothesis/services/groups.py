@@ -10,6 +10,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import Group, GroupMembership, TenantMembership, User
+from bothesis.services.audit import AuditService
 from bothesis.services import (
     ACTIVE_STATUS,
     GROUP_MANAGE_PERMISSION,
@@ -17,7 +18,6 @@ from bothesis.services import (
     AdminConflictError,
     AdminNotFoundError,
     AdminValidationError,
-    AuditService,
     AuthContext,
     normalize_code,
     normalize_page,

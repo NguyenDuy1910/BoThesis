@@ -16,7 +16,9 @@ from xml.sax.saxutils import escape
 from bothesis.agent import AgentConfig, ConversationWindow, PreparedConversation
 from bothesis.agent.models import (
     AgentContext,
+    ConversationArtifact,
     ConversationDocument,
+    ConversationDocumentReference,
     ConversationMessage,
     Evidence,
 )
@@ -89,6 +91,13 @@ class ConversationMemory:
         instructions = render_agent_base()
         if ctx.documents:
             instructions = f"{instructions}\n\n{self._document_system_context(ctx.documents)}"
+        if ctx.document_references:
+            instructions = (
+                f"{instructions}\n\n"
+                f"{self._document_reference_system_context(ctx.document_references)}"
+            )
+        if ctx.artifacts:
+            instructions = f"{instructions}\n\n{self._artifact_system_context(ctx.artifacts)}"
 
         items: list[Item] = [
             MessageItem(
@@ -102,10 +111,88 @@ class ConversationMemory:
         items.append(
             MessageItem(
                 role="user",
-                content=self._document_user_content(user_message, ctx.documents),
+                content=(
+                    *self._document_user_content(user_message, ctx.documents),
+                    *self._artifact_user_content(ctx.artifacts),
+                ),
             )
         )
         return PreparedConversation(items=tuple(items), instructions=instructions)
+
+    @staticmethod
+    def _document_reference_system_context(
+        references: Sequence[ConversationDocumentReference],
+    ) -> str:
+        lines = [
+            "<conversation_document_references>",
+            "<purpose>Documents referenced earlier in this conversation, already access-checked. When the user refers to one of them (\"that form\", \"the policy we discussed\"), use its Document ID directly — for example as artifact_create's source_document_id — instead of searching for it again. If the reference is ambiguous, ask which document the user means.</purpose>",
+            "<grounding>Only the identities are listed; their content is not included. Enterprise facts still come from knowledge_search results or content supplied in this conversation.</grounding>",
+            "<documents>",
+        ]
+        for reference in references:
+            lines.append("<document>")
+            lines.append(f"<document_id>{escape(reference.id)}</document_id>")
+            lines.append(f"<title>{escape(reference.title)}</title>")
+            if reference.document_type:
+                lines.append(
+                    f"<document_type>{escape(reference.document_type)}</document_type>"
+                )
+            lines.append("</document>")
+        lines.append("</documents>")
+        lines.append("</conversation_document_references>")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _artifact_system_context(artifacts: Sequence[ConversationArtifact]) -> str:
+        lines = [
+            "<conversation_artifact_policy>",
+            "<working_documents>The following artifacts are the documents being worked on in this conversation. A request to change, extend, shorten, or export \"the document\" refers to the most recent one unless the user names another.</working_documents>",
+            "<edit_rule>Revise them with artifact_edit using the same artifact_id so the user keeps one document with a revision history; never create a second artifact for a follow-up change. Their current content is supplied with the user message.</edit_rule>",
+            "<artifacts>",
+        ]
+        for artifact in artifacts:
+            lines.append("<artifact>")
+            lines.append(f"<artifact_id>{escape(artifact.id)}</artifact_id>")
+            lines.append(f"<title>{escape(artifact.title)}</title>")
+            lines.append(f"<revision>{artifact.revision}</revision>")
+            lines.append(f"<file_name>{escape(artifact.file_name)}</file_name>")
+            if artifact.source_document_id:
+                # The knowledge document this working copy was created from.
+                lines.append(
+                    "<source_document_id>"
+                    f"{escape(artifact.source_document_id)}"
+                    "</source_document_id>"
+                )
+            lines.append("</artifact>")
+        lines.append("</artifacts>")
+        lines.append("</conversation_artifact_policy>")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _artifact_user_content(
+        artifacts: Sequence[ConversationArtifact],
+    ) -> tuple[ContentPart, ...]:
+        content: list[ContentPart] = []
+        for artifact in artifacts:
+            if artifact.content is None:
+                continue
+            truncated = (
+                "<truncated>true</truncated>\n" if artifact.content_truncated else ""
+            )
+            content.append(
+                InputText(
+                    text=(
+                        "<conversation_artifact>\n"
+                        f"<artifact_id>{escape(artifact.id)}</artifact_id>\n"
+                        f"<title>{escape(artifact.title)}</title>\n"
+                        f"<revision>{artifact.revision}</revision>\n"
+                        f"{truncated}"
+                        f"<content>{escape(artifact.content)}</content>\n"
+                        "</conversation_artifact>"
+                    )
+                )
+            )
+        return tuple(content)
 
     @staticmethod
     def _document_system_context(

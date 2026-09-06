@@ -41,7 +41,7 @@ class Agent:
         self.config = config or AgentConfig()
         self.memory = memory or ConversationMemory(config=self.config)
         self._tracing = tracing
-        self._loop = ConversationLoop(
+        self._conversation_loop = ConversationLoop(
             response_stream(model),
             tools,
             memory=self.memory,
@@ -82,7 +82,7 @@ class Agent:
         )
         with trace_context as run_trace:
             try:
-                async for event in self._loop.run(
+                async for event in self._conversation_loop.run(
                     normalized_message,
                     ctx,
                     run_trace=run_trace,

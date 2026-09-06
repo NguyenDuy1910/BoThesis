@@ -489,6 +489,47 @@ class Item(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     upload: Mapped[ItemUpload | None] = relationship(back_populates="item", uselist=False)
     message_links: Mapped[list[MessageItem]] = relationship(back_populates="item")
     citations: Mapped[list[Citation]] = relationship(back_populates="item")
+    artifact_revisions: Mapped[list[ArtifactRevision]] = relationship(
+        back_populates="item"
+    )
+
+
+class ArtifactRevision(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """One immutable revision of a conversation artifact Item.
+
+    The Item stays the canonical identity (title, ACL, lineage, tombstone) and
+    its ``storage_key`` always points at the current revision; every revision
+    keeps its own object so an edit never overwrites the previous file.
+    """
+
+    __tablename__ = "artifact_revisions"
+    __table_args__ = (
+        UniqueConstraint("item_id", "revision_number"),
+        Index(None, "conversation_id", "deleted_at"),
+        CheckConstraint("revision_number >= 1", name="revision_number_is_valid"),
+        CheckConstraint("size_bytes >= 0", name="revision_size_is_valid"),
+        CheckConstraint("jsonb_typeof(exports) = 'object'", name="exports_is_object"),
+    )
+
+    item_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("items.id"), nullable=False
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    storage_key: Mapped[str] = mapped_column(Text, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    conversation_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("conversations.id")
+    )
+    request_id: Mapped[str | None] = mapped_column(String(64))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id")
+    )
+    exports: Mapped[JsonObject] = _json_object_column()
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    item: Mapped[Item] = relationship(back_populates="artifact_revisions")
 
 
 class Citation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -883,6 +924,7 @@ event.listen(
 
 __all__ = [
     "AccessRequest",
+    "ArtifactRevision",
     "AuditLog",
     "Base",
     "Citation",

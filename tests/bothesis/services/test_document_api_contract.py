@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from main import _environment_boolean
+from config.env_config import boolean as _environment_boolean
 
 
 def test_backend_source_contains_no_physical_delete_operations() -> None:

@@ -110,25 +110,25 @@ export function Dialog({
         role="dialog"
         aria-labelledby={titleId}
         className={cn(
-          "relative z-10 max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto overscroll-contain rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-[var(--shadow-lg)]",
+          "relative z-10 flex max-h-[calc(100dvh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-[var(--adm-r-lg)] bg-[var(--adm-raised)] shadow-[var(--adm-e3)]",
           "ui-dialog-panel",
           className
         )}
       >
-        <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
-          <h2 id={titleId} className="text-base font-semibold text-[var(--text)]">{title}</h2>
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--adm-hairline)] px-4 py-3">
+          <h2 id={titleId} className="text-[0.9375rem] font-semibold text-[var(--text)]">{title}</h2>
           <button
             aria-label="Close dialog"
             onClick={onClose}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--adm-r-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
             type="button"
           >
             <X aria-hidden="true" className="h-4 w-4" />
           </button>
         </div>
-        <div className="px-4 py-4">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">{children}</div>
         {footer && (
-          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--border)] bg-[var(--bg-panel)] px-4 py-3">
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-[var(--adm-hairline)] bg-[var(--adm-inset)] px-4 py-3">
             {footer}
           </div>
         )}

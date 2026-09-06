@@ -24,7 +24,7 @@ export function Tabs({ tabs, activeTab, onChange, className, density = "default"
   const tabsId = useId();
 
   return (
-    <div className={cn("border-b border-[var(--border)]", className)}>
+    <div className={cn("border-b border-[var(--adm-hairline)]", className)}>
       <div aria-label={ariaLabel} className="flex gap-4 overflow-x-auto" role="tablist">
         {tabs.map((tab, index) => (
           <button
@@ -46,11 +46,11 @@ export function Tabs({ tabs, activeTab, onChange, className, density = "default"
             tabIndex={activeTab === tab.id ? 0 : -1}
             type="button"
             className={cn(
-              "relative -mb-px shrink-0 border-b-2 border-transparent font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface)]",
-              compact ? "h-8 px-0.5 text-xs" : "h-10 px-0.5 text-sm",
+              "relative -mb-px shrink-0 border-b-2 border-transparent font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--adm-canvas)]",
+              compact ? "h-8 px-0.5 text-[0.8125rem]" : "h-10 px-0.5 text-[0.875rem]",
               activeTab === tab.id
                 ? "border-[var(--brand-accent)] text-[var(--brand-accent)]"
-                : "text-[var(--text-muted)] hover:border-[var(--border-strong)] hover:text-[var(--text-secondary)]"
+                : "text-[var(--text-muted)] hover:border-[var(--adm-hairline-strong)] hover:text-[var(--text)]"
             )}
           >
             <span className="inline-flex h-full items-center gap-1.5">

@@ -4,6 +4,7 @@ import json
 import sys
 import asyncio
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -13,7 +14,9 @@ from bothesis.agent import AgentConfig, ConversationMemory
 from bothesis.agent.citation import CitationRenderer
 from bothesis.agent.models import (
     AgentContext,
+    ConversationArtifact,
     ConversationDocument,
+    ConversationDocumentReference,
     ConversationMessage,
     Evidence,
     ToolContext,
@@ -21,6 +24,7 @@ from bothesis.agent.models import (
 )
 from bothesis.agent.protocol import FunctionCallItem, InputText
 from bothesis.agent.tools import Tool, ToolDefinition, ToolExecutor, ToolRegistry
+from bothesis.agent.tools.artifact_edit import ArtifactEdit
 
 
 def test_conversation_policy_keeps_newest_content_within_budget() -> None:
@@ -146,6 +150,45 @@ async def test_citation_renderer_carries_split_markers_between_deltas() -> None:
     assert used_evidence_ids == {"ev-1"}
 
 
+@pytest.mark.asyncio
+async def test_citation_renderer_never_grounds_an_unknown_source_reference() -> None:
+    """A reference the backend did not issue is not a citation.
+
+    The model can only cite what retrieval put in front of it. An invented or
+    stale reference stays literal text so no citation payload is fabricated.
+    """
+
+    evidence = {
+        "source-a1b2c3d4": Evidence(
+            id="source-a1b2c3d4",
+            item_id="doc-1",
+            chunk_id="chunk-1",
+            title="Leave policy",
+            content="Grounded content",
+        )
+    }
+    used_evidence_ids: set[str] = set()
+
+    events = [
+        event
+        async for event in CitationRenderer().render(
+            ("Policy [[cite:source-ffffffff]] and [[cite:source-a1b2c3d4]] apply",),
+            evidence,
+            used_evidence_ids,
+        )
+    ]
+
+    # The invented reference is dropped entirely: it must not become a
+    # citation, and it must not leak an internal marker into the prose.
+    assert events == [
+        ("Policy ", None),
+        (" and ", None),
+        ("", "source-a1b2c3d4"),
+        (" apply", None),
+    ]
+    assert used_evidence_ids == {"source-a1b2c3d4"}
+
+
 # Native OpenRouter tool-call normalization is covered by
 # tests/bothesis/agent/test_openrouter_adapter.py, which drives the adapter
 # through its public streaming contract instead of a private helper.
@@ -215,3 +258,239 @@ async def test_tool_executor_runs_independent_calls_concurrently_and_matches_cal
     assert blocked.output_items[0].output == (
         "Tool error: Tool is not available for this request."
     )
+
+
+@pytest.mark.asyncio
+async def test_conversation_context_supplies_working_artifacts() -> None:
+    context = AgentContext(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        roles=[],
+        artifacts=(
+            ConversationArtifact(
+                id="artifact-1",
+                title="Memo <v2>",
+                file_name="memo.md",
+                mime_type="text/markdown",
+                revision=2,
+                size_bytes=10,
+                updated_at="2026-09-06T00:00:00+00:00",
+                content="# Memo <draft>",
+                content_truncated=True,
+            ),
+        ),
+    )
+
+    prepared = await ConversationMemory(config=AgentConfig()).prepare(
+        "Change the date", context
+    )
+
+    assert "<conversation_artifact_policy>" in prepared.instructions
+    assert "<artifact_id>artifact-1</artifact_id>" in prepared.instructions
+    assert "Memo &lt;v2&gt;" in prepared.instructions
+    assert "<revision>2</revision>" in prepared.instructions
+    texts = [
+        part.text
+        for item in prepared.items
+        for part in item.content
+        if isinstance(part, InputText)
+    ]
+    assert texts[0] == "<user_message>Change the date</user_message>"
+    assert texts[1].startswith("<conversation_artifact>")
+    assert "<truncated>true</truncated>" in texts[1]
+    assert "<content># Memo &lt;draft&gt;</content>" in texts[1]
+
+
+@pytest.mark.asyncio
+async def test_conversation_context_lists_referenced_documents_without_content() -> None:
+    """Prior turns' Document IDs are supplied so "fill that form" needs no re-search."""
+
+    context = AgentContext(
+        user_id="user-1",
+        tenant_id="tenant-1",
+        roles=[],
+        document_references=(
+            ConversationDocumentReference(
+                id="doc-1", title="Expense report <form>", document_type="file"
+            ),
+            ConversationDocumentReference(id="doc-2", title="Leave policy"),
+        ),
+        artifacts=(
+            ConversationArtifact(
+                id="artifact-1",
+                title="Filled expense report",
+                file_name="expense.md",
+                mime_type="text/markdown",
+                revision=1,
+                size_bytes=10,
+                updated_at="2026-09-06T00:00:00+00:00",
+                source_document_id="doc-1",
+            ),
+        ),
+    )
+
+    prepared = await ConversationMemory(config=AgentConfig()).prepare(
+        "Fill that form for me", context
+    )
+
+    assert "<conversation_document_references>" in prepared.instructions
+    assert "<document_id>doc-1</document_id>" in prepared.instructions
+    assert "Expense report &lt;form&gt;" in prepared.instructions
+    assert "<document_type>file</document_type>" in prepared.instructions
+    assert "<document_id>doc-2</document_id>" in prepared.instructions
+    # Identities only: referenced documents never inject content.
+    assert "<content>" not in prepared.instructions
+    # The working copy keeps its lineage to the knowledge document it came from.
+    assert "<source_document_id>doc-1</source_document_id>" in prepared.instructions
+
+
+@pytest.mark.asyncio
+async def test_artifact_edit_accepts_exactly_one_change_kind() -> None:
+    """edits, content, and fields are mutually exclusive; fields fill a PDF form."""
+
+    class RecordingArtifacts:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def resolve_access(self, scope: object) -> object:
+            return object()
+
+        async def edit(self, access: object, artifact_id: object, **kwargs: object) -> dict[str, object]:
+            self.calls.append(kwargs)
+            return {
+                "id": str(artifact_id),
+                "title": "Leave form",
+                "file_name": "leave-form.pdf",
+                "mime_type": "application/pdf",
+                "revision": 2,
+                "size_bytes": 10,
+                "updated_at": "2026-09-06T00:00:00+00:00",
+                "content": "filled description",
+            }
+
+    artifacts = RecordingArtifacts()
+    tool = ArtifactEdit(artifacts)  # type: ignore[arg-type]
+    ctx = ToolContext(
+        agent_context=AgentContext(user_id="user-1", tenant_id="tenant-1", roles=[])
+    )
+    base = {"artifact_id": str(uuid4()), "summary": "Fill the name", "edits": []}
+
+    both = await tool.execute(
+        {**base, "content": "x", "fields": [{"name": "a", "value": "1"}]}, ctx
+    )
+    assert both.error is not None and "exactly one" in both.error
+    neither = await tool.execute({**base, "content": None, "fields": None}, ctx)
+    assert neither.error is not None and "exactly one" in neither.error
+    duplicate = await tool.execute(
+        {
+            **base,
+            "content": None,
+            "fields": [{"name": "a", "value": "1"}, {"name": "a", "value": "2"}],
+        },
+        ctx,
+    )
+    assert duplicate.error is not None and "duplicate" in duplicate.error
+    assert artifacts.calls == []
+
+    filled = await tool.execute(
+        {
+            **base,
+            "content": None,
+            "fields": [{"name": "ho_ten", "value": "Trần Văn A"}],
+        },
+        ctx,
+    )
+    assert filled.error is None
+    assert artifacts.calls[0]["fields"] == {"ho_ten": "Trần Văn A"}
+    assert filled.metadata["artifact_id"] == base["artifact_id"]
+
+
+def test_tool_registry_validates_nullable_and_enum_fields() -> None:
+    class DocumentTool(Tool):
+        @property
+        def definition(self) -> ToolDefinition:
+            return ToolDefinition(
+                name="artifact_create",
+                description="Create a document.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "minLength": 1},
+                        "source_document_id": {"type": ["string", "null"]},
+                        "format": {"type": "string", "enum": ["pdf"]},
+                    },
+                    "required": ["title", "source_document_id", "format"],
+                    "additionalProperties": False,
+                },
+            )
+
+        async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolOutput:
+            return ToolOutput(content="")
+
+    registry = ToolRegistry()
+    registry.register(DocumentTool())
+
+    assert registry.arguments_are_valid(
+        "artifact_create", {"title": "Memo", "source_document_id": None, "format": "pdf"}
+    )
+    assert registry.arguments_are_valid(
+        "artifact_create", {"title": "Memo", "source_document_id": "doc-1", "format": "pdf"}
+    )
+    assert not registry.arguments_are_valid(
+        "artifact_create", {"title": "Memo", "source_document_id": 3, "format": "pdf"}
+    )
+    assert not registry.arguments_are_valid(
+        "artifact_create", {"title": "Memo", "source_document_id": None, "format": "docx"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_keeps_the_newest_artifact_revision() -> None:
+    class RevisionTool(Tool):
+        @property
+        def definition(self) -> ToolDefinition:
+            return ToolDefinition(
+                name="artifact_edit",
+                description="Revise a document.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"revision": {"type": "integer"}},
+                    "required": ["revision"],
+                    "additionalProperties": False,
+                },
+            )
+
+        async def execute(self, arguments: dict[str, object], context: ToolContext) -> ToolOutput:
+            revision = int(arguments["revision"])  # type: ignore[arg-type]
+            return ToolOutput(
+                content=f"revision {revision}",
+                artifacts=(
+                    ConversationArtifact(
+                        id="artifact-1",
+                        title="Memo",
+                        file_name="memo.md",
+                        mime_type="text/markdown",
+                        revision=revision,
+                        size_bytes=10,
+                        updated_at="2026-09-06T00:00:00+00:00",
+                    ),
+                ),
+            )
+
+    registry = ToolRegistry()
+    registry.register(RevisionTool())
+    artifacts: dict[str, ConversationArtifact] = {}
+    await ToolExecutor(registry, timeout_seconds=1, max_output_characters=100).execute(
+        (
+            FunctionCallItem(call_id="second", name="artifact_edit", arguments='{"revision":2}'),
+            FunctionCallItem(call_id="first", name="artifact_edit", arguments='{"revision":1}'),
+        ),
+        context=ToolContext(agent_context=AgentContext(user_id="u", tenant_id="t", roles=[])),
+        remaining_calls=2,
+        previous_signatures=set(),
+        evidence={},
+        artifacts=artifacts,
+    )
+
+    assert list(artifacts) == ["artifact-1"]
+    assert artifacts["artifact-1"].revision == 2
