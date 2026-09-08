@@ -175,19 +175,12 @@ export async function releaseConversationDocument(documentId: string): Promise<v
   }
 }
 
-export interface ArtifactExport {
-  file_name: string;
-  size_bytes: number;
-  download_url: string | null;
-}
-
 export interface ArtifactRevision {
   revision: number;
   summary: string | null;
   size_bytes: number;
   created_at: string | null;
   download_url: string | null;
-  exports: Record<string, ArtifactExport>;
 }
 
 export interface ArtifactDetail {
@@ -203,7 +196,6 @@ export interface ArtifactDetail {
   created_at: string | null;
   updated_at: string | null;
   download_url: string | null;
-  exports: Record<string, ArtifactExport>;
   revisions: ArtifactRevision[];
 }
 
@@ -253,21 +245,6 @@ export async function getArtifactContent(
     `/api/v1/artifacts/${encodeURIComponent(artifactId)}/revisions/${revision}/content`,
     { signal },
     "Could not load the document content.",
-  );
-}
-
-export async function exportArtifact(
-  artifactId: string,
-  format: "pdf" = "pdf",
-): Promise<ArtifactDetail> {
-  return artifactRequest<ArtifactDetail>(
-    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/export`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ format }),
-    },
-    "Could not export the document.",
   );
 }
 

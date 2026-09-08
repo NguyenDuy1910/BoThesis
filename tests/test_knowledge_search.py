@@ -11,9 +11,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from bothesis.agent.models import AgentContext, CitationReferences, ToolContext
+from bothesis.agent.models import AgentContext, CitationReferences
 from bothesis.agent.protocol import FunctionTool
-from bothesis.agent.tools import ToolRegistry
+from bothesis.agent.tools import ToolInvocation, ToolPayload, ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
 from bothesis.connector.protocol import (
     CitationInfo,
@@ -40,7 +40,25 @@ CONTEXT = AgentContext(
     roles=[],
     collection_item_ids=("collection-1",),
 )
-TOOL_CONTEXT = ToolContext(agent_context=CONTEXT)
+
+
+def invocation(
+    arguments: dict[str, object],
+    *,
+    context: AgentContext = CONTEXT,
+    references: CitationReferences | None = None,
+) -> ToolInvocation:
+    return ToolInvocation(
+        session=SimpleNamespace(),
+        turn=SimpleNamespace(references=references or CitationReferences()),
+        step_context=SimpleNamespace(
+            environment=SimpleNamespace(agent_context=context)
+        ),
+        call_id="test-call",
+        tool_name="knowledge_search",
+        source="model",  # type: ignore[arg-type]
+        payload=ToolPayload(arguments=arguments),
+    )
 
 
 def _chunk(
@@ -488,17 +506,14 @@ async def test_knowledge_search_returns_bounded_evidence_and_source_metadata() -
     retriever = StubRetriever([EVIDENCE])
     tool = KnowledgeSearch(retriever, result_limit=3)
 
-    result = await tool.execute(
-        {"queries": ["annual leave"]},
-        ToolContext(agent_context=CONTEXT),
-    )
+    result = await tool.handle(invocation({"queries": ["annual leave"]}))
 
     assert retriever.calls == [("annual leave", 3)]
     assert result.error is None
     assert result.metadata["result_count"] == 1
     # The tool assigns the compact reference before building the context.
     # The canonical Document ID is deliberately exposed (it is the source
-    # provenance artifact_create consumes), but the raw chunk id stays hidden
+    # provenance and lineage, but the raw chunk id stays hidden
     # since only the compact reference may ever be echoed back as a citation.
     assert "Source reference: ref_1" in result.content
     assert "Document ID: doc-1" in result.content
@@ -518,9 +533,8 @@ async def test_knowledge_search_returns_bounded_evidence_and_source_metadata() -
 async def test_knowledge_search_passes_the_authenticated_context() -> None:
     retriever = StubRetriever([EVIDENCE])
 
-    result = await KnowledgeSearch(retriever).execute(
-        {"queries": ["annual leave"]},
-        TOOL_CONTEXT,
+    result = await KnowledgeSearch(retriever).handle(
+        invocation({"queries": ["annual leave"]})
     )
 
     assert result.error is None
@@ -529,9 +543,8 @@ async def test_knowledge_search_passes_the_authenticated_context() -> None:
 
 @pytest.mark.asyncio
 async def test_knowledge_search_handles_empty_results() -> None:
-    result = await KnowledgeSearch(StubRetriever([])).execute(
-        {"queries": ["annual leave"]},
-        TOOL_CONTEXT,
+    result = await KnowledgeSearch(StubRetriever([])).handle(
+        invocation({"queries": ["annual leave"]})
     )
 
     assert result.error is None
@@ -541,9 +554,8 @@ async def test_knowledge_search_handles_empty_results() -> None:
 
 @pytest.mark.asyncio
 async def test_knowledge_search_handles_retrieval_failures() -> None:
-    result = await KnowledgeSearch(FailingRetriever()).execute(
-        {"queries": ["annual leave"]},
-        TOOL_CONTEXT,
+    result = await KnowledgeSearch(FailingRetriever()).handle(
+        invocation({"queries": ["annual leave"]})
     )
 
     assert (
@@ -557,7 +569,7 @@ async def test_knowledge_search_handles_timeouts() -> None:
     result = await KnowledgeSearch(
         BlockingRetriever(),
         timeout_seconds=0.01,
-    ).execute({"queries": ["annual leave"]}, TOOL_CONTEXT)
+    ).handle(invocation({"queries": ["annual leave"]}))
 
     assert result.error == "Knowledge search timed out. Please try again."
     assert result.metadata["outcome"] == "timeout"
@@ -572,9 +584,8 @@ async def test_knowledge_search_keeps_evidence_when_only_one_query_fails() -> No
         timeout_seconds=0.05,
     )
 
-    result = await tool.execute(
-        {"queries": ["annual leave", "carry over"]},
-        ToolContext(agent_context=CONTEXT),
+    result = await tool.handle(
+        invocation({"queries": ["annual leave", "carry over"]})
     )
 
     assert result.error is None
@@ -590,9 +601,8 @@ async def test_knowledge_search_runs_queries_concurrently_under_one_deadline() -
     tool = KnowledgeSearch(retriever, timeout_seconds=0.4)
 
     started_at = time.perf_counter()
-    result = await tool.execute(
-        {"queries": ["annual leave", "carry over", "unused days"]},
-        ToolContext(agent_context=CONTEXT),
+    result = await tool.handle(
+        invocation({"queries": ["annual leave", "carry over", "unused days"]})
     )
     elapsed = time.perf_counter() - started_at
 
@@ -607,9 +617,8 @@ async def test_knowledge_search_bounds_total_time_when_every_query_stalls() -> N
     tool = KnowledgeSearch(BlockingRetriever(), timeout_seconds=0.05)
 
     started_at = time.perf_counter()
-    result = await tool.execute(
-        {"queries": ["annual leave", "carry over", "unused days"]},
-        ToolContext(agent_context=CONTEXT),
+    result = await tool.handle(
+        invocation({"queries": ["annual leave", "carry over", "unused days"]})
     )
     elapsed = time.perf_counter() - started_at
 
@@ -629,7 +638,7 @@ def test_knowledge_search_builds_its_declaration_once() -> None:
 
     tool = KnowledgeSearch(StubRetriever([]))
 
-    assert tool.definition is tool.definition
+    assert tool.spec() is tool.spec()
 
 
 def test_knowledge_search_declares_itself_as_a_protocol_function_tool() -> None:
@@ -640,7 +649,6 @@ def test_knowledge_search_declares_itself_as_a_protocol_function_tool() -> None:
     assert declaration.parameters["required"] == ["queries"]
     assert "access-permitted" in declaration.description
     assert "a source reference to cite" in declaration.description
-    assert "source_document_id" in declaration.description
     assert (
         "Do not use generic terms"
         in declaration.parameters["properties"]["queries"]["description"]
@@ -655,9 +663,9 @@ def test_tool_registry_exposes_declarations_through_the_protocol() -> None:
 
     assert [tool.name for tool in registry.function_tools()] == ["knowledge_search"]
     assert registry.function_tools(()) == ()
-    definition = registry.definitions()[0]
-    assert definition.activity_label == "Search knowledge base"
-    assert definition.activity_category == "retrieval"
+    spec = registry.specs()[0]
+    assert spec.activity_label == "Search knowledge base"
+    assert spec.activity_category == "retrieval"
 
 
 class StubRerankTransport:
@@ -858,10 +866,12 @@ async def test_references_are_compact_stable_and_shared_across_tool_calls() -> N
     second = _chunk(chunk_id="chunk-2", score=0.4)
     tool = KnowledgeSearch(StubRetriever([EVIDENCE, _evidence(second)]), result_limit=5)
     references = CitationReferences()
-    context = ToolContext(agent_context=CONTEXT, references=references)
-
-    first_result = await tool.execute({"queries": ["annual leave"]}, context)
-    second_result = await tool.execute({"queries": ["carry over"]}, context)
+    first_result = await tool.handle(
+        invocation({"queries": ["annual leave"]}, references=references)
+    )
+    second_result = await tool.handle(
+        invocation({"queries": ["carry over"]}, references=references)
+    )
 
     assert [item.id for item in first_result.evidence] == ["ref_1", "ref_2"]
     # The same chunks keep the same references on the next round.

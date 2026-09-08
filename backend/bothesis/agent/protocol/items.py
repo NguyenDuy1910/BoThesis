@@ -212,6 +212,8 @@ Item: TypeAlias = Annotated[
     ],
     Discriminator(_item_tag),
 ]
+ResponseItem: TypeAlias = Item
+"""A provider-neutral item retained in model-visible context."""
 
 ItemAdapter: TypeAdapter[Item] = TypeAdapter(Item)
 
@@ -229,5 +231,6 @@ __all__ = [
     "MessageRole",
     "ReasoningItem",
     "ReasoningText",
+    "ResponseItem",
     "SummaryText",
 ]

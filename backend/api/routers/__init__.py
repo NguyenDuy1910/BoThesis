@@ -124,6 +124,10 @@ class ChatRequest(BaseModel):
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=24)
     knowledge_mode: Literal["auto", "selected", "off"] = "auto"
     collection_item_ids: list[UUID] = Field(default_factory=list, max_length=20)
+    # Documents the user attached to this turn. They are already uploaded and
+    # access-checked Items; the turn links them to the message and writes them
+    # into the conversation's execution workspace.
+    document_ids: list[UUID] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def validate_collection_selection(self) -> ChatRequest:
@@ -220,19 +224,12 @@ class DocumentDetail(BaseModel):
 # --- Conversation artifacts ---
 
 
-class ArtifactExportView(BaseModel):
-    file_name: str
-    size_bytes: int = Field(ge=0)
-    download_url: str | None = None
-
-
 class ArtifactRevisionView(BaseModel):
     revision: int = Field(ge=1)
     summary: str | None = None
     size_bytes: int = Field(ge=0)
     created_at: str | None = None
     download_url: str | None = None
-    exports: dict[str, ArtifactExportView] = Field(default_factory=dict)
 
 
 class ArtifactDetail(BaseModel):
@@ -250,7 +247,6 @@ class ArtifactDetail(BaseModel):
     created_at: str | None = None
     updated_at: str | None = None
     download_url: str | None = None
-    exports: dict[str, ArtifactExportView] = Field(default_factory=dict)
     revisions: list[ArtifactRevisionView]
 
 
@@ -260,10 +256,6 @@ class ArtifactContent(BaseModel):
     mime_type: str
     content: str
     truncated: bool = False
-
-
-class ArtifactExportRequest(BaseModel):
-    format: Literal["pdf"] = "pdf"
 
 
 class ArtifactPublishRequest(BaseModel):
@@ -545,8 +537,6 @@ __all__ = [
     "AdminRoleUpdate",
     "ArtifactContent",
     "ArtifactDetail",
-    "ArtifactExportRequest",
-    "ArtifactExportView",
     "ArtifactPublishRequest",
     "ArtifactPublishResponse",
     "ArtifactRevisionView",

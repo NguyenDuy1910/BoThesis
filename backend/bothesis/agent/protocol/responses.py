@@ -59,7 +59,7 @@ class IncompleteDetails(ProtocolModel):
     reason: str
 
 
-class ResponseRequest(ProtocolModel):
+class Prompt(ProtocolModel):
     """One provider-neutral model request.
 
     Field names follow ``CreateResponseBody``. ``provider_options`` is the
@@ -173,7 +173,7 @@ __all__ = [
     "OutputTokensDetails",
     "Response",
     "ResponseError",
-    "ResponseRequest",
+    "Prompt",
     "ResponseStatus",
     "ResponseUsage",
 ]

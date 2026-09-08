@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from bothesis.agent.citation import CitationRenderer
 from bothesis.agent.models import CitationReferences, Evidence
 from bothesis.agent.protocol import (
     DOCUMENT_CITATION_TYPE,
@@ -19,6 +18,8 @@ from bothesis.agent.protocol import (
 from bothesis.knowledge import CitationResolver
 
 _PartKey = tuple[int, int]
+_CITATION_PREFIX = "[[cite:"
+_MAX_MARKER_LENGTH = 256
 
 
 class CitationProjection:
@@ -38,7 +39,7 @@ class CitationProjection:
     ) -> None:
         self._evidence = evidence
         self._references = references or CitationReferences()
-        self._renderers: dict[_PartKey, CitationRenderer] = {}
+        self._buffers: dict[_PartKey, str] = {}
         self._text: dict[_PartKey, list[str]] = {}
         self._annotations: dict[_PartKey, list[Annotation]] = {}
         self._used_evidence_ids: set[str] = set()
@@ -93,11 +94,8 @@ class CitationProjection:
         self, event: ResponseOutputTextDeltaEvent
     ) -> tuple[ResponseStreamEvent, ...]:
         key = (event.output_index, event.content_index)
-        renderer = self._renderers.setdefault(key, CitationRenderer())
         events: list[ResponseStreamEvent] = []
-        for visible_text, evidence_id in renderer.push(
-            event.delta, self._evidence, self._used_evidence_ids
-        ):
+        for visible_text, evidence_id in self._push(key, event.delta):
             if visible_text:
                 self._text.setdefault(key, []).append(visible_text)
                 events.append(event.model_copy(update={"delta": visible_text}))
@@ -110,21 +108,27 @@ class CitationProjection:
         self, event: ResponseOutputTextDoneEvent
     ) -> tuple[ResponseStreamEvent, ...]:
         key = (event.output_index, event.content_index)
-        renderer = self._renderers.get(key)
-        if renderer is None:
+        trailing = self._buffers.pop(key, "")
+        if not trailing:
             return ()
-        trailing = renderer.flush()
-        if trailing is None or not trailing[0]:
-            return ()
-        self._text.setdefault(key, []).append(trailing[0])
+        self._text.setdefault(key, []).append(trailing)
         return (
             ResponseOutputTextDeltaEvent(
                 item_id=event.item_id,
                 output_index=event.output_index,
                 content_index=event.content_index,
-                delta=trailing[0],
+                delta=trailing,
             ),
         )
+
+    def _push(self, key: _PartKey, delta: str) -> list[tuple[str, str | None]]:
+        fragments, self._buffers[key] = _process_citation_buffer(
+            self._buffers.get(key, "") + delta, self._evidence
+        )
+        self._used_evidence_ids.update(
+            evidence_id for _, evidence_id in fragments if evidence_id
+        )
+        return fragments
 
     def _citation_events(
         self,
@@ -231,6 +235,50 @@ def _document_citation(
             "original_url": original_url,
         },
     }
+
+
+def _process_citation_buffer(
+    buffer: str, evidence: Mapping[str, Evidence]
+) -> tuple[list[tuple[str, str | None]], str]:
+    remaining = buffer
+    emitted: list[tuple[str, str | None]] = []
+    while remaining:
+        start = remaining.find("[[")
+        if start < 0:
+            if remaining.endswith("["):
+                emitted.append((remaining[:-1], None))
+                return emitted, "["
+            emitted.append((remaining, None))
+            return emitted, ""
+        before, candidate = remaining[:start], remaining[start:]
+        end = candidate.find("]]", 2)
+        if end < 0:
+            if (
+                _CITATION_PREFIX.startswith(candidate)
+                or candidate.startswith(_CITATION_PREFIX)
+            ) and len(candidate) <= _MAX_MARKER_LENGTH:
+                if before:
+                    emitted.append((before, None))
+                return emitted, candidate
+            emitted.append((remaining, None))
+            return emitted, ""
+        marker, remaining = candidate[: end + 2], candidate[end + 2 :]
+        if before:
+            emitted.append((before, None))
+        evidence_id = marker[len(_CITATION_PREFIX) : -2]
+        if marker.startswith(_CITATION_PREFIX):
+            # A citation marker only grounds anything when retrieval issued the
+            # reference. An invented or stale one is dropped rather than shown:
+            # the reader must never see an internal marker as prose, and it
+            # must never become a clickable citation.
+            if evidence_id in evidence and all(
+                character.isalnum() or character in "_.:-"
+                for character in evidence_id
+            ):
+                emitted.append(("", evidence_id))
+        else:
+            emitted.append((marker, None))
+    return emitted, ""
 
 
 __all__ = ["CitationProjection"]

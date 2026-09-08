@@ -32,6 +32,7 @@ async def chat_stream(
         history=[(message.role, message.content) for message in body.history],
         knowledge_mode=body.knowledge_mode,
         collection_item_ids=body.collection_item_ids,
+        document_ids=body.document_ids,
         is_disconnected=request.is_disconnected,
     )
     return StreamingResponse(

@@ -21,7 +21,7 @@ TextFormat = TypeVar("TextFormat")
 
 
 class OpenAITransport:
-    """Expose OpenAI Responses, embeddings, and files without normalization."""
+    """Expose OpenAI Responses, embeddings, and files unnormalized."""
 
     provider = "openai"
 
@@ -29,6 +29,7 @@ class OpenAITransport:
         self,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
         model: str | None = None,
         embedding_model: str | None = None,
         timeout: float = 60.0,
@@ -40,6 +41,7 @@ class OpenAITransport:
         self.embedding_model = embedding_model or os.getenv("OPENAI_EMBEDDING_MODEL")
         self._client = client or AsyncOpenAI(
             api_key=api_key or os.getenv("OPENAI_API_KEY"),
+            base_url=base_url or os.getenv("OPENAI_BASE_URL") or None,
             timeout=timeout,
         )
         self._owns_client = client is None

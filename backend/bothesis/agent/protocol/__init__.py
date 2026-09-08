@@ -9,13 +9,13 @@ events describe mutations of exactly that state.
 The package holds no behaviour. Response reconstruction lives in
 :mod:`bothesis.agent.reducer`, provider communication and normalization in
 :mod:`bothesis.agent.transports`, and orchestration in
-:mod:`bothesis.agent.conversation_loop`. This package must never import a
+:mod:`bothesis.agent.turn`. This package must never import a
 provider SDK.
 
 Two escape hatches keep implementer concepts out of the common contract:
 :class:`~bothesis.agent.protocol.items.ExtensionItem` /
 :class:`~bothesis.agent.protocol.tools.ExtensionTool` for slug-prefixed
-implementer types, and ``ResponseRequest.provider_options`` for opaque request
+implementer types, and ``Prompt.provider_options`` for opaque request
 options.
 """
 
@@ -47,7 +47,6 @@ class ExtensibleProtocolModel(ProtocolModel):
 # Submodules import the shared base from this package while they are being
 # imported, so the primary contracts are re-exported only after it exists.
 from bothesis.agent.protocol.content import (  # noqa: E402
-    ARTIFACT_ANNOTATION_TYPE,
     DOCUMENT_CITATION_TYPE,
     TEXT_PART_TYPES,
     Annotation,
@@ -76,6 +75,7 @@ from bothesis.agent.protocol.items import (  # noqa: E402
     MessagePhase,
     MessageRole,
     ReasoningItem,
+    ResponseItem,
 )
 from bothesis.agent.protocol.tools import (  # noqa: E402
     AllowedTools,
@@ -95,7 +95,7 @@ from bothesis.agent.protocol.responses import (  # noqa: E402
     OutputTokensDetails,
     Response,
     ResponseError,
-    ResponseRequest,
+    Prompt,
     ResponseStatus,
     ResponseUsage,
 )
@@ -133,7 +133,6 @@ from bothesis.agent.protocol.events import (  # noqa: E402
 )
 
 __all__ = [
-    "ARTIFACT_ANNOTATION_TYPE",
     "CORE_ITEM_TYPES",
     "DOCUMENT_CITATION_TYPE",
     "EXTENSION_TAG",
@@ -172,6 +171,7 @@ __all__ = [
     "ReasoningContent",
     "ReasoningItem",
     "ReasoningText",
+    "ResponseItem",
     "Refusal",
     "Response",
     "ResponseCompletedEvent",
@@ -198,7 +198,7 @@ __all__ = [
     "ResponseReasoningSummaryTextDoneEvent",
     "ResponseRefusalDeltaEvent",
     "ResponseRefusalDoneEvent",
-    "ResponseRequest",
+    "Prompt",
     "ResponseSnapshotEventBase",
     "ResponseStatus",
     "ResponseStreamEvent",

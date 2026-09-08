@@ -7,17 +7,17 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from bothesis.agent.protocol import FunctionTool
-from bothesis.agent.tools import Tool, ToolDefinition
+from bothesis.agent.tools import ToolExecutor, ToolSpec
 
 
 class ToolRegistry:
     """Register tools, expose model definitions, and resolve invocations."""
 
     def __init__(self) -> None:
-        self._tools: dict[str, Tool] = {}
+        self._tools: dict[str, ToolExecutor] = {}
 
-    def register(self, tool: Tool) -> None:
-        definition = tool.definition
+    def register(self, tool: ToolExecutor) -> None:
+        definition = tool.spec()
         name = definition.name.strip()
         if not name:
             raise ValueError("tool name must not be empty")
@@ -25,14 +25,19 @@ class ToolRegistry:
             raise ValueError(f"tool already registered: {name}")
         self._tools[name] = tool
 
-    def get(self, name: str) -> Tool | None:
+    def get(self, name: str) -> ToolExecutor | None:
         return self._tools.get(name)
 
     def has(self, name: str) -> bool:
         return name in self._tools
 
-    def definitions(self) -> tuple[ToolDefinition, ...]:
-        return tuple(tool.definition for tool in self._tools.values())
+    def specs(self) -> tuple[ToolSpec, ...]:
+        return tuple(tool.spec() for tool in self._tools.values())
+
+    def executors(self) -> tuple[tuple[str, ToolExecutor], ...]:
+        """Return registered executors in deterministic registration order."""
+
+        return tuple(self._tools.items())
 
     def function_tools(
         self,
@@ -49,7 +54,7 @@ class ToolRegistry:
 
     def arguments_are_valid(self, name: str, arguments: Mapping[str, Any]) -> bool:
         tool = self.get(name)
-        return tool is not None and _matches_schema(arguments, tool.definition.input_schema)
+        return tool is not None and _matches_schema(arguments, tool.spec().input_schema)
 
     def is_tool_arguments_payload(
         self,
@@ -70,7 +75,7 @@ class ToolRegistry:
             return False
         allowed = set(allowed_names) if allowed_names is not None else None
         return any(
-            _matches_schema(payload, tool.definition.input_schema)
+            _matches_schema(payload, tool.spec().input_schema)
             for name, tool in self._tools.items()
             if allowed is None or name in allowed
         )

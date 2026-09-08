@@ -335,10 +335,15 @@ class RetrievalConfig:
 
 @dataclass(frozen=True, slots=True)
 class AgentRuntimeConfig:
-    """Turn, tool, and history budgets applied to one agent run."""
+    """Turn, tool, and history budgets applied to one agent run.
 
-    max_model_turns: int = 3
-    max_tool_rounds: int = 2
+    A file turn is several sampling requests — search the knowledge base, open
+    the source document, run the workspace, then answer — so the turn budget
+    has to leave room for the whole sequence rather than only for retrieval.
+    """
+
+    max_model_turns: int = 8
+    max_tool_rounds: int = 4
     max_tool_calls: int = 6
     max_history_messages: int = 24
     max_history_characters: int = 24_000
@@ -348,8 +353,8 @@ class AgentRuntimeConfig:
     @classmethod
     def from_environment(cls) -> AgentRuntimeConfig:
         return cls(
-            max_model_turns=integer("BOTHESIS_MAX_MODEL_TURNS", default=3),
-            max_tool_rounds=integer("BOTHESIS_MAX_TOOL_ROUNDS", default=2),
+            max_model_turns=integer("BOTHESIS_MAX_MODEL_TURNS", default=8),
+            max_tool_rounds=integer("BOTHESIS_MAX_TOOL_ROUNDS", default=4),
             max_tool_calls=integer("BOTHESIS_MAX_TOOL_CALLS", default=6),
             max_history_messages=integer("BOTHESIS_MAX_HISTORY_MESSAGES", default=24),
             max_history_characters=integer(
@@ -360,41 +365,6 @@ class AgentRuntimeConfig:
             ),
             tool_timeout_seconds=number(
                 "BOTHESIS_TOOL_TIMEOUT_SECONDS", default=30.0
-            ),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class SandboxConfig:
-    """Isolation limits for the disposable Docker sandbox that edits artifacts."""
-
-    image: str = "bothesis-sandbox:local"
-    timeout_seconds: float = 30.0
-    memory_bytes: int = 256 * 1024 * 1024
-    cpu_count: float = 1.0
-    pids_limit: int = 64
-    max_output_bytes: int = 20 * 1024 * 1024
-
-    def __post_init__(self) -> None:
-        if not self.image.strip():
-            raise RuntimeError("BOTHESIS_SANDBOX_IMAGE must not be blank")
-        if self.timeout_seconds <= 0 or self.cpu_count <= 0:
-            raise RuntimeError("sandbox timeout and CPU limits must be positive")
-        if min(self.memory_bytes, self.pids_limit, self.max_output_bytes) < 1:
-            raise RuntimeError("sandbox memory, pid, and output limits must be positive")
-
-    @classmethod
-    def from_environment(cls) -> SandboxConfig:
-        return cls(
-            image=text("BOTHESIS_SANDBOX_IMAGE", "bothesis-sandbox:local"),
-            timeout_seconds=number("BOTHESIS_SANDBOX_TIMEOUT_SECONDS", default=30.0),
-            memory_bytes=integer(
-                "BOTHESIS_SANDBOX_MEMORY_BYTES", default=256 * 1024 * 1024
-            ),
-            cpu_count=number("BOTHESIS_SANDBOX_CPUS", default=1.0),
-            pids_limit=integer("BOTHESIS_SANDBOX_PIDS_LIMIT", default=64),
-            max_output_bytes=integer(
-                "BOTHESIS_SANDBOX_MAX_OUTPUT_BYTES", default=20 * 1024 * 1024
             ),
         )
 
@@ -580,7 +550,6 @@ class AppConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     agent: AgentRuntimeConfig = field(default_factory=AgentRuntimeConfig)
-    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     artifact: ArtifactConfig = field(default_factory=ArtifactConfig)
     upload: UploadConfig = field(default_factory=UploadConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
@@ -600,7 +569,6 @@ class AppConfig:
             model=ModelConfig.from_environment(),
             retrieval=RetrievalConfig.from_environment(),
             agent=AgentRuntimeConfig.from_environment(),
-            sandbox=SandboxConfig.from_environment(),
             artifact=ArtifactConfig.from_environment(),
             upload=UploadConfig.from_environment(),
             preview=PreviewConfig.from_environment(),
@@ -639,7 +607,6 @@ __all__ = [
     "ObservabilityConfig",
     "PreviewConfig",
     "RetrievalConfig",
-    "SandboxConfig",
     "ServerConfig",
     "UploadConfig",
     "VectorIndexConfig",

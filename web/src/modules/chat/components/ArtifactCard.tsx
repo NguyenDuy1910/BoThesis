@@ -5,7 +5,6 @@ import {
   BookUp,
   Download,
   Eye,
-  FileDown,
   FilePenLine,
   FileText,
   LoaderCircle,
@@ -13,21 +12,19 @@ import {
 import { memo, useCallback, useState } from "react";
 
 import {
-  exportArtifact,
   getArtifact,
   listCollections,
   publishArtifact,
-  type ArtifactDetail,
   type Collection,
 } from "../api";
 import { artifactFormatLabel, artifactSizeLabel, type TurnArtifact } from "../artifacts";
 
 /**
- * The documents a turn produced, shown under the answer that presents them.
+ * The files a turn produced, shown under the answer that presents them.
  *
  * A card carries only what the stream annotated; every action re-resolves the
- * document through the authorized artifact API, so download links stay fresh
- * and a restored conversation never trusts a stale URL.
+ * file through the authorized artifact API, so download links stay fresh and a
+ * restored conversation never trusts a stale URL.
  */
 export const ArtifactCards = memo(function ArtifactCards({
   activeArtifactId,
@@ -56,7 +53,7 @@ export const ArtifactCards = memo(function ArtifactCards({
   );
 });
 
-type Busy = "download" | "export" | "publish" | null;
+type Busy = "download" | "publish" | null;
 
 function ArtifactCard({
   active,
@@ -69,13 +66,11 @@ function ArtifactCard({
   onEdit?: (artifact: TurnArtifact) => void;
   onPreview?: (artifact: TurnArtifact) => void;
 }) {
-  const [detail, setDetail] = useState<ArtifactDetail>();
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [collections, setCollections] = useState<Collection[]>();
   const [collectionId, setCollectionId] = useState("");
-  const hasPdf = artifact.exports.includes("pdf") || Boolean(detail?.exports.pdf?.download_url);
 
   const run = useCallback(async (kind: Busy, action: () => Promise<void>) => {
     if (busy) return;
@@ -93,14 +88,7 @@ function ArtifactCard({
 
   const download = useCallback(() => run("download", async () => {
     const resolved = await getArtifact(artifact.id);
-    setDetail(resolved);
     openUrl(resolved.download_url, "The download link is not available.");
-  }), [artifact.id, run]);
-
-  const exportPdf = useCallback(() => run("export", async () => {
-    const resolved = await exportArtifact(artifact.id, "pdf");
-    setDetail(resolved);
-    openUrl(resolved.exports.pdf?.download_url, "The PDF is not available.");
   }), [artifact.id, run]);
 
   const startPublish = useCallback(() => run("publish", async () => {
@@ -151,12 +139,6 @@ function ArtifactCard({
           {onEdit && (
             <ActionButton icon={FilePenLine} label="Edit" onClick={() => onEdit(artifact)} />
           )}
-          <ActionButton
-            busy={busy === "export"}
-            icon={FileDown}
-            label={hasPdf ? "Download PDF" : "Export PDF"}
-            onClick={exportPdf}
-          />
           <ActionButton
             busy={busy === "publish" && !collections}
             icon={BookUp}

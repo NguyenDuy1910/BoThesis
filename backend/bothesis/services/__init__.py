@@ -59,7 +59,6 @@ ARTIFACT_COLLECTION_KIND = "conversation_artifacts"
 ARTIFACT_COLLECTION_TITLE = "My documents"
 ARTIFACT_MIME_TYPE = "text/markdown"
 ARTIFACT_DOCUMENT_TYPE = "markdown"
-ARTIFACT_EXPORT_FORMATS = frozenset({"pdf"})
 
 PreviewRepresentation = Literal["original", "image", "pages"]
 
@@ -401,7 +400,6 @@ __all__ = [
     "ARTIFACT_COLLECTION_KIND",
     "ARTIFACT_COLLECTION_TITLE",
     "ARTIFACT_DOCUMENT_TYPE",
-    "ARTIFACT_EXPORT_FORMATS",
     "ARTIFACT_MIME_TYPE",
     "AUDIT_READ_PERMISSION",
     "CHUNKER_VERSION",

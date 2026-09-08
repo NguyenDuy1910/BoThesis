@@ -28,7 +28,7 @@ from bothesis.db.models import (
     MessageItem,
 )
 from bothesis.agent.models import AgentContext
-from bothesis.sandbox import SandboxRequest, SandboxResult
+from bothesis.agent.protocol import ExtensionItem, Response
 from bothesis.storage import (
     ObjectNotFoundError,
     ObjectStorageError,
@@ -1050,41 +1050,6 @@ async def test_collection_upload_validates_type_size_and_storage_failures(
     assert item is not None and item.status == "failed"
 
 
-class InProcessSandbox:
-    """Apply the runner's file semantics in-process, recording every request.
-
-    The Docker executor and the runner have their own suites; here only the
-    service's use of the sandbox boundary is under test.
-    """
-
-    def __init__(self) -> None:
-        self.requests: list[SandboxRequest] = []
-
-    async def run(self, request: SandboxRequest) -> SandboxResult:
-        self.requests.append(request)
-        arguments = dict(request.arguments)
-        if request.operation == "write":
-            files = {arguments["file_name"]: str(arguments["content"]).encode("utf-8")}
-        elif request.operation == "replace":
-            text = request.files[0].data.decode("utf-8")
-            for edit in arguments["edits"]:
-                assert text.count(edit["find"]) == 1, edit
-                text = text.replace(edit["find"], edit["replace"], 1)
-            files = {arguments["file_name"]: text.encode("utf-8")}
-        elif request.operation == "import":
-            files = {arguments["target_file_name"]: request.files[0].data}
-        elif request.operation == "export_pdf":
-            files = {f"{Path(arguments['file_name']).stem}.pdf": b"%PDF-1.4 rendered"}
-        else:
-            raise AssertionError(f"unexpected operation {request.operation}")
-        return SandboxResult(
-            operation=request.operation,
-            result={"status": "ok", "operation": request.operation},
-            files=files,
-            duration_ms=1,
-        )
-
-
 class InMemoryObjectStorage:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[bytes, str | None]] = {}
@@ -1143,11 +1108,17 @@ class StubUploads:
 
 
 @pytest.mark.asyncio
-async def test_artifacts_keep_every_revision_under_the_owners_private_collection(
+async def test_conversation_files_keep_every_revision_under_a_private_collection(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    """A produced file becomes a private, revisioned, downloadable document.
+
+    Writing the same file name again is a new revision of the same document,
+    reading a knowledge document back out is access-checked, and publishing
+    into the Knowledge Base stays an explicit, separately authorized step.
+    """
+
     storage = InMemoryObjectStorage()
-    sandbox = InProcessSandbox()
     async with session_factory.begin() as session:
         auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("artifacts", "Artifacts")
@@ -1163,8 +1134,8 @@ async def test_artifacts_keep_every_revision_under_the_owners_private_collection
 
         items = ItemService(session)
         # An ordinary Collection: no "template library" flag exists any more.
-        # It is a valid artifact_create source and a valid publish
-        # destination purely because the writer has editor access to it.
+        # It is a valid publish destination
+        # purely because the writer has editor access to it.
         library = await items.create_collection(
             tenant_id=tenant.id,
             title="Legal documents",
@@ -1204,91 +1175,107 @@ async def test_artifacts_keep_every_revision_under_the_owners_private_collection
     service = ArtifactService(
         session_factory,
         object_storage=lambda: storage,
-        sandbox=sandbox,
         uploads=lambda: uploads,
         max_content_bytes=1_000_000,
         download_url_seconds=60,
     )
 
-    created = await service.create_from_content(
+    created = await service.record_generated(
         writer_context,
-        title="Q3 memo",
-        content="# Q3 memo\n\nDate: 2026-09-01\n",
         conversation_id=conversation.id,
         request_id="req-1",
+        file_name="Q3-memo.md",
+        mime_type="text/markdown",
+        data=b"# Q3 memo\n\nDate: 2026-09-01\n",
+        summary="Produced Q3-memo.md",
     )
     artifact_id = UUID(created["id"])
     first_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/1/Q3-memo.md"
     assert created["revision"] == 1
     assert created["file_name"] == "Q3-memo.md"
     assert created["download_url"] == f"https://storage.test/{first_key}"
-    assert sandbox.requests[0].operation == "write"
     assert storage.objects[first_key][0] == b"# Q3 memo\n\nDate: 2026-09-01\n"
 
-    edited = await service.edit(
+    # The same file name again is the next revision of the same document, so
+    # the user keeps one card with a history rather than two near-identical
+    # files.
+    edited = await service.record_generated(
         writer_context,
-        artifact_id,
-        summary="Changed the date",
-        edits=[{"find": "2026-09-01", "replace": "2026-09-06"}],
         conversation_id=conversation.id,
         request_id="req-2",
+        file_name="/mnt/data/Q3-memo.md",
+        mime_type="",
+        data=b"# Q3 memo\n\nDate: 2026-09-06\n",
+        summary="Produced Q3-memo.md",
     )
     second_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/2/Q3-memo.md"
+    assert edited["id"] == created["id"]
     assert edited["revision"] == 2
-    assert edited["content"] == "# Q3 memo\n\nDate: 2026-09-06\n"
-    # The sandbox received the current revision as its input file.
-    assert sandbox.requests[1].operation == "replace"
-    assert sandbox.requests[1].files[0].data == storage.objects[first_key][0]
+    # A workspace path never becomes part of the document's identity.
+    assert edited["file_name"] == "Q3-memo.md"
+    # The content type is recovered from the extension when none was reported.
+    assert edited["mime_type"] == "text/markdown"
     # A revision never overwrites the previous object.
     assert storage.objects[first_key][0] == b"# Q3 memo\n\nDate: 2026-09-01\n"
     assert storage.objects[second_key][0] == b"# Q3 memo\n\nDate: 2026-09-06\n"
 
-    # Form fills are for fillable PDFs; a text document rejects them clearly.
-    with pytest.raises(ArtifactValidationError, match="only to fillable PDF"):
-        await service.edit(
-            writer_context,
-            artifact_id,
-            summary="Fill fields",
-            fields={"date": "2026-09-06"},
-            conversation_id=conversation.id,
-            request_id="req-2b",
-        )
+    # A different file name is a different document in the same conversation.
+    chart = await service.record_generated(
+        writer_context,
+        conversation_id=conversation.id,
+        request_id="req-3",
+        file_name="revenue.png",
+        mime_type="",
+        data=b"\x89PNG fake",
+        summary="Produced revenue.png",
+    )
+    assert chart["id"] != created["id"]
+    assert chart["mime_type"] == "image/png"
 
-    exported = await service.export(writer_context, artifact_id, format="pdf")
-    assert exported["exports"]["pdf"]["download_url"].endswith("/revisions/2/Q3-memo.pdf")
-    assert exported["revisions"][1]["exports"]["pdf"]["size_bytes"] == len(b"%PDF-1.4 rendered")
-    # Exporting again reuses the stored rendition instead of running the sandbox.
-    await service.export(writer_context, artifact_id, format="pdf")
-    assert [request.operation for request in sandbox.requests] == ["write", "replace", "export_pdf"]
+    with pytest.raises(ArtifactValidationError, match="empty"):
+        await service.record_generated(
+            writer_context,
+            conversation_id=conversation.id,
+            request_id="req-4",
+            file_name="empty.txt",
+            mime_type="text/plain",
+            data=b"",
+            summary="Produced empty.txt",
+        )
 
     detail = await service.get(writer_context, artifact_id)
     assert [revision["revision"] for revision in detail["revisions"]] == [1, 2]
-    assert detail["revisions"][0]["summary"] == "Created from the conversation"
-    assert detail["revisions"][1]["summary"] == "Changed the date"
     assert detail["conversation_id"] == str(conversation.id)
     first_content = await service.content(writer_context, artifact_id, revision=1)
     assert "2026-09-01" in first_content["content"]
+    # A binary revision is named, never decoded as text.
+    binary = await service.content(writer_context, UUID(chart["id"]))
+    assert binary["content"].startswith("(binary document: image/png")
 
     working = await service.conversation_artifacts(
         writer_context, conversation.id, content_characters=12
     )
-    assert [artifact.id for artifact in working] == [str(artifact_id)]
+    assert [artifact.file_name for artifact in working] == ["Q3-memo.md", "revenue.png"]
     assert working[0].revision == 2
     assert working[0].content_truncated is True
     assert working[0].content.startswith("# Q3 memo")
 
-    from_document = await service.create_from_document(
-        writer_context,
-        title=None,
-        source_document_id=source_document.id,
-        conversation_id=conversation.id,
-        request_id="req-3",
-    )
-    assert from_document["title"] == "NDA template"
-    assert from_document["source_document_id"] == str(source_document.id)
-    assert from_document["content"].startswith("# NDA")
-    assert sandbox.requests[-1].operation == "import"
-    assert sandbox.requests[-1].files[0].name == "nda-template.md"
+    # Rebuilding a workspace reads the current revision of each file back out.
+    files = await service.conversation_files(writer_context, conversation.id)
+    assert {(source.file_name, source.data) for source in files} == {
+        ("Q3-memo.md", b"# Q3 memo\n\nDate: 2026-09-06\n"),
+        ("revenue.png", b"\x89PNG fake"),
+    }
+
+    # Any readable document is a valid source to open into a workspace.
+    opened = await service.source_file(writer_context, source_document.id)
+    assert opened.title == "NDA template"
+    assert opened.file_name == "nda-template.md"
+    assert opened.data.startswith(b"# NDA")
+    # A document outside the caller's Collections is not a source they can
+    # open — and it is reported as missing, never as "exists but denied".
+    with pytest.raises(DocumentNotFoundError):
+        await service.source_file(reader_context, source_document.id)
 
     resolved = await service.resolve_access(
         AgentContext(user_id=str(writer.id), tenant_id=str(tenant.id), roles=[])
@@ -1299,8 +1286,8 @@ async def test_artifacts_keep_every_revision_under_the_owners_private_collection
     with pytest.raises(DocumentNotFoundError):
         await service.get(reader_context, artifact_id)
 
-    # Any Collection the caller can edit is a valid publish destination now —
-    # there is no "template library" flag to check.
+    # Publishing into the Knowledge Base is explicit and separately authorized;
+    # nothing above wrote a conversation file into a Collection on its own.
     published = await service.publish(writer_context, artifact_id, collection_id=library.id)
     assert published["collection_id"] == str(library.id)
     assert published["created"] is True
@@ -1336,177 +1323,4 @@ async def test_artifacts_keep_every_revision_under_the_owners_private_collection
                 select(AuditLog.action).where(AuditLog.resource_id == str(artifact_id))
             )
         )
-        assert {
-            "artifact.created",
-            "artifact.revised",
-            "artifact.exported",
-            "artifact.published",
-        } <= actions
-
-
-class ScriptedPdfFormSandbox:
-    """Return runner-shaped results for a fillable PDF, recording requests.
-
-    The real strategy decision and pypdf work are the runner suite's concern;
-    here only the service's handling of a binary artifact is under test.
-    """
-
-    ORIGINAL = b"%PDF-1.4 original form"
-    FILLED = b"%PDF-1.4 filled form"
-    CONTEXT_EMPTY = "# form.pdf — fillable PDF form\n- name: \"ho_ten\" | value: \"\"\n"
-    CONTEXT_FILLED = "# form.pdf — fillable PDF form\n- name: \"ho_ten\" | value: \"Tran A\"\n"
-
-    def __init__(self) -> None:
-        self.requests: list[SandboxRequest] = []
-
-    async def run(self, request: SandboxRequest) -> SandboxResult:
-        self.requests.append(request)
-        stem = Path(str(dict(request.arguments)["file_name"])).stem
-        if request.operation == "import":
-            stem = Path(str(dict(request.arguments)["target_file_name"])).stem
-            name, data, context = f"{stem}.pdf", self.ORIGINAL, self.CONTEXT_EMPTY
-            extra = {"field_count": 1}
-        elif request.operation == "fill_pdf":
-            assert request.files[0].data == self.ORIGINAL
-            name, data, context = f"{stem}.pdf", self.FILLED, self.CONTEXT_FILLED
-            extra = {"applied": len(dict(request.arguments)["fields"])}
-        else:
-            raise AssertionError(f"unexpected operation {request.operation}")
-        return SandboxResult(
-            operation=request.operation,
-            result={
-                "status": "ok",
-                "operation": request.operation,
-                "file_name": name,
-                "content_type": "application/pdf",
-                "artifact_kind": "pdf_form",
-                "context_file_name": f"{name}.context.md",
-                **extra,
-            },
-            files={name: data, f"{name}.context.md": context.encode("utf-8")},
-            duration_ms=1,
-        )
-
-
-@pytest.mark.asyncio
-async def test_pdf_form_artifacts_preserve_the_original_and_fill_fields(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """A fillable PDF source stays a PDF: field fills, no text rewrites.
-
-    The model sees the stored description, never PDF bytes decoded as text,
-    and export/publish carry the real mime type and file name.
-    """
-
-    storage = InMemoryObjectStorage()
-    sandbox = ScriptedPdfFormSandbox()
-    async with session_factory.begin() as session:
-        auth = IdentityStoreService(session)
-        tenant = await auth.create_tenant("pdfforms", "PDF forms")
-        owner = await auth.create_user("owner@pdf.example.com")
-        role = await auth.create_role(
-            tenant.id, "member", "Member", permission_codes=["knowledge.read", "access.manage"]
-        )
-        await auth.assign_membership(owner.id, tenant.id, role.id)
-        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
-        items = ItemService(session)
-        forms = await items.create_collection(
-            tenant_id=tenant.id, title="Forms", created_by_user_id=owner.id
-        )
-        await CollectionAccessService(session).grant(
-            forms.id, principal_type="user", principal_id=owner.id, role="editor", actor=actor
-        )
-        source = await items.create_document(
-            tenant_id=tenant.id,
-            parent_item_id=forms.id,
-            title="Leave request form",
-            document_type="pdf",
-            created_by_user_id=owner.id,
-            mime_type="application/pdf",
-            size_bytes=len(ScriptedPdfFormSandbox.ORIGINAL),
-            storage_key=f"tenants/{tenant.id}/items/leave-form/raw",
-            metadata={"file_name": "leave-form.pdf"},
-            status="ready",
-        )
-        conversation = Conversation(tenant_id=tenant.id, user_id=owner.id, title="Leave")
-        session.add(conversation)
-        await session.flush()
-    storage.objects[source.storage_key] = (
-        ScriptedPdfFormSandbox.ORIGINAL, "application/pdf"
-    )
-
-    uploads = StubUploads()
-    service = ArtifactService(
-        session_factory,
-        object_storage=lambda: storage,
-        sandbox=sandbox,
-        uploads=lambda: uploads,
-        max_content_bytes=1_000_000,
-        download_url_seconds=60,
-    )
-
-    created = await service.create_from_document(
-        actor,
-        title=None,
-        source_document_id=source.id,
-        conversation_id=conversation.id,
-        request_id="req-1",
-    )
-    artifact_id = UUID(created["id"])
-    first_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/1/Leave-request-form.pdf"
-    assert created["mime_type"] == "application/pdf"
-    assert created["file_name"] == "Leave-request-form.pdf"
-    # The artifact is the original PDF, and the model sees its description.
-    assert storage.objects[first_key] == (ScriptedPdfFormSandbox.ORIGINAL, "application/pdf")
-    assert storage.objects[f"{first_key}.context.md"][0].decode() == (
-        ScriptedPdfFormSandbox.CONTEXT_EMPTY
-    )
-    assert created["content"] == ScriptedPdfFormSandbox.CONTEXT_EMPTY
-
-    # Text edits do not apply to a fillable PDF; the message says what does.
-    with pytest.raises(ArtifactValidationError, match="fillable PDF"):
-        await service.edit(
-            actor,
-            artifact_id,
-            summary="Try a text edit",
-            edits=[{"find": "a", "replace": "b"}],
-            conversation_id=conversation.id,
-            request_id="req-2",
-        )
-
-    filled = await service.edit(
-        actor,
-        artifact_id,
-        summary="Filled the name",
-        fields={"ho_ten": "Tran A"},
-        conversation_id=conversation.id,
-        request_id="req-3",
-    )
-    second_key = f"tenants/{tenant.id}/items/{artifact_id}/revisions/2/Leave-request-form.pdf"
-    assert filled["revision"] == 2
-    assert filled["content"] == ScriptedPdfFormSandbox.CONTEXT_FILLED
-    assert storage.objects[second_key][0] == ScriptedPdfFormSandbox.FILLED
-    assert sandbox.requests[-1].operation == "fill_pdf"
-    assert dict(sandbox.requests[-1].arguments)["fields"] == {"ho_ten": "Tran A"}
-
-    # Context supply and previews use the description, never decoded PDF bytes.
-    working = await service.conversation_artifacts(
-        actor, conversation.id, content_characters=10_000
-    )
-    assert working[0].content == ScriptedPdfFormSandbox.CONTEXT_FILLED
-    preview = await service.content(actor, artifact_id)
-    assert preview["content"] == ScriptedPdfFormSandbox.CONTEXT_FILLED
-    assert preview["mime_type"] == "application/pdf"
-
-    # The revision already is a PDF: exporting registers it without a sandbox run.
-    exported = await service.export(actor, artifact_id, format="pdf")
-    assert exported["exports"]["pdf"]["download_url"].endswith(
-        "/revisions/2/Leave-request-form.pdf"
-    )
-    assert [request.operation for request in sandbox.requests] == ["import", "fill_pdf"]
-
-    published = await service.publish(actor, artifact_id, collection_id=forms.id)
-    assert published["created"] is True
-    assert uploads.calls[0]["content_type"] == "application/pdf"
-    assert uploads.calls[0]["file_name"].endswith(".pdf")
-    assert uploads.calls[0]["data"] == ScriptedPdfFormSandbox.FILLED
+        assert {"artifact.created", "artifact.revised", "artifact.published"} <= actions

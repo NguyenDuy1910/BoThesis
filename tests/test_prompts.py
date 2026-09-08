@@ -7,7 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from bothesis.agent.prompts.template_render import (
+from bothesis import (
     PromptRenderError,
     load_prompt,
     render_agent_base,
@@ -27,9 +27,7 @@ def test_prompt_set_contains_only_the_runtime_roles() -> None:
 
     assert prompt_names == {
         "agent_base",
-        "capability_base",
         "contextual_rag",
-        "conversation_compression",
         "retrieval_rerank",
     }
     assert "relevant conversation" in load_prompt("agent_base")
@@ -53,16 +51,6 @@ def test_agent_base_defines_lightweight_retrieval_and_grounding_guidance() -> No
     assert "Do not expose private chain-of-thought" in prompt
     assert "intent classification" not in prompt
     assert "final synthesis" not in prompt
-
-
-def test_specialized_prompts_stay_isolated_from_agent_loop_rules() -> None:
-    capability = render_prompt("capability_base")
-    compression = render_prompt("conversation_compression")
-
-    assert "conversational agent" in capability
-    assert "retrieval" not in capability
-    assert "Preserve user goals" in compression
-    assert "user-facing summary" in compression
 
 
 def test_contextual_rag_prompt_is_retrieval_specific_and_file_backed() -> None:

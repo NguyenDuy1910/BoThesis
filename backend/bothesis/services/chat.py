@@ -15,21 +15,13 @@ from bothesis.services import (
     AuthContext,
     require_tenant_permission,
 )
-from bothesis.services.artifact import ArtifactService, produced_artifact_ids
 from bothesis.services.collection_access import CollectionAccessService
 from bothesis.services.conversation import ConversationService
 
 KnowledgeMode = Literal["auto", "selected", "off"]
 HistoryTurn = tuple[Literal["user", "assistant"], str]
 
-# Retrieval tools follow the knowledge mode; document tools are always available
-# because a document can be written from the conversation alone.
 KNOWLEDGE_TOOL_NAMES: tuple[str, ...] = ("knowledge_search",)
-ARTIFACT_TOOL_NAMES: tuple[str, ...] = (
-    "artifact_create",
-    "artifact_edit",
-    "artifact_export",
-)
 
 
 class ChatService:
@@ -41,16 +33,10 @@ class ChatService:
         *,
         agent: Agent,
         conversations: ConversationService,
-        artifacts: ArtifactService,
-        artifact_context_characters: int = 20_000,
     ) -> None:
-        if artifact_context_characters < 1:
-            raise ValueError("artifact_context_characters must be at least one")
         self._sessions = session_factory
         self._agent = agent
         self._conversations = conversations
-        self._artifacts = artifacts
-        self._artifact_context_characters = artifact_context_characters
 
     async def stream_turn(
         self,
@@ -61,6 +47,7 @@ class ChatService:
         history: Sequence[HistoryTurn],
         knowledge_mode: KnowledgeMode,
         collection_item_ids: Sequence[UUID],
+        document_ids: Sequence[UUID] = (),
         is_disconnected: Callable[[], Awaitable[bool]],
     ) -> AsyncIterator[str]:
         """Yield serialized agent events for one authorized chat turn."""
@@ -74,16 +61,6 @@ class ChatService:
             collection_item_ids=collection_item_ids,
         )
         resolved_conversation_id = conversation_id or uuid4()
-        # A brand-new conversation has no working documents or references yet.
-        artifacts = (
-            await self._artifacts.conversation_artifacts(
-                access,
-                resolved_conversation_id,
-                content_characters=self._artifact_context_characters,
-            )
-            if conversation_id is not None
-            else ()
-        )
         document_references = (
             await self._conversations.referenced_documents(
                 resolved_conversation_id, access=access
@@ -102,15 +79,15 @@ class ChatService:
                 ConversationMessage(role=role, content=content)
                 for role, content in history
             ),
-            allowed_tool_names=(*knowledge_tools, *ARTIFACT_TOOL_NAMES),
+            allowed_tool_names=knowledge_tools,
             document_references=document_references,
-            artifacts=artifacts,
         )
+        attachments = tuple(dict.fromkeys(document_ids))
         await self._conversations.start_turn(
             resolved_conversation_id,
             access=access,
             content=message,
-            document_ids=(),
+            document_ids=attachments,
             request_id=context.request_id or "",
         )
         return self._event_stream(
@@ -133,7 +110,6 @@ class ChatService:
         stream = self._agent.run(message, context)
         final_answer: str | None = None
         referenced_document_ids: tuple[UUID, ...] = ()
-        artifact_ids: tuple[UUID, ...] = ()
         try:
             async for event in stream:
                 if await is_disconnected():
@@ -143,9 +119,6 @@ class ChatService:
                     if answer:
                         final_answer = answer
                         referenced_document_ids = referenced_item_ids(event.response)
-                        artifact_ids = produced_artifact_ids(
-                            event.response.output_annotations
-                        )
                 yield event.model_dump_json()
         finally:
             await stream.aclose()
@@ -156,7 +129,6 @@ class ChatService:
                 content=final_answer,
                 referenced_document_ids=referenced_document_ids,
                 request_id=context.request_id or "",
-                artifact_ids=artifact_ids,
             )
 
     async def _resolve_knowledge_scope(
@@ -203,7 +175,6 @@ def referenced_item_ids(response: Response) -> tuple[UUID, ...]:
 
 
 __all__ = [
-    "ARTIFACT_TOOL_NAMES",
     "KNOWLEDGE_TOOL_NAMES",
     "ChatService",
     "HistoryTurn",

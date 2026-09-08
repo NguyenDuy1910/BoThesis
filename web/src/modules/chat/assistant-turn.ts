@@ -17,6 +17,18 @@ export type AssistantTurnItem =
   | { kind: "reasoning"; id: string; text: string; state: "active" | "completed" };
 
 /**
+ * The provider-hosted tools, mapped to the activity name the UI speaks.
+ *
+ * These arrive as output items rather than function calls, because the model's
+ * provider runs them itself. The backend narrows each one to its type and
+ * status before it reaches here, so this is the whole vocabulary.
+ */
+const HOSTED_TOOL_ACTIVITIES: Record<string, string> = {
+  code_interpreter_call: "code_interpreter",
+  shell_call: "shell",
+};
+
+/**
  * Presentation data derived from materialized output items. The reducer owns
  * ordering and state; this function only chooses how each semantic item reads.
  */
@@ -55,6 +67,20 @@ export function assistantTurnItems(turn: TurnState | undefined): AssistantTurnIt
       continue;
     }
 
+    const hosted = HOSTED_TOOL_ACTIVITIES[item.type];
+    if (hosted) {
+      items.push({
+        kind: "tool",
+        id,
+        name: hosted,
+        // A hosted call completes inside its own response, so its item status
+        // is the whole truth about it — unlike a function call, which the
+        // agent executes after the response that requested it settled.
+        state: hostedToolState(turn, item.status, ordered.responseIndex, newestResponseIndex),
+      });
+      continue;
+    }
+
     if (item.type === "reasoning" && Array.isArray(item.summary)) {
       const text = item.summary
         .filter((part): part is { type: "summary_text"; text: string } => (
@@ -71,6 +97,19 @@ export function assistantTurnItems(turn: TurnState | undefined): AssistantTurnIt
     }
   }
   return items;
+}
+
+function hostedToolState(
+  turn: TurnState,
+  status: string | undefined,
+  responseIndex: number,
+  newestResponseIndex: number,
+): "active" | "completed" | "error" {
+  if (status === "completed") return "completed";
+  if (status === "failed" || status === "incomplete") return "error";
+  if (turn.status === "failed" && responseIndex === newestResponseIndex) return "error";
+  if (turn.status === "streaming") return "active";
+  return "completed";
 }
 
 function toolState(

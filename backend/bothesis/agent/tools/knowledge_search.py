@@ -8,8 +8,8 @@ from dataclasses import replace
 from time import perf_counter
 from typing import Any
 
-from bothesis.agent.models import ToolContext, ToolOutput
-from bothesis.agent.tools import Tool, ToolDefinition
+from bothesis.agent.models import ToolOutput
+from bothesis.agent.tools import ToolExecutor, ToolInvocation, ToolSpec
 from bothesis.knowledge import (
     ContextBuilder,
     Evidence,
@@ -24,7 +24,7 @@ _TIMEOUT_ERROR = "Knowledge search timed out. Please try again."
 _FAILURE_ERROR = "Knowledge search is temporarily unavailable. Please try again."
 
 
-class KnowledgeSearch(Tool):
+class KnowledgeSearch(ToolExecutor):
     """Retrieve bounded evidence that is visible to the authenticated user."""
 
     _MAX_QUERY_CHARACTERS = 512
@@ -68,12 +68,11 @@ class KnowledgeSearch(Tool):
         # reads it on every model turn, tool call, and text-payload check.
         self._definition = self._build_definition()
 
-    @property
-    def definition(self) -> ToolDefinition:
+    def spec(self) -> ToolSpec:
         return self._definition
 
-    def _build_definition(self) -> ToolDefinition:
-        return ToolDefinition(
+    def _build_definition(self) -> ToolSpec:
+        return ToolSpec(
             name="knowledge_search",
             description=(
                 "Search access-permitted enterprise knowledge base for source-grounded "
@@ -83,11 +82,9 @@ class KnowledgeSearch(Tool):
                 "specific queries with exact entity names, identifiers, or dates. If "
                 "the query is too vague or generic, ask the user for clarification "
                 "BEFORE using this tool. Results include a source reference to cite "
-                "and a Document ID; pass a Document ID to artifact_create as "
-                "source_document_id to start an editable copy of that exact document "
-                "(for example, when the user wants to fill in a form or template). If "
-                "no results are found, explicitly tell the user that information was "
-                "not found in the knowledge base - never fabricate an answer."
+                "and a Document ID for lineage. If no results are found, explicitly "
+                "tell the user that information was not found in the knowledge base "
+                "- never fabricate an answer."
             ),
             input_schema={
                 "type": "object",
@@ -119,11 +116,9 @@ class KnowledgeSearch(Tool):
             activity_category="retrieval",
         )
 
-    async def execute(
-        self,
-        arguments: dict[str, Any],
-        ctx: ToolContext,
-    ) -> ToolOutput:
+    async def handle(self, invocation: ToolInvocation) -> ToolOutput:
+        arguments = invocation.payload.arguments
+        ctx = invocation
         queries, validation_error = self._validated_queries(arguments)
         if validation_error is not None:
             return ToolOutput(
@@ -179,7 +174,7 @@ class KnowledgeSearch(Tool):
     async def _search_all(
         self,
         queries: list[str],
-        ctx: ToolContext,
+        ctx: ToolInvocation,
     ) -> list[tuple[list[Evidence], str | None]]:
         """Run every query concurrently under one shared wall-clock budget."""
 
@@ -198,7 +193,7 @@ class KnowledgeSearch(Tool):
     def _merged_evidence(
         self,
         results: list[tuple[list[Evidence], str | None]],
-        ctx: ToolContext,
+        ctx: ToolInvocation,
     ) -> tuple[list[Evidence], list[str]]:
         """Collapse per-query results into one deduplicated, citable ranking."""
 
@@ -223,7 +218,7 @@ class KnowledgeSearch(Tool):
     async def _search_query(
         self,
         query: str,
-        ctx: ToolContext,
+        ctx: ToolInvocation,
         deadline: float,
     ) -> tuple[list[Evidence], str | None]:
         started_at = perf_counter()

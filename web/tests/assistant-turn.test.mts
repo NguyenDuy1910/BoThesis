@@ -75,6 +75,32 @@ test("keeps the newest function call active while its enclosing Turn continues",
   }]);
 });
 
+test("hosted execution calls read as their own semantic activity", () => {
+  const turn: TurnState = {
+    id: "turn-1",
+    status: "streaming",
+    responseOrder: ["response-1"],
+    responses: {
+      "response-1": {
+        id: "response-1", status: "in_progress", itemOrder: ["run-1", "run-2"],
+        items: {
+          // A hosted call completes inside its own response, so a finished one
+          // reads as done even while the turn is still streaming.
+          "run-1": {
+            type: "code_interpreter_call", id: "run-1", status: "completed",
+          },
+          "run-2": { type: "shell_call", id: "run-2", status: "in_progress" },
+        },
+      },
+    },
+  };
+
+  assert.deepEqual(assistantTurnItems(turn), [
+    { kind: "tool", id: "run-1", name: "code_interpreter", state: "completed" },
+    { kind: "tool", id: "run-2", name: "shell", state: "active" },
+  ]);
+});
+
 test("renders provider reasoning summaries as a collapsed semantic activity", () => {
   const turn = turnWithFinalMessage();
   turn.responses["response-1"]!.itemOrder.unshift("reasoning-1");

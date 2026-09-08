@@ -77,13 +77,14 @@ export interface CitationSource {
 export const DOCUMENT_CITATION_TYPE = "bothesis:document_citation";
 
 /**
- * The BoThesis artifact annotation type: a document the turn created or
- * revised, attached to the answer that presents it. Zero-width at the end of
- * the text, the way a provider attaches a sandbox-generated file to a message.
+ * The BoThesis artifact annotation type: a file the turn produced, attached to
+ * the answer that presents it. Zero-width at the end of the text, and the
+ * replacement for the provider's own `container_file_citation`, which the
+ * backend consumes so no container or provider file id reaches a client.
  */
 export const ARTIFACT_ANNOTATION_TYPE = "bothesis:artifact";
 
-/** The description of one artifact revision; never its content. */
+/** The description of one produced file revision; never its content. */
 export interface ArtifactReference {
   id: string;
   title: string;
@@ -92,7 +93,6 @@ export interface ArtifactReference {
   revision: number;
   size_bytes: number;
   updated_at: string;
-  exports?: string[];
 }
 
 /**

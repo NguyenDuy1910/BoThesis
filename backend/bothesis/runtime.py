@@ -11,12 +11,10 @@ from typing import Any
 
 from config import AppConfig, get_config
 
-from bothesis.agent import Agent, AgentConfig
+from bothesis.agent import Agent, SessionConfiguration
 from bothesis.agent.tools import ToolRegistry
-from bothesis.agent.tools.artifact_create import ArtifactCreate
-from bothesis.agent.tools.artifact_edit import ArtifactEdit
-from bothesis.agent.tools.artifact_export import ArtifactExport
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
+from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.connector.file import FileProcessor
 from bothesis.db.engine import LazySessionFactory, SessionFactory
@@ -24,7 +22,6 @@ from bothesis.document_index import ItemIndex, SemanticContextualizer
 from bothesis.health import HealthService, HealthSettings
 from bothesis.knowledge import ItemKnowledgeRetriever, SemanticReranker
 from bothesis.observability import create_langfuse_tracing
-from bothesis.sandbox import DockerSandboxExecutor, SandboxExecutor
 from bothesis.services.admin_console import AdminConsoleService
 from bothesis.services.artifact import ArtifactService
 from bothesis.services.chat import ChatService
@@ -55,11 +52,11 @@ class AppRuntime:
         self._ingestion: ItemIngestionService | None = None
         self._uploads: DocumentUploadService | None = None
         self._conversations: ConversationService | None = None
-        self._sandbox: SandboxExecutor | None = None
         self._artifacts: ArtifactService | None = None
         self._agent: Agent | None = None
         self._retriever: ItemKnowledgeRetriever | None = None
         self._model_transport: OpenRouterTransport | None = None
+        self._agent_transport: OpenAITransport | None = None
         self._contextualization_transport: OpenRouterTransport | None = None
 
     @property
@@ -73,8 +70,6 @@ class AppRuntime:
             self.sessions(),
             agent=self.agent(),
             conversations=self.conversation_service(),
-            artifacts=self.artifact_service(),
-            artifact_context_characters=self._config.artifact.context_characters,
         )
 
     def knowledge_query_service(self) -> KnowledgeQueryService:
@@ -153,19 +148,6 @@ class AppRuntime:
             self._conversations = ConversationService(self.sessions())
         return self._conversations
 
-    def sandbox_executor(self) -> SandboxExecutor:
-        if self._sandbox is None:
-            sandbox = self._config.sandbox
-            self._sandbox = DockerSandboxExecutor(
-                image=sandbox.image,
-                timeout_seconds=sandbox.timeout_seconds,
-                memory_bytes=sandbox.memory_bytes,
-                cpu_count=sandbox.cpu_count,
-                pids_limit=sandbox.pids_limit,
-                max_output_bytes=sandbox.max_output_bytes,
-            )
-        return self._sandbox
-
     def artifact_service(self) -> ArtifactService:
         if self._artifacts is None:
             artifact = self._config.artifact
@@ -174,7 +156,6 @@ class AppRuntime:
             self._artifacts = ArtifactService(
                 self.sessions(),
                 object_storage=self.object_storage,
-                sandbox=self.sandbox_executor(),
                 uploads=self.upload_service,
                 max_content_bytes=artifact.max_content_bytes,
                 download_url_seconds=artifact.download_url_seconds,
@@ -255,11 +236,32 @@ class AppRuntime:
         return self._uploads
 
     def model_transport(self) -> OpenRouterTransport:
+        """The transport the retrieval-side models (reranking) run on."""
+
         if self._model_transport is None:
             self._model_transport = OpenRouterTransport(
                 base_url=self._config.model.openrouter_base_url
             )
         return self._model_transport
+
+    def agent_transport(self) -> OpenAITransport:
+        """The transport the conversation agent runs on.
+
+        The agent speaks OpenAI directly because its execution capabilities —
+        Code Interpreter, Shell, and the containers they share — are native
+        OpenAI primitives with no provider-neutral equivalent. Retrieval-side
+        models keep their own transport above.
+        """
+
+        if self._agent_transport is None:
+            model = self._config.model
+            self._agent_transport = OpenAITransport(
+                api_key=model.openai_api_key,
+                base_url=model.openai_base_url,
+                model=model.chat_model,
+                embedding_model=model.embedding_model,
+            )
+        return self._agent_transport
 
     def knowledge_retriever(self) -> ItemKnowledgeRetriever:
         if self._retriever is None:
@@ -288,7 +290,6 @@ class AppRuntime:
                 self._config.observability.langfuse_public_key,
                 self._config.observability.langfuse_secret_key,
             )
-            artifact = self._config.artifact
             registry = ToolRegistry()
             registry.register(
                 KnowledgeSearch(
@@ -298,25 +299,10 @@ class AppRuntime:
                     tracing=tracing,
                 )
             )
-            registry.register(
-                ArtifactCreate(
-                    self.artifact_service(),
-                    max_content_characters=artifact.max_content_bytes,
-                    max_result_characters=artifact.result_characters,
-                )
-            )
-            registry.register(
-                ArtifactEdit(
-                    self.artifact_service(),
-                    max_content_characters=artifact.max_content_bytes,
-                    max_result_characters=artifact.result_characters,
-                )
-            )
-            registry.register(ArtifactExport(self.artifact_service()))
             self._agent = Agent(
-                model=self.model_transport(),
+                model=self.agent_transport(),
                 tools=registry,
-                config=AgentConfig(
+                configuration=SessionConfiguration(
                     max_model_turns=agent.max_model_turns,
                     max_tool_rounds=agent.max_tool_rounds,
                     max_tool_calls=agent.max_tool_calls,
@@ -337,6 +323,7 @@ class AppRuntime:
         for transport in (
             self._contextualization_transport,
             self._model_transport,
+            self._agent_transport,
         ):
             close = getattr(transport, "aclose", None)
             if close is not None:

@@ -2,7 +2,7 @@
 
 The output is a plain tuple of canonical OpenResponses Items plus the base
 instructions, which is exactly what a
-:class:`~bothesis.agent.protocol.ResponseRequest` carries. No provider wire
+:class:`~bothesis.agent.protocol.Prompt` carries. No provider wire
 format is produced here; that belongs to the transport adapters.
 """
 
@@ -13,16 +13,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from xml.sax.saxutils import escape
 
-from bothesis.agent import AgentConfig, ConversationWindow, PreparedConversation
+from bothesis import render_agent_base
+from bothesis.agent import SessionConfiguration, ConversationWindow, PreparedConversation
 from bothesis.agent.models import (
     AgentContext,
-    ConversationArtifact,
     ConversationDocument,
     ConversationDocumentReference,
     ConversationMessage,
     Evidence,
 )
-from bothesis.agent.prompts.template_render import render_agent_base
 from bothesis.agent.protocol import (
     ContentPart,
     InputFile,
@@ -34,11 +33,13 @@ from bothesis.agent.protocol import (
 )
 
 
-class ConversationMemory:
-    """Prepare a bounded, injection-safe conversation for one model run."""
+class ContextManager:
+    """Own the bounded canonical model history for one active turn."""
 
-    def __init__(self, *, config: AgentConfig) -> None:
-        self._config = config
+    def __init__(self, *, configuration: SessionConfiguration) -> None:
+        self._config = configuration
+        self._items: tuple[Item, ...] = ()
+        self._instructions: str = ""
 
     def window(
         self,
@@ -80,7 +81,7 @@ class ConversationMemory:
         ]
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
-    async def prepare(
+    async def start_turn(
         self,
         user_message: str,
         ctx: AgentContext,
@@ -96,8 +97,6 @@ class ConversationMemory:
                 f"{instructions}\n\n"
                 f"{self._document_reference_system_context(ctx.document_references)}"
             )
-        if ctx.artifacts:
-            instructions = f"{instructions}\n\n{self._artifact_system_context(ctx.artifacts)}"
 
         items: list[Item] = [
             MessageItem(
@@ -113,11 +112,27 @@ class ConversationMemory:
                 role="user",
                 content=(
                     *self._document_user_content(user_message, ctx.documents),
-                    *self._artifact_user_content(ctx.artifacts),
                 ),
             )
         )
-        return PreparedConversation(items=tuple(items), instructions=instructions)
+        prepared = PreparedConversation(items=tuple(items), instructions=instructions)
+        self._items = prepared.items
+        self._instructions = prepared.instructions
+        return prepared
+
+    def record(self, items: Sequence[Item]) -> None:
+        """Append canonical model-visible items, never frontend events."""
+
+        self._items = (*self._items, *items)
+
+    def for_prompt(self) -> tuple[Item, ...]:
+        """Return the canonical history for the next sampling request."""
+
+        return self._items
+
+    @property
+    def instructions(self) -> str:
+        return self._instructions
 
     @staticmethod
     def _document_reference_system_context(
@@ -125,7 +140,7 @@ class ConversationMemory:
     ) -> str:
         lines = [
             "<conversation_document_references>",
-            "<purpose>Documents referenced earlier in this conversation, already access-checked. When the user refers to one of them (\"that form\", \"the policy we discussed\"), use its Document ID directly — for example as artifact_create's source_document_id — instead of searching for it again. If the reference is ambiguous, ask which document the user means.</purpose>",
+            "<purpose>Documents referenced earlier in this conversation, already access-checked. Use their identities only to resolve an unambiguous reference such as \"that policy\". If the reference is ambiguous, ask which document the user means.</purpose>",
             "<grounding>Only the identities are listed; their content is not included. Enterprise facts still come from knowledge_search results or content supplied in this conversation.</grounding>",
             "<documents>",
         ]
@@ -141,58 +156,6 @@ class ConversationMemory:
         lines.append("</documents>")
         lines.append("</conversation_document_references>")
         return "\n".join(lines)
-
-    @staticmethod
-    def _artifact_system_context(artifacts: Sequence[ConversationArtifact]) -> str:
-        lines = [
-            "<conversation_artifact_policy>",
-            "<working_documents>The following artifacts are the documents being worked on in this conversation. A request to change, extend, shorten, or export \"the document\" refers to the most recent one unless the user names another.</working_documents>",
-            "<edit_rule>Revise them with artifact_edit using the same artifact_id so the user keeps one document with a revision history; never create a second artifact for a follow-up change. Their current content is supplied with the user message.</edit_rule>",
-            "<artifacts>",
-        ]
-        for artifact in artifacts:
-            lines.append("<artifact>")
-            lines.append(f"<artifact_id>{escape(artifact.id)}</artifact_id>")
-            lines.append(f"<title>{escape(artifact.title)}</title>")
-            lines.append(f"<revision>{artifact.revision}</revision>")
-            lines.append(f"<file_name>{escape(artifact.file_name)}</file_name>")
-            if artifact.source_document_id:
-                # The knowledge document this working copy was created from.
-                lines.append(
-                    "<source_document_id>"
-                    f"{escape(artifact.source_document_id)}"
-                    "</source_document_id>"
-                )
-            lines.append("</artifact>")
-        lines.append("</artifacts>")
-        lines.append("</conversation_artifact_policy>")
-        return "\n".join(lines)
-
-    @staticmethod
-    def _artifact_user_content(
-        artifacts: Sequence[ConversationArtifact],
-    ) -> tuple[ContentPart, ...]:
-        content: list[ContentPart] = []
-        for artifact in artifacts:
-            if artifact.content is None:
-                continue
-            truncated = (
-                "<truncated>true</truncated>\n" if artifact.content_truncated else ""
-            )
-            content.append(
-                InputText(
-                    text=(
-                        "<conversation_artifact>\n"
-                        f"<artifact_id>{escape(artifact.id)}</artifact_id>\n"
-                        f"<title>{escape(artifact.title)}</title>\n"
-                        f"<revision>{artifact.revision}</revision>\n"
-                        f"{truncated}"
-                        f"<content>{escape(artifact.content)}</content>\n"
-                        "</conversation_artifact>"
-                    )
-                )
-            )
-        return tuple(content)
 
     @staticmethod
     def _document_system_context(
@@ -326,4 +289,4 @@ def _retrieved_evidence_context(evidence: Sequence[Evidence]) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["ConversationMemory"]
+__all__ = ["ContextManager"]

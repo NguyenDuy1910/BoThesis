@@ -5,11 +5,11 @@ import {
   Check,
   ChevronRight,
   Database,
-  FileDown,
-  FilePenLine,
-  FilePlus2,
+  FileSearch,
   LoaderCircle,
   Search,
+  Sparkles,
+  Terminal,
   Wrench,
 } from "lucide-react";
 import { memo, useMemo } from "react";
@@ -148,28 +148,30 @@ function toolPresentation(
       icon: Database,
     };
   }
-  if (name === "artifact_create") {
+  if (name === "open_document") {
     return {
       label: state === "error"
-        ? "Document could not be created"
-        : completed ? "Created document" : "Creating document…",
-      icon: FilePlus2,
+        ? "Document could not be opened"
+        : completed ? "Read the document" : "Reading the document…",
+      icon: FileSearch,
     };
   }
-  if (name === "artifact_edit") {
+  // The native execution tools stay semantic: a user is told what is being
+  // done to their files, never which runtime did it.
+  if (name === "code_interpreter") {
     return {
       label: state === "error"
-        ? "Document could not be updated"
-        : completed ? "Updated document" : "Updating document…",
-      icon: FilePenLine,
+        ? "Preparing the file could not complete"
+        : completed ? "Prepared the file" : "Preparing the file…",
+      icon: Sparkles,
     };
   }
-  if (name === "artifact_export") {
+  if (name === "shell") {
     return {
       label: state === "error"
-        ? "Document could not be exported"
-        : completed ? "Exported document" : "Exporting document…",
-      icon: FileDown,
+        ? "Converting the file could not complete"
+        : completed ? "Converted the file" : "Converting the file…",
+      icon: Terminal,
     };
   }
   if (state === "error") return { label: "Tool could not complete", icon: Wrench };

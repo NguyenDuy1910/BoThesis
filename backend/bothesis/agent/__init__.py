@@ -1,32 +1,18 @@
-"""Public contracts and runtime entry points for the BoThesis agent.
-
-The package has one execution path. :class:`Agent` validates a request and
-delegates to :class:`~bothesis.agent.conversation_loop.ConversationLoop`, which
-runs one user turn as a chain of OpenResponses responses, alternating between
-function calls and final answer generation.
-
-Layering, top to bottom:
-
-``protocol``
-    the OpenResponses data contracts, and nothing else;
-``transports``
-    provider communication plus normalization onto those contracts;
-``reducer``
-    reconstruction of a response from its event stream;
-``conversation_loop``
-    orchestration of one turn;
-``tools``
-    tool execution.
-"""
+"""Provider-neutral contracts for BoThesis's single-agent turn runtime."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
-from bothesis.agent.models import ConversationMessage
+from bothesis.agent.models import AgentContext, CitationReferences, ConversationMessage
 from bothesis.agent.protocol import Item
+
+if TYPE_CHECKING:
+    from bothesis.agent.tools import ToolRouter
 
 
 class AgentExecutionError(RuntimeError):
@@ -34,8 +20,8 @@ class AgentExecutionError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class AgentConfig:
-    """Typed circuit breakers and context limits for one agent runtime."""
+class SessionConfiguration:
+    """Static configuration shared by every turn in one runtime session."""
 
     model: str | None = None
     temperature: float | None = None
@@ -115,6 +101,63 @@ class PreparedConversation:
     instructions: str
 
 
+@dataclass(frozen=True, slots=True)
+class SessionServices:
+    """Session-scoped dependencies; these never become model context."""
+
+    model: object
+    tool_registry: object
+    tracing: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedStepSettings:
+    """Exact model and sampling settings used by one sampling request."""
+
+    model: str | None
+    temperature: float | None
+    max_output_tokens: int | None
+    parallel_tool_calls: bool
+    provider_options: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class TurnEnvironmentSnapshot:
+    """Stable request environment captured for a sampling step."""
+
+    agent_context: AgentContext
+
+
+@dataclass(slots=True)
+class TurnContext:
+    """Mutable accounting and policy state for one user-initiated turn."""
+
+    user_input: str
+    environment: TurnEnvironmentSnapshot
+    initial_settings: ResolvedStepSettings
+    current_settings: ResolvedStepSettings
+    id: str = field(default_factory=lambda: f"turn_{uuid4().hex}")
+    model_iteration: int = 0
+    tool_round: int = 0
+    tool_call_count: int = 0
+    model_duration_ms: int = 0
+    tool_duration_ms: int = 0
+    evidence: dict[str, Any] = field(default_factory=dict)
+    used_evidence_ids: set[str] = field(default_factory=set)
+    executed_tool_signatures: set[str] = field(default_factory=set)
+    references: CitationReferences = field(default_factory=CitationReferences)
+
+
+@dataclass(frozen=True, slots=True)
+class StepContext:
+    """Immutable snapshot used by exactly one model sampling request."""
+
+    turn: TurnContext
+    settings: ResolvedStepSettings
+    environment: TurnEnvironmentSnapshot
+    tool_router: "ToolRouter"
+
+
 def duration_ms(started_at: float) -> int:
     return round((perf_counter() - started_at) * 1_000)
 
@@ -130,17 +173,22 @@ def _message_payload(
 
 
 # Import primary runtime classes only after the shared package contracts exist.
+from bothesis.agent.context_manager import ContextManager  # noqa: E402
+from bothesis.agent.session import Session  # noqa: E402
 from bothesis.agent.agent import Agent  # noqa: E402
-from bothesis.agent.conversation_compression import ConversationMemory  # noqa: E402
-from bothesis.agent.conversation_loop import ConversationLoop  # noqa: E402
 
 __all__ = [
     "Agent",
-    "AgentConfig",
     "AgentExecutionError",
-    "ConversationLoop",
-    "ConversationMemory",
     "ConversationWindow",
+    "ContextManager",
     "PreparedConversation",
+    "ResolvedStepSettings",
+    "Session",
+    "SessionConfiguration",
+    "SessionServices",
+    "StepContext",
+    "TurnContext",
+    "TurnEnvironmentSnapshot",
     "duration_ms",
 ]

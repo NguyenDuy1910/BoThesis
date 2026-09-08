@@ -24,10 +24,9 @@ import api.app as api_app
 import api.deps as api_deps
 import bothesis.runtime as runtime_module
 import bothesis.services.workspace_documents as workspace_documents_module
-from bothesis.agent import Agent, AgentConfig
+from bothesis.agent import Agent, SessionConfiguration
 from bothesis.agent.models import AgentContext
 from bothesis.agent.tools import ToolRegistry
-from bothesis.agent.tools.artifact_create import ArtifactCreate
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
 from bothesis.connector.protocol import (
     CitationInfo,
@@ -89,14 +88,15 @@ class ScriptedTransport(native.ScriptedResponsesTransport):
         return [request["input"] for request in self.requests]
 
 
-def test_default_agent_composes_the_openrouter_transport(
+def test_default_agent_composes_the_openai_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from bothesis.agent.transports import openrouter as openrouter_transport
+    """The agent speaks OpenAI: its execution tools are native OpenAI ones."""
 
-    class TestOpenRouterTransport:
-        DEFAULT_BASE_URL = "https://openrouter.test/v1"
-        provider = "openrouter"
+    from bothesis.agent.transports import openai as openai_transport
+
+    class TestOpenAITransport:
+        provider = "openai"
         model = "gpt-test"
 
         def __init__(self, **_: Any) -> None:
@@ -110,18 +110,25 @@ def test_default_agent_composes_the_openrouter_transport(
             if False:
                 yield None
 
-    monkeypatch.setattr(openrouter_transport, "OpenRouterTransport", TestOpenRouterTransport)
+    class TestOpenRouterTransport:
+        DEFAULT_BASE_URL = "https://openrouter.test/v1"
+        provider = "openrouter"
+        model = "gpt-test"
+
+        def __init__(self, **_: Any) -> None:
+            pass
+
+    monkeypatch.setattr(openai_transport, "OpenAITransport", TestOpenAITransport)
+    monkeypatch.setattr(runtime_module, "OpenAITransport", TestOpenAITransport)
     monkeypatch.setattr(runtime_module, "OpenRouterTransport", TestOpenRouterTransport)
     monkeypatch.setattr(api_deps.get_runtime(), "_agent", None)
+    monkeypatch.setattr(api_deps.get_runtime(), "_agent_transport", None)
 
     agent = api_deps.get_runtime().agent()
 
-    assert isinstance(agent.model, TestOpenRouterTransport)
+    assert isinstance(agent.model, TestOpenAITransport)
     assert agent.tools.has("knowledge_search")
-    # Document tools ride the same registry; none of them touches Docker,
-    # storage, or the database until a call is actually executed.
-    for name in ("artifact_create", "artifact_edit", "artifact_export"):
-        assert agent.tools.has(name), name
+    assert [spec.name for spec in agent.tools.specs()] == ["knowledge_search"]
 
 
 class PermissionDeniedTransport:
@@ -557,7 +564,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
     agent = Agent(
         transport,
         registry,
-        config=AgentConfig(
+        configuration=SessionConfiguration(
             max_model_turns=3,
             max_tool_rounds=2,
             recent_history_messages=2,
@@ -697,8 +704,8 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
     captured_context: list[str] = []
 
     class ContextCapturingSearch(KnowledgeSearch):
-        async def execute(self, arguments, ctx):  # type: ignore[no-untyped-def]
-            output = await super().execute(arguments, ctx)
+        async def handle(self, invocation):  # type: ignore[no-untyped-def]
+            output = await super().handle(invocation)
             captured_context.append(output.content)
             return output
 
@@ -724,7 +731,7 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
     agent = Agent(
         transport,
         registry,
-        config=AgentConfig(max_model_turns=3, max_tool_rounds=2),
+        configuration=SessionConfiguration(max_model_turns=3, max_tool_rounds=2),
     )
     monkeypatch.setattr(api_deps.get_runtime(), "_agent", agent)
     user_id, tenant_id = _install_access(monkeypatch)
@@ -749,7 +756,7 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
     ]
 
     # The model context offers the citation reference and the canonical
-    # Document ID (provenance for artifact_create), but withholds the raw
+    # Document ID for provenance, but withholds the raw
     # chunk identifier — only the compact reference may ever be cited.
     assert f"Source reference: {reference}" in captured_context[0]
     assert f"Document ID: {chunk.item_id}" in captured_context[0]
@@ -852,7 +859,7 @@ def test_chat_api_places_repeated_and_multiple_citations_inline(monkeypatch) -> 
         Agent(
             transport,
             registry,
-            config=AgentConfig(max_model_turns=3, max_tool_rounds=2),
+            configuration=SessionConfiguration(max_model_turns=3, max_tool_rounds=2),
         ),
     )
     user_id, tenant_id = _install_access(monkeypatch)
@@ -1060,12 +1067,15 @@ async def test_a_reasoning_item_replays_as_a_canonical_input_item() -> None:
     assert "private raw reasoning" not in json.dumps(replayed)
 
 
-# Incremental delta forwarding, citation-boundary buffering and literal-bracket
-# handling are covered by tests/bothesis/agent/test_conversation_loop.py, which
-# exercises the same paths without going through the HTTP layer.
+# Incremental delta forwarding, citation-boundary buffering, and literal-bracket
+# handling are covered by tests/bothesis/agent/test_turn_runtime.py.
 
 
-def test_chat_api_rejects_unbounded_history() -> None:
+def test_chat_api_rejects_unbounded_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Request validation is the whole subject: no runtime is composed.
+    monkeypatch.setitem(
+        api_app.app.dependency_overrides, api_deps.get_chat_service, lambda: None
+    )
     with TestClient(api_app.app) as client:
         response = client.post(
             "/api/v1/agent/chat",
@@ -1083,7 +1093,11 @@ def test_chat_api_rejects_unbounded_history() -> None:
     assert response.status_code == 422
 
 
-def test_chat_api_rejects_history_message_over_context_budget() -> None:
+def test_chat_api_rejects_history_message_over_context_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Request validation is the whole subject: no runtime is composed.
+    monkeypatch.setitem(
+        api_app.app.dependency_overrides, api_deps.get_chat_service, lambda: None
+    )
     with TestClient(api_app.app) as client:
         response = client.post(
             "/api/v1/agent/chat",
@@ -1110,144 +1124,6 @@ def test_chat_request_requires_a_bounded_explicit_collection_selection() -> None
     )
 
     assert request.collection_item_ids == [UUID(int=12), UUID(int=14)]
-
-
-class StubArtifactService:
-    """Stand in for ArtifactService: no sandbox, storage, or database."""
-
-    def __init__(self, artifact_id: UUID) -> None:
-        self.artifact_id = artifact_id
-        self.created: list[dict[str, Any]] = []
-
-    async def resolve_access(self, scope: Any) -> AuthContext:
-        return AuthContext(
-            user_id=UUID(scope.user_id),
-            email="person@example.test",
-            display_name="Person",
-            tenant_id=UUID(scope.tenant_id),
-            role_id=None,
-            role_code="analyst",
-            permission_codes=("knowledge.read",),
-            group_ids=(),
-        )
-
-    async def create_from_content(self, access: AuthContext, **values: Any) -> dict[str, Any]:
-        self.created.append(values)
-        return {
-            "id": str(self.artifact_id),
-            "title": values["title"],
-            "file_name": "memo.md",
-            "mime_type": "text/markdown",
-            "size_bytes": 24,
-            "revision": 1,
-            "revision_count": 1,
-            "conversation_id": str(values["conversation_id"]),
-            "source_document_id": None,
-            "created_at": "2026-09-06T00:00:00+00:00",
-            "updated_at": "2026-09-06T00:00:00+00:00",
-            "download_url": None,
-            "exports": {},
-            "revisions": [],
-        }
-
-
-class ArtifactTurnTransport(native.ScriptedResponsesTransport):
-    """Create a document, then present it."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            [
-                [
-                    *native.created("resp_a"),
-                    *native.message(
-                        item_id="msg_1",
-                        output_index=0,
-                        deltas=["Drafting the memo now."],
-                        phase="commentary",
-                    ),
-                    *native.function_call(
-                        item_id="fc_1",
-                        output_index=1,
-                        call_id="create-1",
-                        name="artifact_create",
-                        argument_deltas=[
-                            '{"title":"Q3 memo","source_document_id":null,'
-                            '"content":"# Q3 memo\\n\\nDraft."}'
-                        ],
-                    ),
-                    *native.completed("resp_a"),
-                ],
-                [
-                    *native.created("resp_b"),
-                    *native.message(
-                        item_id="msg_2",
-                        output_index=0,
-                        deltas=["The memo is ready."],
-                        phase="final_answer",
-                    ),
-                    *native.completed("resp_b"),
-                ],
-            ]
-        )
-
-
-def test_chat_api_presents_a_created_artifact_on_the_answer(monkeypatch) -> None:
-    artifact_id = uuid4()
-    artifacts = StubArtifactService(artifact_id)
-    registry = ToolRegistry()
-    registry.register(ArtifactCreate(artifacts))  # type: ignore[arg-type]
-    agent = Agent(
-        ArtifactTurnTransport(),
-        registry,
-        config=AgentConfig(max_model_turns=3, max_tool_rounds=2),
-    )
-    monkeypatch.setattr(api_deps.get_runtime(), "_agent", agent)
-    user_id, tenant_id = _install_access(monkeypatch)
-    conversation_id = uuid4()
-
-    with TestClient(api_app.app) as client:
-        response = client.post(
-            "/api/v1/agent/chat",
-            json={
-                "message": "Draft a Q3 memo",
-                "tenant_id": str(tenant_id),
-                "user_id": str(user_id),
-                "conversation_id": str(conversation_id),
-                "history": [],
-                "knowledge_mode": "off",
-                "collection_item_ids": [],
-            },
-        )
-
-    assert response.status_code == 200, response.text
-    events = [
-        json.loads(line.removeprefix("data: "))
-        for line in response.text.splitlines()
-        if line.startswith("data: ")
-    ]
-    # The tool ran under the authenticated caller and the conversation identity.
-    assert artifacts.created[0]["conversation_id"] == conversation_id
-    assert artifacts.created[0]["title"] == "Q3 memo"
-    # The artifact is presented as an annotation on the answer text, exactly
-    # the way citations are: no new event type, no second vocabulary.
-    annotations = [
-        event for event in events if event["type"] == "response.output_text.annotation.added"
-    ]
-    assert len(annotations) == 1
-    annotation = annotations[0]["annotation"]
-    assert annotation["type"] == "bothesis:artifact"
-    assert annotation["artifact"]["id"] == str(artifact_id)
-    assert annotation["artifact"]["revision"] == 1
-    assert annotation["start_index"] == annotation["end_index"] == len("The memo is ready.")
-    assert "content" not in annotation["artifact"]
-    # The commentary that preceded the tool call is not annotated: the
-    # document did not exist yet when that response settled.
-    settled = [event["response"] for event in events if event["type"] == "response.completed"]
-    assert settled[0]["output"][0]["content"][0]["annotations"] == []
-    assert settled[1]["output"][0]["content"][0]["annotations"][0]["type"] == "bothesis:artifact"
-    # The assistant message is linked to the document as its output.
-    conversations = api_deps.get_runtime()._conversations
-    assert conversations.finished[0][1]["artifact_ids"] == (artifact_id,)
 
 
 def test_artifact_routes_delegate_to_the_service_and_map_missing_documents(
@@ -1279,10 +1155,9 @@ def test_artifact_routes_delegate_to_the_service_and_map_missing_documents(
         "created_at": "2026-09-06T00:00:00+00:00",
         "updated_at": "2026-09-06T00:01:00+00:00",
         "download_url": "https://storage.example/memo.md",
-        "exports": {"pdf": {"file_name": "Q3-memo.pdf", "size_bytes": 2030, "download_url": "https://storage.example/memo.pdf"}},
         "revisions": [
-            {"revision": 1, "summary": "Created from the conversation", "size_bytes": 20, "created_at": "2026-09-06T00:00:00+00:00", "download_url": None, "exports": {}},
-            {"revision": 2, "summary": "Changed the date", "size_bytes": 24, "created_at": "2026-09-06T00:01:00+00:00", "download_url": None, "exports": {}},
+            {"revision": 1, "summary": "Produced Q3-memo.md", "size_bytes": 20, "created_at": "2026-09-06T00:00:00+00:00", "download_url": None},
+            {"revision": 2, "summary": "Produced Q3-memo.md", "size_bytes": 24, "created_at": "2026-09-06T00:01:00+00:00", "download_url": None},
         ],
     }
 
@@ -1290,16 +1165,10 @@ def test_artifact_routes_delegate_to_the_service_and_map_missing_documents(
         return access
 
     class Artifacts:
-        exported: list[tuple[UUID, str]] = []
-
         async def get(self, caller: AuthContext, requested: UUID) -> dict[str, Any]:
             assert caller is access
             if requested != artifact_id:
                 raise DocumentNotFoundError("artifact not found")
-            return detail
-
-        async def export(self, caller: AuthContext, requested: UUID, *, format: str) -> dict[str, Any]:
-            self.exported.append((requested, format))
             return detail
 
         async def content(self, caller: AuthContext, requested: UUID, *, revision: int | None) -> dict[str, Any]:
@@ -1311,13 +1180,10 @@ def test_artifact_routes_delegate_to_the_service_and_map_missing_documents(
     with TestClient(api_app.app) as client:
         found = client.get(f"/api/v1/artifacts/{artifact_id}", headers=headers)
         missing = client.get(f"/api/v1/artifacts/{uuid4()}", headers=headers)
-        exported = client.post(f"/api/v1/artifacts/{artifact_id}/export", json={"format": "pdf"}, headers=headers)
         content = client.get(f"/api/v1/artifacts/{artifact_id}/revisions/2/content", headers=headers)
 
     assert found.status_code == 200, found.text
     assert found.json()["revision"] == 2
-    assert found.json()["exports"]["pdf"]["download_url"] == "https://storage.example/memo.pdf"
     assert [row["revision"] for row in found.json()["revisions"]] == [1, 2]
     assert missing.status_code == 404
-    assert exported.status_code == 200 and Artifacts.exported == [(artifact_id, "pdf")]
     assert content.status_code == 200 and content.json()["content"] == "# Q3 memo"

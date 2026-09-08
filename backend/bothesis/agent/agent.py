@@ -7,9 +7,16 @@ from uuid import uuid4
 
 from openai import PermissionDeniedError
 
-from bothesis.agent import AgentConfig, AgentExecutionError
-from bothesis.agent.conversation_compression import ConversationMemory
-from bothesis.agent.conversation_loop import ConversationLoop
+from bothesis.agent import (
+    AgentExecutionError,
+    ContextManager,
+    ResolvedStepSettings,
+    Session,
+    SessionConfiguration,
+    SessionServices,
+    TurnContext,
+    TurnEnvironmentSnapshot,
+)
 from bothesis.agent.models import AgentContext
 from bothesis.agent.protocol import (
     Response,
@@ -18,7 +25,7 @@ from bothesis.agent.protocol import (
     ResponseStreamEvent,
 )
 from bothesis.agent.tools import ToolRegistry
-from bothesis.agent.transports import response_stream
+from bothesis.agent.turn import run_turn
 from bothesis.observability import LangfuseTracing
 
 _log = logging.getLogger(__name__)
@@ -32,29 +39,36 @@ class Agent:
         model: object,
         tools: ToolRegistry,
         *,
-        config: AgentConfig | None = None,
-        memory: ConversationMemory | None = None,
+        configuration: SessionConfiguration | None = None,
         tracing: LangfuseTracing | None = None,
     ) -> None:
-        self.model = model
-        self.tools = tools
-        self.config = config or AgentConfig()
-        self.memory = memory or ConversationMemory(config=self.config)
+        self._model = model
+        self._tools = tools
+        self.configuration = configuration or SessionConfiguration()
         self._tracing = tracing
-        self._conversation_loop = ConversationLoop(
-            response_stream(model),
-            tools,
-            memory=self.memory,
-            config=self.config,
-            tracing=tracing,
-        )
+
+    @property
+    def model(self) -> object:
+        """The configured model transport; retained as a read-only diagnostic."""
+
+        return self._model
+
+    @property
+    def tools(self) -> ToolRegistry:
+        """Registered executors; per-step visibility is resolved by ToolRouter."""
+
+        return self._tools
 
     async def run(
         self,
         user_message: str,
         ctx: AgentContext,
     ) -> AsyncIterator[ResponseStreamEvent]:
-        """Yield ordered response state mutations for one conversation turn."""
+        """Yield ordered response state mutations for one conversation turn.
+
+        A new in-memory Session is created for this conversation request. Its
+        canonical context is never built from the presentation event stream.
+        """
 
         sequence_number = 0
 
@@ -69,7 +83,7 @@ class Agent:
             )
 
         normalized_message = user_message.strip()
-        rejection = _rejection(normalized_message, ctx, self.config)
+        rejection = _rejection(normalized_message, ctx, self.configuration)
         if rejection is not None:
             sequence_number += 1
             yield failure("invalid_request", rejection)
@@ -82,14 +96,36 @@ class Agent:
         )
         with trace_context as run_trace:
             try:
-                async for event in self._conversation_loop.run(
-                    normalized_message,
-                    ctx,
-                    run_trace=run_trace,
-                ):
+                session = self._session()
+                settings = ResolvedStepSettings(
+                    model=self.configuration.model,
+                    temperature=self.configuration.temperature,
+                    max_output_tokens=self.configuration.max_tokens,
+                    parallel_tool_calls=True,
+                    provider_options=dict(ctx.model_extra_body or {}),
+                )
+                turn = TurnContext(
+                    user_input=normalized_message,
+                    environment=TurnEnvironmentSnapshot(agent_context=ctx),
+                    initial_settings=settings,
+                    current_settings=settings,
+                )
+                final_answer = ""
+                async for event in run_turn(session, turn):
                     sequence_number += 1
+                    if event.type == "response.completed":
+                        final_answer = event.response.final_answer_text.strip() or final_answer
                     yield event.model_copy(
                         update={"sequence_number": sequence_number}
+                    )
+                if run_trace is not None and final_answer:
+                    run_trace.complete(
+                        answer=final_answer,
+                        answer_characters=len(final_answer),
+                        turn_count=turn.model_iteration,
+                        tool_call_count=turn.tool_call_count,
+                        sources_found=len(turn.evidence),
+                        sources_used=len(turn.used_evidence_ids),
                     )
             except AgentExecutionError as exc:
                 _log.error("agent execution failed: %s", exc, exc_info=True)
@@ -97,10 +133,18 @@ class Agent:
                     run_trace.fail(stage="model")
                 sequence_number += 1
                 yield failure(*_failure_reason(exc))
+    def _session(self) -> Session:
+        return Session(
+            self.configuration,
+            SessionServices(
+                model=self._model, tool_registry=self._tools, tracing=self._tracing
+            ),
+            ContextManager(configuration=self.configuration),
+        )
 
 
 def _rejection(
-    message: str, ctx: AgentContext, config: AgentConfig
+    message: str, ctx: AgentContext, config: SessionConfiguration
 ) -> str | None:
     """Return why a request cannot be accepted, or ``None`` when it can."""
 

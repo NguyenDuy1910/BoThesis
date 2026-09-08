@@ -59,7 +59,7 @@ from bothesis.agent.protocol import (
     ReasoningItem,
     ReasoningText,
     Refusal,
-    ResponseRequest,
+    Prompt,
     SummaryText,
 )
 from bothesis.agent.reducer import ResponseReducer
@@ -71,14 +71,14 @@ PROVIDERS = sorted(RESPONSES_PROVIDERS)
 
 async def canonical(
     events: list[Any],
-    request: ResponseRequest | None = None,
+    prompt: Prompt | None = None,
     *,
     provider: str = "openrouter",
 ):
     transport = ScriptedResponsesTransport([events], provider=provider)
     stream = ResponsesStream(transport)
     return transport, [
-        event async for event in stream.stream(request or ResponseRequest(input=()))
+        event async for event in stream.stream(prompt or Prompt(input=()))
     ]
 
 
@@ -246,7 +246,7 @@ async def test_created_response_carries_the_previous_response_id() -> None:
 
     transport, events = await canonical(
         created(),
-        ResponseRequest(input=(), previous_response_id="resp_earlier"),
+        Prompt(input=(), previous_response_id="resp_earlier"),
     )
 
     assert events[0].response.previous_response_id == "resp_earlier"
@@ -380,7 +380,7 @@ async def test_usage_is_mapped_onto_the_canonical_response() -> None:
 
 @pytest.mark.asyncio
 async def test_specified_request_fields_are_rendered_as_native_parameters() -> None:
-    request = ResponseRequest(
+    prompt = Prompt(
         input=(MessageItem(role="user", content=(InputText(text="hi"),)),),
         model="test-model",
         instructions="be brief",
@@ -390,7 +390,7 @@ async def test_specified_request_fields_are_rendered_as_native_parameters() -> N
         temperature=0.2,
         max_output_tokens=256,
     )
-    transport, _ = await canonical([], request)
+    transport, _ = await canonical([], prompt)
     sent = transport.requests[0]
 
     assert sent["model"] == "test-model"
@@ -414,7 +414,7 @@ async def test_specified_request_fields_are_rendered_as_native_parameters() -> N
 async def test_provider_options_ride_in_extra_body() -> None:
     """Non-specified options stay opaque: the adapter never names them."""
 
-    request = ResponseRequest(
+    prompt = Prompt(
         input=(),
         provider_options={
             "provider": {"order": ["openai"]},
@@ -422,7 +422,7 @@ async def test_provider_options_ride_in_extra_body() -> None:
             "top_k": 40,
         },
     )
-    transport, _ = await canonical([], request)
+    transport, _ = await canonical([], prompt)
     sent = transport.requests[0]
 
     assert sent["extra_body"] == {
