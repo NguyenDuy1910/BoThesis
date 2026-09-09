@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { ProductMark } from "@/components/ui/ProductMark";
+import { appBrand } from "@/lib/brand";
 import { cn } from "@/lib/cn";
 import {
   adminNavGroupLabels,
@@ -59,7 +60,7 @@ export function AdminSidebar({
       >
         <div className="adm-nav__brand">
           <Link
-            aria-label="BoThesis Admin dashboard"
+            aria-label={`${appBrand.productName} Admin dashboard`}
             className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--adm-r-sm)] px-1 py-1 transition-colors hover:bg-[var(--adm-row-hover)]"
             href="/admin"
             onClick={onMobileClose}
@@ -67,7 +68,7 @@ export function AdminSidebar({
             <ProductMark decorative size="md" />
             {!compact && (
               <span className="adm-nav__wordmark">
-                <strong>{tenant?.name ?? "BoThesis"}</strong>
+                <strong>{tenant?.name ?? appBrand.productName}</strong>
                 <span>Admin</span>
               </span>
             )}

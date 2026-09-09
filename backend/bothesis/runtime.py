@@ -14,6 +14,9 @@ from config import AppConfig, get_config
 from bothesis.agent import Agent, SessionConfiguration
 from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
+from bothesis.agent.tools.inspect_resource import InspectResource
+from bothesis.agent.tools.materialize_resource import MaterializeResource
+from bothesis.agent.tools.read_resource import ReadResource
 from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.connector.file import FileProcessor
@@ -21,7 +24,7 @@ from bothesis.db.engine import LazySessionFactory, SessionFactory
 from bothesis.document_index import ItemIndex, SemanticContextualizer
 from bothesis.health import HealthService, HealthSettings
 from bothesis.knowledge import ItemKnowledgeRetriever, SemanticReranker
-from bothesis.observability import create_langfuse_tracing
+from bothesis.observability import create_tracer
 from bothesis.services.admin_console import AdminConsoleService
 from bothesis.services.artifact import ArtifactService
 from bothesis.services.chat import ChatService
@@ -32,6 +35,7 @@ from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services.knowledge_query import KnowledgeQueryService
 from bothesis.services.knowledge_view import KnowledgeViewService
 from bothesis.services.preview import KnowledgePreview
+from bothesis.services.resource_resolver import ItemResourceResolver
 from bothesis.services.stored_file_content import StoredFileContentService
 from bothesis.services.workflow.service import TemporalWorkflowService
 from bothesis.services.workspace_documents import WorkspaceDocumentService
@@ -54,6 +58,7 @@ class AppRuntime:
         self._conversations: ConversationService | None = None
         self._artifacts: ArtifactService | None = None
         self._agent: Agent | None = None
+        self._stored_file_content: StoredFileContentService | None = None
         self._retriever: ItemKnowledgeRetriever | None = None
         self._model_transport: OpenRouterTransport | None = None
         self._agent_transport: OpenAITransport | None = None
@@ -70,6 +75,12 @@ class AppRuntime:
             self.sessions(),
             agent=self.agent(),
             conversations=self.conversation_service(),
+            resource_resolver=lambda access: ItemResourceResolver(
+                self.sessions(),
+                access=access,
+                content=self.stored_file_content(),
+                max_read_characters=self._config.agent.max_resource_read_characters,
+            ),
         )
 
     def knowledge_query_service(self) -> KnowledgeQueryService:
@@ -223,17 +234,23 @@ class AppRuntime:
                 self.sessions(),
                 object_storage=self.object_storage(),
                 ingestion_service=self.ingestion_service(),
-                document_source=StoredFileContentService(
-                    object_storage=self.object_storage(),
-                    processor=FileProcessor(
-                        max_file_bytes=upload.processing_max_bytes
-                    ),
-                    max_processing_bytes=upload.processing_max_bytes,
-                ),
+                document_source=self.stored_file_content(),
                 max_upload_bytes=upload.max_upload_bytes,
                 upload_url_seconds=upload.upload_url_seconds,
             )
         return self._uploads
+
+    def stored_file_content(self) -> StoredFileContentService:
+        """The lazy source adapter used by explicit resource reads and ingestion."""
+
+        if self._stored_file_content is None:
+            upload = self._config.upload
+            self._stored_file_content = StoredFileContentService(
+                object_storage=self.object_storage(),
+                processor=FileProcessor(max_file_bytes=upload.processing_max_bytes),
+                max_processing_bytes=upload.processing_max_bytes,
+            )
+        return self._stored_file_content
 
     def model_transport(self) -> OpenRouterTransport:
         """The transport the retrieval-side models (reranking) run on."""
@@ -286,7 +303,7 @@ class AppRuntime:
         if self._agent is None:
             retrieval = self._config.retrieval
             agent = self._config.agent
-            tracing = create_langfuse_tracing(
+            tracer = create_tracer(
                 self._config.observability.langfuse_public_key,
                 self._config.observability.langfuse_secret_key,
             )
@@ -296,9 +313,14 @@ class AppRuntime:
                     self.knowledge_retriever(),
                     result_limit=retrieval.final_top_k,
                     max_context_characters=retrieval.context_characters,
-                    tracing=tracing,
+                    tracer=tracer,
                 )
             )
+            registry.register(InspectResource())
+            registry.register(
+                ReadResource(max_characters=agent.max_resource_read_characters)
+            )
+            registry.register(MaterializeResource())
             self._agent = Agent(
                 model=self.agent_transport(),
                 tools=registry,
@@ -311,7 +333,7 @@ class AppRuntime:
                     recent_history_messages=agent.recent_history_messages,
                     tool_timeout_seconds=agent.tool_timeout_seconds,
                 ),
-                tracing=tracing,
+                tracer=tracer,
             )
         return self._agent
 

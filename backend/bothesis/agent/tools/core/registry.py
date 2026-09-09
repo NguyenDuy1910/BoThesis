@@ -7,16 +7,16 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from bothesis.agent.protocol import FunctionTool
-from bothesis.agent.tools import ToolExecutor, ToolSpec
+from bothesis.agent.tools import Tool, ToolSpec
 
 
 class ToolRegistry:
     """Register tools, expose model definitions, and resolve invocations."""
 
     def __init__(self) -> None:
-        self._tools: dict[str, ToolExecutor] = {}
+        self._tools: dict[str, Tool] = {}
 
-    def register(self, tool: ToolExecutor) -> None:
+    def register(self, tool: Tool) -> None:
         definition = tool.spec()
         name = definition.name.strip()
         if not name:
@@ -25,7 +25,7 @@ class ToolRegistry:
             raise ValueError(f"tool already registered: {name}")
         self._tools[name] = tool
 
-    def get(self, name: str) -> ToolExecutor | None:
+    def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
     def has(self, name: str) -> bool:
@@ -34,7 +34,7 @@ class ToolRegistry:
     def specs(self) -> tuple[ToolSpec, ...]:
         return tuple(tool.spec() for tool in self._tools.values())
 
-    def executors(self) -> tuple[tuple[str, ToolExecutor], ...]:
+    def executors(self) -> tuple[tuple[str, Tool], ...]:
         """Return registered executors in deterministic registration order."""
 
         return tuple(self._tools.items())

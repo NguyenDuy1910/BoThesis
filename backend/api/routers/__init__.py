@@ -122,19 +122,13 @@ class ChatRequest(BaseModel):
     roles: list[str] = Field(default_factory=list, deprecated=True)
     conversation_id: UUID | None = None
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=24)
-    knowledge_mode: Literal["auto", "selected", "off"] = "auto"
     collection_item_ids: list[UUID] = Field(default_factory=list, max_length=20)
-    # Documents the user attached to this turn. They are already uploaded and
-    # access-checked Items; the turn links them to the message and writes them
-    # into the conversation's execution workspace.
-    document_ids: list[UUID] = Field(default_factory=list, max_length=10)
+    # Stable identities for resources attached to this turn. Uploading them
+    # stores bytes only; the agent resolves content lazily when needed.
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def validate_collection_selection(self) -> ChatRequest:
-        if self.knowledge_mode == "selected" and not self.collection_item_ids:
-            raise ValueError("selected knowledge mode requires at least one Collection")
-        if self.knowledge_mode != "selected" and self.collection_item_ids:
-            raise ValueError("Collection IDs are only accepted in selected mode")
         if len(self.collection_item_ids) != len(set(self.collection_item_ids)):
             raise ValueError("Collection IDs must be unique")
         return self

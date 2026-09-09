@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../features/chat/chat_page.dart';
+import 'app_brand.dart';
 import 'app_theme.dart';
 
 class BoThesisApp extends StatefulWidget {
@@ -47,7 +48,7 @@ class _BoThesisAppState extends State<BoThesisApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'BoThesis',
+      title: AppBrand.productName,
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,

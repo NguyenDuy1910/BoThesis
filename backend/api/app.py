@@ -9,7 +9,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.deps import get_runtime
 from api.errors import register_error_handlers
-from api.routers import admin, agent, artifacts, documents, health, knowledge
+from api.routers import (
+    admin,
+    agent,
+    artifacts,
+    documents,
+    health,
+    knowledge,
+)
 from api.routers.planned import PLANNED_ROUTERS
 
 API_PREFIX = "/api/v1"

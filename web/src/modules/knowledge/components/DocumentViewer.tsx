@@ -4,6 +4,7 @@ import { ExternalLink, LoaderCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import { appBrand } from "@/lib/brand";
 import { getKnowledgeItemViewer } from "../api";
 import { resolveHighlightRange } from "../highlight";
 import type { KnowledgeItemViewer, ViewerElement } from "../types";
@@ -76,7 +77,7 @@ export function DocumentViewer({ itemId }: { itemId: string }) {
     <main className="document-viewer">
       <header className="document-viewer__header">
         <div>
-          <p className="document-viewer__eyebrow">Bothesis document viewer</p>
+          <p className="document-viewer__eyebrow">{appBrand.productName} document viewer</p>
           <h1>{viewer.title}</h1>
           {viewer.focus?.citation.spans[0]?.page && <p>Page {viewer.focus.citation.spans[0].page}{viewer.focus.citation.section ? ` · ${viewer.focus.citation.section}` : ""}</p>}
         </div>

@@ -68,7 +68,7 @@ export const connectorDefinitions: readonly ConnectorDefinition[] = [
   connector("confluence", "Confluence", "Spaces, pages, and governed team knowledge", "knowledge", "#1868DB", ["Search", "Sync", "Permissions"], "API token or OAuth", true),
   connector("google_drive", "Google Drive", "Shared drives, folders, and business files", "storage", "#4285F4", ["Search", "Sync", "Folder scope"], "Google OAuth", true),
   connector("jira", "Jira", "Projects, issues, comments, and delivery context", "engineering", "#2684FF", ["Search", "Sync", "Project scope"], "Atlassian OAuth", true),
-  connector("file", "File Upload", "Upload governed documents directly to BoThesis", "knowledge", "#6157D9", ["Upload", "Index", "Citations"], "Workspace access", true, FileUp),
+  connector("file", "File Upload", "Upload governed documents directly to Enterprise Knowledge Agent", "knowledge", "#6157D9", ["Upload", "Index", "Citations"], "Workspace access", true, FileUp),
   connector("slack", "Slack", "Channels, threads, and operational conversations", "communication", "#4A154B", ["Search", "Sync", "Channel scope"], "Slack OAuth", true, MessagesSquare),
   connector("notion", "Notion", "Workspace pages, databases, and team docs", "knowledge", "#111111", ["Search", "Sync", "Page scope"], "Notion OAuth", true, TableProperties),
   connector("sharepoint", "SharePoint", "Sites, libraries, lists, and team content", "knowledge", "#038387", ["Search", "Sync", "Site scope"], "Microsoft OAuth", true, Boxes),

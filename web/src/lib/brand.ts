@@ -4,14 +4,14 @@ export const appBrandKey: AppBrandKey = "bothesis";
 
 export const appBrand = {
   key: appBrandKey,
-  shortName: "BoThesis",
-  productName: "BoThesis",
+  shortName: "Enterprise Knowledge Agent",
+  productName: "Enterprise Knowledge Agent",
   adminName: "Admin Console",
   adminSubtitle: "Control plane",
   workspaceSubtitle: "Enterprise knowledge workspace",
   logo: {
     src: "/bothesis-logo.png",
-    alt: "BoThesis logo",
+    alt: "Enterprise Knowledge Agent logo",
     imageClassName: "object-contain",
   },
 } as const;

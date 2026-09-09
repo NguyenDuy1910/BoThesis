@@ -324,6 +324,29 @@ async def admin_validate_integration_connection(
     return await admin.validate_integration_connection(caller, integration_connection_id)
 
 
+@router.get("/connectors/confluence/environment")
+async def admin_confluence_environment_status(
+    caller: Caller, admin: AdminConsole
+) -> dict[str, Any]:
+    return await admin.confluence_environment_status(caller)
+
+
+@router.get("/connectors/confluence/environment/spaces")
+async def admin_confluence_environment_spaces(
+    caller: Caller, admin: AdminConsole
+) -> dict[str, Any]:
+    return await admin.list_confluence_environment_spaces(caller)
+
+
+@router.get("/connectors/confluence/environment/pages")
+async def admin_confluence_environment_pages(
+    caller: Caller,
+    admin: AdminConsole,
+    space: Annotated[str, Query(min_length=1, max_length=255)],
+) -> dict[str, Any]:
+    return await admin.list_confluence_environment_pages(caller, space=space)
+
+
 @router.get("/ingestion-sources")
 async def admin_list_ingestion_sources(
     caller: Caller,

@@ -119,7 +119,7 @@ export function useBothesisChat({
       await streamAgentResponse(text, {
         conversationId,
         history,
-        documentIds: options.documents?.map((document) => document.id),
+        attachmentIds: options.documents?.map((document) => document.id),
         signal: controller.signal,
         onEvent: (event) => {
           setStatus("streaming");

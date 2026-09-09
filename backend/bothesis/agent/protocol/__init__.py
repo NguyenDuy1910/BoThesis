@@ -76,6 +76,7 @@ from bothesis.agent.protocol.items import (  # noqa: E402
     MessageRole,
     ReasoningItem,
     ResponseItem,
+    ToolCall,
 )
 from bothesis.agent.protocol.tools import (  # noqa: E402
     AllowedTools,
@@ -129,7 +130,11 @@ from bothesis.agent.protocol.events import (  # noqa: E402
     ResponseSnapshotEventBase,
     ResponseStreamEvent,
     ResponseStreamEventAdapter,
+    RuntimeActivityEvent,
     StreamEventBase,
+    ToolCompletedEvent,
+    ToolProgressEvent,
+    ToolStartedEvent,
 )
 
 __all__ = [
@@ -203,10 +208,15 @@ __all__ = [
     "ResponseStatus",
     "ResponseStreamEvent",
     "ResponseStreamEventAdapter",
+    "RuntimeActivityEvent",
     "ResponseUsage",
     "StreamEventBase",
     "SummaryText",
+    "ToolCompletedEvent",
+    "ToolProgressEvent",
+    "ToolStartedEvent",
     "Tool",
+    "ToolCall",
     "ToolAdapter",
     "ToolChoice",
     "ToolChoiceMode",

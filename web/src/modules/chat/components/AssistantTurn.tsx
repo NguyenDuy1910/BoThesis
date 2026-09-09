@@ -1,22 +1,12 @@
 "use client";
 
 import clsx from "clsx";
-import {
-  Check,
-  ChevronRight,
-  Database,
-  FileSearch,
-  LoaderCircle,
-  Search,
-  Sparkles,
-  Terminal,
-  Wrench,
-} from "lucide-react";
-import { memo, useMemo } from "react";
+import { Check, Circle, CircleAlert } from "lucide-react";
+import { memo, useEffect, useMemo, useState } from "react";
 
-import { assistantTurnItems, type AssistantTurnItem } from "../assistant-turn";
+import { assistantTurnItems } from "../assistant-turn";
 import type { AnswerSource } from "../sources";
-import type { TurnState } from "../types";
+import type { RuntimeActivity, TurnState } from "../types";
 import {
   CitationRenderingProvider,
   citationRenderingSources,
@@ -25,7 +15,6 @@ import {
 
 export const AssistantTurn = memo(function AssistantTurn({
   activeCitationId,
-  activityConnectorLabel,
   isStreaming,
   onOpenSource,
   onRevealingChange,
@@ -33,7 +22,6 @@ export const AssistantTurn = memo(function AssistantTurn({
   turn,
 }: {
   activeCitationId?: string;
-  activityConnectorLabel?: string;
   isStreaming: boolean;
   onOpenSource?: (source: AnswerSource) => void;
   /** Report while the turn's newest text is still easing onto screen. */
@@ -43,8 +31,8 @@ export const AssistantTurn = memo(function AssistantTurn({
   turn?: TurnState;
 }) {
   const items = assistantTurnItems(turn);
-  const lastItem = items.at(-1);
-  const showPending = isStreaming && !lastItem;
+  const pending = Boolean(isStreaming && turn?.modelPending);
+  const { visible: showPending } = usePendingIndicator(pending);
   const revealingItemId = items.filter((item) => item.kind === "message").at(-1)?.id;
   const citations = useMemo(() => ({
     sources: citationRenderingSources(sources ?? []),
@@ -60,7 +48,11 @@ export const AssistantTurn = memo(function AssistantTurn({
         {items.map((item) => {
           if (item.kind === "message") {
             return (
-              <div className="assistant-content" key={item.id}>
+              <div
+                className={clsx("assistant-content", item.phase === "commentary" && "assistant-content--commentary")}
+                data-assistant-phase={item.phase}
+                key={item.id}
+              >
                 <IncrementalMarkdown
                   isStreaming={isStreaming && item.state === "streaming"}
                   onRevealingChange={item.id === revealingItemId ? onRevealingChange : undefined}
@@ -69,111 +61,94 @@ export const AssistantTurn = memo(function AssistantTurn({
               </div>
             );
           }
-          if (item.kind === "tool") return <ToolActivity connectorLabel={activityConnectorLabel} item={item} key={item.id} />;
-          return <ReasoningActivity item={item} key={item.id} />;
+          return <ToolActivity activity={item.activity} key={item.id} />;
         })}
         {showPending && (
-          <span aria-label="Assistant is working" className="assistant-turn__pending" role="status">
-            <LoaderCircle aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
-            <span>Analyzing…</span>
-          </span>
+          <span aria-label="BoThesis is working" className="assistant-turn__pending" role="status">BoThesis</span>
         )}
       </div>
     </CitationRenderingProvider>
   );
 });
 
-function ToolActivity({ connectorLabel, item }: { connectorLabel?: string; item: Extract<AssistantTurnItem, { kind: "tool" }> }) {
-  const presentation = toolPresentation(item.name, item.state, connectorLabel);
-  const Icon = item.state === "active" ? LoaderCircle : presentation.icon;
+function usePendingIndicator(pending: boolean) {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!pending) {
+      setVisible(false);
+      return;
+    }
+    const timeout = window.setTimeout(() => setVisible(true), 700);
+    return () => window.clearTimeout(timeout);
+  }, [pending]);
+  return { visible: pending && visible };
+}
+
+function ToolActivity({ activity }: { activity: RuntimeActivity }) {
+  const presentation = toolPresentation(activity);
+  const active = activity.state === "active";
+  const error = activity.state === "failed" || activity.state === "timeout";
+  const elapsed = useElapsedSeconds(activity.startedAt, active);
+  const Icon = active ? Circle : error ? CircleAlert : Check;
+  const elapsedLabel = active && elapsed >= 10 ? `${elapsed}s` : undefined;
+  const accessibleLabel = [presentation.label, presentation.detail, elapsedLabel]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div
-      aria-label={presentation.label}
-      className={clsx("assistant-turn__tool", `assistant-turn__tool--${item.state}`)}
-      role={item.state === "active" ? "status" : undefined}
+      aria-label={accessibleLabel}
+      className={clsx("assistant-turn__activity", `assistant-turn__activity--${activity.state}`)}
+      role={active ? "status" : undefined}
+      title={accessibleLabel}
     >
-      {item.state === "completed" ? (
-        <Check aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
-      ) : (
-        <Icon aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
-      )}
-      <span className="assistant-turn__tool-label">{presentation.label}</span>
+      <Icon aria-hidden="true" className="assistant-turn__activity-icon" size={13} />
+      <span className="assistant-turn__activity-label">{presentation.label}</span>
+      {presentation.detail && <span className="assistant-turn__activity-detail">· {presentation.detail}</span>}
+      {elapsedLabel && <time>· {elapsedLabel}</time>}
     </div>
   );
 }
 
-function ReasoningActivity({ item }: { item: Extract<AssistantTurnItem, { kind: "reasoning" }> }) {
-  if (item.state === "active") {
-    return (
-      <div className="assistant-turn__reasoning" role="status">
-        <LoaderCircle aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
-        <span>Thinking…</span>
-      </div>
-    );
-  }
-  if (!item.text) return null;
-  return (
-    <details className="assistant-turn__reasoning">
-      <summary>
-        <ChevronRight aria-hidden="true" className="assistant-turn__reasoning-caret" size={13} />
-        <span>Thought process</span>
-      </summary>
-      <div className="assistant-turn__reasoning-summary">{item.text}</div>
-    </details>
-  );
+function useElapsedSeconds(startedAt: number, active: boolean) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [active, startedAt]);
+  return Math.max(0, Math.floor((now - startedAt) / 1_000));
 }
 
-function toolPresentation(
-  name: string,
-  state: Extract<AssistantTurnItem, { kind: "tool" }> ["state"],
-  connectorLabel?: string,
-) {
-  const completed = state === "completed";
-  if (name === "knowledge_search") {
-    return {
-      label: state === "error"
-        ? "Knowledge search could not complete"
-        : completed
-          ? `Searched ${connectorLabel ?? "knowledge"}`
-          : `Searching ${connectorLabel ?? "knowledge"}…`,
-      icon: Search,
-    };
-  }
-  if (name === "sql_query") {
-    return {
-      label: state === "error"
-        ? "Data query could not complete"
-        : completed ? "Queried data" : "Querying data…",
-      icon: Database,
-    };
-  }
-  if (name === "open_document") {
-    return {
-      label: state === "error"
-        ? "Document could not be opened"
-        : completed ? "Read the document" : "Reading the document…",
-      icon: FileSearch,
-    };
-  }
-  // The native execution tools stay semantic: a user is told what is being
-  // done to their files, never which runtime did it.
-  if (name === "code_interpreter") {
-    return {
-      label: state === "error"
-        ? "Preparing the file could not complete"
-        : completed ? "Prepared the file" : "Preparing the file…",
-      icon: Sparkles,
-    };
-  }
-  if (name === "shell") {
-    return {
-      label: state === "error"
-        ? "Converting the file could not complete"
-        : completed ? "Converted the file" : "Converting the file…",
-      icon: Terminal,
-    };
-  }
-  if (state === "error") return { label: "Tool could not complete", icon: Wrench };
-  return { label: completed ? "Completed tool activity" : "Running tool…", icon: Wrench };
+function toolPresentation(activity: RuntimeActivity) {
+  const active = activity.state === "active";
+  const progressCount = numericProgress(activity.progress, "result_count");
+  const resultCount = activity.resultCount ?? progressCount;
+  const vocabulary: Record<string, { active: string; completed: string; showResultCount?: boolean }> = {
+    knowledge_search: { active: "Đang tìm tài liệu liên quan…", completed: "Đã tìm tài liệu liên quan", showResultCount: true },
+    read_resource: { active: "Đang đọc tài liệu…", completed: "Đã đọc tài liệu" },
+    inspect_resource: { active: "Đang kiểm tra tài liệu…", completed: "Đã kiểm tra tài liệu" },
+    materialize_resource: { active: "Đang chuẩn bị tài liệu…", completed: "Đã chuẩn bị tài liệu" },
+    document_edit: { active: "Đang chỉnh sửa tài liệu…", completed: "Đã chỉnh sửa tài liệu" },
+    artifact_create: { active: "Đang hoàn thiện tài liệu…", completed: "Đã tạo tài liệu" },
+  };
+  const text = vocabulary[activity.toolName] ?? {
+    active: "Đang xử lý yêu cầu…",
+    completed: "Đã hoàn tất thao tác",
+  };
+  if (activity.state === "failed") return { label: "Không thể hoàn tất thao tác", detail: undefined };
+  if (activity.state === "timeout") return { label: "Thao tác mất quá nhiều thời gian", detail: undefined };
+  if (activity.state === "skipped") return { label: "Đã bỏ qua thao tác", detail: undefined };
+  return {
+    label: active ? text.active : text.completed,
+    detail: !active && text.showResultCount && resultCount !== undefined
+      ? `${resultCount} tài liệu`
+      : undefined,
+  };
+}
+
+function numericProgress(progress: Record<string, unknown> | undefined, key: string) {
+  const value = progress?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }

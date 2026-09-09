@@ -176,6 +176,7 @@ export function cachedToUIMessage(message: CachedChatMessage): ChatMessage {
 }
 
 export function uiToCachedMessage(message: ChatMessage): CachedChatMessage {
+  const turn = message.turn && withoutTransientTurnState(message.turn);
   return {
     id: message.id,
     role: message.role === "user" ? "user" : "assistant",
@@ -184,9 +185,14 @@ export function uiToCachedMessage(message: ChatMessage): CachedChatMessage {
       const normalized = normalizeStoredPart(part);
       return normalized ? [normalized] : [];
     }),
-    turn: message.turn,
+    turn,
     createdAt: Date.now(),
   };
+}
+
+function withoutTransientTurnState(turn: NonNullable<ChatMessage["turn"]>) {
+  const { modelPending: _modelPending, runtimeActivities: _runtimeActivities, ...stored } = turn;
+  return stored;
 }
 
 export const conversationAdapter: ConversationAdapter = {

@@ -2,6 +2,7 @@ import type {
   ChatMessage,
   ContentPart,
   FunctionCallItem,
+  FunctionCallOutputItem,
   MessageItem,
   OutputItem,
   OutputTextAnnotation,
@@ -10,6 +11,7 @@ import type {
   ResponseEnvelope,
   ResponseState,
   ResponseStreamEvent,
+  RuntimeActivity,
   SummaryTextPart,
   TurnState,
 } from "./types";
@@ -23,7 +25,14 @@ export interface OrderedOutputItem {
 }
 
 export function emptyTurnState(id: string): TurnState {
-  return { id, status: "streaming", responses: {}, responseOrder: [] };
+  return {
+    id,
+    status: "streaming",
+    responses: {},
+    responseOrder: [],
+    modelPending: true,
+    runtimeActivities: [],
+  };
 }
 
 /**
@@ -39,6 +48,36 @@ export function reduceResponseStreamEvent(
   event: ResponseStreamEvent,
 ): TurnState {
   switch (event.type) {
+    case "tool_started":
+      return {
+        ...current,
+        modelPending: false,
+        runtimeActivities: upsertRuntimeActivity(current.runtimeActivities, {
+          callId: event.call_id,
+          toolName: event.tool_name,
+          state: "active",
+          startedAt: Date.now(),
+        }),
+      };
+    case "tool_progress":
+      return {
+        ...current,
+        modelPending: false,
+        runtimeActivities: updateRuntimeActivity(current.runtimeActivities, event.call_id, {
+          toolName: event.tool_name,
+          progress: event.data,
+        }),
+      };
+    case "tool_completed":
+      return {
+        ...current,
+        modelPending: true,
+        runtimeActivities: updateRuntimeActivity(current.runtimeActivities, event.call_id, {
+          toolName: event.tool_name,
+          state: event.status,
+          resultCount: typeof event.result_count === "number" ? event.result_count : undefined,
+        }),
+      };
     case "response.created":
     case "response.queued":
     case "response.in_progress":
@@ -49,19 +88,31 @@ export function reduceResponseStreamEvent(
         error: undefined,
       };
     case "response.output_item.added":
-      return upsertItem(current, event.output_index, event.item, false);
+      return withMeaningfulModelContent(
+        upsertItem(current, event.output_index, event.item, false),
+        event.item,
+      );
     case "response.output_item.done":
-      return upsertItem(current, event.output_index, event.item, true);
+      return withMeaningfulModelContent(
+        upsertItem(current, event.output_index, event.item, true),
+        event.item,
+      );
     case "response.content_part.added":
     case "response.content_part.done":
-      return updateContent(current, event, () => cloneContentPart(event.part));
+      return withMeaningfulModelContent(
+        updateContent(current, event, () => cloneContentPart(event.part)),
+        event.part,
+      );
     case "response.output_text.delta":
-      return updateContent(current, event, (part) => ({
+      return withMeaningfulText(updateContent(current, event, (part) => ({
         ...part,
         text: part.text + event.delta,
-      }));
+      })), event.delta);
     case "response.output_text.done":
-      return updateContent(current, event, (part) => ({ ...part, text: event.text }));
+      return withMeaningfulText(
+        updateContent(current, event, (part) => ({ ...part, text: event.text })),
+        event.text,
+      );
     case "response.refusal.delta":
       return updateContent(current, event, () => ({
         type: "refusal",
@@ -134,12 +185,13 @@ export function reduceResponseStreamEvent(
       const next = reconcileResponse(current, event.response);
       return {
         ...next,
+        modelPending: false,
         status: "failed",
         error: responseFailureMessage(event.response),
       };
     }
     case "error":
-      return { ...current, status: "failed", error: event.error.message };
+      return { ...current, modelPending: false, status: "failed", error: event.error.message };
   }
 }
 
@@ -159,7 +211,63 @@ export function applyResponseStreamEvent(
 
 /** Mark a locally interrupted request as failed without inventing a stream event. */
 export function failTurn(turn: TurnState, message: string): TurnState {
-  return { ...turn, status: "failed", error: message };
+  return { ...turn, modelPending: false, status: "failed", error: message };
+}
+
+function withMeaningfulText(current: TurnState, text: string): TurnState {
+  return text.trim() ? { ...current, modelPending: false } : current;
+}
+
+function withMeaningfulModelContent(
+  current: TurnState,
+  content: OutputItem | ContentPart,
+): TurnState {
+  if (content.type === "output_text" && "text" in content && typeof content.text === "string") {
+    return withMeaningfulText(current, content.text);
+  }
+  if (
+    content.type !== "message"
+    || !("content" in content)
+    || !Array.isArray(content.content)
+  ) return current;
+  return withMeaningfulText(
+    current,
+    content.content
+      .filter((part) => part.type === "output_text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join(""),
+  );
+}
+
+function upsertRuntimeActivity(
+  activities: RuntimeActivity[] | undefined,
+  activity: RuntimeActivity,
+): RuntimeActivity[] {
+  const current = activities ?? [];
+  const index = current.findIndex((item) => item.callId === activity.callId);
+  if (index < 0) return [...current, activity];
+  return current.map((item, itemIndex) => itemIndex === index ? { ...item, ...activity } : item);
+}
+
+function updateRuntimeActivity(
+  activities: RuntimeActivity[] | undefined,
+  callId: string,
+  update: Partial<RuntimeActivity>,
+): RuntimeActivity[] {
+  const current = activities ?? [];
+  const index = current.findIndex((item) => item.callId === callId);
+  if (index < 0) {
+    return [...current, {
+      callId,
+      toolName: update.toolName ?? "tool",
+      state: update.state ?? "active",
+      startedAt: Date.now(),
+      ...update,
+    }];
+  }
+  return current.map((item, itemIndex) => (
+    itemIndex === index ? { ...item, ...update } : item
+  ));
 }
 
 /** Flatten semantic response ordering for the item renderer. */
@@ -208,6 +316,14 @@ export function isFunctionCallItem(item: OutputItem | undefined): item is Functi
   return item?.type === "function_call"
     && typeof (item as Partial<FunctionCallItem>).call_id === "string"
     && typeof (item as Partial<FunctionCallItem>).name === "string";
+}
+
+export function isFunctionCallOutputItem(
+  item: OutputItem | undefined,
+): item is FunctionCallOutputItem {
+  return item?.type === "function_call_output"
+    && typeof (item as Partial<FunctionCallOutputItem>).call_id === "string"
+    && typeof (item as Partial<FunctionCallOutputItem>).output === "string";
 }
 
 export function isReasoningItem(item: OutputItem | undefined): item is ReasoningItem {

@@ -159,6 +159,10 @@ class FunctionCallOutputItem(ProtocolModel):
     status: ItemStatus | None = "completed"
 
 
+ToolCall: TypeAlias = FunctionCallItem
+"""The provider-neutral function-call item used by the core tool runtime."""
+
+
 class CompactionItem(ProtocolModel):
     """Conversation state a provider compacted into an opaque blob."""
 
@@ -233,4 +237,5 @@ __all__ = [
     "ReasoningText",
     "ResponseItem",
     "SummaryText",
+    "ToolCall",
 ]

@@ -10,12 +10,13 @@ test("renders message items directly from semantic item state", () => {
   assert.deepEqual(items, [{
     kind: "message",
     id: "message-1",
+    phase: "final_answer",
     text: "The answer.",
     state: "done",
   }]);
 });
 
-test("keeps interleaved response item ordering and completes tools when a later response starts", () => {
+test("does not present a model function call as runtime activity", () => {
   const turn: TurnState = {
     id: "turn-1",
     status: "streaming",
@@ -48,15 +49,18 @@ test("keeps interleaved response item ordering and completes tools when a later 
 
   assert.deepEqual(
     assistantTurnItems(turn).map((item) => [item.kind, item.kind === "tool" ? item.state : item.id]),
-    [["message", "message-1"], ["tool", "completed"], ["message", "message-2"]],
+    [["message", "message-1"], ["message", "message-2"]],
   );
 });
 
-test("keeps the newest function call active while its enclosing Turn continues", () => {
+test("presents a verified runtime activity at its function-call position", () => {
   const turn: TurnState = {
     id: "turn-1",
     status: "streaming",
     responseOrder: ["response-1"],
+    runtimeActivities: [{
+      callId: "call-1", toolName: "sql_query", state: "active", startedAt: 1,
+    }],
     responses: {
       "response-1": {
         id: "response-1", status: "completed", itemOrder: ["tool-1"],
@@ -71,11 +75,12 @@ test("keeps the newest function call active while its enclosing Turn continues",
   };
 
   assert.deepEqual(assistantTurnItems(turn), [{
-    kind: "tool", id: "tool-1", name: "sql_query", state: "active",
+    kind: "activity", id: "call-1",
+    activity: { callId: "call-1", toolName: "sql_query", state: "active", startedAt: 1 },
   }]);
 });
 
-test("hosted execution calls read as their own semantic activity", () => {
+test("does not make hosted provider output look like a runtime activity", () => {
   const turn: TurnState = {
     id: "turn-1",
     status: "streaming",
@@ -95,13 +100,10 @@ test("hosted execution calls read as their own semantic activity", () => {
     },
   };
 
-  assert.deepEqual(assistantTurnItems(turn), [
-    { kind: "tool", id: "run-1", name: "code_interpreter", state: "completed" },
-    { kind: "tool", id: "run-2", name: "shell", state: "active" },
-  ]);
+  assert.deepEqual(assistantTurnItems(turn), []);
 });
 
-test("renders provider reasoning summaries as a collapsed semantic activity", () => {
+test("does not render provider reasoning as user-facing commentary", () => {
   const turn = turnWithFinalMessage();
   turn.responses["response-1"]!.itemOrder.unshift("reasoning-1");
   turn.responses["response-1"]!.items["reasoning-1"] = {
@@ -109,13 +111,13 @@ test("renders provider reasoning summaries as a collapsed semantic activity", ()
     summary: [{ type: "summary_text", text: "I should verify the policy source." }],
   };
 
-  const [reasoning] = assistantTurnItems(turn);
-  assert.deepEqual(reasoning, {
-    kind: "reasoning",
-    id: "reasoning-1",
-    text: "I should verify the policy source.",
-    state: "completed",
-  });
+  assert.deepEqual(assistantTurnItems(turn), [{
+    kind: "message",
+    id: "message-1",
+    phase: "final_answer",
+    text: "The answer.",
+    state: "done",
+  }]);
 });
 
 function turnWithFinalMessage(): TurnState {

@@ -8,9 +8,11 @@ import { Button } from "@/components/ui/Button";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { FormField } from "@/components/ui/FormField";
 import { Input } from "@/components/ui/Input";
+import { Select } from "@/components/ui/Select";
 import { Sheet } from "@/components/ui/Sheet";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
+import { appBrand } from "@/lib/brand";
 import { cn } from "@/lib/cn";
 import { adminRequest } from "@/modules/admin/api";
 import { errorMessage } from "@/modules/admin/format";
@@ -93,7 +95,7 @@ export function ConnectorSetupDrawer({
             </p>
             <p className="mt-2 text-[0.75rem] text-[var(--text-muted)]">
               Signs in with {connector.authentication}. Credentials are encrypted
-              before they are stored, and BoThesis only reads what the account
+              before they are stored, and {appBrand.productName} only reads what the account
               you connect can already see.
             </p>
           </div>
@@ -182,8 +184,8 @@ function NotAvailable({
             {connector.name} is not switched on for this deployment
           </p>
           <p className="mt-1 text-[0.8125rem] leading-5 text-[var(--text-muted)]">
-            BoThesis supports it, but the service has not been enabled here yet.
-            Ask whoever runs your BoThesis deployment to turn it on.
+            {appBrand.productName} supports it, but the service has not been enabled here yet.
+            Ask whoever runs your {appBrand.productName} deployment to turn it on.
           </p>
           {error && (
             <p className="mt-2 text-[0.75rem] leading-4 text-[var(--danger-text)]">
@@ -232,21 +234,65 @@ function ConfluenceSetup({
 }) {
   const { toast } = useToast();
   const [name, setName] = useState("Company Confluence");
-  const [siteUrl, setSiteUrl] = useState("");
-  const [email, setEmail] = useState("");
-  const [token, setToken] = useState("");
   const [space, setSpace] = useState("");
+  const [pageId, setPageId] = useState("");
   const [includeChildren, setIncludeChildren] = useState(true);
+  const [environmentReady, setEnvironmentReady] = useState<boolean | null>(null);
+  const [spaces, setSpaces] = useState<{ key: string; name: string }[]>([]);
+  const [pages, setPages] = useState<{ id: string; title: string; space: string }[]>([]);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createdId, setCreatedId] = useState<string | null>(null);
   const formId = "confluence-setup";
 
   useEffect(() => {
+    let active = true;
+    void adminRequest<{ configured: boolean; connected: boolean }>("/connectors/confluence/environment")
+      .then((result) => {
+        if (!active) return;
+        setEnvironmentReady(result.configured && result.connected);
+        if (!result.configured) {
+          setDiscoveryError("Configure the Confluence environment values in backend/.env first.");
+          return;
+        }
+        return adminRequest<{ spaces: { key: string; name: string }[] }>("/connectors/confluence/environment/spaces");
+      })
+      .then((result) => {
+        if (active && result) setSpaces(result.spaces);
+      })
+      .catch((cause) => {
+        if (!active) return;
+        setEnvironmentReady(false);
+        setDiscoveryError(errorMessage(cause));
+      });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!space) {
+      setPages([]);
+      setPageId("");
+      return;
+    }
+    let active = true;
+    setPages([]);
+    setPageId("");
+    void adminRequest<{ pages: { id: string; title: string; space: string }[] }>(
+      `/connectors/confluence/environment/pages?space=${encodeURIComponent(space)}`,
+    ).then((result) => {
+      if (active) setPages(result.pages);
+    }).catch((cause) => {
+      if (active) setDiscoveryError(errorMessage(cause));
+    });
+    return () => { active = false; };
+  }, [space]);
+
+  useEffect(() => {
     onDirtyChange(
-      Boolean(createdId || siteUrl || email || token || space || !includeChildren),
+      Boolean(createdId || space || pageId || !includeChildren),
     );
-  }, [createdId, email, includeChildren, onDirtyChange, siteUrl, space, token]);
+  }, [createdId, includeChildren, onDirtyChange, pageId, space]);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -263,16 +309,11 @@ function ConfluenceSetup({
                 connector_key: "confluence",
                 display_name: name.trim(),
                 config: {
-                  wiki_base: siteUrl.trim(),
-                  is_cloud: true,
+                  use_environment_credentials: true,
                   space: space.trim(),
+                  page_id: pageId || undefined,
                   index_recursively: includeChildren,
                 },
-                credentials: {
-                  confluence_username: email.trim(),
-                  confluence_access_token: token,
-                },
-                credential_type: "api_token",
               }),
             })
           ).id,
@@ -300,6 +341,7 @@ function ConfluenceSetup({
     <>
       <form className="space-y-3.5" id={formId} onSubmit={submit}>
         {error && <ErrorState description={error} layout="inline" />}
+        {discoveryError && <ErrorState description={discoveryError} layout="inline" />}
         <FormField
           helperText="Shown in your list of connections."
           htmlFor="confluence-name"
@@ -315,63 +357,42 @@ function ConfluenceSetup({
             value={name}
           />
         </FormField>
-        <FormField htmlFor="confluence-url" label="Confluence address" required>
-          <Input
-            autoComplete="url"
-            id="confluence-url"
-            onChange={(event) => setSiteUrl(event.target.value)}
-            placeholder="https://company.atlassian.net/wiki"
-            required
-            type="url"
-            value={siteUrl}
-          />
-        </FormField>
-        <FormField
-          helperText="The Atlassian account BoThesis should read as. It only sees what this account can see."
-          htmlFor="confluence-email"
-          label="Account email"
-          required
-        >
-          <Input
-            autoComplete="username"
-            id="confluence-email"
-            onChange={(event) => setEmail(event.target.value)}
-            placeholder="person@company.com"
-            required
-            type="email"
-            value={email}
-          />
-        </FormField>
-        <FormField
-          helperText="Create one in Atlassian under Account settings → Security."
-          htmlFor="confluence-token"
-          label="API token"
-          required
-        >
-          <Input
-            autoComplete="new-password"
-            id="confluence-token"
-            onChange={(event) => setToken(event.target.value)}
-            required
-            type="password"
-            value={token}
-          />
-        </FormField>
+        <p className="rounded-[var(--adm-r-sm)] bg-[var(--adm-inset)] px-3 py-2 text-[0.8125rem] leading-5 text-[var(--text-secondary)]">
+          Credentials are loaded from the server environment and never sent to this browser.
+          {environmentReady === null ? " Checking connection…" : environmentReady ? " Connection verified." : " Connection is unavailable."}
+        </p>
 
         <Advanced>
           <FormField
             helperText="Leave blank to import every space this account can read."
             htmlFor="confluence-space"
-            label="Limit to one space"
+            label="Confluence space"
           >
-            <Input
-              autoComplete="off"
+            <Select
+              disabled={!environmentReady}
               id="confluence-space"
               onChange={(event) => setSpace(event.target.value)}
-              placeholder="ENG"
+              options={spaces.map((entry) => ({ value: entry.key, label: `${entry.name} (${entry.key})` }))}
+              placeholder="All available spaces"
               value={space}
             />
           </FormField>
+          {space && (
+            <FormField
+              helperText="Choose one page to narrow the source, or leave this blank for the whole space."
+              htmlFor="confluence-page"
+              label="Starting page"
+            >
+              <Select
+                disabled={!environmentReady}
+                id="confluence-page"
+                onChange={(event) => setPageId(event.target.value)}
+                options={pages.map((entry) => ({ value: entry.id, label: entry.title }))}
+                placeholder="All pages in this space"
+                value={pageId}
+              />
+            </FormField>
+          )}
           <label className="flex cursor-pointer items-start gap-2.5 text-[0.8125rem] text-[var(--text-secondary)]">
             <input
               checked={includeChildren}
@@ -391,7 +412,7 @@ function ConfluenceSetup({
         </Advanced>
       </form>
 
-      <SetupFooter created={Boolean(createdId)} form={formId} loading={submitting} />
+      <SetupFooter created={Boolean(createdId)} disabled={!environmentReady} form={formId} loading={submitting} />
     </>
   );
 }
@@ -485,16 +506,18 @@ function FileSetup({
 
 function SetupFooter({
   created,
+  disabled = false,
   form,
   loading,
 }: {
   created: boolean;
+  disabled?: boolean;
   form: string;
   loading: boolean;
 }) {
   return (
     <div className="mt-5 flex items-center justify-end border-t border-[var(--adm-hairline)] pt-4">
-      <Button form={form} loading={loading} type="submit">
+      <Button disabled={disabled} form={form} loading={loading} type="submit">
         {created ? "Test again" : "Connect"}
       </Button>
     </div>

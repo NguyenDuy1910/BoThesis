@@ -222,6 +222,32 @@ test("a stream error fails the Turn", () => {
   assert.equal(turn.error, "upstream down");
 });
 
+test("runtime activity drives pending state without becoming model content", () => {
+  let turn = emptyTurnState("turn-1");
+  assert.equal(turn.modelPending, true);
+
+  turn = reduceResponseStreamEvent(turn, {
+    type: "tool_started", call_id: "call-1", tool_name: "knowledge_search",
+  });
+  assert.equal(turn.modelPending, false);
+  assert.deepEqual(turn.runtimeActivities?.[0], {
+    callId: "call-1", toolName: "knowledge_search", state: "active", startedAt: turn.runtimeActivities?.[0]?.startedAt,
+  });
+
+  turn = reduceResponseStreamEvent(turn, {
+    type: "tool_completed", call_id: "call-1", tool_name: "knowledge_search",
+    status: "completed", result_count: 6, duration_ms: 120,
+  });
+  assert.equal(turn.modelPending, true);
+  assert.equal(turn.runtimeActivities?.[0]?.resultCount, 6);
+
+  turn = reduceResponseStreamEvent(turn, {
+    type: "response.output_text.delta", item_id: "answer-1", output_index: 0,
+    content_index: 0, delta: "Here is the answer.",
+  });
+  assert.equal(turn.modelPending, false);
+});
+
 function envelope(id: string) {
   return { id, status: "in_progress" as const, output: [] };
 }

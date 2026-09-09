@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 from bothesis.agent.protocol import FunctionTool
 from bothesis.agent.tools import ToolExposure
-from bothesis.agent.tools.registry import ToolRegistry
+from bothesis.agent.tools.core.registry import ToolRegistry
 
 
 class ToolRouter:

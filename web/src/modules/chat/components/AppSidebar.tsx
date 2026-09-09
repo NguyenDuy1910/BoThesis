@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
 import { ProductMark } from "@/components/ui/ProductMark";
+import { appBrand } from "@/lib/brand";
 import {
   sidebarNavigationItems,
   sidebarSecondaryDestinations,
@@ -151,7 +152,7 @@ function SidebarHeader({
         <div className="brand">
           <ProductMark decorative size="md" />
           <span className="brand-lockup">
-            <span className="brand-wordmark">BoThesis</span>
+            <span className="brand-wordmark">{appBrand.productName}</span>
             <span className="brand-caption">Knowledge workspace</span>
           </span>
         </div>

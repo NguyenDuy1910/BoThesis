@@ -1,8 +1,9 @@
 import type { Metadata, Viewport } from "next";
+import { appBrand } from "@/lib/brand";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "BoThesis",
+  title: appBrand.productName,
   description: "Enterprise knowledge and BI assistant.",
 };
 

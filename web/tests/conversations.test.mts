@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   conversationAdapter,
   setConversationUser,
+  uiToCachedMessage,
 } from "../src/modules/chat/conversations.ts";
 
 class MemoryStorage {
@@ -54,4 +55,28 @@ test("conversation adapter persists custom rename metadata and confirmed deletio
     (await conversationAdapter.getConversationMessages("chat-1"))[0]?.content,
     "Retain this message",
   );
+});
+
+test("does not persist pending or runtime activity as conversation history", () => {
+  const cached = uiToCachedMessage({
+    id: "assistant-1",
+    role: "assistant",
+    parts: [],
+    turn: {
+      id: "assistant-1",
+      status: "streaming",
+      responses: {},
+      responseOrder: [],
+      modelPending: true,
+      runtimeActivities: [{
+        callId: "call-1",
+        toolName: "knowledge_search",
+        state: "active",
+        startedAt: Date.now(),
+      }],
+    },
+  });
+
+  assert.equal(cached.turn?.modelPending, undefined);
+  assert.equal(cached.turn?.runtimeActivities, undefined);
 });

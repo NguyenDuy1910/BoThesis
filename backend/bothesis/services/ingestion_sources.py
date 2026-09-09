@@ -11,6 +11,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from config import ConfluenceEnvironmentConfig
+
 from bothesis.connector.registry import ConnectorRegistry
 from bothesis.db.models import IngestionSource, IntegrationConnection, Item
 from bothesis.services.audit import AuditService
@@ -37,6 +39,7 @@ class IngestionSourceService:
         *,
         registry: ConnectorRegistry | None = None,
         credential_encryption_key: str | None = None,
+        confluence_environment: ConfluenceEnvironmentConfig | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._session = session
@@ -45,6 +48,7 @@ class IngestionSourceService:
             session,
             registry=registry,
             credential_encryption_key=credential_encryption_key,
+            confluence_environment=confluence_environment,
             audit=self._audit,
         )
 

@@ -21,7 +21,7 @@ export async function streamAgentResponse(
   options: {
     conversationId?: string | null;
     history: AgentHistoryMessage[];
-    documentIds?: string[];
+    attachmentIds?: string[];
     signal: AbortSignal;
     onEvent: (event: ResponseStreamEvent) => void;
   }
@@ -40,8 +40,7 @@ export async function streamAgentResponse(
       message,
       conversation_id: options.conversationId ?? null,
       history: options.history,
-      document_ids: options.documentIds ?? [],
-      knowledge_mode: "auto",
+      attachment_ids: options.attachmentIds ?? [],
       collection_item_ids: [],
     }),
   });

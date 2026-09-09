@@ -28,6 +28,7 @@ from bothesis.services import (
 from bothesis.services.access_requests import AccessRequestService
 from bothesis.services.audit import AuditService
 from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.confluence_environment import ConfluenceEnvironmentService
 from bothesis.services.groups import GroupService
 from bothesis.services.ingestion_sources import IngestionSourceService
 from bothesis.services.integration_connections import IntegrationConnectionService
@@ -227,6 +228,21 @@ class AdminConsoleService:
             return await self._connections(session).validate_connection(
                 actor, integration_connection_id
             )
+
+    async def confluence_environment_status(self, actor: AuthContext) -> dict[str, Any]:
+        return await ConfluenceEnvironmentService(self._integration.confluence).status(actor)
+
+    async def list_confluence_environment_spaces(
+        self, actor: AuthContext
+    ) -> dict[str, Any]:
+        return await ConfluenceEnvironmentService(self._integration.confluence).spaces(actor)
+
+    async def list_confluence_environment_pages(
+        self, actor: AuthContext, *, space: str
+    ) -> dict[str, Any]:
+        return await ConfluenceEnvironmentService(self._integration.confluence).pages(
+            actor, space=space
+        )
 
     # -- Ingestion sources --------------------------------------------------
 
@@ -684,12 +700,14 @@ class AdminConsoleService:
         return IntegrationConnectionService(
             session,
             credential_encryption_key=self._integration.credential_encryption_key,
+            confluence_environment=self._integration.confluence,
         )
 
     def _sources(self, session: AsyncSession) -> IngestionSourceService:
         return IngestionSourceService(
             session,
             credential_encryption_key=self._integration.credential_encryption_key,
+            confluence_environment=self._integration.confluence,
         )
 
 

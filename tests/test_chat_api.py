@@ -26,8 +26,9 @@ import bothesis.runtime as runtime_module
 import bothesis.services.workspace_documents as workspace_documents_module
 from bothesis.agent import Agent, SessionConfiguration
 from bothesis.agent.models import AgentContext
-from bothesis.agent.tools import ToolRegistry
+from bothesis.agent.tools import ToolExecutor, ToolRegistry, ToolSpec
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
+from bothesis.services.chat import ChatService
 from bothesis.connector.protocol import (
     CitationInfo,
     CitationSpan,
@@ -88,6 +89,34 @@ class ScriptedTransport(native.ScriptedResponsesTransport):
         return [request["input"] for request in self.requests]
 
 
+class ExposedChatTool(ToolExecutor):
+    def __init__(self, name: str = "exposed_chat_tool") -> None:
+        self._name = name
+
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self._name,
+            description="A registered chat tool.",
+            input_schema={"type": "object", "properties": {}, "required": []},
+        )
+
+
+def test_chat_exposes_all_registered_tools() -> None:
+    registry = ToolRegistry()
+    registry.register(ExposedChatTool())
+    registry.register(ExposedChatTool("knowledge_search"))
+    service = ChatService(
+        session_factory=object(),  # type: ignore[arg-type]
+        agent=Agent(model=object(), tools=registry),
+        conversations=object(),  # type: ignore[arg-type]
+    )
+
+    assert service._available_tool_names() == (
+        "exposed_chat_tool",
+        "knowledge_search",
+    )
+
+
 def test_default_agent_composes_the_openai_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -128,7 +157,12 @@ def test_default_agent_composes_the_openai_transport(
 
     assert isinstance(agent.model, TestOpenAITransport)
     assert agent.tools.has("knowledge_search")
-    assert [spec.name for spec in agent.tools.specs()] == ["knowledge_search"]
+    assert [spec.name for spec in agent.tools.specs()] == [
+        "knowledge_search",
+        "inspect_resource",
+        "read_resource",
+        "materialize_resource",
+    ]
 
 
 class PermissionDeniedTransport:
@@ -329,7 +363,10 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
             self.finished.append((_, __))
             return None
 
-        async def referenced_documents(self, *_: Any, **__: Any) -> tuple[Any, ...]:
+        async def referenced_resources(self, *_: Any, **__: Any) -> tuple[Any, ...]:
+            return ()
+
+        async def resources(self, *_: Any, **__: Any) -> tuple[Any, ...]:
             return ()
 
     monkeypatch.setattr(api_deps.get_runtime(), "_conversations", ConversationRecorder())
@@ -587,7 +624,6 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
                     {"role": "user", "content": "Recent scope question"},
                     {"role": "assistant", "content": "Recent scope answer"},
                 ],
-                "knowledge_mode": "selected",
                 "collection_item_ids": [str(UUID(int=12))],
             },
         )
@@ -645,7 +681,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
         {
             "type": "message",
             "role": "user",
-            "content": "<user_message>What is the leave policy?</user_message>",
+            "content": "What is the leave policy?",
         },
     ]
 
@@ -743,7 +779,6 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
                 "message": "How much annual leave is there?",
                 "tenant_id": str(tenant_id),
                 "user_id": str(user_id),
-                "knowledge_mode": "selected",
                 "collection_item_ids": [str(UUID(int=12))],
             },
         )
@@ -871,7 +906,6 @@ def test_chat_api_places_repeated_and_multiple_citations_inline(monkeypatch) -> 
                 "message": "How many VPC endpoints do I need?",
                 "tenant_id": str(tenant_id),
                 "user_id": str(user_id),
-                "knowledge_mode": "selected",
                 "collection_item_ids": [str(UUID(int=12))],
             },
         )
@@ -1113,13 +1147,9 @@ def test_chat_api_rejects_history_message_over_context_budget(monkeypatch: pytes
     assert response.status_code == 422
 
 
-def test_chat_request_requires_a_bounded_explicit_collection_selection() -> None:
-    with pytest.raises(ValueError, match="requires at least one Collection"):
-        ChatRequest(message="hello", knowledge_mode="selected")
-
+def test_chat_request_accepts_an_optional_bounded_collection_selection() -> None:
     request = ChatRequest(
         message="hello",
-        knowledge_mode="selected",
         collection_item_ids=[UUID(int=12), UUID(int=14)],
     )
 

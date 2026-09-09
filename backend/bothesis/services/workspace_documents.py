@@ -84,7 +84,7 @@ class WorkspaceDocumentService:
     async def complete_upload(
         self, access: AuthContext, document_id: UUID
     ) -> dict[str, Any]:
-        """Mark a presigned upload available and index its content."""
+        """Mark a personal upload available without ingesting its content."""
 
         document = await self._uploads.complete_upload(access, document_id)
         return self._presenter.metadata(document)

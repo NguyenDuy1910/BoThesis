@@ -5,18 +5,142 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 from uuid import uuid4
 
-from bothesis.agent.models import AgentContext, CitationReferences, ConversationMessage
-from bothesis.agent.protocol import Item
+from bothesis.agent.models import AgentContext, CitationReferences, Evidence, ConversationMessage
+from bothesis.agent.protocol import (
+    InputImage,
+    InputText,
+    Item,
+    Tool,
+    RuntimeActivityEvent,
+    ResponseStreamEvent,
+)
+
+
+ModelContent: TypeAlias = InputText | InputImage
+"""Concrete, provider-neutral content the runtime sends to a model."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceRef:
+    """A stable, access-checked resource identity; never a storage path."""
+
+    id: str
+    name: str
+    mime_type: str
+    size_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if not self.id.strip() or not self.name.strip() or not self.mime_type.strip():
+            raise ValueError("resource id, name, and mime type must not be blank")
+        if self.size_bytes is not None and self.size_bytes < 0:
+            raise ValueError("resource size must not be negative")
+
+    @property
+    def is_image(self) -> bool:
+        return self.mime_type.casefold().startswith("image/")
+
+
+@dataclass(frozen=True, slots=True)
+class AttachmentRef:
+    """A current-turn attachment relationship to one accessible resource."""
+
+    resource: ResourceRef
+
+
+@dataclass(frozen=True, slots=True)
+class TextInput:
+    """Text entered by the user in the current turn."""
+
+    text: str
+
+    def __post_init__(self) -> None:
+        if not self.text.strip():
+            raise ValueError("text input must not be blank")
+
+
+@dataclass(frozen=True, slots=True)
+class ImageInput:
+    """An image resource the runtime may materialize as native model input."""
+
+    resource: ResourceRef
+
+
+@dataclass(frozen=True, slots=True)
+class AttachmentInput:
+    """A generic current-turn attachment that remains lazy by default."""
+
+    attachment: AttachmentRef
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceInput:
+    """An existing accessible resource explicitly referenced by the user."""
+
+    resource: ResourceRef
+
+
+UserInput: TypeAlias = TextInput | ImageInput | AttachmentInput | ResourceInput
+
+
+@dataclass(frozen=True, slots=True)
+class UserTurn:
+    """Everything that entered one user turn, before runtime resolution."""
+
+    inputs: tuple[UserInput, ...]
+
+    def __post_init__(self) -> None:
+        if not self.inputs:
+            raise ValueError("a user turn must contain at least one input")
+
+    @property
+    def text(self) -> str:
+        return "\n".join(
+            input_.text.strip()
+            for input_ in self.inputs
+            if isinstance(input_, TextInput)
+        )
+
+    @property
+    def resources(self) -> tuple[ResourceRef, ...]:
+        """Current-turn resources in first-reference order."""
+
+        resources: list[ResourceRef] = []
+        seen: set[str] = set()
+        for input_ in self.inputs:
+            resource = (
+                input_.resource
+                if isinstance(input_, (ImageInput, ResourceInput))
+                else input_.attachment.resource
+                if isinstance(input_, AttachmentInput)
+                else None
+            )
+            if resource is not None and resource.id not in seen:
+                seen.add(resource.id)
+                resources.append(resource)
+        return tuple(resources)
+
+
+class ResourceResolver(Protocol):
+    """Resolve an accessible resource only for an explicit runtime capability."""
+
+    async def inspect(self, resource: ResourceRef) -> dict[str, Any]: ...
+
+    async def read(self, resource: ResourceRef, *, max_characters: int) -> str: ...
+
+    async def materialize(self, resource: ResourceRef) -> tuple[ModelContent, ...]: ...
 
 if TYPE_CHECKING:
-    from bothesis.agent.tools import ToolRouter
+    from bothesis.observability import Tracer
 
 
 class AgentExecutionError(RuntimeError):
     """The agent could not safely complete a request."""
+
+
+AgentStreamEvent: TypeAlias = ResponseStreamEvent | RuntimeActivityEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,20 +218,13 @@ class ConversationWindow:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedConversation:
-    """The canonical input items and base instructions for one turn."""
-
-    items: tuple[Item, ...]
-    instructions: str
-
-
-@dataclass(frozen=True, slots=True)
 class SessionServices:
     """Session-scoped dependencies; these never become model context."""
 
     model: object
     tool_registry: object
-    tracing: object | None = None
+    resource_resolver: ResourceResolver | None = None
+    tracer: Tracer | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,9 +247,13 @@ class TurnEnvironmentSnapshot:
 
 @dataclass(slots=True)
 class TurnContext:
-    """Mutable accounting and policy state for one user-initiated turn."""
+    """Mutable runtime state for one user-initiated agent turn.
 
-    user_input: str
+    This state is deliberately broader than a model request. ContextManager
+    selects and compacts it into an immutable StepContext before every sample.
+    """
+
+    user_turn: UserTurn
     environment: TurnEnvironmentSnapshot
     initial_settings: ResolvedStepSettings
     current_settings: ResolvedStepSettings
@@ -142,7 +263,11 @@ class TurnContext:
     tool_call_count: int = 0
     model_duration_ms: int = 0
     tool_duration_ms: int = 0
-    evidence: dict[str, Any] = field(default_factory=dict)
+    resources: tuple[ResourceRef, ...] = ()
+    input_items: tuple[Item, ...] = ()
+    initial_input_item_count: int = 0
+    observations: tuple[Item, ...] = ()
+    evidence: dict[str, Evidence] = field(default_factory=dict)
     used_evidence_ids: set[str] = field(default_factory=set)
     executed_tool_signatures: set[str] = field(default_factory=set)
     references: CitationReferences = field(default_factory=CitationReferences)
@@ -152,10 +277,12 @@ class TurnContext:
 class StepContext:
     """Immutable snapshot used by exactly one model sampling request."""
 
-    turn: TurnContext
+    turn_id: str
+    step_index: int
     settings: ResolvedStepSettings
-    environment: TurnEnvironmentSnapshot
-    tool_router: "ToolRouter"
+    instructions: str
+    input_items: tuple[Item, ...]
+    tools: tuple[Tool, ...]
 
 
 def duration_ms(started_at: float) -> int:
@@ -180,9 +307,16 @@ from bothesis.agent.agent import Agent  # noqa: E402
 __all__ = [
     "Agent",
     "AgentExecutionError",
+    "AgentStreamEvent",
     "ConversationWindow",
     "ContextManager",
-    "PreparedConversation",
+    "AttachmentInput",
+    "AttachmentRef",
+    "ImageInput",
+    "ModelContent",
+    "ResourceInput",
+    "ResourceRef",
+    "ResourceResolver",
     "ResolvedStepSettings",
     "Session",
     "SessionConfiguration",
@@ -190,5 +324,8 @@ __all__ = [
     "StepContext",
     "TurnContext",
     "TurnEnvironmentSnapshot",
+    "TextInput",
+    "UserInput",
+    "UserTurn",
     "duration_ms",
 ]

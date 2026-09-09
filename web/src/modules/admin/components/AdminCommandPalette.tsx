@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
+import { appBrand } from "@/lib/brand";
 import { adminRequest, queryString } from "@/modules/admin/api";
 import { adminRoutes, type AdminRoute } from "@/modules/admin/navigation";
 
@@ -141,7 +142,7 @@ export function AdminCommandPalette({
   let renderedGroup = "";
 
   return createPortal(
-    <div className="adm-palette" role="dialog" aria-label="Search BoThesis Admin" aria-modal="true">
+    <div className="adm-palette" role="dialog" aria-label={`Search ${appBrand.productName} Admin`} aria-modal="true">
       <button
         aria-label="Close search"
         className="adm-palette__scrim"

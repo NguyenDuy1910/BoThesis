@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bothesis.agent.models import ConversationDocumentReference
+from bothesis.agent import ResourceRef
 from bothesis.db.models import Conversation, Item, Message, MessageItem
 from bothesis.services import AuthContext, DocumentNotFoundError
 from bothesis.services.collection_access import CollectionAccessService
@@ -32,7 +32,7 @@ class ConversationService:
         *,
         access: AuthContext,
         content: str,
-        document_ids: Sequence[UUID],
+        attachment_ids: Sequence[UUID],
         request_id: str,
     ) -> Message:
         normalized_content = content.strip()
@@ -79,10 +79,10 @@ class ConversationService:
             conversation.last_message_at = now
             await session.flush()
             items = ItemService(session)
-            for position, document_id in enumerate(document_ids):
+            for position, attachment_id in enumerate(attachment_ids):
                 await items.link_message(
                     message.id,
-                    document_id,
+                    attachment_id,
                     "attachment",
                     access=access,
                     position=position,
@@ -152,14 +152,34 @@ class ConversationService:
                 )
             return message
 
-    async def referenced_documents(
+    async def resources(
+        self,
+        resource_ids: Sequence[UUID],
+        *,
+        access: AuthContext,
+    ) -> tuple[ResourceRef, ...]:
+        """Return stable references for resources available to this turn."""
+
+        if access.tenant_id is None:
+            return ()
+        async with self._session_factory() as session:
+            items = ItemService(session)
+            result: list[ResourceRef] = []
+            for resource_id in dict.fromkeys(resource_ids):
+                item = await items.get_item(resource_id, access=access)
+                if item.item_type != "document":
+                    raise DocumentNotFoundError(f"resource not found: {resource_id}")
+                result.append(_resource_ref(item))
+            return tuple(result)
+
+    async def referenced_resources(
         self,
         conversation_id: UUID,
         *,
         access: AuthContext,
         limit: int = 10,
-    ) -> tuple[ConversationDocumentReference, ...]:
-        """The knowledge documents earlier turns of this conversation referenced.
+    ) -> tuple[ResourceRef, ...]:
+        """Accessible resources linked by earlier turns of this conversation.
 
         These are the durable ``MessageItem`` links ``start_turn`` and
         ``finish_turn`` recorded ("attachment" and "reference" relations —
@@ -200,20 +220,14 @@ class ConversationService:
             # it from context, not merely fail later tool calls.
             collections = CollectionAccessService(session)
             allowed = set(await collections.allowed_collection_ids(access))
-            references: list[ConversationDocumentReference] = []
+            references: list[ResourceRef] = []
             for item in candidates:
                 collection_id = await collections.authorization_collection_id(
                     item.id, tenant_id=access.tenant_id
                 )
                 if collection_id is None or collection_id not in allowed:
                     continue
-                references.append(
-                    ConversationDocumentReference(
-                        id=str(item.id),
-                        title=item.title,
-                        document_type=item.document_type,
-                    )
-                )
+                references.append(_resource_ref(item))
             return tuple(references)
 
 
@@ -229,6 +243,15 @@ async def _next_sequence(session: AsyncSession, conversation_id: UUID) -> int:
 def _title(content: str) -> str:
     normalized = " ".join(content.split())
     return normalized[:120]
+
+
+def _resource_ref(item: Item) -> ResourceRef:
+    return ResourceRef(
+        id=str(item.id),
+        name=str(item.metadata_.get("file_name") or item.title),
+        mime_type=item.mime_type or "application/octet-stream",
+        size_bytes=item.size_bytes,
+    )
 
 
 __all__ = ["ConversationService"]

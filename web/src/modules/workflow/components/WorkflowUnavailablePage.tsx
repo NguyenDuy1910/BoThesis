@@ -3,14 +3,15 @@ import { ArrowLeft, Workflow } from "lucide-react";
 
 import { ProductMark } from "@/components/ui/ProductMark";
 import { UnavailableState } from "@/components/ui/UnavailableState";
+import { appBrand } from "@/lib/brand";
 
 export function WorkflowUnavailablePage() {
   return (
     <main className="status-page" id="main-content">
       <header className="status-page__header">
-        <Link className="status-page__brand" href="/app" aria-label="BoThesis knowledge workspace">
+        <Link className="status-page__brand" href="/app" aria-label={`${appBrand.productName} knowledge workspace`}>
           <ProductMark decorative size="sm" />
-          <span>BoThesis</span>
+          <span>{appBrand.productName}</span>
         </Link>
         <span className="status-page__context">Workflow studio</span>
       </header>

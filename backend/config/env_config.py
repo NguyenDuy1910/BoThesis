@@ -349,6 +349,7 @@ class AgentRuntimeConfig:
     max_history_characters: int = 24_000
     recent_history_messages: int = 6
     tool_timeout_seconds: float = 30.0
+    max_resource_read_characters: int = 12_000
 
     @classmethod
     def from_environment(cls) -> AgentRuntimeConfig:
@@ -365,6 +366,9 @@ class AgentRuntimeConfig:
             ),
             tool_timeout_seconds=number(
                 "BOTHESIS_TOOL_TIMEOUT_SECONDS", default=30.0
+            ),
+            max_resource_read_characters=integer(
+                "BOTHESIS_MAX_RESOURCE_READ_CHARACTERS", default=12_000
             ),
         )
 
@@ -500,17 +504,46 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfluenceEnvironmentConfig:
+    """One deployment-managed Confluence account for demo and local setup."""
+
+    base_url: str | None = None
+    username: str | None = None
+    api_token: str | None = None
+    is_cloud: bool = True
+    timeout_seconds: int = 30
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.username and self.api_token)
+
+    @classmethod
+    def from_environment(cls) -> ConfluenceEnvironmentConfig:
+        return cls(
+            base_url=optional_text("BOTHESIS_CONFLUENCE_BASE_URL"),
+            username=optional_text("BOTHESIS_CONFLUENCE_USERNAME"),
+            api_token=optional_text("BOTHESIS_CONFLUENCE_API_TOKEN"),
+            is_cloud=boolean("BOTHESIS_CONFLUENCE_IS_CLOUD", default=True),
+            timeout_seconds=integer("BOTHESIS_CONFLUENCE_TIMEOUT_SECONDS", default=30),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class IntegrationConfig:
     """Secrets protecting stored connector credentials."""
 
     credential_encryption_key: str | None = None
+    confluence: ConfluenceEnvironmentConfig = field(
+        default_factory=ConfluenceEnvironmentConfig
+    )
 
     @classmethod
     def from_environment(cls) -> IntegrationConfig:
         return cls(
             credential_encryption_key=optional_text(
                 "BOTHESIS_INTEGRATION_ENCRYPTION_KEY"
-            )
+            ),
+            confluence=ConfluenceEnvironmentConfig.from_environment(),
         )
 
 
@@ -594,6 +627,7 @@ def reset_config() -> None:
 __all__ = [
     "AWS_S3_PROVIDER",
     "CLOUDFLARE_R2_PROVIDER",
+    "ConfluenceEnvironmentConfig",
     "LANGFUSE_DEFAULT_BASE_URL",
     "OPENAI_DEFAULT_BASE_URL",
     "OPENROUTER_DEFAULT_BASE_URL",

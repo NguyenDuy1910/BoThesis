@@ -1,6 +1,7 @@
 "use client";
 
 import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { appBrand } from "@/lib/brand";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export class AdminApiError extends Error {
@@ -20,7 +21,7 @@ export async function adminRequest<T>(
   const configuration = getBothesisChatConfiguration();
   if (!configuration) {
     throw new AdminApiError(
-      "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
+      `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
     );
   }
   let response: Response;
@@ -124,7 +125,7 @@ export function uploadDatasourceFile<T>(
   const configuration = getBothesisChatConfiguration();
   if (!configuration) {
     return Promise.reject(new AdminApiError(
-      "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
+      `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
     ));
   }
 
@@ -174,7 +175,7 @@ export function uploadCollectionFile<T>(
   const configuration = getBothesisChatConfiguration();
   if (!configuration) {
     return Promise.reject(new AdminApiError(
-      "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
+      `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
     ));
   }
 
@@ -198,7 +199,7 @@ export function uploadCollectionFile<T>(
     };
     request.upload.onload = () => options.onProcessing?.();
     request.onerror = () => reject(new AdminApiError(
-      "The upload could not reach the BoThesis API.",
+      `The upload could not reach the ${appBrand.productName} API.`,
     ));
     request.onload = () => {
       const payload = request.response as { detail?: unknown } | T | null;
@@ -220,7 +221,7 @@ export async function retryCollectionDocument<T>(documentId: string): Promise<T>
   const configuration = getBothesisChatConfiguration();
   if (!configuration) {
     throw new AdminApiError(
-      "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
+      `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
     );
   }
   let response: Response;
@@ -239,7 +240,7 @@ export async function retryCollectionDocument<T>(documentId: string): Promise<T>
     );
   } catch {
     throw new AdminApiError(
-      "The indexing retry could not reach the BoThesis API.",
+      `The indexing retry could not reach the ${appBrand.productName} API.`,
     );
   }
   const payload = await response.json().catch(() => null) as { detail?: unknown } | T | null;

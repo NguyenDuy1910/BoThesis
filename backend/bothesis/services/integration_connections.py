@@ -11,6 +11,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
+from config import ConfluenceEnvironmentConfig
+
 from bothesis.connector import ConnectorDefinition
 from bothesis.connector.registry import ConnectorRegistry
 from bothesis.db.models import IngestionSource, IntegrationConnection
@@ -50,11 +52,13 @@ class IntegrationConnectionService:
         *,
         registry: ConnectorRegistry | None = None,
         credential_encryption_key: str | None = None,
+        confluence_environment: ConfluenceEnvironmentConfig | None = None,
         audit: AuditService | None = None,
     ) -> None:
         self._session = session
         self._registry = registry or ConnectorRegistry.default()
         self._credential_encryption_key = credential_encryption_key
+        self._confluence_environment = confluence_environment
         self._audit = audit or AuditService(session)
 
     async def capabilities(self, actor: AuthContext) -> dict[str, Any]:
@@ -102,7 +106,11 @@ class IntegrationConnectionService:
         )
         if duplicate is not None:
             raise AdminConflictError("connection display name already exists")
-        if definition.authentication_type != "none" and not credentials:
+        if (
+            definition.authentication_type != "none"
+            and not credentials
+            and not self._uses_environment_credentials(normalized_key, config)
+        ):
             raise AdminValidationError(
                 f"{definition.display_name} credentials are required"
             )
@@ -390,6 +398,16 @@ class IntegrationConnectionService:
         definition = self._definition(connection.connector_key)
         if definition.authentication_type == "none":
             return {}
+        if self._uses_environment_credentials(connection.connector_key, connection.config):
+            environment = self._confluence_environment
+            if environment is None or not environment.configured:
+                raise AdminExternalUnavailableError(
+                    "Confluence environment credentials are not configured"
+                )
+            return {
+                "confluence_username": environment.username,
+                "confluence_access_token": environment.api_token,
+            }
         return await self._credentials().resolve(connection.id)
 
     def _runtime(
@@ -406,7 +424,26 @@ class IntegrationConnectionService:
             "_integration_connection_id": str(connection.id),
             "connector_id": str(connection.id),
         }
+        if self._uses_environment_credentials(connection.connector_key, connection.config):
+            environment = self._confluence_environment
+            if environment is None or not environment.configured:
+                raise AdminExternalUnavailableError(
+                    "Confluence environment credentials are not configured"
+                )
+            connection_config = {
+                "wiki_base": environment.base_url,
+                "is_cloud": environment.is_cloud,
+                **connection_config,
+            }
         return definition.factory(connection_config, source_config, credentials)
+
+    def _uses_environment_credentials(
+        self, connector_key: str, config: Mapping[str, Any]
+    ) -> bool:
+        return (
+            connector_key == "confluence"
+            and config.get("use_environment_credentials") is True
+        )
 
     @staticmethod
     def _connection_payload(connection: IntegrationConnection) -> dict[str, Any]:

@@ -22,7 +22,7 @@ several responses one agent turn may produce.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, TypeAlias, Union
+from typing import Annotated, Any, Literal, TypeAlias, Union
 
 from pydantic import Field, TypeAdapter
 
@@ -216,6 +216,34 @@ class ErrorEvent(StreamEventBase):
     error: ErrorPayload
 
 
+class ToolStartedEvent(StreamEventBase):
+    """A runtime-owned tool execution has actually started."""
+
+    type: Literal["tool_started"] = "tool_started"
+    call_id: str = Field(min_length=1)
+    tool_name: str = Field(min_length=1)
+
+
+class ToolProgressEvent(ToolStartedEvent):
+    """An optional factual update from a running tool."""
+
+    type: Literal["tool_progress"] = "tool_progress"
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolCompletedEvent(ToolStartedEvent):
+    """The terminal outcome from one real tool execution."""
+
+    type: Literal["tool_completed"] = "tool_completed"
+    status: Literal["completed", "failed", "timeout", "skipped"]
+    result_count: int | None = Field(default=None, ge=0)
+    duration_ms: int = Field(ge=0)
+
+
+RuntimeActivityEvent: TypeAlias = ToolStartedEvent | ToolProgressEvent | ToolCompletedEvent
+"""Transient runtime execution facts; never model context."""
+
+
 ResponseStreamEvent: TypeAlias = Annotated[
     Union[
         ResponseCreatedEvent,
@@ -289,6 +317,10 @@ __all__ = [
     "ResponseSnapshotEventBase",
     "ResponseStreamEvent",
     "ResponseStreamEventAdapter",
+    "RuntimeActivityEvent",
     "StreamEventBase",
     "SummaryEventBase",
+    "ToolCompletedEvent",
+    "ToolProgressEvent",
+    "ToolStartedEvent",
 ]

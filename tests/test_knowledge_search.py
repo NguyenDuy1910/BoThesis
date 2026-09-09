@@ -50,10 +50,11 @@ def invocation(
 ) -> ToolInvocation:
     return ToolInvocation(
         session=SimpleNamespace(),
-        turn=SimpleNamespace(references=references or CitationReferences()),
-        step_context=SimpleNamespace(
-            environment=SimpleNamespace(agent_context=context)
+        turn=SimpleNamespace(
+            environment=SimpleNamespace(agent_context=context),
+            references=references or CitationReferences(),
         ),
+        step_context=SimpleNamespace(),
         call_id="test-call",
         tool_name="knowledge_search",
         source="model",  # type: ignore[arg-type]

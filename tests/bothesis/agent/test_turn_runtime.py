@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
@@ -16,15 +18,21 @@ from native_responses import ScriptedResponsesTransport, completed, created, fun
 
 from bothesis.agent import (
     ContextManager,
+    AttachmentInput,
+    AttachmentRef,
+    ImageInput,
+    ResourceRef,
     ResolvedStepSettings,
     Session,
     SessionConfiguration,
     SessionServices,
+    TextInput,
     TurnContext,
     TurnEnvironmentSnapshot,
+    UserTurn,
 )
-from bothesis.agent.models import AgentContext, ToolOutput
-from bothesis.agent.protocol import FunctionCallItem
+from bothesis.agent.models import AgentContext, ConversationMessage, ToolOutput
+from bothesis.agent.protocol import FunctionCallItem, InputImage, InputText
 from bothesis.agent.tools import (
     ToolExecutor,
     ToolInvocation,
@@ -32,6 +40,7 @@ from bothesis.agent.tools import (
     ToolRegistry,
     ToolSpec,
 )
+from bothesis.agent.tools.read_resource import ReadResource
 from bothesis.agent.turn import run_turn
 
 
@@ -71,28 +80,191 @@ def _context(*, allowed: tuple[str, ...] | None = ("knowledge_search",)) -> Agen
     return AgentContext(user_id="user", tenant_id="tenant", roles=[], allowed_tool_names=allowed)
 
 
-def _turn(context: AgentContext) -> TurnContext:
+def _turn(context: AgentContext, user_turn: UserTurn | None = None) -> TurnContext:
     settings = ResolvedStepSettings(
         model=None,
         temperature=None,
         max_output_tokens=None,
         parallel_tool_calls=True,
     )
+    captured_input = user_turn or UserTurn(
+        inputs=(TextInput(text="What is the leave policy?"),)
+    )
+    resources = list(captured_input.resources)
+    known_ids = {resource.id for resource in resources}
+    for resource in context.resources:
+        if resource.id not in known_ids:
+            known_ids.add(resource.id)
+            resources.append(resource)
     return TurnContext(
-        user_input="What is the leave policy?",
+        user_turn=captured_input,
         environment=TurnEnvironmentSnapshot(agent_context=context),
         initial_settings=settings,
         current_settings=settings,
+        resources=tuple(resources),
     )
 
 
-def _session(transport: ScriptedResponsesTransport, registry: ToolRegistry) -> RecordingSession:
+def _session(
+    transport: ScriptedResponsesTransport,
+    registry: ToolRegistry,
+    resource_resolver: RecordingResourceResolver | None = None,
+) -> RecordingSession:
     configuration = SessionConfiguration(max_model_turns=3, max_tool_rounds=2)
     return RecordingSession(
         configuration,
-        SessionServices(model=transport, tool_registry=registry),
+        SessionServices(
+            model=transport,
+            tool_registry=registry,
+            resource_resolver=resource_resolver,
+        ),
         ContextManager(configuration=configuration),
     )
+
+
+class RecordingResourceResolver:
+    def __init__(self) -> None:
+        self.materialized: list[ResourceRef] = []
+        self.read_resources: list[ResourceRef] = []
+
+    async def inspect(self, resource: ResourceRef) -> dict[str, object]:
+        return {"id": resource.id}
+
+    async def read(self, resource: ResourceRef, *, max_characters: int) -> str:
+        self.read_resources.append(resource)
+        return "resource text"
+
+    async def materialize(self, resource: ResourceRef):  # type: ignore[no-untyped-def]
+        self.materialized.append(resource)
+        return (InputImage(image_url=f"https://resource.test/{resource.id}"),)
+
+
+@pytest.mark.asyncio
+async def test_generic_attachment_stays_lazy_until_a_resource_tool_reads_it() -> None:
+    configuration = SessionConfiguration()
+    manager = ContextManager(configuration=configuration)
+    resolver = RecordingResourceResolver()
+    file = ResourceRef(
+        id="file-1", name="plan.pdf", mime_type="application/pdf", size_bytes=12
+    )
+
+    turn = _turn(
+        _context(),
+        UserTurn(
+            inputs=(
+                TextInput(text="Review this plan"),
+                AttachmentInput(attachment=AttachmentRef(resource=file)),
+            )
+        ),
+    )
+    await manager.start_turn(turn, resolver)
+
+    assert resolver.materialized == []
+    assert turn.input_items[-1].content == (InputText(text="Review this plan"),)
+
+
+@pytest.mark.asyncio
+async def test_image_input_materializes_as_native_model_content() -> None:
+    configuration = SessionConfiguration()
+    manager = ContextManager(configuration=configuration)
+    resolver = RecordingResourceResolver()
+    image = ResourceRef(id="image-1", name="chart.png", mime_type="image/png")
+
+    turn = _turn(
+        _context(),
+        UserTurn(inputs=(TextInput(text="What does this chart show?"), ImageInput(image))),
+    )
+    await manager.start_turn(turn, resolver)
+
+    assert resolver.materialized == [image]
+    assert turn.input_items[-1].content == (
+        InputText(text="What does this chart show?"),
+        InputImage(image_url="https://resource.test/image-1"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_manager_retains_only_relevant_older_conversation() -> None:
+    configuration = SessionConfiguration(max_history_messages=8, recent_history_messages=2)
+    manager = ContextManager(configuration=configuration)
+    context = AgentContext(
+        user_id="user",
+        tenant_id="tenant",
+        roles=[],
+        history=(
+            ConversationMessage(role="user", content="Discuss the office party."),
+            ConversationMessage(role="assistant", content="The party is on Friday."),
+            ConversationMessage(role="user", content="What is the leave policy?"),
+            ConversationMessage(role="assistant", content="I can check the leave policy."),
+            ConversationMessage(role="user", content="Thanks."),
+            ConversationMessage(role="assistant", content="You're welcome."),
+        ),
+    )
+
+    turn = _turn(
+        context, UserTurn(inputs=(TextInput(text="Explain the leave policy"),))
+    )
+    await manager.start_turn(turn, RecordingResourceResolver())
+
+    history_text = "\n".join(
+        part.text
+        for item in turn.input_items[:-1]
+        for part in item.content
+        if isinstance(part, InputText)
+    )
+    assert "office party" not in history_text
+    assert "leave policy" in history_text
+
+
+@pytest.mark.asyncio
+async def test_generic_resource_is_read_only_after_the_model_calls_a_tool() -> None:
+    file = ResourceRef(id="file-1", name="plan.txt", mime_type="text/plain")
+    resolver = RecordingResourceResolver()
+    transport = ScriptedResponsesTransport(
+        [
+            [
+                *created("resp_a"),
+                *function_call(
+                    item_id="fc_1",
+                    output_index=0,
+                    call_id="call_1",
+                    name="read_resource",
+                    argument_deltas=['{"resource_id":"file-1"}'],
+                ),
+                *completed("resp_a"),
+            ],
+            [
+                *created("resp_b"),
+                *message(item_id="msg_1", output_index=0, deltas=["Reviewed."], phase="final_answer"),
+                *completed("resp_b"),
+            ],
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(ReadResource())
+    session = _session(transport, registry, resolver)
+    turn = _turn(
+        _context(allowed=("read_resource",)),
+        UserTurn(
+            inputs=(
+                TextInput(text="Review the plan"),
+                AttachmentInput(attachment=AttachmentRef(resource=file)),
+            )
+        ),
+    )
+
+    events = [event async for event in run_turn(session, turn)]
+
+    assert resolver.read_resources == [file]
+    assert "<resource_id>file-1</resource_id>" in transport.requests[0]["instructions"]
+    assert "<current_turn_goal>" not in transport.requests[0]["instructions"]
+    output = next(
+        event.item
+        for event in events
+        if event.type == "response.output_item.done"
+        and event.item.type == "function_call_output"
+    )
+    assert output.output == "resource text"
 
 
 @pytest.mark.asyncio
@@ -128,7 +300,72 @@ async def test_turn_recaptures_step_and_returns_to_model_after_a_tool() -> None:
     assert session.steps[0] is not session.steps[1]
     assert lookup.invocations[0].step_context is session.steps[0]
     assert transport.requests[1]["input"][-1]["type"] == "function_call_output"
+    tool_output = next(
+        event.item
+        for event in events
+        if event.type == "response.output_item.done"
+        and event.item.type == "function_call_output"
+    )
+    assert tool_output.output == "found leave"
+    activities = [
+        event for event in events if event.type in {"tool_started", "tool_completed"}
+    ]
+    assert [event.type for event in activities] == ["tool_started", "tool_completed"]
+    assert activities[0].call_id == "call_1"
+    assert activities[0].tool_name == "knowledge_search"
+    assert activities[1].status == "completed"
     assert events[-1].type == "response.completed"
+
+
+@pytest.mark.asyncio
+async def test_step_context_is_a_model_visible_snapshot() -> None:
+    file = ResourceRef(id="file-1", name="plan.txt", mime_type="text/plain")
+    transport = ScriptedResponsesTransport(
+        [
+            [
+                *created("resp_a"),
+                *function_call(
+                    item_id="fc_1",
+                    output_index=0,
+                    call_id="call_1",
+                    name="read_resource",
+                    argument_deltas=['{"resource_id":"file-1"}'],
+                ),
+                *completed("resp_a"),
+            ],
+            [
+                *created("resp_b"),
+                *message(item_id="msg_1", output_index=0, deltas=["Done."], phase="final_answer"),
+                *completed("resp_b"),
+            ],
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(ReadResource())
+    session = _session(transport, registry, RecordingResourceResolver())
+    turn = _turn(
+        _context(allowed=("read_resource",)),
+        UserTurn(
+            inputs=(
+                TextInput(text="Review this plan"),
+                AttachmentInput(attachment=AttachmentRef(resource=file)),
+            )
+        ),
+    )
+
+    _ = [event async for event in run_turn(session, turn)]
+
+    first, second = session.steps
+    assert tuple(field.name for field in fields(first)) == (
+        "turn_id", "step_index", "settings", "instructions", "input_items", "tools"
+    )
+    assert first.turn_id == turn.id
+    assert first.step_index == 1
+    assert first.input_items[-1].role == "user"
+    assert "<resource_id>file-1</resource_id>" in first.instructions
+    assert "<current_turn_goal>" not in first.instructions
+    assert len(second.input_items) > len(first.input_items)
+    assert second.input_items[-1].type == "function_call_output"
 
 
 @pytest.mark.asyncio
@@ -143,8 +380,93 @@ async def test_step_router_is_captured_from_current_turn_visibility() -> None:
     turn.environment = TurnEnvironmentSnapshot(agent_context=_context(allowed=()))
     second = await session.capture_step_context(turn)
 
-    assert [spec.name for spec in first.tool_router.model_visible_specs] == ["knowledge_search"]
-    assert second.tool_router.model_visible_specs == ()
+    assert [spec.name for spec in first.tools] == ["knowledge_search"]
+    assert second.tools == ()
+
+
+@pytest.mark.asyncio
+async def test_step_selects_only_explicit_or_user_relevant_resources() -> None:
+    relevant = ResourceRef(
+        id="leave-policy", name="Leave policy.pdf", mime_type="application/pdf"
+    )
+    unrelated = ResourceRef(
+        id="travel-policy", name="Travel policy.pdf", mime_type="application/pdf"
+    )
+    context = AgentContext(
+        user_id="user",
+        tenant_id="tenant",
+        roles=[],
+        resources=(relevant, unrelated),
+    )
+    session = _session(ScriptedResponsesTransport([]), ToolRegistry())
+    turn = _turn(
+        context, UserTurn(inputs=(TextInput(text="Review leave-policy"),))
+    )
+
+    step = await session.capture_step_context(turn)
+
+    assert "<resource_id>leave-policy</resource_id>" in step.instructions
+    assert "<resource_id>travel-policy</resource_id>" not in step.instructions
+    assert session.resources_for(step) == (relevant,)
+
+
+class SlowTool(Lookup):
+    """A tool that outruns the session budget but declares its own."""
+
+    def __init__(self, *, declared: float | None) -> None:
+        super().__init__()
+        self._declared = declared
+
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="knowledge_search",
+            description="Search knowledge.",
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            timeout_seconds=self._declared,
+        )
+
+    async def handle(self, invocation: ToolInvocation) -> ToolOutput:
+        await asyncio.sleep(0.15)
+        return await super().handle(invocation)
+
+
+async def _run_slow_tool(declared: float | None) -> str:
+    transport = ScriptedResponsesTransport([])
+    registry = ToolRegistry()
+    registry.register(SlowTool(declared=declared))
+    session = _session(transport, registry)
+    turn = _turn(_context())
+    step = await session.capture_step_context(turn)
+    batch = await ToolOrchestrator(
+        timeout_seconds=0.05,
+        max_output_characters=1_000,
+    ).execute(
+        (FunctionCallItem(call_id="call_1", name="knowledge_search", arguments='{"query":"leave"}'),),
+        session=session,
+        turn=turn,
+        step_context=step,
+        tool_router=session.tool_router(step),
+        resources=session.resources_for(step),
+        remaining_calls=1,
+    )
+    return batch.output_items[0].output
+
+
+@pytest.mark.asyncio
+async def test_a_tool_declaring_its_own_budget_outlives_the_session_timeout() -> None:
+    """A slow tool with its own budget must not be cancelled by the shared budget."""
+
+    assert await _run_slow_tool(declared=5.0) == "found leave"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_without_its_own_budget_still_uses_the_session_timeout() -> None:
+    assert await _run_slow_tool(declared=None) == "Tool error: Tool execution timed out."
 
 
 @pytest.mark.asyncio
@@ -163,7 +485,10 @@ async def test_hidden_tool_call_is_rejected_by_the_originating_step_router() -> 
     ).execute(
         (FunctionCallItem(call_id="call_1", name="knowledge_search", arguments='{"query":"leave"}'),),
         session=session,
+        turn=turn,
         step_context=step,
+        tool_router=session.tool_router(step),
+        resources=session.resources_for(step),
         remaining_calls=1,
     )
 

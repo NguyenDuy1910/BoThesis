@@ -232,6 +232,19 @@ export interface TurnState {
    */
   currentResponseId?: string;
   error?: string;
+  /** Live-only state. It is intentionally omitted from saved conversations. */
+  modelPending?: boolean;
+  /** Runtime facts, never model output. They only exist during this stream. */
+  runtimeActivities?: RuntimeActivity[];
+}
+
+export interface RuntimeActivity {
+  callId: string;
+  toolName: string;
+  state: "active" | "completed" | "failed" | "timeout" | "skipped";
+  startedAt: number;
+  resultCount?: number;
+  progress?: Record<string, unknown>;
 }
 
 interface StreamEventBase {
@@ -259,6 +272,25 @@ interface SummaryEventBase extends StreamEventBase {
  * one agent turn produces.
  */
 export type ResponseStreamEvent =
+  | (StreamEventBase & {
+      type: "tool_started";
+      call_id: string;
+      tool_name: string;
+    })
+  | (StreamEventBase & {
+      type: "tool_progress";
+      call_id: string;
+      tool_name: string;
+      data: Record<string, unknown>;
+    })
+  | (StreamEventBase & {
+      type: "tool_completed";
+      call_id: string;
+      tool_name: string;
+      status: "completed" | "failed" | "timeout" | "skipped";
+      result_count?: number | null;
+      duration_ms: number;
+    })
   | (StreamEventBase & {
       type:
         | "response.created"

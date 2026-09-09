@@ -30,9 +30,8 @@ async def chat_stream(
         message=body.message,
         conversation_id=body.conversation_id,
         history=[(message.role, message.content) for message in body.history],
-        knowledge_mode=body.knowledge_mode,
         collection_item_ids=body.collection_item_ids,
-        document_ids=body.document_ids,
+        attachment_ids=body.attachment_ids,
         is_disconnected=request.is_disconnected,
     )
     return StreamingResponse(

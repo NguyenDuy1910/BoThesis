@@ -353,8 +353,11 @@ class ChatTurnState {
     this.currentResponseId,
     this.error,
     this.lastSequenceNumber = 0,
+    this.modelPending = true,
+    List<RuntimeActivity>? runtimeActivities,
   }) : responses = responses ?? <String, ChatResponseState>{},
-       responseOrder = responseOrder ?? <String>[];
+       responseOrder = responseOrder ?? <String>[],
+       runtimeActivities = runtimeActivities ?? <RuntimeActivity>[];
 
   final String id;
   String status;
@@ -363,6 +366,8 @@ class ChatTurnState {
   String? currentResponseId;
   String? error;
   int lastSequenceNumber;
+  bool modelPending;
+  final List<RuntimeActivity> runtimeActivities;
 
   Iterable<OrderedTurnItem> get orderedItems sync* {
     for (
@@ -408,7 +413,6 @@ class ChatTurnState {
   }
 
   List<AssistantTurnItem> get presentationItems {
-    final newestResponseIndex = responseOrder.length - 1;
     final result = <AssistantTurnItem>[];
     for (final ordered in orderedItems) {
       final item = ordered.item;
@@ -419,6 +423,7 @@ class ChatTurnState {
             AssistantTurnItem.message(
               id: item.id,
               text: text,
+              phase: item.phase,
               state: item.status == 'completed' || status != 'streaming'
                   ? 'done'
                   : 'streaming',
@@ -426,31 +431,16 @@ class ChatTurnState {
           );
         }
       } else if (item.type == 'function_call') {
-        final state =
-            status == 'failed' && ordered.responseIndex == newestResponseIndex
-            ? 'error'
-            : status == 'streaming' &&
-                  ordered.responseIndex == newestResponseIndex
-            ? 'active'
-            : 'completed';
-        result.add(
-          AssistantTurnItem.tool(
-            id: item.id,
-            name: item.name ?? 'tool',
-            state: state,
-          ),
-        );
-      } else if (item.type == 'reasoning') {
-        final active =
-            status == 'streaming' &&
-            ordered.responseIndex == newestResponseIndex &&
-            item.status != 'completed';
-        if (item.summaryText.isNotEmpty || active) {
+        final activity = runtimeActivities
+            .where((activity) => activity.callId == item.callId)
+            .firstOrNull;
+        if (activity != null) {
           result.add(
-            AssistantTurnItem.reasoning(
-              id: item.id,
-              text: item.summaryText,
-              state: active ? 'active' : 'completed',
+            AssistantTurnItem.tool(
+              id: activity.callId,
+              name: activity.toolName,
+              state: activity.state,
+              resultCount: activity.resultCount,
             ),
           );
         }
@@ -541,28 +531,34 @@ class AssistantTurnItem {
     required this.state,
     this.text = '',
     this.name = '',
+    this.resultCount,
+    this.phase,
   });
 
   factory AssistantTurnItem.message({
     required String id,
     required String text,
     required String state,
+    String? phase,
   }) => AssistantTurnItem._(
     kind: AssistantTurnItemKind.message,
     id: id,
     text: text,
     state: state,
+    phase: phase,
   );
 
   factory AssistantTurnItem.tool({
     required String id,
     required String name,
     required String state,
+    int? resultCount,
   }) => AssistantTurnItem._(
     kind: AssistantTurnItemKind.tool,
     id: id,
     name: name,
     state: state,
+    resultCount: resultCount,
   );
 
   factory AssistantTurnItem.reasoning({
@@ -581,6 +577,24 @@ class AssistantTurnItem {
   final String state;
   final String text;
   final String name;
+  final int? resultCount;
+  final String? phase;
+}
+
+class RuntimeActivity {
+  RuntimeActivity({
+    required this.callId,
+    required this.toolName,
+    required this.state,
+    this.resultCount,
+    Map<String, dynamic>? progress,
+  }) : progress = progress ?? <String, dynamic>{};
+
+  final String callId;
+  String toolName;
+  String state;
+  int? resultCount;
+  Map<String, dynamic> progress;
 }
 
 class AnswerSource {

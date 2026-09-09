@@ -172,8 +172,10 @@ export function KnowledgeDocumentPreview({
                   key={`${region.x}:${region.y}:${region.width}:${region.height}`}
                   style={regionStyle(region)}
                 />
-              ))}
+            ))}
           </div>
+        ) : isHtmlSource(viewer) ? (
+          <HtmlSourcePreview viewer={viewer} />
         ) : (
           <UnrenderedSource viewer={viewer} />
         )}
@@ -190,6 +192,31 @@ export function KnowledgeDocumentPreview({
       )}
     </div>
   );
+}
+
+/** Render an HTML source without granting it access to the chat application. */
+function HtmlSourcePreview({ viewer }: { viewer: KnowledgeItemViewer }) {
+  const sourceUrl = viewer.preview?.original.url || viewer.document_url;
+  if (!sourceUrl) return <UnrenderedSource viewer={viewer} />;
+  return (
+    <div className="source-preview__html">
+      <p className="source-preview__html-note">
+        Rendered source preview in an isolated sandbox.
+      </p>
+      <iframe
+        className="source-preview__html-frame"
+        referrerPolicy="no-referrer"
+        sandbox="allow-scripts"
+        src={sourceUrl}
+        title={`${viewer.title} preview`}
+      />
+    </div>
+  );
+}
+
+function isHtmlSource(viewer: KnowledgeItemViewer): boolean {
+  const contentType = viewer.content_type.split(";", 1)[0]?.trim().toLowerCase();
+  return contentType === "text/html" || /\.(?:html?|xhtml)$/i.test(viewer.title);
 }
 
 /** Every reason a page image is not available, told apart honestly. */

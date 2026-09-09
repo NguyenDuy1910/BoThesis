@@ -83,10 +83,11 @@ class ResponsesStream:
     ) -> AsyncIterator[ResponseStreamEvent]:
         """Yield one canonical event per native event, without buffering."""
 
+        request = render_request(prompt)
         stream = await self._transport.stream_response(
-            input=cast(Any, render_input(prompt.input)),
-            model=prompt.model,
-            **_native_params(prompt),
+            input=cast(Any, request.pop("input")),
+            model=cast(str | None, request.pop("model")),
+            **request,
         )
         async for native in stream:
             for event in _project(native, prompt):
@@ -106,6 +107,16 @@ def render_input(items: Sequence[Item]) -> list[dict[str, Any]]:
         if block is not None:
             rendered.append(block)
     return rendered
+
+
+def render_request(prompt: Prompt) -> dict[str, Any]:
+    """Render the exact provider request body before the transport sends it."""
+
+    return {
+        "model": prompt.model,
+        "input": render_input(prompt.input),
+        **_native_params(prompt),
+    }
 
 
 def _native_params(prompt: Prompt) -> dict[str, Any]:
@@ -608,4 +619,4 @@ def _dump(native: Any) -> dict[str, Any] | None:
     return dict(native) if isinstance(native, dict) else None
 
 
-__all__ = ["ResponsesStream", "render_input"]
+__all__ = ["ResponsesStream", "render_input", "render_request"]

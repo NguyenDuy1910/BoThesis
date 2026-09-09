@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useToast } from "@/components/ui/Toast";
 import { cn } from "@/lib/cn";
+import { appBrand } from "@/lib/brand";
 import { adminRequest } from "@/modules/admin/api";
 import { formatDateTime } from "@/modules/admin/format";
 import { errorMessage } from "@/modules/admin/format";
@@ -58,7 +59,7 @@ export function SettingsPage() {
                 </Button>
               )
             }
-            description="The name your team sees across BoThesis."
+            description={`The name your team sees across ${appBrand.productName}.`}
             title="Workspace"
           />
           <CardBody>

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from bothesis.agent.protocol import FunctionCallItem
+from bothesis.agent.protocol import InputContent, ToolCall
 from bothesis.knowledge import Evidence
+
+
+if TYPE_CHECKING:
+    from bothesis.agent import ResourceRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,37 +20,6 @@ class ConversationMessage:
 
     role: Literal["user", "assistant"]
     content: str
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationDocument:
-    """Server-validated Document context available to one model run."""
-
-    id: str
-    title: str
-    content_type: str
-    mode: Literal["direct", "indexed"]
-    citation_id: str
-    content_block: Mapping[str, Any] | None = None
-    extracted_text: str | None = None
-    evidence: tuple[Evidence, ...] = ()
-    provider_annotations: tuple[Mapping[str, Any], ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationDocumentReference:
-    """A knowledge document an earlier turn of this conversation referenced.
-
-    Only the access-checked identity travels here — never content. It lets a
-    follow-up such as "fill that form for me" resolve the Document ID the
-    conversation already surfaced, without a second search; every use of the
-    id is re-checked against the caller's
-    Item ACL at execution time.
-    """
-
-    id: str
-    title: str
-    document_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,8 +84,7 @@ class AgentContext:
     trace_step: int | None = None
     retrieval_round: int = 0
     retrieval_query_count: int = 0
-    documents: tuple[ConversationDocument, ...] = ()
-    document_references: tuple[ConversationDocumentReference, ...] = ()
+    resources: tuple["ResourceRef", ...] = ()
     model_extra_body: Mapping[str, Any] | None = None
 
 
@@ -153,48 +125,60 @@ class CitationReferences:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolOutput:
+class ToolResult:
     """A tool result before the runtime binds it to a provider call ID."""
 
     content: str
     evidence: list[Evidence] = field(default_factory=list)
     error: str | None = None
     metadata: dict[str, str | int | float | bool] = field(default_factory=dict)
+    model_content: tuple[InputContent, ...] = ()
+
+
+# Existing tool implementations and integrations import this name. New code
+# uses ToolResult, whose extra model_content channel supports explicit native
+# multimodal materialization without smuggling it through a text observation.
+ToolOutput = ToolResult
 
 
 @dataclass(frozen=True, slots=True)
 class ToolObservation:
     """One model invocation paired with the outcome observed by the runtime."""
 
-    call: FunctionCallItem
-    output: ToolOutput
+    call: ToolCall
+    result: ToolResult
     duration_ms: int
 
     @property
     def result_count(self) -> int | None:
-        value = self.output.metadata.get("result_count")
+        value = self.result.metadata.get("result_count")
         return value if isinstance(value, int) else None
 
     @property
     def status(self) -> Literal["completed", "failed", "timeout", "skipped"]:
-        if not self.output.error:
+        if not self.result.error:
             return "completed"
-        outcome = self.output.metadata.get("outcome")
+        outcome = self.result.metadata.get("outcome")
         if outcome == "timeout":
             return "timeout"
         if outcome in {"duplicate_call", "tool_call_limit"}:
             return "skipped"
         return "failed"
 
+    @property
+    def output(self) -> ToolResult:
+        """Compatibility name for callers that have not moved to result yet."""
+
+        return self.result
+
 
 __all__ = [
     "AgentContext",
     "CitationReferences",
     "ConversationArtifact",
-    "ConversationDocument",
-    "ConversationDocumentReference",
     "ConversationMessage",
     "Evidence",
     "ToolObservation",
+    "ToolResult",
     "ToolOutput",
 ]

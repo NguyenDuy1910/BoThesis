@@ -103,6 +103,7 @@ class TemporalWorker:
             credential_encryption_key=(
                 self._config.integration.credential_encryption_key
             ),
+            confluence_environment=self._config.integration.confluence,
             preview=self._runtime.knowledge_preview(),
         )
 

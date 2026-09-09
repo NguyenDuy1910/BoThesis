@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext
 from dataclasses import replace
 from time import perf_counter
 from typing import Any
 
-from bothesis.agent.models import ToolOutput
-from bothesis.agent.tools import ToolExecutor, ToolInvocation, ToolSpec
+from bothesis.agent.models import ToolResult
+from bothesis.agent.tools import Tool, ToolInvocation, ToolSpec
 from bothesis.knowledge import (
     ContextBuilder,
     Evidence,
     EvidenceContextBuilder,
     KnowledgeRetriever,
 )
-from bothesis.observability import LangfuseTracing, RetrievalTrace
+from bothesis.observability import NoopTracer, TraceSerializer, TraceSpan, Tracer
 
 
 _EMPTY_CONTENT = "No matching access-permitted enterprise documents were found."
@@ -24,7 +23,7 @@ _TIMEOUT_ERROR = "Knowledge search timed out. Please try again."
 _FAILURE_ERROR = "Knowledge search is temporarily unavailable. Please try again."
 
 
-class KnowledgeSearch(ToolExecutor):
+class KnowledgeSearch(Tool):
     """Retrieve bounded evidence that is visible to the authenticated user."""
 
     _MAX_QUERY_CHARACTERS = 512
@@ -39,7 +38,7 @@ class KnowledgeSearch(ToolExecutor):
         max_context_characters: int = 8_000,
         max_evidence_characters: int = 1_600,
         context_builder: ContextBuilder | None = None,
-        tracing: LangfuseTracing | None = None,
+        tracer: Tracer | None = None,
     ) -> None:
         # The retrieval boundary is checked once here rather than on every
         # execution: a misconfigured runtime must fail at wiring time, not be
@@ -63,7 +62,7 @@ class KnowledgeSearch(ToolExecutor):
             max_characters=max_context_characters,
             max_evidence_characters=max_evidence_characters,
         )
-        self._tracing = tracing
+        self._tracer = tracer or NoopTracer()
         # The declaration is fixed once the limits are known, and the runtime
         # reads it on every model turn, tool call, and text-payload check.
         self._definition = self._build_definition()
@@ -75,16 +74,11 @@ class KnowledgeSearch(ToolExecutor):
         return ToolSpec(
             name="knowledge_search",
             description=(
-                "Search access-permitted enterprise knowledge base for source-grounded "
-                "evidence. This is the only search tool: it covers every ingested "
-                "document, including templates and forms, not just prose. ONLY use "
-                "this tool when you need enterprise-specific information. Use focused, "
-                "specific queries with exact entity names, identifiers, or dates. If "
-                "the query is too vague or generic, ask the user for clarification "
-                "BEFORE using this tool. Results include a source reference to cite "
-                "and a Document ID for lineage. If no results are found, explicitly "
-                "tell the user that information was not found in the knowledge base "
-                "- never fabricate an answer."
+                "Search access-permitted enterprise sources for grounded evidence. "
+                "Use it when the answer needs organization-specific facts or the user "
+                "asks to search knowledge. Supply one to three focused, standalone "
+                "queries. It returns citable evidence with a source reference to cite "
+                "or reports that no permitted source was found."
             ),
             input_schema={
                 "type": "object",
@@ -92,13 +86,9 @@ class KnowledgeSearch(ToolExecutor):
                     "queries": {
                         "type": "array",
                         "description": (
-                            "One to three focused standalone queries with specific details. "
-                            "Each query must be specific and independently searchable. "
-                            "Do not use generic terms (like 'information', 'details', 'company') "
-                            "without specific context. Do not combine unrelated questions. "
-                            "Use exact names, identifiers, dates, project codes when available. "
-                            "If you only have a vague concept, ask the user for more specifics "
-                            "instead of searching with generic terms."
+                            "Focused, independently useful queries. Do not use generic "
+                            "terms without available scope; include names, identifiers, "
+                            "dates, or other useful detail."
                         ),
                         "items": {
                             "type": "string",
@@ -116,12 +106,12 @@ class KnowledgeSearch(ToolExecutor):
             activity_category="retrieval",
         )
 
-    async def handle(self, invocation: ToolInvocation) -> ToolOutput:
+    async def handle(self, invocation: ToolInvocation) -> ToolResult:
         arguments = invocation.payload.arguments
         ctx = invocation
         queries, validation_error = self._validated_queries(arguments)
         if validation_error is not None:
-            return ToolOutput(
+            return ToolResult(
                 content="",
                 error=validation_error,
                 metadata={
@@ -138,7 +128,7 @@ class KnowledgeSearch(ToolExecutor):
 
         context = self._context_builder.build(evidence) if evidence else None
         if context is not None and context.evidence:
-            return ToolOutput(
+            return ToolResult(
                 content=context.text,
                 evidence=list(context.evidence),
                 metadata={
@@ -152,7 +142,7 @@ class KnowledgeSearch(ToolExecutor):
             # Reaching here means no query produced citable content, so the
             # failure is the whole outcome rather than a partial one.
             timed_out = all(failure == "timeout" for failure in failures)
-            return ToolOutput(
+            return ToolResult(
                 content="",
                 error=_TIMEOUT_ERROR if timed_out else _FAILURE_ERROR,
                 metadata={
@@ -161,7 +151,7 @@ class KnowledgeSearch(ToolExecutor):
                     "duration_ms": duration_ms,
                 },
             )
-        return ToolOutput(
+        return ToolResult(
             content=_EMPTY_CONTENT,
             metadata={
                 "outcome": "empty",
@@ -222,16 +212,19 @@ class KnowledgeSearch(ToolExecutor):
         deadline: float,
     ) -> tuple[list[Evidence], str | None]:
         started_at = perf_counter()
-        trace_context = (
-            self._tracing.retrieval(
-                query=query,
-                result_limit=self._result_limit,
-                ctx=ctx.agent_context,
-            )
-            if self._tracing is not None
-            else nullcontext(None)
-        )
-        with trace_context as retrieval_trace:
+        # Trace start: one child span records this query within the tool call.
+        with self._tracer.span(
+            "knowledge.retrieve",
+            attributes={
+                "result_limit": self._result_limit,
+                "tool_call_id": ctx.call_id,
+            },
+            input=TraceSerializer.full(
+                TraceSerializer.retrieval_input(
+                    query=query, result_limit=self._result_limit
+                )
+            ),
+        ) as trace:
             try:
                 async with asyncio.timeout_at(deadline):
                     evidence = await self._retriever.search(
@@ -240,34 +233,47 @@ class KnowledgeSearch(ToolExecutor):
                         ctx=ctx.agent_context,
                     )
             except TimeoutError:
-                return [], self._failed(retrieval_trace, "timeout", started_at)
+                return [], self._failed(trace, "timeout", started_at)
             except ValueError:
-                return [], self._failed(retrieval_trace, "invalid_query", started_at)
+                return [], self._failed(trace, "invalid_query", started_at)
             except Exception:  # noqa: BLE001 - retrieval errors are model observations
-                return [], self._failed(retrieval_trace, "retrieval_failure", started_at)
+                return [], self._failed(trace, "retrieval_failure", started_at)
 
-            if retrieval_trace is not None:
-                retrieval_trace.complete(
-                    outcome="success" if evidence else "empty",
-                    result_count=len(evidence),
-                    source_types=[
-                        item.source.provider.value
-                        for item in evidence
-                        if item.source is not None
-                    ],
-                    results=evidence,
-                    duration_ms=self._duration_ms(started_at),
+            trace.set_output(
+                TraceSerializer.full(
+                    TraceSerializer.retrieval_output(
+                        outcome="success" if evidence else "empty",
+                        result_count=len(evidence),
+                        source_types=[
+                            item.source.provider.value
+                            for item in evidence
+                            if item.source is not None
+                        ],
+                        duration_ms=self._duration_ms(started_at),
+                        results=evidence,
+                    )
                 )
+            )
+            # Trace end: this query's evidence is attached to the retrieval span.
             return evidence, None
 
     def _failed(
         self,
-        trace: RetrievalTrace | None,
+        trace: TraceSpan,
         category: str,
         started_at: float,
     ) -> str:
-        if trace is not None:
-            trace.fail(category=category, duration_ms=self._duration_ms(started_at))
+        trace.set_output(
+            TraceSerializer.full(
+                TraceSerializer.retrieval_output(
+                    outcome=category,
+                    result_count=0,
+                    source_types=(),
+                    duration_ms=self._duration_ms(started_at),
+                )
+            )
+        )
+        # Trace end: record the safe failure category before the span closes.
         return category
 
     def _validated_queries(

@@ -195,7 +195,7 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
 
 
 @pytest.mark.asyncio
-async def test_referenced_documents_resolve_prior_turns_under_current_access(
+async def test_referenced_resources_resolve_prior_turns_under_current_access(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """A follow-up like "fill that form" resolves earlier Document IDs.
@@ -303,7 +303,7 @@ async def test_referenced_documents_resolve_prior_turns_under_current_access(
         conversation_id = conversation.id
 
     conversations = ConversationService(session_factory)
-    references = await conversations.referenced_documents(
+    references = await conversations.referenced_resources(
         conversation_id, access=actor
     )
     assert [reference.title for reference in references] == [
@@ -311,10 +311,10 @@ async def test_referenced_documents_resolve_prior_turns_under_current_access(
         "Leave policy",
     ]
     assert references[0].id == str(expense_form.id)
-    assert references[0].document_type == "file"
+    assert references[0].mime_type == "application/octet-stream"
     # A conversation is private to its user: another member resolves nothing.
     assert (
-        await conversations.referenced_documents(conversation_id, access=other_actor)
+        await conversations.referenced_resources(conversation_id, access=other_actor)
         == ()
     )
 

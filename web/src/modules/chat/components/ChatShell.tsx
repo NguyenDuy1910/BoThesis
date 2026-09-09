@@ -21,6 +21,7 @@ import {
 import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
+import { appBrand } from "@/lib/brand";
 import { AppShell } from "@/components/ui/AppShell";
 import { ProductMark } from "@/components/ui/ProductMark";
 import { getBothesisChatConfiguration } from "@/lib/api/config";
@@ -372,7 +373,7 @@ function ChatConversation({
   const selectAttachments = useCallback((files: FileList) => {
     const availableSlots = Math.max(0, 12 - composerAttachments.length);
     for (const file of Array.from(files).slice(0, availableSlots)) {
-      const key = `${file.name}:${file.size}:${file.lastModified}:${Math.random().toString(36).slice(2)}`;
+      const key = `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}:${Math.random().toString(36).slice(2)}`;
       const controller = new AbortController();
       uploadControllersRef.current.set(key, controller);
       setComposerAttachments((current) => [...current, {
@@ -656,7 +657,6 @@ const MessageView = memo(function MessageView({
       <div className="message-body">
         <AssistantTurn
           activeCitationId={activeCitationId}
-          activityConnectorLabel={activityConnectorLabel}
           isStreaming={isStreaming}
           onOpenSource={onOpenSource}
           onRevealingChange={setIsRevealing}
@@ -737,6 +737,7 @@ function ChatComposer({
   textareaRef: RefObject<HTMLTextAreaElement | null>;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     await onSubmit(input);
@@ -782,6 +783,20 @@ function ChatComposer({
           ref={fileInputRef}
           type="file"
         />
+        <input
+          accept=".avif,.bmp,.csv,.docx,.gif,.htm,.html,.jpeg,.jpg,.json,.jsonl,.log,.markdown,.md,.pdf,.png,.pptx,.rst,.sql,.tif,.tiff,.tsv,.txt,.webp,.xlsx,.xml,.yaml,.yml"
+          hidden
+          multiple
+          onChange={(event) => {
+            if (event.target.files?.length) onFiles(event.target.files);
+            event.target.value = "";
+          }}
+          ref={(element) => {
+            folderInputRef.current = element;
+            if (element) element.setAttribute("webkitdirectory", "");
+          }}
+          type="file"
+        />
         <textarea
           aria-describedby="composer-help"
           aria-label="Message assistant"
@@ -812,6 +827,17 @@ function ChatComposer({
             <Paperclip aria-hidden="true" size={15} />
             <span>Attach</span>
           </button>
+          <button
+            aria-label="Attach a folder"
+            className="composer-tool"
+            disabled={!isConfigured || attachments.length >= 12}
+            onClick={() => folderInputRef.current?.click()}
+            title="Attach a folder"
+            type="button"
+          >
+            <FileSearch aria-hidden="true" size={15} />
+            <span>Folder</span>
+          </button>
           <span className="composer__privacy"><ShieldCheck aria-hidden="true" size={13} /> Permission-aware</span>
           <span className="composer__shortcut">Enter to send · Shift + Enter for new line</span>
           <button
@@ -829,7 +855,7 @@ function ChatComposer({
           </button>
         </div>
       </form>
-      <p className="composer-disclaimer" id="composer-help">BoThesis can make mistakes. Verify important decisions with the cited sources.</p>
+      <p className="composer-disclaimer" id="composer-help">{appBrand.productName} can make mistakes. Verify important decisions with the cited sources.</p>
     </div>
   );
 }
@@ -855,7 +881,7 @@ function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
         <div className="welcome-hero">
           <span className="welcome-hero__mark"><ProductMark decorative size="lg" /></span>
           <div className="welcome-identity">
-            BoThesis workspace
+            {appBrand.productName}
           </div>
           <div className="welcome-heading">
             <h2>What can I help you understand?</h2>
