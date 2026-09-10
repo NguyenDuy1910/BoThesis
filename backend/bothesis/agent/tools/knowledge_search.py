@@ -1,32 +1,19 @@
-"""Permission-scoped retrieval of grounded enterprise knowledge."""
+"""Expose bounded, citable enterprise retrieval to the model."""
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import replace
-from time import perf_counter
-from typing import Any
-
 from bothesis.agent.models import ToolResult
 from bothesis.agent.tools import Tool, ToolInvocation, ToolSpec
-from bothesis.knowledge import (
-    ContextBuilder,
-    Evidence,
-    EvidenceContextBuilder,
-    KnowledgeRetriever,
-)
-from bothesis.observability import NoopTracer, TraceSerializer, TraceSpan, Tracer
-
-
-_EMPTY_CONTENT = "No matching access-permitted enterprise documents were found."
-_TIMEOUT_ERROR = "Knowledge search timed out. Please try again."
-_FAILURE_ERROR = "Knowledge search is temporarily unavailable. Please try again."
+from bothesis.knowledge import ContextBuilder, KnowledgeRetriever
+from bothesis.observability import Tracer
+from bothesis.services.agent_runtime import MAX_KNOWLEDGE_SEARCH_QUERY_CHARACTERS
+from bothesis.services.agent_runtime.knowledge_search import AgentKnowledgeSearchService
 
 
 class KnowledgeSearch(Tool):
-    """Retrieve bounded evidence that is visible to the authenticated user."""
+    """Translate the model tool contract into agent-runtime retrieval."""
 
-    _MAX_QUERY_CHARACTERS = 512
+    _MAX_QUERY_CHARACTERS = MAX_KNOWLEDGE_SEARCH_QUERY_CHARACTERS
 
     def __init__(
         self,
@@ -40,31 +27,17 @@ class KnowledgeSearch(Tool):
         context_builder: ContextBuilder | None = None,
         tracer: Tracer | None = None,
     ) -> None:
-        # The retrieval boundary is checked once here rather than on every
-        # execution: a misconfigured runtime must fail at wiring time, not be
-        # reported to the model as a per-call tool failure.
-        if not isinstance(retriever, KnowledgeRetriever):
-            raise TypeError("retriever must implement the KnowledgeRetriever protocol")
-        if result_limit < 1:
-            raise ValueError("result_limit must be at least one")
-        if max_queries < 1:
-            raise ValueError("max_queries must be at least one")
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be greater than zero")
-        if max_context_characters < 1 or max_evidence_characters < 1:
-            raise ValueError("context limits must be greater than zero")
-
-        self._retriever = retriever
-        self._result_limit = result_limit
         self._max_queries = max_queries
-        self._timeout_seconds = timeout_seconds
-        self._context_builder = context_builder or EvidenceContextBuilder(
-            max_characters=max_context_characters,
+        self._search = AgentKnowledgeSearchService(
+            retriever,
+            result_limit=result_limit,
+            max_queries=max_queries,
+            timeout_seconds=timeout_seconds,
+            max_context_characters=max_context_characters,
             max_evidence_characters=max_evidence_characters,
+            context_builder=context_builder,
+            tracer=tracer,
         )
-        self._tracer = tracer or NoopTracer()
-        # The declaration is fixed once the limits are known, and the runtime
-        # reads it on every model turn, tool call, and text-payload check.
         self._definition = self._build_definition()
 
     def spec(self) -> ToolSpec:
@@ -107,207 +80,25 @@ class KnowledgeSearch(Tool):
         )
 
     async def handle(self, invocation: ToolInvocation) -> ToolResult:
-        arguments = invocation.payload.arguments
-        ctx = invocation
-        queries, validation_error = self._validated_queries(arguments)
-        if validation_error is not None:
-            return ToolResult(
-                content="",
-                error=validation_error,
-                metadata={
-                    "outcome": "invalid_input",
-                    "result_count": 0,
-                    "duration_ms": 0,
-                },
-            )
-
-        started_at = perf_counter()
-        results = await self._search_all(queries, ctx)
-        evidence, failures = self._merged_evidence(results, ctx)
-        duration_ms = self._duration_ms(started_at)
-
-        context = self._context_builder.build(evidence) if evidence else None
-        if context is not None and context.evidence:
-            return ToolResult(
-                content=context.text,
-                evidence=list(context.evidence),
-                metadata={
-                    "outcome": "partial_success" if failures else "success",
-                    "result_count": len(context.evidence),
-                    "success_criteria_met": True,
-                    "duration_ms": duration_ms,
-                },
-            )
-        if failures:
-            # Reaching here means no query produced citable content, so the
-            # failure is the whole outcome rather than a partial one.
-            timed_out = all(failure == "timeout" for failure in failures)
-            return ToolResult(
-                content="",
-                error=_TIMEOUT_ERROR if timed_out else _FAILURE_ERROR,
-                metadata={
-                    "outcome": "timeout" if timed_out else "retrieval_failure",
-                    "result_count": 0,
-                    "duration_ms": duration_ms,
-                },
-            )
+        result = await self._search.search(
+            invocation.payload.arguments,
+            context=invocation.agent_context,
+            references=invocation.references,
+            call_id=invocation.call_id,
+        )
+        metadata: dict[str, str | int | bool] = {
+            "outcome": result.outcome,
+            "result_count": len(result.evidence),
+            "duration_ms": result.duration_ms,
+        }
+        if result.success_criteria_met is not None:
+            metadata["success_criteria_met"] = result.success_criteria_met
         return ToolResult(
-            content=_EMPTY_CONTENT,
-            metadata={
-                "outcome": "empty",
-                "result_count": 0,
-                "success_criteria_met": False,
-                "duration_ms": duration_ms,
-            },
+            content=result.content,
+            evidence=list(result.evidence),
+            error=result.error,
+            metadata=metadata,
         )
-
-    async def _search_all(
-        self,
-        queries: list[str],
-        ctx: ToolInvocation,
-    ) -> list[tuple[list[Evidence], str | None]]:
-        """Run every query concurrently under one shared wall-clock budget."""
-
-        # A single deadline bounds the whole call: without it, queries dispatched
-        # behind a saturated retrieval pool each restart their own budget and the
-        # tool can outlive the timeout the runtime was promised.
-        deadline = asyncio.get_running_loop().time() + self._timeout_seconds
-        if len(queries) == 1:
-            return [await self._search_query(queries[0], ctx, deadline)]
-        return list(
-            await asyncio.gather(
-                *(self._search_query(query, ctx, deadline) for query in queries)
-            )
-        )
-
-    def _merged_evidence(
-        self,
-        results: list[tuple[list[Evidence], str | None]],
-        ctx: ToolInvocation,
-    ) -> tuple[list[Evidence], list[str]]:
-        """Collapse per-query results into one deduplicated, citable ranking."""
-
-        evidence: list[Evidence] = []
-        failures: list[str] = []
-        seen: set[tuple[str, str]] = set()
-        for query_evidence, failure in results:
-            if failure is not None:
-                failures.append(failure)
-                continue
-            for item in query_evidence:
-                identity = (item.item_id, item.chunk_id)
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                # The compact reference is what the model is allowed to cite,
-                # and it is assigned before the context is built so the model
-                # never sees an Item or chunk identifier it could echo back.
-                evidence.append(replace(item, id=ctx.references.reference(*identity)))
-        return evidence, failures
-
-    async def _search_query(
-        self,
-        query: str,
-        ctx: ToolInvocation,
-        deadline: float,
-    ) -> tuple[list[Evidence], str | None]:
-        started_at = perf_counter()
-        # Trace start: one child span records this query within the tool call.
-        with self._tracer.span(
-            "knowledge.retrieve",
-            attributes={
-                "result_limit": self._result_limit,
-                "tool_call_id": ctx.call_id,
-            },
-            input=TraceSerializer.full(
-                TraceSerializer.retrieval_input(
-                    query=query, result_limit=self._result_limit
-                )
-            ),
-        ) as trace:
-            try:
-                async with asyncio.timeout_at(deadline):
-                    evidence = await self._retriever.search(
-                        query,
-                        limit=self._result_limit,
-                        ctx=ctx.agent_context,
-                    )
-            except TimeoutError:
-                return [], self._failed(trace, "timeout", started_at)
-            except ValueError:
-                return [], self._failed(trace, "invalid_query", started_at)
-            except Exception:  # noqa: BLE001 - retrieval errors are model observations
-                return [], self._failed(trace, "retrieval_failure", started_at)
-
-            trace.set_output(
-                TraceSerializer.full(
-                    TraceSerializer.retrieval_output(
-                        outcome="success" if evidence else "empty",
-                        result_count=len(evidence),
-                        source_types=[
-                            item.source.provider.value
-                            for item in evidence
-                            if item.source is not None
-                        ],
-                        duration_ms=self._duration_ms(started_at),
-                        results=evidence,
-                    )
-                )
-            )
-            # Trace end: this query's evidence is attached to the retrieval span.
-            return evidence, None
-
-    def _failed(
-        self,
-        trace: TraceSpan,
-        category: str,
-        started_at: float,
-    ) -> str:
-        trace.set_output(
-            TraceSerializer.full(
-                TraceSerializer.retrieval_output(
-                    outcome=category,
-                    result_count=0,
-                    source_types=(),
-                    duration_ms=self._duration_ms(started_at),
-                )
-            )
-        )
-        # Trace end: record the safe failure category before the span closes.
-        return category
-
-    def _validated_queries(
-        self,
-        arguments: dict[str, Any],
-    ) -> tuple[list[str], str | None]:
-        raw_queries = arguments.get("queries")
-        if not isinstance(raw_queries, list) or not raw_queries:
-            return [], "knowledge_search requires at least one query."
-        if len(raw_queries) > self._max_queries:
-            return [], f"knowledge_search accepts at most {self._max_queries} queries."
-
-        queries: list[str] = []
-        seen_queries: set[str] = set()
-        for raw_query in raw_queries:
-            if not isinstance(raw_query, str):
-                return [], "knowledge_search queries must be strings."
-            query = " ".join(raw_query.split())
-            if not query:
-                return [], "knowledge_search queries must not be empty."
-            if len(query) > self._MAX_QUERY_CHARACTERS:
-                return [], (
-                    "knowledge_search queries must not exceed "
-                    f"{self._MAX_QUERY_CHARACTERS} characters."
-                )
-            query_key = query.casefold()
-            if query_key not in seen_queries:
-                seen_queries.add(query_key)
-                queries.append(query)
-        return queries, None
-
-    @staticmethod
-    def _duration_ms(started_at: float) -> int:
-        return round((perf_counter() - started_at) * 1_000)
 
 
 __all__ = ["KnowledgeSearch"]

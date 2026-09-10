@@ -1,47 +1,72 @@
-# Agent runtime context
+# Agent runtime execution model
 
-`TurnContext` is the mutable runtime state for one user-initiated turn. It
-holds the user input, stable request environment, resources, accumulated
-canonical items and observations, evidence, citations, settings, counters, and
-timing. It is never sent to a model directly.
-
-`StepContext` is an immutable, provider-neutral snapshot of exactly one model
-sampling request:
+One user request is one `TurnContext`, not one model request. The agent may
+sample the model repeatedly, execute tools, record observations, and build a
+new context before every subsequent sample.
 
 ```text
-turn_id
-step_index
-settings
-instructions
-input_items
-tools
+durable ConversationService history + TurnInput
+                    │
+                    ▼
+              ConversationState
+                    │
+TurnContext ────────┼──────────── Capability and resource registries
+                    ▼
+              ContextManager
+                    │
+                    ▼
+               StepContext
+                    │
+                    ▼
+                ModelInput
+                    │
+                    ▼
+                   Prompt / LLM
+                    │
+          ┌─────────┴──────────┐
+          ▼                    ▼
+      tool calls            final answer
+          │
+          ▼
+  ToolOrchestrator
+          │
+          ▼
+     observations
+          │
+          └───────────────► ConversationState → next step
 ```
 
-The context manager selects bounded relevant conversation, the current user
-input, applicable resource metadata, and a compacted set of recent tool
-interactions from the mutable turn state. It renders those selections into the
-snapshot's `instructions` and ordered `input_items`; it does not retain their
-source decomposition in `StepContext`.
+## Ownership
 
-```text
-UserTurn
-  -> TurnContext
-  -> ContextManager
-  -> StepContext #1
-  -> ModelAdapter
-  -> ToolCall / observation
-  -> update TurnContext
-  -> StepContext #2
-```
+- `ConversationService` owns persisted user and final-assistant messages. Its
+  ordered history is supplied when a new agent turn begins.
+- `ConversationState` owns the one ordered sequence of provider-neutral items
+  visible while that agent turn runs: selected history, current user input,
+  model messages, function calls, and function outputs. `TurnContext` does not
+  duplicate these items.
+- `TurnContext` owns mutable, turn-scoped runtime state: resource surface,
+  counters, durations, evidence, citation references, and executed-call
+  signatures. It is never a model request.
+- `StepContext` is immutable and describes runtime state for exactly one model
+  step: resolved settings, selected resource references, and visible tool
+  names. It does not contain prompt text or conversation items.
+- `ModelInput` is the exact provider-neutral context materialized for that
+  step: instructions, selected ordered items, tool schemas, and settings. It
+  projects to the protocol `Prompt` consumed by the transport.
+- `ContextManager` decides what the model sees now. It initializes and compacts
+  `ConversationState`, selects resources, composes instructions, and builds
+  `StepContext` and `ModelInput`. It never executes a tool or runs the loop.
+- `ToolOrchestrator` validates and executes only calls that were exposed by the
+  originating immutable `StepContext`; results become observations appended to
+  `ConversationState`.
 
-Tool routing, resource resolution, tracing, and model transports are runtime
-capabilities owned by `SessionServices` and the agent loop. `StepContext`
-contains only provider-neutral tool specifications; the runtime recreates the
-router from that immutable visible tool surface when executing a model call.
-The session likewise retains the selected resource scope keyed by the step
-identity, rather than placing a resolver or mutable resource state in the
-snapshot.
+Tools and resources are progressive capabilities. Resource metadata is included
+only when relevant, while content remains behind explicit read/materialize
+tools. Tool visibility is resolved again before every step from the current
+turn limits and the caller's allowed capability names.
 
-Every `context.build` and `model.sample` trace includes the full `StepContext`
-snapshot. Comparing adjacent traces therefore shows the precise model-visible
-context before and after a tool observation or compaction.
+`context.build` traces the selected runtime snapshot and the ordered state
+considered for it. Every `model.sample` trace contains the exact materialized
+`Prompt`, including instructions, input items, tool schemas, settings, and the
+previous-response lineage. Comparing adjacent model traces therefore shows the
+effective context before and after each observation.

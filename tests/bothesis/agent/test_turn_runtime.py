@@ -18,6 +18,7 @@ from native_responses import ScriptedResponsesTransport, completed, created, fun
 
 from bothesis.agent import (
     ContextManager,
+    ConversationState,
     AttachmentInput,
     AttachmentRef,
     ImageInput,
@@ -32,7 +33,13 @@ from bothesis.agent import (
     UserTurn,
 )
 from bothesis.agent.models import AgentContext, ConversationMessage, ToolOutput
-from bothesis.agent.protocol import FunctionCallItem, InputImage, InputText
+from bothesis.agent.protocol import (
+    FunctionCallItem,
+    FunctionCallOutputItem,
+    InputImage,
+    InputText,
+    ReasoningItem,
+)
 from bothesis.agent.tools import (
     ToolExecutor,
     ToolInvocation,
@@ -69,11 +76,17 @@ class RecordingSession(Session):
     def __init__(self, *args: Any) -> None:
         super().__init__(*args)
         self.steps = []
+        self.model_inputs = []
 
     async def capture_step_context(self, turn: TurnContext):
         step = await super().capture_step_context(turn)
         self.steps.append(step)
         return step
+
+    def build_model_input(self, step_context):  # type: ignore[no-untyped-def]
+        model_input = super().build_model_input(step_context)
+        self.model_inputs.append(model_input)
+        return model_input
 
 
 def _context(*, allowed: tuple[str, ...] | None = ("knowledge_search",)) -> AgentContext:
@@ -157,10 +170,11 @@ async def test_generic_attachment_stays_lazy_until_a_resource_tool_reads_it() ->
             )
         ),
     )
-    await manager.start_turn(turn, resolver)
+    conversation = ConversationState()
+    await manager.start_turn(conversation, turn, resolver)
 
     assert resolver.materialized == []
-    assert turn.input_items[-1].content == (InputText(text="Review this plan"),)
+    assert conversation.items[-1].content == (InputText(text="Review this plan"),)
 
 
 @pytest.mark.asyncio
@@ -174,10 +188,11 @@ async def test_image_input_materializes_as_native_model_content() -> None:
         _context(),
         UserTurn(inputs=(TextInput(text="What does this chart show?"), ImageInput(image))),
     )
-    await manager.start_turn(turn, resolver)
+    conversation = ConversationState()
+    await manager.start_turn(conversation, turn, resolver)
 
     assert resolver.materialized == [image]
-    assert turn.input_items[-1].content == (
+    assert conversation.items[-1].content == (
         InputText(text="What does this chart show?"),
         InputImage(image_url="https://resource.test/image-1"),
     )
@@ -204,11 +219,12 @@ async def test_context_manager_retains_only_relevant_older_conversation() -> Non
     turn = _turn(
         context, UserTurn(inputs=(TextInput(text="Explain the leave policy"),))
     )
-    await manager.start_turn(turn, RecordingResourceResolver())
+    conversation = ConversationState()
+    await manager.start_turn(conversation, turn, RecordingResourceResolver())
 
     history_text = "\n".join(
         part.text
-        for item in turn.input_items[:-1]
+        for item in conversation.items[:-1]
         for part in item.content
         if isinstance(part, InputText)
     )
@@ -318,7 +334,7 @@ async def test_turn_recaptures_step_and_returns_to_model_after_a_tool() -> None:
 
 
 @pytest.mark.asyncio
-async def test_step_context_is_a_model_visible_snapshot() -> None:
+async def test_step_context_is_immutable_and_model_input_is_materialized_per_step() -> None:
     file = ResourceRef(id="file-1", name="plan.txt", mime_type="text/plain")
     transport = ScriptedResponsesTransport(
         [
@@ -357,15 +373,18 @@ async def test_step_context_is_a_model_visible_snapshot() -> None:
 
     first, second = session.steps
     assert tuple(field.name for field in fields(first)) == (
-        "turn_id", "step_index", "settings", "instructions", "input_items", "tools"
+        "turn_id", "step_index", "settings", "resources", "tool_names"
     )
     assert first.turn_id == turn.id
     assert first.step_index == 1
-    assert first.input_items[-1].role == "user"
-    assert "<resource_id>file-1</resource_id>" in first.instructions
-    assert "<current_turn_goal>" not in first.instructions
-    assert len(second.input_items) > len(first.input_items)
-    assert second.input_items[-1].type == "function_call_output"
+    assert first.resources == (file,)
+    assert first.tool_names == ("read_resource",)
+    first_input, second_input = session.model_inputs
+    assert first_input.input_items[-1].role == "user"
+    assert "<resource_id>file-1</resource_id>" in first_input.instructions
+    assert "<current_turn_goal>" not in first_input.instructions
+    assert len(second_input.input_items) > len(first_input.input_items)
+    assert second_input.input_items[-1].type == "function_call_output"
 
 
 @pytest.mark.asyncio
@@ -380,8 +399,8 @@ async def test_step_router_is_captured_from_current_turn_visibility() -> None:
     turn.environment = TurnEnvironmentSnapshot(agent_context=_context(allowed=()))
     second = await session.capture_step_context(turn)
 
-    assert [spec.name for spec in first.tools] == ["knowledge_search"]
-    assert second.tools == ()
+    assert first.tool_names == ("knowledge_search",)
+    assert second.tool_names == ()
 
 
 @pytest.mark.asyncio
@@ -405,9 +424,31 @@ async def test_step_selects_only_explicit_or_user_relevant_resources() -> None:
 
     step = await session.capture_step_context(turn)
 
-    assert "<resource_id>leave-policy</resource_id>" in step.instructions
-    assert "<resource_id>travel-policy</resource_id>" not in step.instructions
-    assert session.resources_for(step) == (relevant,)
+    model_input = session.build_model_input(step)
+    assert "<resource_id>leave-policy</resource_id>" in model_input.instructions
+    assert "<resource_id>travel-policy</resource_id>" not in model_input.instructions
+    assert step.resources == (relevant,)
+
+
+@pytest.mark.asyncio
+async def test_model_input_keeps_reasoning_required_by_a_retained_function_call() -> None:
+    session = _session(ScriptedResponsesTransport([]), ToolRegistry())
+    turn = _turn(_context())
+    await session.capture_step_context(turn)
+    reasoning = ReasoningItem(id="rs_1", encrypted_content="x" * 20_000)
+    call = FunctionCallItem(
+        id="fc_1",
+        call_id="call_1",
+        name="knowledge_search",
+        arguments='{"query":"leave"}',
+    )
+    output = FunctionCallOutputItem(call_id="call_1", output="found leave")
+    session.record((reasoning, call, output))
+
+    step = await session.capture_step_context(turn)
+    model_input = session.build_model_input(step)
+
+    assert model_input.input_items[-3:] == (reasoning, call, output)
 
 
 class SlowTool(Lookup):
@@ -451,7 +492,7 @@ async def _run_slow_tool(declared: float | None) -> str:
         turn=turn,
         step_context=step,
         tool_router=session.tool_router(step),
-        resources=session.resources_for(step),
+        resources=step.resources,
         remaining_calls=1,
     )
     return batch.output_items[0].output
@@ -488,7 +529,7 @@ async def test_hidden_tool_call_is_rejected_by_the_originating_step_router() -> 
         turn=turn,
         step_context=step,
         tool_router=session.tool_router(step),
-        resources=session.resources_for(step),
+        resources=step.resources,
         remaining_calls=1,
     )
 

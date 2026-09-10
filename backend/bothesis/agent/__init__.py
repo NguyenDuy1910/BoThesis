@@ -13,6 +13,7 @@ from bothesis.agent.protocol import (
     InputImage,
     InputText,
     Item,
+    Prompt,
     Tool,
     RuntimeActivityEvent,
     ResponseStreamEvent,
@@ -217,6 +218,35 @@ class ConversationWindow:
         return _compact_json(self.older_payload())
 
 
+@dataclass(slots=True)
+class ConversationState:
+    """The one ordered, model-visible interaction history for an active turn."""
+
+    items: tuple[Item, ...] = ()
+    initial_item_count: int = 0
+
+    @property
+    def initialized(self) -> bool:
+        return self.initial_item_count > 0
+
+    @property
+    def observations(self) -> tuple[Item, ...]:
+        """Tool outputs acquired during this turn, in interaction order."""
+
+        return tuple(
+            item for item in self.items if item.type == "function_call_output"
+        )
+
+    def initialize(self, items: tuple[Item, ...]) -> None:
+        if self.initialized:
+            return
+        self.items = items
+        self.initial_item_count = len(items)
+
+    def record(self, items: tuple[Item, ...]) -> None:
+        self.items = (*self.items, *items)
+
+
 @dataclass(frozen=True, slots=True)
 class SessionServices:
     """Session-scoped dependencies; these never become model context."""
@@ -264,9 +294,6 @@ class TurnContext:
     model_duration_ms: int = 0
     tool_duration_ms: int = 0
     resources: tuple[ResourceRef, ...] = ()
-    input_items: tuple[Item, ...] = ()
-    initial_input_item_count: int = 0
-    observations: tuple[Item, ...] = ()
     evidence: dict[str, Evidence] = field(default_factory=dict)
     used_evidence_ids: set[str] = field(default_factory=set)
     executed_tool_signatures: set[str] = field(default_factory=set)
@@ -275,7 +302,18 @@ class TurnContext:
 
 @dataclass(frozen=True, slots=True)
 class StepContext:
-    """Immutable snapshot used by exactly one model sampling request."""
+    """Immutable runtime snapshot used to build exactly one model request."""
+
+    turn_id: str
+    step_index: int
+    settings: ResolvedStepSettings
+    resources: tuple[ResourceRef, ...]
+    tool_names: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelInput:
+    """The exact provider-neutral context materialized for one sampling step."""
 
     turn_id: str
     step_index: int
@@ -283,6 +321,24 @@ class StepContext:
     instructions: str
     input_items: tuple[Item, ...]
     tools: tuple[Tool, ...]
+
+    def prompt(self, *, previous_response_id: str | None) -> Prompt:
+        """Project the materialized agent context onto the transport contract."""
+
+        return Prompt(
+            input=self.input_items,
+            model=self.settings.model,
+            instructions=self.instructions,
+            tools=self.tools,
+            tool_choice="auto" if self.tools else None,
+            parallel_tool_calls=(
+                self.settings.parallel_tool_calls if self.tools else None
+            ),
+            temperature=self.settings.temperature,
+            max_output_tokens=self.settings.max_output_tokens,
+            previous_response_id=previous_response_id,
+            provider_options=self.settings.provider_options,
+        )
 
 
 def duration_ms(started_at: float) -> int:
@@ -308,12 +364,14 @@ __all__ = [
     "Agent",
     "AgentExecutionError",
     "AgentStreamEvent",
+    "ConversationState",
     "ConversationWindow",
     "ContextManager",
     "AttachmentInput",
     "AttachmentRef",
     "ImageInput",
     "ModelContent",
+    "ModelInput",
     "ResourceInput",
     "ResourceRef",
     "ResourceResolver",

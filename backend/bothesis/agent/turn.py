@@ -9,6 +9,7 @@ from time import perf_counter
 from bothesis.agent import (
     AgentExecutionError,
     AgentStreamEvent,
+    ModelInput,
     StepContext,
     TurnContext,
     duration_ms,
@@ -17,7 +18,6 @@ from bothesis.agent.citation_stream import CitationProjection
 from bothesis.agent.protocol import (
     TERMINAL_EVENT_TYPES,
     MessageItem,
-    Prompt,
     Response,
     ResponseOutputTextDeltaEvent,
     ResponseOutputItemAddedEvent,
@@ -27,7 +27,6 @@ from bothesis.agent.protocol import (
     ToolCompletedEvent,
     ToolProgressEvent,
     ToolStartedEvent,
-    FunctionTool,
 )
 from bothesis.agent.reducer import ResponseReducer
 from bothesis.agent.sampling import sample
@@ -39,7 +38,6 @@ from bothesis.observability import TraceSerializer
 async def run_turn(session: Session, turn: TurnContext) -> AsyncIterator[AgentStreamEvent]:
     """Stream one turn, recapturing StepContext before every model request."""
 
-    await session.context_manager.start_turn(turn, session.resource_resolver)
     orchestrator = ToolOrchestrator(
         timeout_seconds=session.configuration.tool_timeout_seconds,
         max_output_characters=session.configuration.max_tool_context_characters,
@@ -51,9 +49,15 @@ async def run_turn(session: Session, turn: TurnContext) -> AsyncIterator[AgentSt
             raise AgentExecutionError("sampling request limit reached without a final response")
         turn.model_iteration += 1
         step_context = await session.capture_step_context(turn)
-        prompt = _build_prompt(step_context, previous_response_id)
+        model_input = session.build_model_input(step_context)
         response: Response | None = None
-        async for event, settled in run_sampling_request(session, turn, step_context, prompt):
+        async for event, settled in run_sampling_request(
+            session,
+            turn,
+            step_context,
+            model_input,
+            previous_response_id=previous_response_id,
+        ):
             response = settled or response
             yield event
         if response is None:
@@ -62,9 +66,9 @@ async def run_turn(session: Session, turn: TurnContext) -> AsyncIterator[AgentSt
             return
 
         previous_response_id = response.id
-        session.context_manager.record(turn, response.output)
+        session.record(response.output)
         if response.function_calls:
-            if not step_context.tools:
+            if not step_context.tool_names:
                 raise AgentExecutionError("model requested a tool after the safety limit")
             turn.tool_round += 1
             batch: ToolExecutionBatch | None = None
@@ -83,9 +87,9 @@ async def run_turn(session: Session, turn: TurnContext) -> AsyncIterator[AgentSt
             assert batch is not None
             turn.tool_call_count += batch.executed_call_count
             turn.tool_duration_ms += batch.duration_ms
-            session.context_manager.record(turn, batch.output_items)
+            session.record(batch.output_items)
             if batch.model_content:
-                session.context_manager.record(turn, (
+                session.record((
                     MessageItem(role="user", content=batch.model_content),
                 ))
             for output_index, item in enumerate(
@@ -97,11 +101,7 @@ async def run_turn(session: Session, turn: TurnContext) -> AsyncIterator[AgentSt
 
         answer = response.final_answer_text.strip()
         if not answer or session.tool_registry.is_tool_arguments_payload(
-            answer, step_context.tools and tuple(
-                tool.name
-                for tool in step_context.tools
-                if isinstance(tool, FunctionTool)
-            )
+            answer, step_context.tool_names
         ):
             raise AgentExecutionError("model returned neither a final answer nor a valid tool call")
         return
@@ -130,7 +130,7 @@ async def _execute_tools(
             turn=turn,
             step_context=step_context,
             tool_router=session.tool_router(step_context),
-            resources=session.resources_for(step_context),
+            resources=step_context.resources,
             remaining_calls=remaining_calls,
             on_progress=report,
         )
@@ -191,31 +191,20 @@ def _runtime_activity_event(update: ToolProgress) -> AgentStreamEvent:
     )
 
 
-def _build_prompt(step_context: StepContext, previous_response_id: str | None) -> Prompt:
-    settings = step_context.settings
-    tools = step_context.tools
-    return Prompt(
-        input=step_context.input_items,
-        model=settings.model,
-        instructions=step_context.instructions,
-        tools=tools,
-        tool_choice="auto" if tools else None,
-        parallel_tool_calls=settings.parallel_tool_calls if tools else None,
-        temperature=settings.temperature,
-        max_output_tokens=settings.max_output_tokens,
-        previous_response_id=previous_response_id,
-        provider_options=settings.provider_options,
-    )
-
-
 async def run_sampling_request(
-    session: Session, turn: TurnContext, step_context: StepContext, prompt: Prompt
+    session: Session,
+    turn: TurnContext,
+    step_context: StepContext,
+    model_input: ModelInput,
+    *,
+    previous_response_id: str | None,
 ) -> AsyncIterator[tuple[ResponseStreamEvent, Response | None]]:
     """Stream exactly one sampling request and reconstruct canonical output."""
 
     started_at = perf_counter()
     reducer = ResponseReducer()
     projection = CitationProjection(turn.evidence, references=turn.references)
+    prompt = model_input.prompt(previous_response_id=previous_response_id)
     # Trace start: this generation contains the normalized and provider request.
     with session.tracer.generation(
         "model.sample",

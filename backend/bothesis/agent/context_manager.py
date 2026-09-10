@@ -9,9 +9,11 @@ from xml.sax.saxutils import escape
 
 from bothesis import render_agent_base
 from bothesis.agent import (
+    ConversationState,
     ConversationWindow,
     ImageInput,
     ModelContent,
+    ModelInput,
     ResourceInput,
     ResourceRef,
     ResourceResolver,
@@ -26,9 +28,11 @@ from bothesis.agent.models import ConversationMessage
 from bothesis.agent.protocol import (
     FunctionCallItem,
     FunctionCallOutputItem,
+    FunctionTool,
     InputText,
     Item,
     MessageItem,
+    ReasoningItem,
     Tool,
 )
 
@@ -87,11 +91,14 @@ class ContextManager:
         )
 
     async def start_turn(
-        self, turn: TurnContext, resource_resolver: ResourceResolver | None
+        self,
+        conversation: ConversationState,
+        turn: TurnContext,
+        resource_resolver: ResourceResolver | None,
     ) -> None:
-        """Normalize the initial user turn once into mutable turn runtime state."""
+        """Initialize the turn's one ordered model-visible conversation state."""
 
-        if turn.initial_input_item_count:
+        if conversation.initialized:
             return
         window = self.relevant_window(
             turn.environment.agent_context.history, turn.user_turn
@@ -106,17 +113,12 @@ class ContextManager:
                 content=await self._user_content(turn.user_turn, resource_resolver),
             )
         )
-        turn.input_items = tuple(items)
-        turn.initial_input_item_count = len(items)
+        conversation.initialize(tuple(items))
 
-    def record(self, turn: TurnContext, items: Sequence[Item]) -> None:
-        """Add acquired canonical output to the mutable turn state."""
+    def record(self, conversation: ConversationState, items: Sequence[Item]) -> None:
+        """Append canonical runtime output to the ordered conversation state."""
 
-        additions = tuple(items)
-        turn.input_items = (*turn.input_items, *additions)
-        turn.observations = (*turn.observations, *(
-            item for item in additions if isinstance(item, FunctionCallOutputItem)
-        ))
+        conversation.record(tuple(items))
 
     def capture_step_context(
         self,
@@ -126,16 +128,35 @@ class ContextManager:
         tools: tuple[Tool, ...],
         resources: tuple[ResourceRef, ...],
     ) -> StepContext:
-        """Select the exact immutable snapshot exposed to one model sample."""
+        """Capture runtime capabilities available to one immutable step."""
 
-        if not turn.initial_input_item_count:
-            raise RuntimeError("turn context has not been initialized")
         return StepContext(
             turn_id=turn.id,
             step_index=turn.model_iteration,
             settings=settings,
-            instructions=self._instructions(resources),
-            input_items=self._selected_input_items(turn),
+            resources=resources,
+            tool_names=tuple(
+                tool.name for tool in tools if isinstance(tool, FunctionTool)
+            ),
+        )
+
+    def build_model_input(
+        self,
+        conversation: ConversationState,
+        step: StepContext,
+        *,
+        tools: tuple[Tool, ...],
+    ) -> ModelInput:
+        """Materialize the exact model-visible request for one step snapshot."""
+
+        if not conversation.initialized:
+            raise RuntimeError("conversation state has not been initialized")
+        return ModelInput(
+            turn_id=step.turn_id,
+            step_index=step.step_index,
+            settings=step.settings,
+            instructions=self._instructions(step.resources),
+            input_items=self._selected_input_items(conversation),
             tools=tools,
         )
 
@@ -154,7 +175,9 @@ class ContextManager:
                 explicit.append(resource)
         return tuple(explicit)
 
-    def _selected_input_items(self, turn: TurnContext) -> tuple[Item, ...]:
+    def _selected_input_items(
+        self, conversation: ConversationState
+    ) -> tuple[Item, ...]:
         """Keep initial context plus a bounded suffix of tool interactions.
 
         The latest tool output is always retained with its matching function
@@ -162,37 +185,46 @@ class ContextManager:
         the configured model-context budget is exhausted.
         """
 
-        initial = turn.input_items[: turn.initial_input_item_count]
-        dynamic = turn.input_items[turn.initial_input_item_count :]
+        initial = conversation.items[: conversation.initial_item_count]
+        dynamic = conversation.items[conversation.initial_item_count :]
         if not dynamic:
             return initial
 
-        selected_reversed: list[Item] = []
-        consumed_call_ids: set[str] = set()
-        excluded_call_ids: set[str] = set()
+        selected_item_ids: set[int] = set()
+        excluded_item_ids: set[int] = set()
         remaining = self._config.max_tool_context_characters
         for item in reversed(dynamic):
+            item_id = id(item)
             size = _item_characters(item)
             if isinstance(item, FunctionCallOutputItem):
                 call = _matching_call(dynamic, item.call_id)
-                pair_size = size + (_item_characters(call) if call is not None else 0)
-                if selected_reversed and pair_size > remaining:
-                    excluded_call_ids.add(item.call_id)
+                reasoning = _preceding_reasoning(dynamic, call)
+                interaction = tuple(
+                    candidate
+                    for candidate in (item, call, reasoning)
+                    if candidate is not None
+                )
+                interaction_size = sum(
+                    _item_characters(candidate) for candidate in interaction
+                )
+                if selected_item_ids and interaction_size > remaining:
+                    excluded_item_ids.update(id(candidate) for candidate in interaction)
                     continue
-                selected_reversed.append(item)
-                remaining -= pair_size
-                consumed_call_ids.add(item.call_id)
-                if call is not None:
-                    selected_reversed.append(call)
+                selected_item_ids.update(id(candidate) for candidate in interaction)
+                remaining -= interaction_size
                 continue
             if isinstance(item, FunctionCallItem):
-                if item.call_id in consumed_call_ids or item.call_id in excluded_call_ids:
+                if item_id in selected_item_ids or item_id in excluded_item_ids:
                     continue
-            if selected_reversed and size > remaining:
+            if isinstance(item, ReasoningItem) and (
+                item_id in selected_item_ids or item_id in excluded_item_ids
+            ):
                 continue
-            selected_reversed.append(item)
+            if selected_item_ids and size > remaining:
+                continue
+            selected_item_ids.add(item_id)
             remaining -= size
-        return (*initial, *reversed(selected_reversed))
+        return (*initial, *(item for item in dynamic if id(item) in selected_item_ids))
 
     @staticmethod
     async def _user_content(
@@ -255,6 +287,22 @@ def _matching_call(items: tuple[Item, ...], call_id: str) -> FunctionCallItem | 
         ),
         None,
     )
+
+
+def _preceding_reasoning(
+    items: tuple[Item, ...], call: FunctionCallItem | None
+) -> ReasoningItem | None:
+    """Return the replay-required reasoning item immediately preceding a call."""
+
+    if call is None:
+        return None
+    call_index = next(index for index, item in enumerate(items) if item is call)
+    for item in reversed(items[:call_index]):
+        if isinstance(item, FunctionCallOutputItem):
+            return None
+        if isinstance(item, ReasoningItem):
+            return item
+    return None
 
 
 def _item_characters(item: Item | None) -> int:

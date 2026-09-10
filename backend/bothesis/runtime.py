@@ -35,7 +35,7 @@ from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services.knowledge_query import KnowledgeQueryService
 from bothesis.services.knowledge_view import KnowledgeViewService
 from bothesis.services.preview import KnowledgePreview
-from bothesis.services.resource_resolver import ItemResourceResolver
+from bothesis.services.agent_runtime.item_resource_resolver import ItemResourceResolver
 from bothesis.services.stored_file_content import StoredFileContentService
 from bothesis.services.workflow.service import TemporalWorkflowService
 from bothesis.services.workspace_documents import WorkspaceDocumentService

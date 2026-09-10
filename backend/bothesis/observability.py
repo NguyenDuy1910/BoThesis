@@ -267,6 +267,7 @@ class TraceSerializer:
         cls,
         turn: TurnContext,
         *,
+        conversation: Sequence[object],
         previous_observations: Sequence[object] = (),
         available_tools: Sequence[object] = (),
     ) -> dict[str, object]:
@@ -274,10 +275,7 @@ class TraceSerializer:
 
         context = turn.environment.agent_context
         return {
-            "conversation_state": [
-                {"index": index, "role": message.role, "content": message.content}
-                for index, message in enumerate(context.history)
-            ],
+            "conversation_state": cls._items(conversation),
             "current_user_input": cls._user_turn(turn.user_turn),
             "previous_observations": cls._items(previous_observations),
             "available_resources": [cls.resource_input(item) for item in turn.resources],
@@ -298,12 +296,7 @@ class TraceSerializer:
             "step_context": cls.step_context(step_context),
             "context_metrics": {
                 "considered_input_item_count": len(considered_input),
-                "model_input_item_count": len(step_context.input_items),
-                "excluded_input_item_count": len(considered_input) - len(step_context.input_items),
                 "observation_count": observation_count,
-                "context_token_estimate": (
-                    sum(_item_character_estimate(item) for item in step_context.input_items) + 3
-                ) // 4,
             },
         }
 
@@ -315,9 +308,11 @@ class TraceSerializer:
             "turn_id": getattr(step_context, "turn_id", None),
             "step_index": getattr(step_context, "step_index", None),
             "settings": _model_value(getattr(step_context, "settings", None)),
-            "instructions": getattr(step_context, "instructions", None),
-            "input_items": cls._items(getattr(step_context, "input_items", ())),
-            "tools": cls._tools(getattr(step_context, "tools", ())),
+            "resources": [
+                cls.resource_input(resource)
+                for resource in getattr(step_context, "resources", ())
+            ],
+            "tool_names": list(getattr(step_context, "tool_names", ())),
         }
 
     @classmethod
@@ -422,7 +417,7 @@ class TraceSerializer:
             "message_count": len(prompt.input),
             "tool_count": len(prompt.tools),
             "context_token_estimate": (context_characters + 3) // 4,
-            "step_input_item_count": len(getattr(step_context, "input_items", ())),
+            "model_input_item_count": len(prompt.input),
         }
 
     @staticmethod

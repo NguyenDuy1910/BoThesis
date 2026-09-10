@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from bothesis.agent import (
+    ConversationState,
     ContextManager,
+    ModelInput,
     SessionConfiguration,
     SessionServices,
     StepContext,
     TurnContext,
     ResourceResolver,
-    ResourceRef,
 )
-from bothesis.agent.protocol import FunctionTool
+from bothesis.agent.protocol import Item
 from bothesis.agent.tools import ToolRegistry, ToolRouter
 from bothesis.agent.transports import ResponseStream, response_stream
 from bothesis.observability import NoopTracer, TraceSerializer, Tracer
@@ -29,8 +30,8 @@ class Session:
         self.configuration = configuration
         self.services = services
         self.context_manager = context_manager
+        self.conversation = ConversationState()
         self._tracer = services.tracer or NoopTracer()
-        self._step_resources: dict[tuple[str, int], tuple[ResourceRef, ...]] = {}
 
     @property
     def model(self) -> ResponseStream:
@@ -58,7 +59,11 @@ class Session:
     async def capture_step_context(self, turn: TurnContext) -> StepContext:
         """Capture the exact settings, environment and tool surface for one step."""
 
-        await self.context_manager.start_turn(turn, self.resource_resolver)
+        await self.context_manager.start_turn(
+            self.conversation,
+            turn,
+            self.resource_resolver,
+        )
         router = self._tool_router(turn)
         resources = self.context_manager.relevant_resources(turn)
         settings = turn.current_settings
@@ -76,8 +81,9 @@ class Session:
             attributes={"step": turn.model_iteration, "tool_round": turn.tool_round},
             input=TraceSerializer.full(
                 TraceSerializer.context_build_input(
-                    turn,
-                    previous_observations=turn.observations,
+                turn,
+                conversation=self.conversation.items,
+                previous_observations=self.conversation.observations,
                     available_tools=router.model_visible_specs,
                 )
             ),
@@ -88,36 +94,38 @@ class Session:
                 tools=router.model_visible_specs,
                 resources=resources,
             )
-            self._step_resources[(step_context.turn_id, step_context.step_index)] = resources
             trace.set_output(
                 TraceSerializer.full(
                     TraceSerializer.context_build_output(
                         step_context,
-                        considered_input=turn.input_items,
-                        observation_count=len(turn.observations),
+                        considered_input=self.conversation.items,
+                        observation_count=len(self.conversation.observations),
                     )
                 )
             )
             # Trace end: record the exact StepContext before returning it to the loop.
             return step_context
 
-    def resources_for(self, step_context: StepContext) -> tuple[ResourceRef, ...]:
-        """Return the resource scope selected for the immutable sampling step."""
+    def build_model_input(self, step_context: StepContext) -> ModelInput:
+        """Materialize the exact request from one immutable runtime snapshot."""
 
-        return self._step_resources.get(
-            (step_context.turn_id, step_context.step_index), ()
+        return self.context_manager.build_model_input(
+            self.conversation,
+            step_context,
+            tools=self.tool_router(step_context).model_visible_specs,
         )
+
+    def record(self, items: tuple[Item, ...]) -> None:
+        """Append model or tool output to this turn's ordered conversation state."""
+
+        self.context_manager.record(self.conversation, items)
 
     def tool_router(self, step_context: StepContext) -> ToolRouter:
         """Recreate the execution router from the immutable exposed tool names."""
 
         return ToolRouter(
             self.tool_registry,
-            allowed_names=tuple(
-                tool.name
-                for tool in step_context.tools
-                if isinstance(tool, FunctionTool)
-            ),
+            allowed_names=step_context.tool_names,
         )
 
     def _tool_router(self, turn: TurnContext) -> ToolRouter:
