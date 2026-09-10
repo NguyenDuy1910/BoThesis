@@ -17,6 +17,7 @@ class ToolRouter:
         registry: ToolRegistry,
         *,
         allowed_names: Iterable[str] | None,
+        sandbox_available: bool = True,
     ) -> None:
         self.registry = registry
         allowed = frozenset(allowed_names) if allowed_names is not None else None
@@ -25,6 +26,7 @@ class ToolRouter:
             for name, executor in registry.executors()
             if (allowed is None or name in allowed)
             and executor.exposure() is ToolExposure.DIRECT
+            and (sandbox_available or not executor.spec().requires_sandbox)
         )
 
     @property

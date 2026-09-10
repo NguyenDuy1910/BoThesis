@@ -129,6 +129,59 @@ class AuthContext:
         return self.is_admin or required.issubset(self.permission_codes)
 
 
+SandboxSessionStatus = Literal["active", "expired", "closed"]
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxManifestResource:
+    """A durable, provider-neutral input selected for one sandbox workspace."""
+
+    resource_id: str
+    name: str
+    mime_type: str
+    size_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if not all(value.strip() for value in (self.resource_id, self.name, self.mime_type)):
+            raise ValueError("sandbox manifest resource fields must not be blank")
+        if self.size_bytes is not None and self.size_bytes < 0:
+            raise ValueError("sandbox manifest resource size must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxProviderFile:
+    """A provider file reference retained only inside sandbox runtime state."""
+
+    id: str
+    name: str
+    resource_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.id.strip() or not self.name.strip():
+            raise ValueError("sandbox provider file fields must not be blank")
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxSessionState:
+    """Recovery state for one tenant-scoped conversation sandbox."""
+
+    id: UUID
+    provider: str
+    status: SandboxSessionStatus
+    manifest: tuple[SandboxManifestResource, ...] = ()
+    environment_id: str | None = None
+    materialized_files: tuple[SandboxProviderFile, ...] = ()
+    observed_files: tuple[SandboxProviderFile, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.provider.strip():
+            raise ValueError("sandbox provider must not be blank")
+        if self.status not in {"active", "expired", "closed"}:
+            raise ValueError("sandbox session status is invalid")
+        if self.environment_id is not None and not self.environment_id.strip():
+            raise ValueError("sandbox environment id must not be blank")
+
+
 @dataclass(frozen=True, slots=True)
 class CanonicalDocumentContent:
     """Canonical source item and chunks produced for one stored document."""

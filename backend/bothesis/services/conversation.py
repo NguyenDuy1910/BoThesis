@@ -182,11 +182,12 @@ class ConversationService:
         """Accessible resources linked by earlier turns of this conversation.
 
         These are the durable ``MessageItem`` links ``start_turn`` and
-        ``finish_turn`` recorded ("attachment" and "reference" relations —
-        artifact "output" links are the working documents and travel
-        separately). Only identities the caller can still read are returned,
-        newest reference first, so a follow-up such as "fill that form for me"
-        can resolve the Document ID without a second search and without ever
+        ``finish_turn`` recorded. Explicit artifact ``output`` links are also
+        resources: a follow-up can reopen a document that the prior turn
+        deliberately exported, without duplicating its bytes in conversation
+        state. Only identities the caller can still read are returned, newest
+        reference first, so a follow-up such as "fill that form for me" can
+        resolve the Document ID without a second search and without ever
         leaking a since-revoked title.
         """
 
@@ -203,7 +204,7 @@ class ConversationService:
                     Message.conversation_id == conversation_id,
                     Conversation.tenant_id == access.tenant_id,
                     Conversation.user_id == access.user_id,
-                    MessageItem.relation_type.in_(("attachment", "reference")),
+                    MessageItem.relation_type.in_(("attachment", "reference", "output")),
                     MessageItem.deleted_at.is_(None),
                     Item.tenant_id == access.tenant_id,
                     Item.item_type == "document",

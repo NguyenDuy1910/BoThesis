@@ -5,12 +5,14 @@ from __future__ import annotations
 from bothesis.agent import (
     ConversationState,
     ContextManager,
+    ExecutionCapability,
     ModelInput,
     SessionConfiguration,
     SessionServices,
     StepContext,
     TurnContext,
     ResourceResolver,
+    SandboxRuntime,
 )
 from bothesis.agent.protocol import Item
 from bothesis.agent.tools import ToolRegistry, ToolRouter
@@ -56,6 +58,12 @@ class Session:
 
         return self._tracer
 
+    @property
+    def sandbox(self) -> SandboxRuntime | None:
+        """The optional request-scoped workspace; never model-visible state."""
+
+        return self.services.sandbox_runtime
+
     async def capture_step_context(self, turn: TurnContext) -> StepContext:
         """Capture the exact settings, environment and tool surface for one step."""
 
@@ -91,6 +99,7 @@ class Session:
             step_context = self.context_manager.capture_step_context(
                 turn,
                 settings=settings,
+                execution_capability=await self.execution_capability(settings),
                 tools=router.model_visible_specs,
                 resources=resources,
             )
@@ -105,6 +114,23 @@ class Session:
             )
             # Trace end: record the exact StepContext before returning it to the loop.
             return step_context
+
+    async def execution_capability(
+        self, settings: ResolvedStepSettings
+    ) -> ExecutionCapability:
+        """Resolve provider-managed execution before fixing a step's tool surface."""
+
+        provider = self.model.provider
+        model = settings.model or self.model.model
+        resolver = self.services.execution_capability_resolver
+        capability = (
+            ExecutionCapability(provider=provider, model=model)
+            if resolver is None
+            else resolver.resolve(provider=provider, model=model)
+        )
+        if self.sandbox is not None:
+            return await self.sandbox.configure_execution(capability)
+        return capability
 
     def build_model_input(self, step_context: StepContext) -> ModelInput:
         """Materialize the exact request from one immutable runtime snapshot."""
@@ -126,6 +152,7 @@ class Session:
         return ToolRouter(
             self.tool_registry,
             allowed_names=step_context.tool_names,
+            sandbox_available=self.sandbox is not None,
         )
 
     def _tool_router(self, turn: TurnContext) -> ToolRouter:
@@ -139,7 +166,11 @@ class Session:
             )
         )
         allowed_names = context.allowed_tool_names if tools_allowed else ()
-        return ToolRouter(self.tool_registry, allowed_names=allowed_names)
+        return ToolRouter(
+            self.tool_registry,
+            allowed_names=allowed_names,
+            sandbox_available=self.sandbox is not None,
+        )
 
 
 __all__ = ["Session"]

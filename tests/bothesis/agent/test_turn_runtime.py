@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -19,6 +20,8 @@ from native_responses import ScriptedResponsesTransport, completed, created, fun
 from bothesis.agent import (
     ContextManager,
     ConversationState,
+    ExecutionCapability,
+    ExecutionCapabilityResolver,
     AttachmentInput,
     AttachmentRef,
     ImageInput,
@@ -36,8 +39,12 @@ from bothesis.agent.models import AgentContext, ConversationMessage, ToolOutput
 from bothesis.agent.protocol import (
     FunctionCallItem,
     FunctionCallOutputItem,
+    ExecutionOutput,
+    HostedExecutionCallItem,
+    HostedExecutionResultItem,
     InputImage,
     InputText,
+    ProviderResourceRef,
     ReasoningItem,
 )
 from bothesis.agent.tools import (
@@ -48,7 +55,18 @@ from bothesis.agent.tools import (
     ToolSpec,
 )
 from bothesis.agent.tools.read_resource import ReadResource
+from bothesis.agent.transports.openrouter_execution_capability import (
+    OpenRouterExecutionCapabilityResolver,
+)
 from bothesis.agent.turn import run_turn
+from bothesis.services import (
+    AuthContext,
+    SandboxManifestResource,
+    SandboxProviderFile,
+    SandboxSessionState,
+)
+from bothesis.services.agent_runtime.sandbox_workspace import SandboxWorkspace
+from bothesis.services.artifact import WorkspaceSource
 
 
 class Lookup(ToolExecutor):
@@ -122,6 +140,7 @@ def _session(
     transport: ScriptedResponsesTransport,
     registry: ToolRegistry,
     resource_resolver: RecordingResourceResolver | None = None,
+    execution_capability_resolver: ExecutionCapabilityResolver | None = None,
 ) -> RecordingSession:
     configuration = SessionConfiguration(max_model_turns=3, max_tool_rounds=2)
     return RecordingSession(
@@ -130,6 +149,7 @@ def _session(
             model=transport,
             tool_registry=registry,
             resource_resolver=resource_resolver,
+            execution_capability_resolver=execution_capability_resolver,
         ),
         ContextManager(configuration=configuration),
     )
@@ -373,12 +393,20 @@ async def test_step_context_is_immutable_and_model_input_is_materialized_per_ste
 
     first, second = session.steps
     assert tuple(field.name for field in fields(first)) == (
-        "turn_id", "step_index", "settings", "resources", "tool_names"
+        "turn_id",
+        "step_index",
+        "settings",
+        "execution_capability",
+        "resources",
+        "tool_names",
     )
     assert first.turn_id == turn.id
     assert first.step_index == 1
     assert first.resources == (file,)
     assert first.tool_names == ("read_resource",)
+    assert first.execution_capability.available is False
+    assert first.execution_capability.provider == transport.provider
+    assert first.execution_capability.model == transport.model
     first_input, second_input = session.model_inputs
     assert first_input.input_items[-1].role == "user"
     assert "<resource_id>file-1</resource_id>" in first_input.instructions
@@ -449,6 +477,223 @@ async def test_model_input_keeps_reasoning_required_by_a_retained_function_call(
     model_input = session.build_model_input(step)
 
     assert model_input.input_items[-3:] == (reasoning, call, output)
+
+
+@pytest.mark.asyncio
+async def test_model_input_keeps_reasoning_required_by_hosted_execution_replay() -> None:
+    session = _session(ScriptedResponsesTransport([]), ToolRegistry())
+    turn = _turn(_context())
+    await session.capture_step_context(turn)
+    reasoning = ReasoningItem(id="rs_1", encrypted_content="x" * 20_000)
+    call = HostedExecutionCallItem(
+        id="execution_1",
+        call_id="call_1",
+        commands=("python --version",),
+    )
+    output = HostedExecutionResultItem(
+        id="result_1",
+        call_id="call_1",
+        output=(ExecutionOutput(stdout="Python 3.12\\n", exit_code=0),),
+    )
+    session.record((reasoning, call, output))
+
+    step = await session.capture_step_context(turn)
+    model_input = session.build_model_input(step)
+
+    assert model_input.input_items[-3:] == (reasoning, call, output)
+
+
+def test_openrouter_execution_capabilities_are_provider_and_model_gated() -> None:
+    resolver = OpenRouterExecutionCapabilityResolver()
+
+    available = resolver.resolve(provider="openrouter", model="model-with-tools")
+    unavailable = resolver.resolve(provider="openai", model="model-with-tools")
+    unconfigured = resolver.resolve(provider="openrouter", model=None)
+
+    assert available.available is True
+    assert available.hosted_shell is True
+    assert available.provider_files is True
+    assert available.persistent_environments is True
+    assert unavailable.available is False
+    assert unconfigured.available is False
+
+
+@pytest.mark.asyncio
+async def test_step_captures_execution_capability_without_exposing_a_shell_tool() -> None:
+    registry = ToolRegistry()
+    registry.register(Lookup())
+    session = _session(
+        ScriptedResponsesTransport([]),
+        registry,
+        execution_capability_resolver=OpenRouterExecutionCapabilityResolver(),
+    )
+
+    step = await session.capture_step_context(_turn(_context()))
+
+    assert step.execution_capability.hosted_shell is True
+    assert step.tool_names == ("knowledge_search",)
+
+
+@pytest.mark.asyncio
+async def test_hosted_shell_capability_reaches_the_provider_prompt_without_a_local_tool() -> None:
+    session = _session(
+        ScriptedResponsesTransport([]),
+        ToolRegistry(),
+        execution_capability_resolver=OpenRouterExecutionCapabilityResolver(),
+    )
+
+    step = await session.capture_step_context(_turn(_context()))
+    prompt = session.build_model_input(step).prompt(previous_response_id=None)
+
+    assert prompt.tools == ()
+    assert prompt.execution_capability == step.execution_capability
+    assert prompt.tool_choice == "auto"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_workspace_materializes_reuses_and_exports_without_host_paths() -> None:
+    class Provider:
+        provider = "openrouter"
+
+        def __init__(self) -> None:
+            self.uploads: list[tuple[str, bytes]] = []
+            self.downloads: list[tuple[str, str]] = []
+
+        async def upload_file(self, *, file_name: str, mime_type: str, data: bytes):
+            assert mime_type == "text/csv"
+            self.uploads.append((file_name, data))
+            return ProviderResourceRef(
+                provider="openrouter", id="or_file_1", name=file_name
+            )
+
+        async def download_file(self, *, environment_id: str, file_id: str) -> bytes:
+            self.downloads.append((environment_id, file_id))
+            return b"month,total\nJan,10\n"
+
+    class Sessions:
+        def __init__(self) -> None:
+            self.state: SandboxSessionState | None = None
+
+        async def active(self, *_: Any, **__: Any) -> SandboxSessionState | None:
+            return self.state
+
+        async def recoverable(self, *_: Any, **__: Any) -> SandboxSessionState | None:
+            return None
+
+        async def ensure(self, *_: Any, **__: Any) -> SandboxSessionState:
+            assert self.state is None
+            self.state = SandboxSessionState(
+                id=uuid4(), provider="openrouter", status="active"
+            )
+            return self.state
+
+        async def record_materialization(
+            self, _: AuthContext, *, resource: SandboxManifestResource,
+            provider_file: SandboxProviderFile, **__: Any
+        ) -> SandboxSessionState:
+            assert self.state is not None
+            self.state = replace(
+                self.state,
+                manifest=(resource,),
+                materialized_files=(provider_file,),
+            )
+            return self.state
+
+        async def record_execution(
+            self, _: AuthContext, *, environment_id: str,
+            files: tuple[SandboxProviderFile, ...], **__: Any
+        ) -> SandboxSessionState:
+            assert self.state is not None
+            self.state = replace(
+                self.state, environment_id=environment_id, observed_files=files
+            )
+            return self.state
+
+        async def record_resource(
+            self, _: AuthContext, *, resource: SandboxManifestResource, **__: Any
+        ) -> SandboxSessionState:
+            assert self.state is not None
+            self.state = replace(self.state, manifest=(*self.state.manifest, resource))
+            return self.state
+
+        async def expire(self, *_: Any, **__: Any) -> None:
+            raise AssertionError("the provider did not expire")
+
+    class Artifacts:
+        async def source_file(self, _: AuthContext, document_id):  # type: ignore[no-untyped-def]
+            return WorkspaceSource(
+                document_id=str(document_id),
+                title="Revenue",
+                file_name="revenue.csv",
+                mime_type="text/csv",
+                data=b"month,total\nJan,10\n",
+            )
+
+        async def record_generated(self, _: AuthContext, **__: Any) -> dict[str, object]:
+            return {
+                "id": str(UUID(int=44)),
+                "title": "Analysis",
+                "file_name": "analysis.csv",
+                "mime_type": "text/csv",
+                "size_bytes": 19,
+                "revision": 1,
+                "updated_at": "2026-09-10T00:00:00Z",
+            }
+
+    provider = Provider()
+    sessions = Sessions()
+    access = AuthContext(
+        user_id=uuid4(),
+        email="owner@example.com",
+        display_name=None,
+        tenant_id=uuid4(),
+        role_id=None,
+        role_code="member",
+        permission_codes=("knowledge.read",),
+        group_ids=(),
+    )
+    resource = ResourceRef(
+        id=str(UUID(int=33)), name="revenue.csv", mime_type="text/csv", size_bytes=19
+    )
+    workspace = SandboxWorkspace(
+        access=access,
+        conversation_id=uuid4(),
+        request_id="a" * 32,
+        provider=provider,
+        sessions=sessions,  # type: ignore[arg-type]
+        artifacts=Artifacts(),  # type: ignore[arg-type]
+    )
+    capability = ExecutionCapability(
+        provider="openrouter", model="model", hosted_shell=True
+    )
+
+    await workspace.materialize_resource(resource)
+    prepared = await workspace.configure_execution(capability)
+    await workspace.observe_execution(
+        (
+            HostedExecutionResultItem(
+                call_id="call_1",
+                output=(ExecutionOutput(stdout="", exit_code=0),),
+                environment={"provider": "openrouter", "id": "container_1"},
+                files=(
+                    ProviderResourceRef(
+                        provider="openrouter", id="cfile_1", name="analysis.csv"
+                    ),
+                ),
+            ),
+        )
+    )
+    resumed = await workspace.configure_execution(capability)
+    artifact = await workspace.promote_file(
+        "analysis.csv", summary="Saved analysis"
+    )
+
+    assert provider.uploads == [("revenue.csv", b"month,total\nJan,10\n")]
+    assert prepared.workspace_file_ids == ("or_file_1",)
+    assert resumed.environment_id == "container_1"
+    assert provider.downloads == [("container_1", "cfile_1")]
+    assert artifact.id == str(UUID(int=44))
+    assert workspace.artifact_ids == (str(UUID(int=44)),)
 
 
 class SlowTool(Lookup):

@@ -17,7 +17,14 @@ import json
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, TypeAlias, Union
 
-from pydantic import Discriminator, Field, Tag, TypeAdapter, field_validator
+from pydantic import (
+    Discriminator,
+    Field,
+    Tag,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from bothesis.agent.protocol import (
     EXTENSION_TAG,
@@ -57,6 +64,8 @@ CORE_ITEM_TYPES = frozenset(
         "function_call",
         "function_call_output",
         "compaction",
+        "hosted_execution_call",
+        "hosted_execution_result",
     }
 )
 
@@ -159,6 +168,67 @@ class FunctionCallOutputItem(ProtocolModel):
     status: ItemStatus | None = "completed"
 
 
+class ExecutionEnvironmentRef(ProtocolModel):
+    """A provider-managed execution environment without provider internals."""
+
+    provider: str = Field(min_length=1)
+    id: str = Field(min_length=1)
+
+
+class ProviderResourceRef(ProtocolModel):
+    """A provider-managed resource produced by hosted execution."""
+
+    provider: str = Field(min_length=1)
+    id: str = Field(min_length=1)
+    name: str | None = None
+
+
+class ExecutionOutput(ProtocolModel):
+    """The captured outcome of one hosted command."""
+
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int | None = None
+    timed_out: bool = False
+
+    @model_validator(mode="after")
+    def _valid_outcome(self) -> ExecutionOutput:
+        if self.timed_out and self.exit_code is not None:
+            raise ValueError("a timed-out execution cannot have an exit code")
+        if not self.timed_out and self.exit_code is None:
+            raise ValueError("an execution result needs an exit code or timeout")
+        return self
+
+
+class HostedExecutionCallItem(ProtocolModel):
+    """A provider-executed command batch observed in model output."""
+
+    type: Literal["hosted_execution_call"] = "hosted_execution_call"
+    call_id: str = Field(min_length=1)
+    commands: tuple[str, ...] = Field(min_length=1)
+    id: str | None = None
+    status: ItemStatus | None = None
+    timeout_ms: int | None = Field(default=None, ge=1)
+    max_output_characters: int | None = Field(default=None, ge=1)
+    environment: ExecutionEnvironmentRef | None = None
+
+
+class HostedExecutionResultItem(ProtocolModel):
+    """A provider-executed command observation returned to the model."""
+
+    type: Literal["hosted_execution_result"] = "hosted_execution_result"
+    call_id: str = Field(min_length=1)
+    output: tuple[ExecutionOutput, ...]
+    commands: tuple[str, ...] = ()
+    id: str | None = None
+    status: ItemStatus | None = None
+    environment: ExecutionEnvironmentRef | None = None
+    files: tuple[ProviderResourceRef, ...] = ()
+    # Safe display names are independent of the opaque provider file bindings.
+    # They can cross the API boundary after ``files`` is stripped.
+    workspace_files: tuple[str, ...] = ()
+
+
 ToolCall: TypeAlias = FunctionCallItem
 """The provider-neutral function-call item used by the core tool runtime."""
 
@@ -211,6 +281,8 @@ Item: TypeAlias = Annotated[
         Annotated[ReasoningItem, Tag("reasoning")],
         Annotated[FunctionCallItem, Tag("function_call")],
         Annotated[FunctionCallOutputItem, Tag("function_call_output")],
+        Annotated[HostedExecutionCallItem, Tag("hosted_execution_call")],
+        Annotated[HostedExecutionResultItem, Tag("hosted_execution_result")],
         Annotated[CompactionItem, Tag("compaction")],
         Annotated[ExtensionItem, Tag(EXTENSION_TAG)],
     ],
@@ -224,15 +296,20 @@ ItemAdapter: TypeAdapter[Item] = TypeAdapter(Item)
 __all__ = [
     "CORE_ITEM_TYPES",
     "CompactionItem",
+    "ExecutionEnvironmentRef",
+    "ExecutionOutput",
     "ExtensionItem",
     "FunctionCallItem",
     "FunctionCallOutputItem",
+    "HostedExecutionCallItem",
+    "HostedExecutionResultItem",
     "Item",
     "ItemAdapter",
     "ItemStatus",
     "MessageItem",
     "MessagePhase",
     "MessageRole",
+    "ProviderResourceRef",
     "ReasoningItem",
     "ReasoningText",
     "ResponseItem",

@@ -264,6 +264,50 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     memories: Mapped[list[Memory]] = relationship(back_populates="conversation")
 
 
+class SandboxSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Durable recovery metadata for a provider-backed conversation workspace.
+
+    The provider container and files are opaque values in ``provider_state``;
+    durable BoThesis Item identities stay in the provider-neutral ``manifest``.
+    Neither field contains workspace output bytes.
+    """
+
+    __tablename__ = "sandbox_sessions"
+    __table_args__ = (
+        Index(None, "tenant_id", "conversation_id", "status"),
+        Index(None, "conversation_id", "provider", "status"),
+        CheckConstraint(
+            "status IN ('active', 'expired', 'closed')",
+            name="sandbox_session_status_is_valid",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(manifest) = 'object'", name="sandbox_manifest_is_object"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(provider_state) = 'object'",
+            name="sandbox_provider_state_is_object",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
+    )
+    conversation_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest: Mapped[JsonObject] = _json_object_column()
+    provider_state: Mapped[JsonObject] = _json_object_column()
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Message(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "messages"
     __table_args__ = (UniqueConstraint("conversation_id", "sequence_number"),)

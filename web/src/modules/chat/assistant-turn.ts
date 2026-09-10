@@ -1,10 +1,12 @@
 import {
+  isHostedExecutionCallItem,
+  isHostedExecutionResultItem,
   isFunctionCallItem,
   isMessageItem,
   isOutputTextPart,
   orderedTurnItems,
 } from "./message-stream.ts";
-import type { RuntimeActivity, TurnState } from "./types";
+import type { HostedExecutionOutput, RuntimeActivity, TurnState } from "./types";
 
 export type AssistantTurnItem =
   | {
@@ -14,7 +16,16 @@ export type AssistantTurnItem =
       text: string;
       state: "streaming" | "done";
     }
-  | { kind: "activity"; id: string; activity: RuntimeActivity };
+  | { kind: "activity"; id: string; activity: RuntimeActivity }
+  | {
+      kind: "execution";
+      id: string;
+      callId: string;
+      state: "running" | "completed" | "failed" | "timeout";
+      commands: string[];
+      output: HostedExecutionOutput[];
+      files: string[];
+    };
 
 /**
  * Function calls are model intent, not user-visible activity. An activity
@@ -55,6 +66,36 @@ export function assistantTurnItems(turn: TurnState | undefined): AssistantTurnIt
         items.push({ kind: "activity", id: item.call_id, activity });
         seenActivities.add(item.call_id);
       }
+      continue;
+    }
+
+    if (isHostedExecutionCallItem(item)) {
+      items.push({
+        kind: "execution",
+        id,
+        callId: item.call_id,
+        state: "running",
+        commands: item.commands,
+        output: [],
+        files: [],
+      });
+      continue;
+    }
+
+    if (isHostedExecutionResultItem(item)) {
+      const timedOut = item.output.some((entry) => entry.timed_out);
+      const failed = item.output.some(
+        (entry) => !entry.timed_out && entry.exit_code !== 0,
+      );
+      items.push({
+        kind: "execution",
+        id,
+        callId: item.call_id,
+        state: timedOut ? "timeout" : failed ? "failed" : "completed",
+        commands: item.commands,
+        output: item.output,
+        files: item.workspace_files?.filter((file) => typeof file === "string") ?? [],
+      });
     }
   }
   for (const activity of turn.runtimeActivities ?? []) {

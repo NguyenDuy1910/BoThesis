@@ -8,10 +8,18 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 from uuid import uuid4
 
-from bothesis.agent.models import AgentContext, CitationReferences, Evidence, ConversationMessage
+from bothesis.agent.execution import ExecutionCapability
+from bothesis.agent.models import (
+    AgentContext,
+    CitationReferences,
+    ConversationMessage,
+    Evidence,
+)
 from bothesis.agent.protocol import (
     InputImage,
     InputText,
+    FunctionCallOutputItem,
+    HostedExecutionResultItem,
     Item,
     Prompt,
     Tool,
@@ -42,6 +50,36 @@ class ResourceRef:
     @property
     def is_image(self) -> bool:
         return self.mime_type.casefold().startswith("image/")
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxMaterialization:
+    """A durable resource made available to the next hosted-shell step."""
+
+    resource: ResourceRef
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxArtifact:
+    """A deliberately exported sandbox file, now a durable Item artifact."""
+
+    id: str
+    title: str
+    name: str
+    mime_type: str
+    revision: int
+    size_bytes: int
+    updated_at: str | None
+
+    def __post_init__(self) -> None:
+        if not all(
+            value.strip() for value in (self.id, self.title, self.name, self.mime_type)
+        ):
+            raise ValueError("sandbox artifact fields must not be blank")
+        if self.revision < 1:
+            raise ValueError("sandbox artifact revision must be positive")
+        if self.size_bytes < 0:
+            raise ValueError("sandbox artifact size must not be negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +170,34 @@ class ResourceResolver(Protocol):
     async def read(self, resource: ResourceRef, *, max_characters: int) -> str: ...
 
     async def materialize(self, resource: ResourceRef) -> tuple[ModelContent, ...]: ...
+
+
+class ExecutionCapabilityResolver(Protocol):
+    """Resolve hosted-execution support for the provider and model of one step."""
+
+    def resolve(
+        self, *, provider: str, model: str | None
+    ) -> ExecutionCapability: ...
+
+
+class SandboxRuntime(Protocol):
+    """Request-scoped sandbox actions available to the generic agent loop."""
+
+    async def configure_execution(
+        self, capability: ExecutionCapability
+    ) -> ExecutionCapability: ...
+
+    async def observe_execution(self, items: tuple[Item, ...]) -> None: ...
+
+    async def materialize_resource(
+        self, resource: ResourceRef
+    ) -> SandboxMaterialization: ...
+
+    async def promote_file(self, file_name: str, *, summary: str) -> SandboxArtifact: ...
+
+    @property
+    def artifact_ids(self) -> tuple[str, ...]: ...
+
 
 if TYPE_CHECKING:
     from bothesis.observability import Tracer
@@ -234,7 +300,9 @@ class ConversationState:
         """Tool outputs acquired during this turn, in interaction order."""
 
         return tuple(
-            item for item in self.items if item.type == "function_call_output"
+            item
+            for item in self.items
+            if isinstance(item, (FunctionCallOutputItem, HostedExecutionResultItem))
         )
 
     def initialize(self, items: tuple[Item, ...]) -> None:
@@ -254,6 +322,8 @@ class SessionServices:
     model: object
     tool_registry: object
     resource_resolver: ResourceResolver | None = None
+    execution_capability_resolver: ExecutionCapabilityResolver | None = None
+    sandbox_runtime: SandboxRuntime | None = None
     tracer: Tracer | None = None
 
 
@@ -307,6 +377,7 @@ class StepContext:
     turn_id: str
     step_index: int
     settings: ResolvedStepSettings
+    execution_capability: ExecutionCapability
     resources: tuple[ResourceRef, ...]
     tool_names: tuple[str, ...]
 
@@ -318,6 +389,7 @@ class ModelInput:
     turn_id: str
     step_index: int
     settings: ResolvedStepSettings
+    execution_capability: ExecutionCapability
     instructions: str
     input_items: tuple[Item, ...]
     tools: tuple[Tool, ...]
@@ -330,9 +402,16 @@ class ModelInput:
             model=self.settings.model,
             instructions=self.instructions,
             tools=self.tools,
-            tool_choice="auto" if self.tools else None,
+            execution_capability=self.execution_capability,
+            tool_choice=(
+                "auto"
+                if self.tools or self.execution_capability.hosted_shell
+                else None
+            ),
             parallel_tool_calls=(
-                self.settings.parallel_tool_calls if self.tools else None
+                self.settings.parallel_tool_calls
+                if self.tools or self.execution_capability.hosted_shell
+                else None
             ),
             temperature=self.settings.temperature,
             max_output_tokens=self.settings.max_output_tokens,
@@ -367,6 +446,8 @@ __all__ = [
     "ConversationState",
     "ConversationWindow",
     "ContextManager",
+    "ExecutionCapability",
+    "ExecutionCapabilityResolver",
     "AttachmentInput",
     "AttachmentRef",
     "ImageInput",
@@ -375,6 +456,9 @@ __all__ = [
     "ResourceInput",
     "ResourceRef",
     "ResourceResolver",
+    "SandboxArtifact",
+    "SandboxMaterialization",
+    "SandboxRuntime",
     "ResolvedStepSettings",
     "Session",
     "SessionConfiguration",

@@ -67,6 +67,8 @@ async def run_turn(session: Session, turn: TurnContext) -> AsyncIterator[AgentSt
 
         previous_response_id = response.id
         session.record(response.output)
+        if session.sandbox is not None:
+            await session.sandbox.observe_execution(response.output)
         if response.function_calls:
             if not step_context.tool_names:
                 raise AgentExecutionError("model requested a tool after the safety limit")

@@ -175,6 +175,32 @@ export interface FunctionCallOutputItem extends OutputItemBase {
   output: string;
 }
 
+/** A command dispatched and executed by the provider's hosted environment. */
+export interface HostedExecutionCallItem extends OutputItemBase {
+  type: "hosted_execution_call";
+  call_id: string;
+  commands: string[];
+  timeout_ms?: number;
+  max_output_characters?: number;
+}
+
+export interface HostedExecutionOutput {
+  stdout: string;
+  stderr: string;
+  exit_code?: number | null;
+  timed_out: boolean;
+}
+
+/** The provider's finished hosted-shell observation used by the chat renderer. */
+export interface HostedExecutionResultItem extends OutputItemBase {
+  type: "hosted_execution_result";
+  call_id: string;
+  commands: string[];
+  output: HostedExecutionOutput[];
+  /** Safe file names reported by the workspace; never provider file IDs. */
+  workspace_files?: string[];
+}
+
 export interface ReasoningItem extends OutputItemBase {
   type: "reasoning";
   /** Raw reasoning text, when the provider exposes it. */
@@ -193,6 +219,8 @@ export type OutputItem =
   | MessageItem
   | FunctionCallItem
   | FunctionCallOutputItem
+  | HostedExecutionCallItem
+  | HostedExecutionResultItem
   | ReasoningItem
   | ExtensionOutputItem;
 

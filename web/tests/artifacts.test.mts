@@ -76,6 +76,42 @@ test("a file presented twice keeps its newest revision and first position", () =
   assert.equal(artifacts[0]?.sizeBytes, 4096);
 });
 
+test("collects an explicitly exported workspace artifact from tool progress", () => {
+  const turn: TurnState = {
+    id: "turn-1",
+    status: "streaming",
+    responseOrder: [],
+    responses: {},
+    runtimeActivities: [{
+      callId: "export-1",
+      toolName: "export_sandbox_file",
+      state: "completed",
+      startedAt: 1,
+      progress: {
+        artifact: {
+          id: "artifact-1",
+          title: "Analysis",
+          file_name: "analysis.csv",
+          mime_type: "text/csv",
+          revision: 1,
+          size_bytes: 42,
+          updated_at: "2026-09-10T00:00:00Z",
+        },
+      },
+    }],
+  };
+
+  assert.deepEqual(turnArtifacts(turn), [{
+    id: "artifact-1",
+    title: "Analysis",
+    fileName: "analysis.csv",
+    mimeType: "text/csv",
+    revision: 1,
+    sizeBytes: 42,
+    updatedAt: "2026-09-10T00:00:00Z",
+  }]);
+});
+
 test("a container file citation never reaches the client as one", () => {
   // The backend consumes the provider's own citation and republishes it as a
   // BoThesis file, so an unknown provider annotation contributes nothing.

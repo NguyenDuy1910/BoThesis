@@ -3,10 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
+from bothesis.agent.protocol import ProviderResourceRef
 from bothesis.knowledge import Evidence
 
 MAX_KNOWLEDGE_SEARCH_QUERY_CHARACTERS = 512
+
+
+class SandboxProvider(Protocol):
+    """The small provider boundary required by a hosted sandbox lifecycle."""
+
+    provider: str
+
+    async def upload_file(
+        self, *, file_name: str, mime_type: str, data: bytes
+    ) -> ProviderResourceRef: ...
+
+    async def download_file(
+        self, *, environment_id: str, file_id: str
+    ) -> bytes: ...
 
 
 @dataclass(frozen=True, slots=True)

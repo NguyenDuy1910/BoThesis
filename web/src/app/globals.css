@@ -1955,6 +1955,78 @@ a {
   font-weight: 400;
 }
 
+.assistant-turn__execution {
+  width: min(100%, 44rem);
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.assistant-turn__execution > summary {
+  display: flex;
+  min-height: 2.75rem;
+  min-width: 0;
+  align-items: center;
+  gap: 0.4375rem;
+  padding: 0.5rem 0.625rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.assistant-turn__execution > summary::-webkit-details-marker { display: none; }
+.assistant-turn__execution > summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+}
+
+.assistant-turn__execution-status,
+.assistant-turn__execution-terminal { flex: 0 0 auto; }
+.assistant-turn__execution-status { color: var(--text-muted); }
+.assistant-turn__execution--running .assistant-turn__execution-status {
+  animation: assistant-activity-breathe 2s ease-in-out infinite;
+}
+.assistant-turn__execution--failed .assistant-turn__execution-status,
+.assistant-turn__execution--timeout .assistant-turn__execution-status { color: var(--danger); }
+.assistant-turn__execution-label { flex: 0 0 auto; font-weight: 600; }
+.assistant-turn__execution-command {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assistant-turn__execution-caret {
+  flex: 0 0 auto;
+  margin-left: auto;
+  transition: transform 140ms ease;
+}
+.assistant-turn__execution[open] .assistant-turn__execution-caret { transform: rotate(90deg); }
+.assistant-turn__execution-body {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0 0.625rem 0.625rem;
+}
+.assistant-turn__execution-body pre {
+  max-height: 18rem;
+  margin: 0;
+  overflow: auto;
+  border-radius: 0.4375rem;
+  background: var(--code-surface);
+  color: var(--code-text);
+  padding: 0.625rem 0.75rem;
+  font: 0.75rem/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.assistant-turn__execution-body p { margin: 0; color: var(--text-muted); }
+.assistant-turn__execution-files {
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+
 .assistant-turn__reasoning {
   display: inline-flex;
   width: fit-content;
@@ -2027,6 +2099,8 @@ details.assistant-turn__reasoning {
     animation: none;
     transition: none;
   }
+  .assistant-turn__execution--running .assistant-turn__execution-status,
+  .assistant-turn__execution-caret { animation: none; transition: none; }
 }
 
 /* Completed-answer footer (sources, confidence, actions) eases in so the

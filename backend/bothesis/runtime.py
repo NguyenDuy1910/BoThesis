@@ -8,6 +8,7 @@ services share (object storage, vector index, model transports, the agent).
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from config import AppConfig, get_config
 
@@ -16,9 +17,14 @@ from bothesis.agent.tools import ToolRegistry
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
 from bothesis.agent.tools.inspect_resource import InspectResource
 from bothesis.agent.tools.materialize_resource import MaterializeResource
+from bothesis.agent.tools.materialize_sandbox_resource import MaterializeSandboxResource
 from bothesis.agent.tools.read_resource import ReadResource
+from bothesis.agent.tools.export_sandbox_file import ExportSandboxFile
 from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
+from bothesis.agent.transports.openrouter_execution_capability import (
+    OpenRouterExecutionCapabilityResolver,
+)
 from bothesis.connector.file import FileProcessor
 from bothesis.db.engine import LazySessionFactory, SessionFactory
 from bothesis.document_index import ItemIndex, SemanticContextualizer
@@ -27,6 +33,7 @@ from bothesis.knowledge import ItemKnowledgeRetriever, SemanticReranker
 from bothesis.observability import create_tracer
 from bothesis.services.admin_console import AdminConsoleService
 from bothesis.services.artifact import ArtifactService
+from bothesis.services import AuthContext
 from bothesis.services.chat import ChatService
 from bothesis.services.conversation import ConversationService
 from bothesis.services.document_presentation import DocumentPresenter
@@ -36,6 +43,8 @@ from bothesis.services.knowledge_query import KnowledgeQueryService
 from bothesis.services.knowledge_view import KnowledgeViewService
 from bothesis.services.preview import KnowledgePreview
 from bothesis.services.agent_runtime.item_resource_resolver import ItemResourceResolver
+from bothesis.services.agent_runtime.sandbox_workspace import SandboxWorkspace
+from bothesis.services.sandbox_session import SandboxSessionService
 from bothesis.services.stored_file_content import StoredFileContentService
 from bothesis.services.workflow.service import TemporalWorkflowService
 from bothesis.services.workspace_documents import WorkspaceDocumentService
@@ -59,9 +68,10 @@ class AppRuntime:
         self._artifacts: ArtifactService | None = None
         self._agent: Agent | None = None
         self._stored_file_content: StoredFileContentService | None = None
+        self._sandbox_sessions: SandboxSessionService | None = None
         self._retriever: ItemKnowledgeRetriever | None = None
         self._model_transport: OpenRouterTransport | None = None
-        self._agent_transport: OpenAITransport | None = None
+        self._agent_transport: OpenAITransport | OpenRouterTransport | None = None
         self._contextualization_transport: OpenRouterTransport | None = None
 
     @property
@@ -81,6 +91,7 @@ class AppRuntime:
                 content=self.stored_file_content(),
                 max_read_characters=self._config.agent.max_resource_read_characters,
             ),
+            sandbox_runtime=self._sandbox_workspace,
         )
 
     def knowledge_query_service(self) -> KnowledgeQueryService:
@@ -173,6 +184,11 @@ class AppRuntime:
             )
         return self._artifacts
 
+    def sandbox_session_service(self) -> SandboxSessionService:
+        if self._sandbox_sessions is None:
+            self._sandbox_sessions = SandboxSessionService(self.sessions())
+        return self._sandbox_sessions
+
     def object_storage(self) -> Any:
         if self._storage is None:
             self._storage = self._build_object_storage()
@@ -261,23 +277,30 @@ class AppRuntime:
             )
         return self._model_transport
 
-    def agent_transport(self) -> OpenAITransport:
+    def agent_transport(self) -> OpenAITransport | OpenRouterTransport:
         """The transport the conversation agent runs on.
 
-        The agent speaks OpenAI directly because its execution capabilities —
-        Code Interpreter, Shell, and the containers they share — are native
-        OpenAI primitives with no provider-neutral equivalent. Retrieval-side
-        models keep their own transport above.
+        The selected provider owns any native model capabilities. The agent
+        loop stays provider-neutral; OpenRouter's hosted shell is enabled only
+        when both its provider selection and the execution policy allow it.
         """
 
         if self._agent_transport is None:
             model = self._config.model
-            self._agent_transport = OpenAITransport(
-                api_key=model.openai_api_key,
-                base_url=model.openai_base_url,
-                model=model.chat_model,
-                embedding_model=model.embedding_model,
-            )
+            if model.agent_provider == "openrouter":
+                self._agent_transport = OpenRouterTransport(
+                    api_key=model.openrouter_api_key,
+                    base_url=model.openrouter_base_url,
+                    model=model.chat_model,
+                    embedding_model=model.embedding_model,
+                )
+            else:
+                self._agent_transport = OpenAITransport(
+                    api_key=model.openai_api_key,
+                    base_url=model.openai_base_url,
+                    model=model.chat_model,
+                    embedding_model=model.embedding_model,
+                )
         return self._agent_transport
 
     def knowledge_retriever(self) -> ItemKnowledgeRetriever:
@@ -321,6 +344,9 @@ class AppRuntime:
                 ReadResource(max_characters=agent.max_resource_read_characters)
             )
             registry.register(MaterializeResource())
+            if isinstance(self.agent_transport(), OpenRouterTransport):
+                registry.register(MaterializeSandboxResource())
+                registry.register(ExportSandboxFile())
             self._agent = Agent(
                 model=self.agent_transport(),
                 tools=registry,
@@ -334,8 +360,26 @@ class AppRuntime:
                     tool_timeout_seconds=agent.tool_timeout_seconds,
                 ),
                 tracer=tracer,
+                execution_capability_resolver=OpenRouterExecutionCapabilityResolver(),
             )
         return self._agent
+
+    def _sandbox_workspace(
+        self, access: AuthContext, conversation_id: UUID, request_id: str
+    ) -> SandboxWorkspace | None:
+        """Build a request-scoped workspace only for the selected provider."""
+
+        transport = self.agent().model
+        if not isinstance(transport, OpenRouterTransport):
+            return None
+        return SandboxWorkspace(
+            access=access,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            provider=transport,
+            sessions=self.sandbox_session_service(),
+            artifacts=self.artifact_service(),
+        )
 
     async def aclose(self) -> None:
         """Release every client this runtime opened."""

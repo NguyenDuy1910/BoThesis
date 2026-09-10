@@ -1,12 +1,12 @@
 "use client";
 
 import clsx from "clsx";
-import { Check, Circle, CircleAlert } from "lucide-react";
+import { Check, ChevronRight, Circle, CircleAlert, Terminal } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
 
 import { assistantTurnItems } from "../assistant-turn";
 import type { AnswerSource } from "../sources";
-import type { RuntimeActivity, TurnState } from "../types";
+import type { HostedExecutionOutput, RuntimeActivity, TurnState } from "../types";
 import {
   CitationRenderingProvider,
   citationRenderingSources,
@@ -61,7 +61,10 @@ export const AssistantTurn = memo(function AssistantTurn({
               </div>
             );
           }
-          return <ToolActivity activity={item.activity} key={item.id} />;
+          if (item.kind === "activity") {
+            return <ToolActivity activity={item.activity} key={item.id} />;
+          }
+          return <HostedExecutionActivity execution={item} key={item.id} />;
         })}
         {showPending && (
           <span aria-label="BoThesis is working" className="assistant-turn__pending" role="status">BoThesis</span>
@@ -82,6 +85,60 @@ function usePendingIndicator(pending: boolean) {
     return () => window.clearTimeout(timeout);
   }, [pending]);
   return { visible: pending && visible };
+}
+
+function HostedExecutionActivity({
+  execution,
+}: {
+  execution: Extract<ReturnType<typeof assistantTurnItems>[number], { kind: "execution" }>;
+}) {
+  const active = execution.state === "running";
+  const failed = execution.state === "failed" || execution.state === "timeout";
+  const command = execution.commands.join("\n");
+  const output = formatExecutionOutput(execution.output);
+  const label = active
+    ? "Running hosted shell"
+    : execution.state === "timeout"
+      ? "Hosted shell timed out"
+      : execution.state === "failed"
+        ? "Hosted shell finished with an error"
+        : "Hosted shell completed";
+  const Icon = active ? Circle : failed ? CircleAlert : Check;
+
+  return (
+    <details
+      className={clsx("assistant-turn__execution", `assistant-turn__execution--${execution.state}`)}
+      open={active || failed}
+    >
+      <summary aria-label={`${label}${command ? `: ${command}` : ""}`}>
+        <Icon aria-hidden="true" className="assistant-turn__execution-status" size={14} />
+        <Terminal aria-hidden="true" className="assistant-turn__execution-terminal" size={15} />
+        <span className="assistant-turn__execution-label">{label}</span>
+        {command && <code className="assistant-turn__execution-command">{command}</code>}
+        <ChevronRight aria-hidden="true" className="assistant-turn__execution-caret" size={15} />
+      </summary>
+      <div className="assistant-turn__execution-body">
+        {command && <pre aria-label="Executed command"><code>{command}</code></pre>}
+        {output && <pre aria-label="Command output"><code>{output}</code></pre>}
+        {execution.files.length > 0 && (
+          <p className="assistant-turn__execution-files" role="status">
+            Files reported: {execution.files.join(", ")}
+          </p>
+        )}
+        {!output && !active && <p>No command output was returned.</p>}
+      </div>
+    </details>
+  );
+}
+
+function formatExecutionOutput(output: HostedExecutionOutput[]) {
+  return output.map((entry, index) => {
+    const status = entry.timed_out
+      ? "Timed out"
+      : `Exit code: ${entry.exit_code ?? "unknown"}`;
+    const text = [entry.stdout, entry.stderr].filter(Boolean).join("\n");
+    return `${output.length > 1 ? `Command ${index + 1} · ` : ""}${status}${text ? `\n${text}` : ""}`;
+  }).join("\n\n");
 }
 
 function ToolActivity({ activity }: { activity: RuntimeActivity }) {
@@ -130,6 +187,8 @@ function toolPresentation(activity: RuntimeActivity) {
     read_resource: { active: "Đang đọc tài liệu…", completed: "Đã đọc tài liệu" },
     inspect_resource: { active: "Đang kiểm tra tài liệu…", completed: "Đã kiểm tra tài liệu" },
     materialize_resource: { active: "Đang chuẩn bị tài liệu…", completed: "Đã chuẩn bị tài liệu" },
+    materialize_sandbox_resource: { active: "Đang chuẩn bị tệp cho không gian làm việc…", completed: "Tệp đã sẵn sàng trong không gian làm việc" },
+    export_sandbox_file: { active: "Đang lưu tệp từ không gian làm việc…", completed: "Đã lưu tệp để dùng lại" },
     document_edit: { active: "Đang chỉnh sửa tài liệu…", completed: "Đã chỉnh sửa tài liệu" },
     artifact_create: { active: "Đang hoàn thiện tài liệu…", completed: "Đã tạo tài liệu" },
   };

@@ -11,6 +11,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import Literal
 
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
@@ -273,21 +274,44 @@ class ModelConfig:
     openai_base_url: str = OPENAI_DEFAULT_BASE_URL
     openai_api_key: str | None = None
     chat_model: str | None = None
+    agent_provider: Literal["openai", "openrouter"] = "openai"
     embedding_model: str | None = None
     contextualization_enabled: bool = True
     contextualization_model: str | None = None
     reranker_model: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.agent_provider not in {"openai", "openrouter"}:
+            raise ValueError("agent provider must be 'openai' or 'openrouter'")
+
     @classmethod
     def from_environment(cls) -> ModelConfig:
+        configured_provider = optional_text("BOTHESIS_AGENT_MODEL_PROVIDER")
+        openrouter_api_key = optional_text("OPENROUTER_API_KEY")
+        openrouter_model = optional_text("OPENROUTER_MODEL")
+        # A fully configured OpenRouter agent is the only provider that offers
+        # hosted shell execution. Prefer it automatically, while retaining an
+        # explicit provider setting as an intentional deployment override.
+        agent_provider = configured_provider or (
+            "openrouter" if openrouter_api_key and openrouter_model else "openai"
+        )
+        if agent_provider not in {"openai", "openrouter"}:
+            raise RuntimeError(
+                "BOTHESIS_AGENT_MODEL_PROVIDER must be 'openai' or 'openrouter'"
+            )
         return cls(
             openrouter_base_url=text(
                 "OPEN_ROUTER_BASE_URL", OPENROUTER_DEFAULT_BASE_URL
             ),
-            openrouter_api_key=optional_text("OPENROUTER_API_KEY"),
+            openrouter_api_key=openrouter_api_key,
             openai_base_url=text("OPENAI_BASE_URL", OPENAI_DEFAULT_BASE_URL),
             openai_api_key=optional_text("OPENAI_API_KEY"),
-            chat_model=optional_text("OPENAI_MODEL"),
+            chat_model=(
+                openrouter_model or optional_text("OPENAI_MODEL")
+                if agent_provider == "openrouter"
+                else optional_text("OPENAI_MODEL")
+            ),
+            agent_provider=agent_provider,
             embedding_model=optional_text("EMBEDDING_MODEL"),
             contextualization_enabled=boolean(
                 "BOTHESIS_CONTEXTUALIZATION_ENABLED", default=True

@@ -32,6 +32,7 @@ class ToolSpec:
     defer_loading: bool = False
     activity_label: str | None = None
     activity_category: Literal["retrieval", "tool"] = "tool"
+    requires_sandbox: bool = False
     # A tool that legitimately runs longer than the session-wide budget
     # declares its own here. The orchestrator uses it in place of that budget,
     # so a slow tool is not cancelled before it can report its own outcome.

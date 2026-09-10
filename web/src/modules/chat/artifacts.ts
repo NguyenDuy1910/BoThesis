@@ -44,6 +44,19 @@ export function turnArtifacts(turn: TurnState | undefined): TurnArtifact[] {
       }
     }
   }
+  for (const activity of turn.runtimeActivities ?? []) {
+    const candidate = activity.progress?.artifact;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const artifact = toTurnArtifact(candidate as ArtifactReference);
+    if (!artifact) continue;
+    const existing = artifacts.get(artifact.id);
+    if (!existing) {
+      artifacts.set(artifact.id, artifact);
+      order.push(artifact.id);
+    } else if (artifact.revision >= existing.revision) {
+      artifacts.set(artifact.id, artifact);
+    }
+  }
   return order.map((id) => artifacts.get(id)!);
 }
 

@@ -26,6 +26,7 @@ from bothesis.db.models import (
     ItemUpload,
     Message,
     MessageItem,
+    SandboxSession,
 )
 from bothesis.agent.models import AgentContext
 from bothesis.agent.protocol import ExtensionItem, Response
@@ -43,6 +44,8 @@ from bothesis.services import (
     DocumentProcessingError,
     UploadTooLargeError,
     UploadValidationError,
+    SandboxManifestResource,
+    SandboxProviderFile,
 )
 from bothesis.services.access_requests import AccessRequestService
 from bothesis.services.artifact import ArtifactService
@@ -54,6 +57,7 @@ from bothesis.services.integration_connections import IntegrationConnectionServi
 from bothesis.services.integration_credential import IntegrationCredentialService
 from bothesis.services.item import ItemService
 from bothesis.services.item_catalog import ItemCatalogService
+from bothesis.services.sandbox_session import SandboxSessionService
 from bothesis.services.document_upload import DocumentUploadService
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -191,6 +195,60 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
         )
         assert await session.scalar(
             select(MessageItem).where(MessageItem.item_id == item.id)
+        )
+
+
+@pytest.mark.asyncio
+async def test_sandbox_recovery_state_is_private_to_its_conversation_owner(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        identity = IdentityStoreService(session)
+        first_tenant = await identity.create_tenant("sandbox-one", "Sandbox one")
+        second_tenant = await identity.create_tenant("sandbox-two", "Sandbox two")
+        owner = await identity.create_user("owner@sandbox.test")
+        other = await identity.create_user("other@sandbox.test")
+        owner_role = await identity.create_role(first_tenant.id, "member", "Member")
+        other_role = await identity.create_role(second_tenant.id, "member", "Member")
+        await identity.assign_membership(owner.id, first_tenant.id, owner_role.id)
+        await identity.assign_membership(other.id, second_tenant.id, other_role.id)
+        owner_access = await identity.get_context(owner.id, tenant_id=first_tenant.id)
+        other_access = await identity.get_context(other.id, tenant_id=second_tenant.id)
+        conversation = Conversation(
+            tenant_id=first_tenant.id, user_id=owner.id, title="Sandbox work"
+        )
+        session.add(conversation)
+        await session.flush()
+        conversation_id = conversation.id
+
+    sandboxes = SandboxSessionService(session_factory)
+    created = await sandboxes.ensure(
+        owner_access, conversation_id=conversation_id, provider="openrouter"
+    )
+    recorded = await sandboxes.record_materialization(
+        owner_access,
+        session_id=created.id,
+        resource=SandboxManifestResource(
+            resource_id=str(UUID(int=19)),
+            name="revenue.csv",
+            mime_type="text/csv",
+            size_bytes=12,
+        ),
+        provider_file=SandboxProviderFile(
+            id="or_file_1", name="revenue.csv", resource_id=str(UUID(int=19))
+        ),
+    )
+
+    assert recorded.manifest[0].resource_id == str(UUID(int=19))
+    async with session_factory() as session:
+        row = await session.get(SandboxSession, created.id)
+        assert row is not None
+        assert row.provider_state["materialized_files"] == [
+            {"id": "or_file_1", "name": "revenue.csv", "resource_id": str(UUID(int=19))}
+        ]
+    with pytest.raises(DocumentNotFoundError):
+        await sandboxes.active(
+            other_access, conversation_id=conversation_id, provider="openrouter"
         )
 
 

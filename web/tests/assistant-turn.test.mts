@@ -80,7 +80,7 @@ test("presents a verified runtime activity at its function-call position", () =>
   }]);
 });
 
-test("does not make hosted provider output look like a runtime activity", () => {
+test("presents hosted shell execution with its command and captured output", () => {
   const turn: TurnState = {
     id: "turn-1",
     status: "streaming",
@@ -89,18 +89,30 @@ test("does not make hosted provider output look like a runtime activity", () => 
       "response-1": {
         id: "response-1", status: "in_progress", itemOrder: ["run-1", "run-2"],
         items: {
-          // A hosted call completes inside its own response, so a finished one
-          // reads as done even while the turn is still streaming.
           "run-1": {
-            type: "code_interpreter_call", id: "run-1", status: "completed",
+            type: "hosted_execution_result", id: "run-1", call_id: "shell-1",
+            status: "completed", commands: ["printf verified"],
+            output: [{ stdout: "verified", stderr: "", exit_code: 0, timed_out: false }],
+            workspace_files: ["analysis.csv"],
           },
-          "run-2": { type: "shell_call", id: "run-2", status: "in_progress" },
+          "run-2": { type: "hosted_execution_call", id: "run-2", call_id: "shell-2", status: "in_progress", commands: ["date"] },
         },
       },
     },
   };
 
-  assert.deepEqual(assistantTurnItems(turn), []);
+  assert.deepEqual(assistantTurnItems(turn), [
+    {
+      kind: "execution", id: "run-1", callId: "shell-1", state: "completed",
+      commands: ["printf verified"],
+      output: [{ stdout: "verified", stderr: "", exit_code: 0, timed_out: false }],
+      files: ["analysis.csv"],
+    },
+    {
+      kind: "execution", id: "run-2", callId: "shell-2", state: "running",
+      commands: ["date"], output: [], files: [],
+    },
+  ]);
 });
 
 test("does not render provider reasoning as user-facing commentary", () => {

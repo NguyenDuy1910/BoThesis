@@ -28,6 +28,7 @@ EXPECTED_TABLES = {
     "integration_connections",
     "integration_credentials",
     "roles",
+    "sandbox_sessions",
     "tenant_memberships",
     "tenants",
     "users",

@@ -11,11 +11,13 @@ from bothesis.agent import (
     AgentStreamEvent,
     AgentExecutionError,
     ContextManager,
+    ExecutionCapabilityResolver,
     ResolvedStepSettings,
     Session,
     SessionConfiguration,
     SessionServices,
     ResourceResolver,
+    SandboxRuntime,
     TextInput,
     TurnContext,
     TurnEnvironmentSnapshot,
@@ -45,12 +47,14 @@ class Agent:
         configuration: SessionConfiguration | None = None,
         tracer: Tracer | None = None,
         resource_resolver: ResourceResolver | None = None,
+        execution_capability_resolver: ExecutionCapabilityResolver | None = None,
     ) -> None:
         self._model = model
         self._tools = tools
         self.configuration = configuration or SessionConfiguration()
         self._tracer = tracer or NoopTracer()
         self._resource_resolver = resource_resolver
+        self._execution_capability_resolver = execution_capability_resolver
 
     @property
     def model(self) -> object:
@@ -64,13 +68,19 @@ class Agent:
 
         return self._tools
 
-    def _session(self, resource_resolver: ResourceResolver | None) -> Session:
+    def _session(
+        self,
+        resource_resolver: ResourceResolver | None,
+        sandbox_runtime: SandboxRuntime | None,
+    ) -> Session:
         return Session(
             self.configuration,
             SessionServices(
                 model=self._model,
                 tool_registry=self._tools,
                 resource_resolver=resource_resolver,
+                execution_capability_resolver=self._execution_capability_resolver,
+                sandbox_runtime=sandbox_runtime,
                 tracer=self._tracer,
             ),
             ContextManager(configuration=self.configuration),
@@ -82,6 +92,7 @@ class Agent:
         ctx: AgentContext,
         *,
         resource_resolver: ResourceResolver | None = None,
+        sandbox_runtime: SandboxRuntime | None = None,
     ) -> AsyncIterator[AgentStreamEvent]:
         """Yield ordered response state mutations for one conversation turn.
 
@@ -108,7 +119,9 @@ class Agent:
             yield failure("invalid_request", rejection)
             return
 
-        session = self._session(resource_resolver or self._resource_resolver)
+        session = self._session(
+            resource_resolver or self._resource_resolver, sandbox_runtime
+        )
         settings = ResolvedStepSettings(
             model=self.configuration.model,
             temperature=self.configuration.temperature,

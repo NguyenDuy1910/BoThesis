@@ -6,6 +6,7 @@ from typing import Any, Literal, TypeAlias
 
 from pydantic import Field
 
+from bothesis.agent.execution import ExecutionCapability
 from bothesis.agent.protocol import ProtocolModel
 from bothesis.agent.protocol.content import Annotation, OutputText
 from bothesis.agent.protocol.items import FunctionCallItem, Item, MessageItem
@@ -88,6 +89,9 @@ class Prompt(ProtocolModel):
     store: bool | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
     provider_options: dict[str, Any] = Field(default_factory=dict)
+    # This runtime contract is consumed by the provider adapter, never emitted
+    # directly into the wire payload by the shared Responses renderer.
+    execution_capability: ExecutionCapability | None = None
 
 
 class Response(ProtocolModel):

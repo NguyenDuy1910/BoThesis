@@ -26,9 +26,16 @@ import bothesis.runtime as runtime_module
 import bothesis.services.workspace_documents as workspace_documents_module
 from bothesis.agent import Agent, SessionConfiguration
 from bothesis.agent.models import AgentContext
+from bothesis.agent.protocol import (
+    ExecutionEnvironmentRef,
+    ExecutionOutput,
+    HostedExecutionResultItem,
+    ProviderResourceRef,
+    ResponseOutputItemDoneEvent,
+)
 from bothesis.agent.tools import ToolExecutor, ToolRegistry, ToolSpec
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
-from bothesis.services.chat import ChatService
+from bothesis.services.chat import ChatService, _public_event
 from bothesis.connector.protocol import (
     CitationInfo,
     CitationSpan,
@@ -47,6 +54,7 @@ from bothesis.services.document_presentation import (
     viewer_elements,
 )
 from bothesis.services.workspace_documents import WorkspaceDocumentService
+from config import AppConfig, ModelConfig
 
 
 def search_call(output_index: int = 0) -> list[Any]:
@@ -117,6 +125,30 @@ def test_chat_exposes_all_registered_tools() -> None:
     )
 
 
+def test_public_chat_events_strip_provider_workspace_bindings() -> None:
+    event = ResponseOutputItemDoneEvent(
+        output_index=0,
+        item=HostedExecutionResultItem(
+            call_id="shell-1",
+            output=(ExecutionOutput(stdout="done", exit_code=0),),
+            environment=ExecutionEnvironmentRef(provider="openrouter", id="container_1"),
+            files=(
+                ProviderResourceRef(
+                    provider="openrouter", id="cfile_1", name="report.csv"
+                ),
+            ),
+            workspace_files=("report.csv",),
+        ),
+    )
+
+    payload = _public_event(event).model_dump_json()
+
+    assert "container_1" not in payload
+    assert "cfile_1" not in payload
+    assert "openrouter" not in payload
+    assert "report.csv" in payload
+
+
 def test_default_agent_composes_the_openai_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -163,6 +195,56 @@ def test_default_agent_composes_the_openai_transport(
         "read_resource",
         "materialize_resource",
     ]
+
+
+def test_agent_uses_openrouter_only_when_the_model_provider_selects_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TestOpenRouterTransport:
+        provider = "openrouter"
+        model = "openrouter/test-model"
+
+        def __init__(self, **_: Any) -> None:
+            pass
+
+    runtime = api_deps.get_runtime()
+    monkeypatch.setattr(runtime_module, "OpenRouterTransport", TestOpenRouterTransport)
+    monkeypatch.setattr(
+        runtime,
+        "_config",
+        AppConfig(
+            model=ModelConfig(
+                agent_provider="openrouter",
+                chat_model="openrouter/test-model",
+            ),
+        ),
+    )
+    monkeypatch.setattr(runtime, "_agent", None)
+    monkeypatch.setattr(runtime, "_agent_transport", None)
+
+    agent = runtime.agent()
+
+    assert isinstance(agent.model, TestOpenRouterTransport)
+
+
+def test_model_configuration_auto_selects_a_configured_openrouter_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in (
+        "BOTHESIS_AGENT_MODEL_PROVIDER",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL",
+        "OPENAI_MODEL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router-key")
+    monkeypatch.setenv("OPENROUTER_MODEL", "openai/gpt-5.6-luna")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5.6-luna")
+
+    model = ModelConfig.from_environment()
+
+    assert model.agent_provider == "openrouter"
+    assert model.chat_model == "openai/gpt-5.6-luna"
 
 
 class PermissionDeniedTransport:

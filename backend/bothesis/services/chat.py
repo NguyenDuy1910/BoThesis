@@ -12,11 +12,20 @@ from bothesis.agent import (
     AttachmentRef,
     ImageInput,
     ResourceResolver,
+    SandboxRuntime,
     TextInput,
     UserTurn,
 )
 from bothesis.agent.models import AgentContext, ConversationMessage
-from bothesis.agent.protocol import Response, ResponseCompletedEvent
+from bothesis.agent.protocol import (
+    HostedExecutionCallItem,
+    HostedExecutionResultItem,
+    Item,
+    Response,
+    ResponseCompletedEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+)
 from bothesis.db.engine import SessionFactory, session_scope
 from bothesis.services import (
     KNOWLEDGE_READ_PERMISSION,
@@ -28,7 +37,12 @@ from bothesis.services.conversation import ConversationService
 
 HistoryTurn = tuple[Literal["user", "assistant"], str]
 _RESOURCE_TOOL_NAMES = frozenset(
-    {"inspect_resource", "read_resource", "materialize_resource"}
+    {
+        "inspect_resource",
+        "read_resource",
+        "materialize_resource",
+        "materialize_sandbox_resource",
+    }
 )
 
 
@@ -42,11 +56,14 @@ class ChatService:
         agent: Agent,
         conversations: ConversationService,
         resource_resolver: Callable[[AuthContext], ResourceResolver] | None = None,
+        sandbox_runtime: Callable[[AuthContext, UUID, str], SandboxRuntime | None]
+        | None = None,
     ) -> None:
         self._sessions = session_factory
         self._agent = agent
         self._conversations = conversations
         self._resource_resolver = resource_resolver
+        self._sandbox_runtime = sandbox_runtime
 
     async def stream_turn(
         self,
@@ -122,6 +139,11 @@ class ChatService:
                 and (attachment_resources or referenced_resources)
                 else None
             ),
+            sandbox_runtime=(
+                self._sandbox_runtime(access, resolved_conversation_id, context.request_id or "")
+                if self._sandbox_runtime is not None
+                else None
+            ),
             is_disconnected=is_disconnected,
         )
 
@@ -133,12 +155,14 @@ class ChatService:
         access: AuthContext,
         conversation_id: UUID,
         resource_resolver: ResourceResolver | None,
+        sandbox_runtime: SandboxRuntime | None,
         is_disconnected: Callable[[], Awaitable[bool]],
     ) -> AsyncIterator[str]:
         stream = self._agent.run(
             user_turn,
             context,
             resource_resolver=resource_resolver,
+            sandbox_runtime=sandbox_runtime,
         )
         final_answer: str | None = None
         referenced_document_ids: tuple[UUID, ...] = ()
@@ -151,7 +175,7 @@ class ChatService:
                     if answer:
                         final_answer = answer
                         referenced_document_ids = referenced_item_ids(event.response)
-                yield event.model_dump_json()
+                yield _public_event(event).model_dump_json()
         finally:
             await stream.aclose()
         if final_answer:
@@ -161,6 +185,7 @@ class ChatService:
                 content=final_answer,
                 referenced_document_ids=referenced_document_ids,
                 request_id=context.request_id or "",
+                artifact_ids=_artifact_ids(sandbox_runtime),
             )
 
     async def _resolve_knowledge_scope(
@@ -209,6 +234,48 @@ def referenced_item_ids(response: Response) -> tuple[UUID, ...]:
             result.append(item_id)
             seen.add(item_id)
     return tuple(result)
+
+
+def _artifact_ids(sandbox: SandboxRuntime | None) -> tuple[UUID, ...]:
+    if sandbox is None:
+        return ()
+    result: list[UUID] = []
+    for value in sandbox.artifact_ids:
+        try:
+            artifact_id = UUID(value)
+        except ValueError:
+            continue
+        if artifact_id not in result:
+            result.append(artifact_id)
+    return tuple(result)
+
+
+def _public_event(event):  # type: ignore[no-untyped-def]
+    """Remove opaque execution bindings before an agent event reaches the web."""
+
+    if isinstance(event, (ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent)):
+        return event.model_copy(update={"item": _public_item(event.item)})
+    if isinstance(event, ResponseCompletedEvent):
+        return event.model_copy(
+            update={
+                "response": event.response.model_copy(
+                    update={
+                        "output": tuple(
+                            _public_item(item) for item in event.response.output
+                        )
+                    }
+                )
+            }
+        )
+    return event
+
+
+def _public_item(item: Item) -> Item:
+    if isinstance(item, HostedExecutionCallItem):
+        return item.model_copy(update={"environment": None})
+    if isinstance(item, HostedExecutionResultItem):
+        return item.model_copy(update={"environment": None, "files": ()})
+    return item
 
 
 __all__ = [

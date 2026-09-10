@@ -3,6 +3,8 @@ import type {
   ContentPart,
   FunctionCallItem,
   FunctionCallOutputItem,
+  HostedExecutionCallItem,
+  HostedExecutionResultItem,
   MessageItem,
   OutputItem,
   OutputTextAnnotation,
@@ -324,6 +326,22 @@ export function isFunctionCallOutputItem(
   return item?.type === "function_call_output"
     && typeof (item as Partial<FunctionCallOutputItem>).call_id === "string"
     && typeof (item as Partial<FunctionCallOutputItem>).output === "string";
+}
+
+export function isHostedExecutionCallItem(
+  item: OutputItem | undefined,
+): item is HostedExecutionCallItem {
+  return item?.type === "hosted_execution_call"
+    && typeof (item as Partial<HostedExecutionCallItem>).call_id === "string"
+    && Array.isArray((item as Partial<HostedExecutionCallItem>).commands);
+}
+
+export function isHostedExecutionResultItem(
+  item: OutputItem | undefined,
+): item is HostedExecutionResultItem {
+  return item?.type === "hosted_execution_result"
+    && typeof (item as Partial<HostedExecutionResultItem>).call_id === "string"
+    && Array.isArray((item as Partial<HostedExecutionResultItem>).output);
 }
 
 export function isReasoningItem(item: OutputItem | undefined): item is ReasoningItem {
