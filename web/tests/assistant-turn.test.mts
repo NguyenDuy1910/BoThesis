@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assistantTurnItems } from "../src/modules/chat/assistant-turn.ts";
+import { assistantTurnItems, groupAssistantTurnItems } from "../src/modules/chat/assistant-turn.ts";
 import type { TurnState } from "../src/modules/chat/types.ts";
 
 test("renders message items directly from semantic item state", () => {
@@ -78,6 +78,42 @@ test("presents a verified runtime activity at its function-call position", () =>
     kind: "activity", id: "call-1",
     activity: { callId: "call-1", toolName: "sql_query", state: "active", startedAt: 1 },
   }]);
+});
+
+test("groups adjacent runtime activities without moving interleaved commentary", () => {
+  const grouped = groupAssistantTurnItems([
+    {
+      kind: "message" as const,
+      id: "commentary-1",
+      phase: "commentary" as const,
+      text: "I found the current policy.",
+      state: "done" as const,
+    },
+    {
+      kind: "activity" as const,
+      id: "search-1",
+      activity: { callId: "search-1", toolName: "knowledge_search", state: "completed" as const, startedAt: 1, resultCount: 2 },
+    },
+    {
+      kind: "activity" as const,
+      id: "read-1",
+      activity: { callId: "read-1", toolName: "read_resource", state: "active" as const, startedAt: 2 },
+    },
+    {
+      kind: "message" as const,
+      id: "answer-1",
+      phase: "final_answer" as const,
+      text: "The allowance is unchanged.",
+      state: "streaming" as const,
+    },
+  ]);
+
+  assert.deepEqual(grouped.map((item) => item.kind), [
+    "message",
+    "activity_group",
+    "message",
+  ]);
+  assert.equal(grouped[1]?.kind === "activity_group" && grouped[1].activities.length, 2);
 });
 
 test("presents hosted shell execution with its command and captured output", () => {

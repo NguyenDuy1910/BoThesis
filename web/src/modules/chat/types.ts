@@ -17,6 +17,12 @@ export interface ConversationDocument {
   status: "available" | "failed";
 }
 
+/** A Collection explicitly attached to one user turn as retrieval context. */
+export interface ConversationCollection {
+  id: string;
+  title: string;
+}
+
 /** The OpenResponses item state machine. */
 export type OutputItemStatus = "in_progress" | "completed" | "incomplete";
 
@@ -73,11 +79,11 @@ export interface CitationSource {
   url?: string | null;
 }
 
-/** The BoThesis citation annotation type; the specification only defines url_citation. */
+/** The Enterprise Agent citation annotation type; the specification only defines url_citation. */
 export const DOCUMENT_CITATION_TYPE = "bothesis:document_citation";
 
 /**
- * The BoThesis artifact annotation type: a file the turn produced, attached to
+ * The Enterprise Agent artifact annotation type: a file the turn produced, attached to
  * the answer that presents it. Zero-width at the end of the text, and the
  * replacement for the provider's own `container_file_citation`, which the
  * backend consumes so no container or provider file id reaches a client.
@@ -388,7 +394,8 @@ export type ChatMessagePart =
       state: "streaming" | "done";
       annotations?: OutputTextAnnotation[];
     }
-  | { type: "data-document"; id?: string; data: ConversationDocument };
+  | { type: "data-document"; id?: string; data: ConversationDocument }
+  | { type: "data-collection"; id?: string; data: ConversationCollection };
 
 export interface ChatMessage {
   id: string;

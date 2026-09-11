@@ -1,4 +1,4 @@
-"""Single source of truth for BoThesis process configuration.
+"""Single source of truth for Enterprise Agent process configuration.
 
 Every environment variable the application depends on is read here, once, and
 handed to the rest of the system as validated values. No module outside this

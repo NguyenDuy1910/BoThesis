@@ -1,4 +1,4 @@
-# BoThesis connector pipeline
+# Enterprise Agent connector pipeline
 
 This package owns source extraction, Docling conversion, normalized content,
 source-aware chunking, provenance, ACL mapping, and checkpoint synchronization.

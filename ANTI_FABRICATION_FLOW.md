@@ -1,8 +1,8 @@
-# Anti-Fabrication Flow Enhancement for BoThesis Agent
+# Anti-Fabrication Flow Enhancement for Enterprise Agent
 
 ## Overview
 
-The BoThesis agent has been enhanced with strict anti-fabrication rules to ensure that:
+The Enterprise Agent has been enhanced with strict anti-fabrication rules to ensure that:
 1. Agent never makes up or guesses enterprise-related information
 2. All enterprise questions must be grounded in the knowledge base
 3. Vague questions trigger clarification, not hallucination

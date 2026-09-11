@@ -5,6 +5,13 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: appBrand.productName,
   description: "Enterprise knowledge and BI assistant.",
+  applicationName: appBrand.productName,
+  manifest: "/site.webmanifest",
+  openGraph: {
+    title: appBrand.productName,
+    description: "Enterprise knowledge and BI assistant.",
+    siteName: appBrand.productName,
+  },
 };
 
 export const viewport: Viewport = {

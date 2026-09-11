@@ -114,7 +114,7 @@ test("collects an explicitly exported workspace artifact from tool progress", ()
 
 test("a container file citation never reaches the client as one", () => {
   // The backend consumes the provider's own citation and republishes it as a
-  // BoThesis file, so an unknown provider annotation contributes nothing.
+  // Product file, so an unknown provider annotation contributes nothing.
   const provider: OutputTextAnnotation = {
     type: "container_file_citation",
     container_id: "cntr_1",

@@ -1,6 +1,6 @@
 # Temporal runtime
 
-BoThesis uses Temporal as the durable runtime for the single end-to-end
+Enterprise Agent uses Temporal as the durable runtime for the single end-to-end
 `IngestionWorkflow`. PostgreSQL stores connector and Item domain state; it does
 not mirror Workflow executions or schedules.
 

@@ -102,7 +102,7 @@ def render_input(items: Sequence[Item]) -> list[dict[str, Any]]:
     """Render canonical items as OpenAI Responses input items.
 
     Annotations are dropped: OpenAI only accepts ``url_citation`` on replayed
-    output text, and BoThesis document citations are its own annotation type.
+    output text, and Enterprise Agent document citations are its own annotation type.
     """
 
     rendered: list[dict[str, Any]] = []
@@ -508,7 +508,7 @@ def _project(
                 arguments=native.arguments or "",
             ),
         )
-    # Hosted-tool and audio lifecycles BoThesis never declares.
+    # Hosted-tool and audio lifecycles Enterprise Agent never declares.
     return ()
 
 
@@ -637,7 +637,7 @@ def _item(
             call_id=payload.get("call_id", ""),
             output=payload.get("output", ""),
         )
-    # A hosted-tool item BoThesis does not model is preserved verbatim so it can
+    # A hosted-tool item Enterprise Agent does not model is preserved verbatim so it can
     # be replayed to the provider that produced it.
     return ExtensionItem(**payload)
 

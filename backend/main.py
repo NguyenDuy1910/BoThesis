@@ -1,4 +1,4 @@
-"""Executable bootstrap for the BoThesis HTTP application."""
+"""Executable bootstrap for the Enterprise Agent HTTP application."""
 
 from __future__ import annotations
 

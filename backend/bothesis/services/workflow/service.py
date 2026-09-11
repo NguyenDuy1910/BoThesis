@@ -235,7 +235,7 @@ class TemporalWorkflowService:
             ingestion_schedule_id(source_id)
         )
         try:
-            await handle.pause(note="Paused by BoThesis administrator")
+            await handle.pause(note="Paused by Enterprise Agent administrator")
             return self._schedule_payload(await handle.describe())
         except RPCError as exc:
             if exc.status == RPCStatusCode.NOT_FOUND:
@@ -247,7 +247,7 @@ class TemporalWorkflowService:
             ingestion_schedule_id(source_id)
         )
         try:
-            await handle.unpause(note="Resumed by BoThesis administrator")
+            await handle.unpause(note="Resumed by Enterprise Agent administrator")
             return self._schedule_payload(await handle.describe())
         except RPCError as exc:
             if exc.status == RPCStatusCode.NOT_FOUND:

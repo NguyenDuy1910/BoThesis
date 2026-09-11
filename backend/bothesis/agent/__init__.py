@@ -1,4 +1,4 @@
-"""Provider-neutral contracts for BoThesis's single-agent turn runtime."""
+"""Provider-neutral contracts for Enterprise Agent's single-agent turn runtime."""
 
 from __future__ import annotations
 

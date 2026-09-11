@@ -1,6 +1,6 @@
 """Builders for native ``/responses`` streaming events, shared by agent tests.
 
-Every provider BoThesis supports emits the same OpenResponses-format events, so
+Every provider Enterprise Agent supports emits the same OpenResponses-format events, so
 these builders describe one provider stream and are reused for all of them. They
 produce real OpenAI SDK event objects, which is exactly what both transports
 hand to the adapter.

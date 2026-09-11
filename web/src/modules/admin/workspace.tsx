@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getChatConfiguration } from "@/lib/api/config";
 import { adminRequest } from "@/modules/admin/api";
 
 export interface AdminTenant {
@@ -70,7 +70,7 @@ export function AdminWorkspaceProvider({ children }: { children: React.ReactNode
 
   useEffect(() => {
     const controller = new AbortController();
-    const userId = getBothesisChatConfiguration()?.userId;
+    const userId = getChatConfiguration()?.userId;
     setLoading(true);
     setError(null);
 

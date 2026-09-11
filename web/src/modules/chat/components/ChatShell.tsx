@@ -8,26 +8,22 @@ import {
   FileSearch,
   ArrowDown,
   FilePenLine,
-  ListChecks,
-  LoaderCircle,
+  LibraryBig,
   Menu,
-  Paperclip,
   RefreshCw,
-  Send,
   ShieldCheck,
-  Square,
-  X,
 } from "lucide-react";
-import { memo, type FormEvent, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { appBrand } from "@/lib/brand";
 import { AppShell } from "@/components/ui/AppShell";
 import { ProductMark } from "@/components/ui/ProductMark";
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getChatConfiguration } from "@/lib/api/config";
 import {
   releaseConversationDocument,
   uploadConversationDocument,
+  type Collection,
 } from "@/modules/chat/api";
 import {
   cachedToUIMessage,
@@ -37,14 +33,13 @@ import {
   titleFromMessage,
   uiToCachedMessage,
 } from "@/modules/chat/conversations";
-import { useBothesisChat } from "@/modules/chat/hooks/useBothesisChat";
+import { useChat } from "@/modules/chat/hooks/useBothesisChat";
 import { useJumpToLatest } from "@/modules/chat/hooks/useJumpToLatest";
 import { useSidebarState } from "@/modules/chat/hooks/useSidebarState";
 import type {
   ChatConversation,
   ChatMessage,
   ChatMessagePart,
-  ConversationDocument,
 } from "@/modules/chat/types";
 import {
   artifactPreviewActivity,
@@ -54,47 +49,37 @@ import {
 } from "@/modules/chat/activity";
 import { turnArtifacts, type TurnArtifact } from "@/modules/chat/artifacts";
 import { answerSources, type AnswerSource } from "@/modules/chat/sources";
+import { recoveryForTurn } from "@/modules/chat/recovery";
+import { conversationResources } from "@/modules/chat/conversation-resources";
 import { AppSidebar } from "./AppSidebar";
 import { AnswerSources } from "./AnswerSources";
 import { ArtifactCards } from "./ArtifactCard";
 import { AssistantTurn } from "./AssistantTurn";
+import { ChatComposer, type ComposerAttachment } from "./ChatComposer";
+import { ConversationReuse } from "./ConversationReuse";
+import { RecoveryNotice } from "./RecoveryNotice";
 import { RightActivityPanel } from "./RightActivityPanel";
 
 const suggestions = [
   {
-    title: "Executive briefing",
-    description: "Summarize priorities, blockers, and source-backed decisions.",
-    prompt: "Summarize the latest executive priorities from the knowledge base with sources.",
+    title: "Research company knowledge",
+    description: "Find a trusted answer with the supporting sources.",
+    prompt: "Find the most relevant company knowledge for my question and cite the supporting sources.",
     icon: FileSearch,
   },
   {
-    title: "Risk review",
-    description: "Surface exceptions, policy gaps, and operating signals.",
-    prompt: "What risks should leadership review this week, and what evidence supports them?",
+    title: "Analyze a document",
+    description: "Upload a file and turn its contents into a clear next step.",
+    prompt: "Help me analyze an attached document and identify the most important next steps.",
     icon: BarChart3,
   },
   {
-    title: "Decision memo",
-    description: "Draft a concise decision memo from the most relevant internal context.",
-    prompt: "Draft a concise decision memo from the most relevant internal context.",
+    title: "Create a deliverable",
+    description: "Draft a brief, plan, or document from trusted context.",
+    prompt: "Create a concise, source-backed deliverable from the relevant company knowledge.",
     icon: FilePenLine,
   },
-  {
-    title: "Source lookup",
-    description: "Find policy details, owners, and referenced documents.",
-    prompt: "Find policy details related to internal permissions and cite the source documents.",
-    icon: ListChecks,
-  },
 ];
-
-interface ComposerDocument {
-  key: string;
-  fileName: string;
-  sizeBytes: number;
-  progress: "starting" | "uploading" | "validating" | "ready" | "failed";
-  document?: ConversationDocument;
-  error?: string;
-}
 
 function createDraftConversationId() {
   return globalThis.crypto.randomUUID();
@@ -123,7 +108,7 @@ export default function ChatShell() {
   }, []);
 
   useEffect(() => {
-    setConversationUser(getBothesisChatConfiguration()?.userId);
+    setConversationUser(getChatConfiguration()?.userId);
     void refresh();
   }, [refresh]);
 
@@ -250,7 +235,8 @@ function ChatConversation({
   onOpenSidebar: () => void;
 }) {
   const [input, setInput] = useState("");
-  const [composerAttachments, setComposerAttachments] = useState<ComposerDocument[]>([]);
+  const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  const [contextCollections, setContextCollections] = useState<Collection[]>([]);
   // Source inspection lives beside this conversation, so opening a citation
   // never touches the streamed messages, the composer, or the scroll position.
   const [activity, setActivity] = useState<RightActivity | null>(null);
@@ -269,7 +255,7 @@ function ChatConversation({
     error,
     clearError,
     isConfigured,
-  } = useBothesisChat({
+  } = useChat({
     conversationId,
     initialMessages,
     onFinish: (completedMessages) => {
@@ -289,6 +275,7 @@ function ChatConversation({
     ? `${latestUserMessageId}:${activeAssistantMessageId}`
     : null;
   const hasMessageError = messages.some((message) => message.turn?.status === "failed");
+  const reusableResources = useMemo(() => conversationResources(messages), [messages]);
   const isUploading = composerAttachments.some((item) => (
     item.progress !== "ready" && item.progress !== "failed"
   ));
@@ -357,13 +344,16 @@ function ChatConversation({
     clearError();
     setInput("");
     setComposerAttachments([]);
+    setContextCollections([]);
     await sendMessage({
       text,
       documents: readyDocuments,
+      collections: contextCollections.map(({ id, title }) => ({ id, title })),
     });
   }, [
     clearError,
     composerAttachments,
+    contextCollections,
     isConfigured,
     isStreaming,
     isUploading,
@@ -417,6 +407,18 @@ function ChatConversation({
     void regenerate({ messageId });
   }, [regenerate]);
 
+  const editRequest = useCallback((assistantMessageId: string) => {
+    const assistantIndex = messages.findIndex((message) => message.id === assistantMessageId);
+    const user = messages
+      .slice(0, assistantIndex < 0 ? messages.length : assistantIndex)
+      .reverse()
+      .find((message) => message.role === "user");
+    if (!user) return;
+    setInput(getMessageText(user));
+    setActivity(null);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [messages]);
+
   // Hand the caret back to the composer when a turn settles — including a
   // failed one, so a retry or follow-up can be typed straight away. Focus is
   // left alone if the reader moved it somewhere deliberate, and on touch
@@ -451,12 +453,18 @@ function ChatConversation({
     textareaRef.current?.focus();
   }, []);
 
+  const askSource = useCallback((title: string) => {
+    setActivity(null);
+    setInput((current) => current.trim() ? current : `Ask a follow-up about “${title}”: `);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
+
   const closeActivity = useCallback(() => setActivity(null), []);
 
   const { hasMoreBelow, jumpToLatest } = useJumpToLatest(chatScrollRef, messageStackRef);
 
   return (
-    <section className="main-pane" id="main-content">
+    <section className={clsx("main-pane", activity && "main-pane--inspector-open")} id="main-content">
       <header className="topbar">
         <div className="topbar__left">
           <button
@@ -470,7 +478,7 @@ function ChatConversation({
           <div className="topbar__title-wrap">
             <span className="topbar__identity-mark"><ProductMark decorative size="sm" /></span>
             <span className="topbar__title-copy">
-              <span className="topbar__eyebrow">Knowledge assistant</span>
+              <span className="topbar__eyebrow">Conversation</span>
               <h1 title={conversationTitle ?? "New conversation"}>{conversationTitle ?? "New conversation"}</h1>
             </span>
           </div>
@@ -500,6 +508,7 @@ function ChatConversation({
                     lastMessageId={lastMessage?.id}
                     messages={messages}
                     onEditArtifact={editArtifact}
+                    onEditRequest={editRequest}
                     onOpenSource={openSource}
                     onPreviewArtifact={previewArtifact}
                     onRegenerate={handleRegenerate}
@@ -527,13 +536,16 @@ function ChatConversation({
                 <div className="error-box" role="status">Chat is unavailable because workspace access has not been configured. Contact your administrator.</div>
               </div>
             )}
+            <ConversationReuse resources={reusableResources} />
             <ChatComposer
               attachments={composerAttachments}
+              contextCollections={contextCollections}
               input={input}
               isConfigured={isConfigured}
               isStreaming={isStreaming}
               isUploading={isUploading}
               onChange={setInput}
+              onContextCollectionsChange={setContextCollections}
               onFiles={selectAttachments}
               onRemoveAttachment={removeAttachment}
               onStop={stop}
@@ -542,7 +554,7 @@ function ChatConversation({
             />
         </div>
         {activity && (
-          <RightActivityPanel activity={activity} onClose={closeActivity} />
+          <RightActivityPanel activity={activity} onAskSource={askSource} onClose={closeActivity} />
         )}
       </div>
     </section>
@@ -557,6 +569,7 @@ function MessageList({
   lastMessageId,
   messages,
   onEditArtifact,
+  onEditRequest,
   onOpenSource,
   onPreviewArtifact,
   onRegenerate,
@@ -569,6 +582,7 @@ function MessageList({
   lastMessageId?: string;
   messages: ChatMessage[];
   onEditArtifact: (artifact: TurnArtifact) => void;
+  onEditRequest: (messageId: string) => void;
   onOpenSource: (source: AnswerSource) => void;
   onPreviewArtifact: (artifact: TurnArtifact) => void;
   onRegenerate: (messageId: string) => void;
@@ -585,6 +599,7 @@ function MessageList({
           key={message.id}
           message={message}
           onEditArtifact={onEditArtifact}
+          onEditRequest={onEditRequest}
           onOpenSource={onOpenSource}
           onPreviewArtifact={onPreviewArtifact}
           onRegenerate={onRegenerate}
@@ -601,6 +616,7 @@ const MessageView = memo(function MessageView({
   isStreaming,
   message,
   onEditArtifact,
+  onEditRequest,
   onOpenSource,
   onPreviewArtifact,
   onRegenerate,
@@ -611,6 +627,7 @@ const MessageView = memo(function MessageView({
   isStreaming: boolean;
   message: ChatMessage;
   onEditArtifact: (artifact: TurnArtifact) => void;
+  onEditRequest: (messageId: string) => void;
   onOpenSource: (source: AnswerSource) => void;
   onPreviewArtifact: (artifact: TurnArtifact) => void;
   onRegenerate: (messageId: string) => void;
@@ -627,15 +644,30 @@ const MessageView = memo(function MessageView({
   const hasSettled = !isStreaming && !isRevealing;
   const text = getMessageText(message);
   const streamError = message.turn?.error;
+  const recovery = useMemo(() => recoveryForTurn(message.turn), [message.turn]);
   const messageDocuments = message.parts
     .filter((part): part is Extract<ChatMessagePart, { type: "data-document" }> => (
       part.type === "data-document"
+    ));
+  const messageCollections = message.parts
+    .filter((part): part is Extract<ChatMessagePart, { type: "data-collection" }> => (
+      part.type === "data-collection"
     ));
 
   if (message.role === "user") {
     return (
       <div className="message-row user" data-chat-role="user">
         <div className="user-bubble">
+          {messageCollections.length > 0 && (
+            <div className="message-attachments message-attachments--collections">
+              {messageCollections.map((part) => (
+                <span className="message-attachment message-attachment--collection" key={part.data.id}>
+                  <LibraryBig aria-hidden="true" size={13} />
+                  <span title={part.data.title}>{part.data.title}</span>
+                </span>
+              ))}
+            </div>
+          )}
           {messageDocuments.length > 0 && (
             <div className="message-attachments">
               {messageDocuments.map((part) => (
@@ -671,7 +703,14 @@ const MessageView = memo(function MessageView({
             onPreview={onPreviewArtifact}
           />
         )}
-        {streamError && <div className="error-box" role="alert">{streamError}</div>}
+        {recovery && (
+          <RecoveryNotice
+            onEditRequest={() => onEditRequest(message.id)}
+            onRetry={() => onRegenerate(message.id)}
+            recovery={recovery}
+          />
+        )}
+        {streamError && !recovery && streamError !== "Response stopped." && <div className="error-box" role="alert">{streamError}</div>}
         {hasSettled && (
           <AnswerSources
             activeCitationId={activeCitationId}
@@ -679,7 +718,7 @@ const MessageView = memo(function MessageView({
             sources={sources}
           />
         )}
-        {hasSettled && (text || streamError) && (
+        {hasSettled && (text || (!recovery && streamError && streamError !== "Response stopped.")) && (
           <div className="answer-footer">
             <div className="assistant-actions" aria-label="Assistant message actions" role="group">
               {text && (
@@ -687,10 +726,11 @@ const MessageView = memo(function MessageView({
                   {copied ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
                 </button>
               )}
-              <button aria-label={streamError ? "Retry response" : "Regenerate response"} className={clsx("assistant-action", streamError && "assistant-action--retry")} onClick={() => onRegenerate(message.id)} title={streamError ? "Retry" : "Regenerate"} type="button">
-                <RefreshCw aria-hidden="true" size={14} />
-                {streamError && <span>Retry</span>}
-              </button>
+              {!recovery && (
+                <button aria-label="Regenerate response" className="assistant-action" onClick={() => onRegenerate(message.id)} title="Regenerate" type="button">
+                  <RefreshCw aria-hidden="true" size={14} />
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -711,188 +751,24 @@ function reserveActiveTurnSpace(scroller: HTMLDivElement, stack: HTMLDivElement)
   stack.style.setProperty("--chat-active-fill", `${reservedHeight}px`);
 }
 
-function ChatComposer({
-  attachments,
-  input,
-  isConfigured,
-  isStreaming,
-  isUploading,
-  onChange,
-  onFiles,
-  onRemoveAttachment,
-  onStop,
-  onSubmit,
-  textareaRef,
-}: {
-  attachments: ComposerDocument[];
-  input: string;
-  isConfigured: boolean;
-  isStreaming: boolean;
-  isUploading: boolean;
-  onChange: (value: string) => void;
-  onFiles: (files: FileList) => void;
-  onRemoveAttachment: (key: string) => void;
-  onStop: () => void;
-  onSubmit: (text: string) => Promise<void>;
-  textareaRef: RefObject<HTMLTextAreaElement | null>;
-}) {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const folderInputRef = useRef<HTMLInputElement | null>(null);
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    await onSubmit(input);
-  };
-  return (
-    <div className="composer-wrap">
-      <form className="composer" onSubmit={submit}>
-        {attachments.length > 0 && (
-          <div className="composer-attachments">
-            {attachments.map((item) => (
-              <span
-                className={clsx(
-                  "composer-attachment",
-                  item.progress === "failed" && "composer-attachment--failed",
-                )}
-                key={item.key}
-                title={item.error ?? item.fileName}
-              >
-                {item.progress !== "ready" && item.progress !== "failed"
-                  ? <LoaderCircle aria-hidden="true" className="composer-attachment__spin" size={13} />
-                  : <FileSearch aria-hidden="true" size={13} />}
-                <span>{item.fileName}</span>
-                <small>{attachmentProgressLabel(item)}</small>
-                <button
-                  aria-label={`Remove ${item.fileName}`}
-                  onClick={() => onRemoveAttachment(item.key)}
-                  type="button"
-                >
-                  <X aria-hidden="true" size={12} />
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-        <input
-          accept=".avif,.bmp,.csv,.docx,.gif,.htm,.html,.jpeg,.jpg,.json,.jsonl,.log,.markdown,.md,.pdf,.png,.pptx,.rst,.sql,.tif,.tiff,.tsv,.txt,.webp,.xlsx,.xml,.yaml,.yml"
-          hidden
-          multiple
-          onChange={(event) => {
-            if (event.target.files?.length) onFiles(event.target.files);
-            event.target.value = "";
-          }}
-          ref={fileInputRef}
-          type="file"
-        />
-        <input
-          accept=".avif,.bmp,.csv,.docx,.gif,.htm,.html,.jpeg,.jpg,.json,.jsonl,.log,.markdown,.md,.pdf,.png,.pptx,.rst,.sql,.tif,.tiff,.tsv,.txt,.webp,.xlsx,.xml,.yaml,.yml"
-          hidden
-          multiple
-          onChange={(event) => {
-            if (event.target.files?.length) onFiles(event.target.files);
-            event.target.value = "";
-          }}
-          ref={(element) => {
-            folderInputRef.current = element;
-            if (element) element.setAttribute("webkitdirectory", "");
-          }}
-          type="file"
-        />
-        <textarea
-          aria-describedby="composer-help"
-          aria-label="Message assistant"
-          autoComplete="off"
-          disabled={!isConfigured}
-          name="message"
-          onChange={(event) => onChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              void onSubmit(input);
-            }
-          }}
-          placeholder="Ask about your company knowledge…"
-          ref={textareaRef}
-          rows={1}
-          value={input}
-        />
-        <div className="composer__footer">
-          <button
-            aria-label="Attach files"
-            className="composer-tool"
-            disabled={!isConfigured || attachments.length >= 12}
-            onClick={() => fileInputRef.current?.click()}
-            title="Attach files"
-            type="button"
-          >
-            <Paperclip aria-hidden="true" size={15} />
-            <span>Attach</span>
-          </button>
-          <button
-            aria-label="Attach a folder"
-            className="composer-tool"
-            disabled={!isConfigured || attachments.length >= 12}
-            onClick={() => folderInputRef.current?.click()}
-            title="Attach a folder"
-            type="button"
-          >
-            <FileSearch aria-hidden="true" size={15} />
-            <span>Folder</span>
-          </button>
-          <span className="composer__privacy"><ShieldCheck aria-hidden="true" size={13} /> Permission-aware</span>
-          <span className="composer__shortcut">Enter to send · Shift + Enter for new line</span>
-          <button
-            aria-label={isStreaming ? "Stop generating" : "Send message"}
-            className={clsx("composer-send", isStreaming && "composer-send--stop")}
-            disabled={!isStreaming && (
-              isUploading
-              || (!input.trim() && !attachments.some((item) => item.progress === "ready"))
-              || !isConfigured
-            )}
-            onClick={isStreaming ? onStop : undefined}
-            type={isStreaming ? "button" : "submit"}
-          >
-            {isStreaming ? <Square aria-hidden="true" className="composer-send__stop-icon" size={11} strokeWidth={0} /> : <Send aria-hidden="true" className="composer-send__send-icon" size={17} />}
-          </button>
-        </div>
-      </form>
-      <p className="composer-disclaimer" id="composer-help">{appBrand.productName} can make mistakes. Verify important decisions with the cited sources.</p>
-    </div>
-  );
-}
-
-function attachmentProgressLabel(item: ComposerDocument) {
-  if (item.progress === "starting") return "Starting…";
-  if (item.progress === "uploading") return "Uploading…";
-  if (item.progress === "validating") return "Validating…";
-  if (item.progress === "failed") return "Failed";
-  return formatFileSize(item.sizeBytes);
-}
-
-function formatFileSize(sizeBytes: number) {
-  if (sizeBytes < 1024) return `${sizeBytes} B`;
-  if (sizeBytes < 1024 * 1024) return `${Math.ceil(sizeBytes / 1024)} KB`;
-  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
   return (
     <div className="welcome">
       <div className="welcome__content">
-        <div className="welcome-hero">
+          <div className="welcome-hero">
           <span className="welcome-hero__mark"><ProductMark decorative size="lg" /></span>
           <div className="welcome-identity">
             {appBrand.productName}
           </div>
           <div className="welcome-heading">
-            <h2>What can I help you understand?</h2>
+            <h2>What can I help you accomplish?</h2>
           </div>
-          <p className="welcome-copy">Ask across the company knowledge you can access, compare business signals, or turn trusted context into a clear next step.</p>
+          <p className="welcome-copy">Research your company knowledge, analyze a document, or turn trusted context into a clear next step.</p>
           <div className="welcome-trust" aria-label="Assistant capabilities">
             <span><ShieldCheck aria-hidden="true" size={14} /> Searches only content you can access</span>
             <span><FileSearch aria-hidden="true" size={14} /> Keeps evidence with every answer</span>
           </div>
         </div>
-        <p className="suggestions__label">Try a starting point</p>
         <div className="suggestions">
           {suggestions.map((suggestion) => (
             <button className="suggestion" key={suggestion.title} onClick={() => void onSelect(suggestion.prompt)} type="button">

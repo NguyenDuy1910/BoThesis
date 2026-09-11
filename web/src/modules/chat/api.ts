@@ -1,4 +1,4 @@
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getChatConfiguration } from "@/lib/api/config";
 import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type {
   AgentHistoryMessage,
@@ -22,11 +22,12 @@ export async function streamAgentResponse(
     conversationId?: string | null;
     history: AgentHistoryMessage[];
     attachmentIds?: string[];
+    collectionItemIds?: string[];
     signal: AbortSignal;
     onEvent: (event: ResponseStreamEvent) => void;
   }
 ): Promise<void> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getChatConfiguration();
   if (!configuration) throw new ChatConfigurationError();
 
   const response = await fetch(`${configuration.apiUrl}/api/v1/agent/chat`, {
@@ -41,7 +42,7 @@ export async function streamAgentResponse(
       conversation_id: options.conversationId ?? null,
       history: options.history,
       attachment_ids: options.attachmentIds ?? [],
-      collection_item_ids: [],
+      collection_item_ids: options.collectionItemIds ?? [],
     }),
   });
   if (!response.ok || !response.body) {
@@ -107,7 +108,7 @@ export async function uploadConversationDocument(
     onProgress?: (status: "starting" | "uploading" | "validating") => void;
   },
 ): Promise<ConversationDocument> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getChatConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   options.onProgress?.("starting");
   const identityHeaders = developmentIdentityHeaders(configuration);
@@ -160,7 +161,7 @@ export async function uploadConversationDocument(
 }
 
 export async function releaseConversationDocument(documentId: string): Promise<void> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getChatConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(
     `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(documentId)}`,
@@ -283,7 +284,7 @@ async function artifactRequest<T>(
   init: RequestInit,
   fallback: string,
 ): Promise<T> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getChatConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(`${configuration.apiUrl}${path}`, {
     ...init,

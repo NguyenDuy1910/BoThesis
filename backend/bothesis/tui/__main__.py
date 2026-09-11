@@ -1,4 +1,4 @@
-"""Run the BoThesis terminal chat client."""
+"""Run the Enterprise Agent terminal chat client."""
 
 from bothesis.tui.app import run_tui
 

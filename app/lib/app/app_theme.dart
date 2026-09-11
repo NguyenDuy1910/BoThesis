@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 
 @immutable
-class BoThesisColors extends ThemeExtension<BoThesisColors> {
-  const BoThesisColors({
+class AppColors extends ThemeExtension<AppColors> {
+  const AppColors({
     required this.appBackground,
     required this.surface,
     required this.sidebar,
@@ -44,7 +44,7 @@ class BoThesisColors extends ThemeExtension<BoThesisColors> {
   final Color codeSurface;
   final Color codeText;
 
-  static const light = BoThesisColors(
+  static const light = AppColors(
     appBackground: Color(0xFFF7F7F6),
     surface: Color(0xFFFFFFFF),
     sidebar: Color(0xFFF3F3F1),
@@ -66,7 +66,7 @@ class BoThesisColors extends ThemeExtension<BoThesisColors> {
     codeText: Color(0xFFE4E4E7),
   );
 
-  static const dark = BoThesisColors(
+  static const dark = AppColors(
     appBackground: Color(0xFF111113),
     surface: Color(0xFF1A1A1E),
     sidebar: Color(0xFF151518),
@@ -89,18 +89,18 @@ class BoThesisColors extends ThemeExtension<BoThesisColors> {
   );
 
   @override
-  BoThesisColors copyWith() => this;
+  AppColors copyWith() => this;
 
   @override
-  BoThesisColors lerp(BoThesisColors? other, double t) =>
+  AppColors lerp(AppColors? other, double t) =>
       t < 0.5 || other == null ? this : other;
 }
 
 abstract final class AppTheme {
-  static ThemeData get light => _build(Brightness.light, BoThesisColors.light);
-  static ThemeData get dark => _build(Brightness.dark, BoThesisColors.dark);
+  static ThemeData get light => _build(Brightness.light, AppColors.light);
+  static ThemeData get dark => _build(Brightness.dark, AppColors.dark);
 
-  static ThemeData _build(Brightness brightness, BoThesisColors colors) {
+  static ThemeData _build(Brightness brightness, AppColors colors) {
     final colorScheme = ColorScheme(
       brightness: brightness,
       primary: colors.brand,
@@ -221,7 +221,7 @@ abstract final class AppTheme {
   }
 }
 
-extension BoThesisThemeContext on BuildContext {
-  BoThesisColors get colors =>
-      Theme.of(this).extension<BoThesisColors>() ?? BoThesisColors.light;
+extension AppThemeContext on BuildContext {
+  AppColors get colors =>
+      Theme.of(this).extension<AppColors>() ?? AppColors.light;
 }

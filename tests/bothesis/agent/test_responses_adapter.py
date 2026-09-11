@@ -161,7 +161,7 @@ async def test_reasoning_events_are_renamed_to_the_specified_types(
     assert item.content == (ReasoningText(text="raw thought"),)
     assert item.summary == (SummaryText(text="check the policy"),)
     # ``encrypted_content`` is the specified continuation blob, so a reasoning
-    # item needs no BoThesis-specific field to replay.
+    # item needs no product-specific field to replay.
     assert item.encrypted_content == "blob"
 
 

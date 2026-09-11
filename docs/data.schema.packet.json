@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "title": "BoThesis canonical Item and storage ownership",
+  "title": "Enterprise Agent canonical Item and storage ownership",
   "status": "implemented",
   "ownership": {
     "postgresql": "durable business and application state",

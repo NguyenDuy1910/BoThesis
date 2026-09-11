@@ -80,3 +80,30 @@ test("does not persist pending or runtime activity as conversation history", () 
   assert.equal(cached.turn?.modelPending, undefined);
   assert.equal(cached.turn?.runtimeActivities, undefined);
 });
+
+test("retains collection context on a persisted user turn", async () => {
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { localStorage: new MemoryStorage() },
+  });
+  setConversationUser("collection-context-test");
+
+  await conversationAdapter.createConversation("Policy question", "chat-collections");
+  await conversationAdapter.saveConversationMessages("chat-collections", [{
+    id: "message-collection",
+    role: "user",
+    content: "What changed in the policy?",
+    parts: [
+      { type: "text", text: "What changed in the policy?", state: "done" },
+      {
+        type: "data-collection",
+        id: "collection-policy",
+        data: { id: "collection-policy", title: "Policy workspace" },
+      },
+    ],
+    createdAt: Date.now(),
+  }]);
+
+  const restored = await conversationAdapter.getConversationMessages("chat-collections");
+  assert.equal(restored[0]?.parts[1]?.type, "data-collection");
+});

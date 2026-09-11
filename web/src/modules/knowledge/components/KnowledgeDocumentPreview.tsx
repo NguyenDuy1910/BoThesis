@@ -1,15 +1,19 @@
 "use client";
 
 import {
+  Check,
   ChevronLeft,
   ChevronRight,
+  Copy,
   ExternalLink,
+  FileText,
   FileWarning,
   LoaderCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { getKnowledgeItemViewer } from "../api";
+import { useClipboard } from "@/lib/hooks/useClipboard";
+import { getKnowledgeItemViewer, KnowledgeViewerRequestError } from "../api";
 import {
   adjacentPage,
   citationRegions,
@@ -31,14 +35,16 @@ import type { KnowledgeItemViewer } from "../types";
 export function KnowledgeDocumentPreview({
   chunkId,
   itemId,
+  onAskSource,
   page: citedPage,
 }: {
   chunkId: string;
   itemId: string;
+  onAskSource?: (title: string) => void;
   page?: number;
 }) {
   const [viewer, setViewer] = useState<KnowledgeItemViewer>();
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState<SourceViewerFailure>();
   const [page, setPage] = useState<number>();
   // A page that has not painted yet must not carry a highlight over blank space.
   const [renderedPage, setRenderedPage] = useState<number>();
@@ -53,6 +59,8 @@ export function KnowledgeDocumentPreview({
     const controller = new AbortController();
     // A newer citation must win even if an earlier document resolves later.
     const request = (requestRef.current += 1);
+    refreshedRef.current = false;
+    setViewer(undefined);
     setError(undefined);
     setPageError(undefined);
     void getKnowledgeItemViewer(itemId, chunkId, controller.signal)
@@ -64,7 +72,7 @@ export function KnowledgeDocumentPreview({
       })
       .catch((cause: unknown) => {
         if (controller.signal.aborted || requestRef.current !== request) return;
-        setError(cause instanceof Error ? cause.message : "Could not open this source.");
+        setError(sourceViewerFailure(cause));
       });
     return () => controller.abort();
   }, [chunkId, citedPage, itemId, refresh]);
@@ -98,13 +106,33 @@ export function KnowledgeDocumentPreview({
   // a long document across the network.
   const prefetch = page === undefined ? [] : pagesToPrefetch(preview, page);
 
+  const retry = useCallback(() => {
+    refreshedRef.current = false;
+    setError(undefined);
+    setRefresh((value) => value + 1);
+  }, []);
+
   if (error) {
-    return <PreviewNotice icon="warning" title="This source is unavailable" detail={error} />;
+    return error.kind === "permission_denied" ? (
+      <PreviewNotice
+        icon="warning"
+        title="You can’t open this source"
+        detail="You can continue using the grounded answer, but your account cannot open the underlying source."
+      />
+    ) : (
+      <PreviewNotice
+        icon="warning"
+        title="Source temporarily unavailable"
+        detail="The grounded answer remains visible, but the original document could not be loaded. Enterprise Agent will not reconstruct missing source text."
+        onRetry={retry}
+      />
+    );
   }
   if (!viewer) return <PreviewNotice icon="spinner" title="Opening source…" />;
 
   return (
     <div className="source-preview">
+      <SourceIdentity onAskSource={onAskSource} viewer={viewer} />
       <div className="source-preview__meta">
         {viewer.focus?.citation.section && (
           <span className="source-preview__section">{viewer.focus.citation.section}</span>
@@ -190,7 +218,60 @@ export function KnowledgeDocumentPreview({
       {viewer.focus?.chunk_text && (
         <blockquote className="source-preview__quote">{viewer.focus.chunk_text}</blockquote>
       )}
+      {!viewer.focus?.chunk_text && (
+        <p className="source-preview__no-excerpt">
+          This answer is grounded in the document, but no exact passage maps cleanly to this statement.
+        </p>
+      )}
     </div>
+  );
+}
+
+function SourceIdentity({
+  onAskSource,
+  viewer,
+}: {
+  onAskSource?: (title: string) => void;
+  viewer: KnowledgeItemViewer;
+}) {
+  const { copy, copied } = useClipboard();
+  const originalUrl = viewer.external_url || viewer.document_url || viewer.preview?.original.url;
+  const page = viewer.focus?.citation.page_start;
+  const sourceType = viewer.content_type.split(";", 1)[0]?.trim() || "Document";
+
+  return (
+    <section className="source-preview__identity" aria-label="Source details">
+      <div className="source-preview__identity-heading">
+        <span className="source-preview__identity-icon"><FileText aria-hidden="true" size={17} /></span>
+        <div>
+          <h3 title={viewer.title}>{viewer.title}</h3>
+          <p>{sourceType}</p>
+        </div>
+      </div>
+      <dl className="source-preview__facts">
+        <div><dt>Access</dt><dd>Authorized</dd></div>
+        {page && <div><dt>Page</dt><dd>{page}</dd></div>}
+        {viewer.focus?.citation.section && <div><dt>Section</dt><dd>{viewer.focus.citation.section}</dd></div>}
+      </dl>
+      <div className="source-preview__actions">
+        {originalUrl && (
+          <a className="source-preview__action source-preview__action--contextual" href={originalUrl} rel="noopener noreferrer" target="_blank">
+            <ExternalLink aria-hidden="true" size={13} />Open original
+          </a>
+        )}
+        {onAskSource && (
+          <button className="source-preview__action source-preview__action--soft" onClick={() => onAskSource(viewer.title)} type="button">
+            Ask this document
+          </button>
+        )}
+        {viewer.focus?.chunk_text && (
+          <button className="source-preview__action source-preview__action--ghost" onClick={() => void copy(viewer.focus!.chunk_text)} type="button">
+            {copied ? <Check aria-hidden="true" size={13} /> : <Copy aria-hidden="true" size={13} />}
+            {copied ? "Copied" : "Copy quote"}
+          </button>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -255,11 +336,13 @@ function PreviewNotice({
   detail,
   icon,
   link,
+  onRetry,
   title,
 }: {
   detail?: string;
   icon: "spinner" | "warning";
   link?: { href: string; label: string };
+  onRetry?: () => void;
   title: string;
 }) {
   return (
@@ -281,6 +364,18 @@ function PreviewNotice({
           {link.label} <ExternalLink aria-hidden="true" size={12} />
         </a>
       )}
+      {onRetry && <button className="source-preview__notice-retry" onClick={onRetry} type="button">Retry source</button>}
     </div>
   );
+}
+
+type SourceViewerFailure = {
+  kind: "permission_denied" | "unavailable";
+};
+
+function sourceViewerFailure(cause: unknown): SourceViewerFailure {
+  if (cause instanceof KnowledgeViewerRequestError && (cause.status === 401 || cause.status === 403)) {
+    return { kind: "permission_denied" };
+  }
+  return { kind: "unavailable" };
 }

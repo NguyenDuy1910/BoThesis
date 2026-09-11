@@ -1,4 +1,4 @@
-"""Aggregate readiness checks for the services used by BoThesis chat."""
+"""Aggregate readiness checks for the services used by Enterprise Agent chat."""
 
 from __future__ import annotations
 

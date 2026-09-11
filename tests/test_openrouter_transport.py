@@ -102,7 +102,7 @@ async def test_stream_response_posts_to_the_openresponses_endpoint() -> None:
         )
 
     transport = transport_with(
-        handler, site_url="https://bothesis.test", app_name="BoThesis"
+        handler, site_url="https://bothesis.test", app_name="Enterprise Agent"
     )
     stream = await transport.stream_response(
         input=[{"type": "message", "role": "user", "content": "hi"}],
@@ -113,7 +113,7 @@ async def test_stream_response_posts_to_the_openresponses_endpoint() -> None:
 
     assert seen["url"] == "https://openrouter.ai/api/v1/responses"
     assert seen["headers"]["http-referer"] == "https://bothesis.test"
-    assert seen["headers"]["x-title"] == "BoThesis"
+    assert seen["headers"]["x-title"] == "Enterprise Agent"
     # Specified fields are top-level; non-specified options merge in from
     # ``extra_body`` without the agent ever naming them.
     assert seen["body"]["model"] == "openai/gpt-test"

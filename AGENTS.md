@@ -1,7 +1,7 @@
-# BoThesis Agent Rules
+# Enterprise Agent Rules
 
 ## Project intent
-BoThesis is an enterprise knowledge and BI assistant. It connects to trusted company sources, indexes domain knowledge, answers with grounded citations, and helps users analyze business data.
+Enterprise Agent is an enterprise knowledge and BI assistant. It connects to trusted company sources, indexes domain knowledge, answers with grounded citations, and helps users analyze business data.
 
 Primary source types:
 - Confluence

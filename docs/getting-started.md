@@ -1,6 +1,6 @@
 # Getting started
 
-This guide prepares a local BoThesis environment for backend, WebUI, and
+This guide prepares a local Enterprise Agent environment for backend, WebUI, and
 connector development.
 
 ## Prerequisites

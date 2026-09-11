@@ -1,6 +1,6 @@
 "use client";
 
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getChatConfiguration } from "@/lib/api/config";
 import { appBrand } from "@/lib/brand";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -18,7 +18,7 @@ export async function adminRequest<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getChatConfiguration();
   if (!configuration) {
     throw new AdminApiError(
       `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
@@ -122,7 +122,7 @@ export function uploadDatasourceFile<T>(
   file: File,
   options: { onProgress?: (percent: number) => void; signal?: AbortSignal } = {},
 ): Promise<T> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getChatConfiguration();
   if (!configuration) {
     return Promise.reject(new AdminApiError(
       `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
@@ -172,7 +172,7 @@ export function uploadCollectionFile<T>(
     onProcessing?: () => void;
   },
 ): Promise<T> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getChatConfiguration();
   if (!configuration) {
     return Promise.reject(new AdminApiError(
       `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
@@ -218,7 +218,7 @@ export function uploadCollectionFile<T>(
 
 /** Retry indexing from a previously stored native upload. */
 export async function retryCollectionDocument<T>(documentId: string): Promise<T> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getChatConfiguration();
   if (!configuration) {
     throw new AdminApiError(
       `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,

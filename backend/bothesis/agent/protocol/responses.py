@@ -68,7 +68,7 @@ class Prompt(ProtocolModel):
     body verbatim, which keeps provider-only knobs (reasoning effort, routing
     preferences, caching hints) out of the common contract.
 
-    ``previous_response_id`` names the response this one continues. BoThesis
+    ``previous_response_id`` names the response this one continues. Enterprise Agent
     replays the full item history on every request, so an adapter must not
     forward it to a provider that would then re-expand server-side state; it is
     stamped onto the emitted :class:`Response` so a client can chain the

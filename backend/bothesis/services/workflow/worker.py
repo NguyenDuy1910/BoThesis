@@ -26,7 +26,7 @@ from bothesis.services.workflow.ingestion_workflow import IngestionWorkflow
 
 
 class TemporalWorker:
-    """Register and run BoThesis application workflows and Activities."""
+    """Register and run Enterprise Agent application workflows and Activities."""
 
     def __init__(
         self,

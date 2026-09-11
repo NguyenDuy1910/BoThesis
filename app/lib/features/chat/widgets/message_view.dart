@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../app/app_brand.dart';
 import '../../../app/app_theme.dart';
 import '../models/chat_models.dart';
 import '../state/chat_controller.dart';
@@ -384,13 +385,13 @@ class _PendingIndicatorState extends State<_PendingIndicator>
     if (!_visible) return const SizedBox(height: 18);
     return Semantics(
       liveRegion: true,
-      label: 'BoThesis is working',
+      label: '${AppBrand.productName} is working',
       child: FadeTransition(
         opacity: Tween<double>(begin: 0.25, end: 0.7).animate(
           CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
         ),
         child: Text(
-          'BoThesis',
+          AppBrand.productName,
           style: Theme.of(context).textTheme.bodySmall?.copyWith(
             color: context.colors.textSecondary,
             fontWeight: FontWeight.w400,

@@ -125,7 +125,9 @@ function normalizeStoredPart(part: ChatMessagePart): ChatMessagePart | undefined
   if (part.type === "text" && part.state === "streaming") {
     return { ...part, state: "done" };
   }
-  return part.type === "text" || part.type === "data-document" ? part : undefined;
+  return part.type === "text" || part.type === "data-document" || part.type === "data-collection"
+    ? part
+    : undefined;
 }
 
 function normalizeCachedMessages(messages: CachedChatMessage[]) {

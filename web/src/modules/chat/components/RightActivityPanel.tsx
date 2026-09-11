@@ -16,9 +16,11 @@ import { ArtifactPreview } from "./ArtifactPreview";
 export function RightActivityPanel({
   activity,
   onClose,
+  onAskSource,
 }: {
   activity: RightActivity;
   onClose: () => void;
+  onAskSource?: (title: string) => void;
 }) {
   // Escape returns the reader to the full-width conversation, matching how the
   // conversation sidebar is dismissed.
@@ -31,7 +33,7 @@ export function RightActivityPanel({
   }, [onClose]);
 
   const isArtifact = activity.type === "artifact";
-  const eyebrow = isArtifact ? "Document" : "Source";
+  const eyebrow = isArtifact ? "Document" : "Source of Truth";
 
   return (
     <aside aria-label={`${eyebrow} panel`} className="activity-panel">
@@ -64,6 +66,7 @@ export function RightActivityPanel({
             // viewer and just navigate, while another source starts clean.
             key={activity.itemId}
             itemId={activity.itemId}
+            onAskSource={onAskSource}
             page={activity.page}
           />
         )}

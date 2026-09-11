@@ -1,4 +1,4 @@
-# BoThesis documentation
+# Enterprise Agent documentation
 
 This directory contains the durable project documentation. Keep the root
 [README](../README.md) focused on orientation and a working quick start; place

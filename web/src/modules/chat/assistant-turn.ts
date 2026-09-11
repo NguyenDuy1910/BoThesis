@@ -27,6 +27,13 @@ export type AssistantTurnItem =
       files: string[];
     };
 
+export type AssistantTurnRenderableItem = Exclude<AssistantTurnItem, { kind: "activity" }>
+  | {
+      kind: "activity_group";
+      id: string;
+      activities: RuntimeActivity[];
+    };
+
 /**
  * Function calls are model intent, not user-visible activity. An activity
  * appears only after the runtime says that call actually began executing.
@@ -104,4 +111,32 @@ export function assistantTurnItems(turn: TurnState | undefined): AssistantTurnIt
     }
   }
   return items;
+}
+
+/**
+ * Keep commentary and answer text exactly where the runtime emitted them,
+ * while presenting adjacent tool calls as one calm, expandable activity.
+ */
+export function groupAssistantTurnItems(
+  items: AssistantTurnItem[],
+): AssistantTurnRenderableItem[] {
+  const grouped: AssistantTurnRenderableItem[] = [];
+
+  for (const item of items) {
+    if (item.kind !== "activity") {
+      grouped.push(item);
+      continue;
+    }
+    const previous = grouped.at(-1);
+    if (previous?.kind === "activity_group") {
+      previous.activities.push(item.activity);
+      continue;
+    }
+    grouped.push({
+      kind: "activity_group",
+      id: `activities:${item.id}`,
+      activities: [item.activity],
+    });
+  }
+  return grouped;
 }

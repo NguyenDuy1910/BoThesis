@@ -1,17 +1,17 @@
 ---
 sidebar_position: 3
-title: "BoThesis Agent Architecture"
+title: "Enterprise Agent Architecture"
 description: "OpenResponses as the canonical language of the agent: items, events, reducer, provider adapters, conversation loop, tools, grounding"
 ---
 
-# BoThesis Agent Architecture
+# Enterprise Agent Architecture
 
-This document is implementation context for the BoThesis conversational agent.
+This document is implementation context for the Enterprise Agent conversational agent.
 Keep it aligned with the code when changing agent behavior.
 
 ## Purpose and boundaries
 
-BoThesis is an enterprise knowledge and analytics assistant. The agent answers
+Enterprise Agent is an enterprise knowledge and analytics assistant. The agent answers
 from the current conversation when sufficient, retrieves enterprise knowledge
 only when needed, preserves source lineage for citations, and enforces the
 authenticated tenant and reader scope before evidence reaches the model.
@@ -26,7 +26,7 @@ The agent speaks [Open Responses](https://www.openresponses.org) (version
 `2026-04-24`), an open, vendor-neutral specification for LLM APIs. It is the
 canonical language of the agent, not one of several dialects:
 
-- there is no BoThesis event model, and no translation step into or out of one;
+- there is no Enterprise Agent event model, and no translation step into or out of one;
 - a provider's native protocol exists only inside its transport adapter;
 - anything above the transport layer works with the same canonical models.
 
@@ -228,7 +228,7 @@ inferred or deferred: the adapter forwards each `output_item.added`,
 ## Custom extensions
 
 The specification requires implementer-specific types to be slug-prefixed and
-permits optional fields on standard types when documented. BoThesis adds exactly
+permits optional fields on standard types when documented. Enterprise Agent adds exactly
 two things, both annotations, both because OpenResponses does not cover the
 requirement:
 
@@ -236,7 +236,7 @@ requirement:
 | --- | --- |
 | `bothesis:document_citation` annotation | The specification defines only `url_citation`, which cannot carry enterprise document lineage (document id, page, section, access source). |
 That is the entire extension surface. A reasoning item, in particular, needs no
-BoThesis-specific field: `summary` plus `encrypted_content` are what every
+Enterprise Agent-specific field: `summary` plus `encrypted_content` are what every
 provider uses to continue a reasoning session.
 
 Before adding anything else, check whether an existing item, annotation, content

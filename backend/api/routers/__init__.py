@@ -466,6 +466,11 @@ class IntegrationConnectionUpdate(AdminRequest):
     status: Literal["draft", "active", "disabled", "error"] | None = None
 
 
+class AppRequestCreate(AdminRequest):
+    connector_key: str = Field(min_length=1, max_length=64)
+    reason: str | None = Field(default=None, max_length=2_000)
+
+
 class ScheduleInput(AdminRequest):
     schedule_type: Literal["cron", "interval"] = "cron"
     cron_expression: str = Field(min_length=1, max_length=255)
@@ -525,6 +530,7 @@ class CollectionAccessGrant(AdminRequest):
 
 __all__ = [
     "AccessRequestCreate",
+    "AppRequestCreate",
     "AccessRequestDecision",
     "AdminRequest",
     "AdminRoleCreate",

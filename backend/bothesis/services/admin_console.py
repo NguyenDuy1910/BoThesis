@@ -26,6 +26,7 @@ from bothesis.services import (
     require_tenant_permission,
 )
 from bothesis.services.access_requests import AccessRequestService
+from bothesis.services.app_request import AppRequestService
 from bothesis.services.audit import AuditService
 from bothesis.services.collection_access import CollectionAccessService
 from bothesis.services.confluence_environment import ConfluenceEnvironmentService
@@ -561,6 +562,16 @@ class AdminConsoleService:
             )
 
     # -- Access requests and audit -----------------------------------------
+
+    async def list_app_requests(self, actor: AuthContext, **filters: Any) -> dict[str, Any]:
+        async with self._unit_of_work() as session:
+            return await AppRequestService(session).list_requests(actor, **filters)
+
+    async def create_app_request(
+        self, actor: AuthContext, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        async with self._unit_of_work() as session:
+            return await AppRequestService(session).create_request(actor, **values)
 
     async def list_access_requests(
         self, actor: AuthContext, **filters: Any

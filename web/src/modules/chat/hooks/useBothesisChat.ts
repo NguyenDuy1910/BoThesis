@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getChatConfiguration } from "@/lib/api/config";
 import { streamAgentResponse } from "../api";
 import { historyFromMessages, regenerationContext } from "../conversation-history";
 import {
@@ -11,6 +11,7 @@ import {
 } from "../message-stream";
 import type {
   ChatMessage,
+  ConversationCollection,
   ConversationDocument,
   ResponseStreamEvent,
 } from "../types";
@@ -21,7 +22,7 @@ function messageId(prefix: string) {
   return globalThis.crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-export function useBothesisChat({
+export function useChat({
   conversationId,
   initialMessages,
   onFinish,
@@ -39,7 +40,7 @@ export function useBothesisChat({
   const activeAssistantIdRef = useRef<string | null>(null);
   messagesRef.current = messages;
   onFinishRef.current = onFinish;
-  const isConfigured = Boolean(getBothesisChatConfiguration());
+  const isConfigured = Boolean(getChatConfiguration());
 
   // Reset on a real conversation switch only. ``initialMessages`` gets a fresh
   // array identity from every ChatShell refresh — including the ones behind
@@ -80,6 +81,7 @@ export function useBothesisChat({
       historyMessages?: ChatMessage[];
       displayMessages?: ChatMessage[];
       documents?: ConversationDocument[];
+      collections?: ConversationCollection[];
     } = {},
   ) => {
     if (controllerRef.current) return;
@@ -109,6 +111,11 @@ export function useBothesisChat({
               id: document.id,
               data: document,
             })),
+            ...(options.collections ?? []).map((collection) => ({
+              type: "data-collection" as const,
+              id: collection.id,
+              data: collection,
+            })),
           ],
         }, assistant]
       : [...baseMessages, assistant];
@@ -120,6 +127,7 @@ export function useBothesisChat({
         conversationId,
         history,
         attachmentIds: options.documents?.map((document) => document.id),
+        collectionItemIds: options.collections?.map((collection) => collection.id),
         signal: controller.signal,
         onEvent: (event) => {
           setStatus("streaming");
@@ -163,10 +171,12 @@ export function useBothesisChat({
   const sendMessage = useCallback(async ({
     text,
     documents = [],
+    collections = [],
   }: {
     text: string;
     documents?: ConversationDocument[];
-  }) => run(text, true, { documents }), [run]);
+    collections?: ConversationCollection[];
+  }) => run(text, true, { documents, collections }), [run]);
   const stop = useCallback(() => {
     const activeAssistantId = activeAssistantIdRef.current;
     controllerRef.current?.abort();
@@ -198,6 +208,7 @@ export function useBothesisChat({
       historyMessages: context.historyMessages,
       displayMessages: context.displayMessages,
       documents: context.documents,
+      collections: context.collections,
     });
   }, [run]);
 

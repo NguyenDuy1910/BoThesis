@@ -206,7 +206,7 @@ def test_reasoning_item_exposes_content_and_summary_separately() -> None:
     assert item.reasoning_text == "raw thought"
     assert item.summary_text == "plan"
     # ``encrypted_content`` is the specified continuation blob, so no
-    # BoThesis-specific field is needed to replay a reasoning item.
+    # Product-specific field is needed to replay a reasoning item.
     assert item.encrypted_content == "opaque"
 
 

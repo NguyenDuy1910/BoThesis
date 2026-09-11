@@ -9,7 +9,7 @@ Three families share one ``type``-discriminated union:
 * reasoning parts (``reasoning_text``, ``summary_text``) live inside a
   ``reasoning`` item.
 
-``input_video`` is specified but never authored by BoThesis, so it is not
+``input_video`` is specified but never authored by Enterprise Agent, so it is not
 modelled. Nothing here knows about a provider.
 """
 
@@ -26,13 +26,13 @@ Annotation: TypeAlias = dict[str, Any]
 
 Kept opaque because members are provider and tool specific: OpenAI emits
 ``url_citation``, ``file_citation``, ``file_path`` and container references,
-OpenRouter emits file-cache descriptors, and BoThesis adds
+OpenRouter emits file-cache descriptors, and Enterprise Agent adds
 :data:`DOCUMENT_CITATION_TYPE`. Typing the union would pull every provider's
 vocabulary into the common contract for no gain.
 """
 
 DOCUMENT_CITATION_TYPE = "bothesis:document_citation"
-"""The BoThesis citation annotation type.
+"""The Enterprise Agent citation annotation type.
 
 OpenResponses only specifies ``url_citation``, which cannot carry enterprise
 document lineage (document id, page, section, access source). The spec requires

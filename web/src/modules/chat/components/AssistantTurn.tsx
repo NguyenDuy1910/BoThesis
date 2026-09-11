@@ -1,12 +1,13 @@
 "use client";
 
 import clsx from "clsx";
-import { Check, ChevronRight, Circle, CircleAlert, Terminal } from "lucide-react";
+import { Check, ChevronRight, Circle, CircleAlert, FileCog } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
 
-import { assistantTurnItems } from "../assistant-turn";
+import { assistantTurnItems, groupAssistantTurnItems } from "../assistant-turn";
 import type { AnswerSource } from "../sources";
-import type { HostedExecutionOutput, RuntimeActivity, TurnState } from "../types";
+import type { RuntimeActivity, TurnState } from "../types";
+import { appBrand } from "@/lib/brand";
 import {
   CitationRenderingProvider,
   citationRenderingSources,
@@ -31,6 +32,7 @@ export const AssistantTurn = memo(function AssistantTurn({
   turn?: TurnState;
 }) {
   const items = assistantTurnItems(turn);
+  const renderItems = groupAssistantTurnItems(items);
   const pending = Boolean(isStreaming && turn?.modelPending);
   const { visible: showPending } = usePendingIndicator(pending);
   const revealingItemId = items.filter((item) => item.kind === "message").at(-1)?.id;
@@ -45,7 +47,7 @@ export const AssistantTurn = memo(function AssistantTurn({
   return (
     <CitationRenderingProvider value={citations}>
       <div className="assistant-turn">
-        {items.map((item) => {
+        {renderItems.map((item) => {
           if (item.kind === "message") {
             return (
               <div
@@ -61,13 +63,13 @@ export const AssistantTurn = memo(function AssistantTurn({
               </div>
             );
           }
-          if (item.kind === "activity") {
-            return <ToolActivity activity={item.activity} key={item.id} />;
+          if (item.kind === "activity_group") {
+            return <ActivityGroup activities={item.activities} key={item.id} />;
           }
           return <HostedExecutionActivity execution={item} key={item.id} />;
         })}
         {showPending && (
-          <span aria-label="BoThesis is working" className="assistant-turn__pending" role="status">BoThesis</span>
+          <span aria-label={`${appBrand.productName} is working`} className="assistant-turn__pending" role="status">{appBrand.productName}</span>
         )}
       </div>
     </CitationRenderingProvider>
@@ -94,15 +96,13 @@ function HostedExecutionActivity({
 }) {
   const active = execution.state === "running";
   const failed = execution.state === "failed" || execution.state === "timeout";
-  const command = execution.commands.join("\n");
-  const output = formatExecutionOutput(execution.output);
   const label = active
-    ? "Running hosted shell"
+    ? "Working with your file"
     : execution.state === "timeout"
-      ? "Hosted shell timed out"
+      ? "File work took too long"
       : execution.state === "failed"
-        ? "Hosted shell finished with an error"
-        : "Hosted shell completed";
+        ? "Could not complete file work"
+        : "File work completed";
   const Icon = active ? Circle : failed ? CircleAlert : Check;
 
   return (
@@ -110,35 +110,48 @@ function HostedExecutionActivity({
       className={clsx("assistant-turn__execution", `assistant-turn__execution--${execution.state}`)}
       open={active || failed}
     >
-      <summary aria-label={`${label}${command ? `: ${command}` : ""}`}>
+      <summary aria-label={label}>
         <Icon aria-hidden="true" className="assistant-turn__execution-status" size={14} />
-        <Terminal aria-hidden="true" className="assistant-turn__execution-terminal" size={15} />
+        <FileCog aria-hidden="true" className="assistant-turn__execution-terminal" size={15} />
         <span className="assistant-turn__execution-label">{label}</span>
-        {command && <code className="assistant-turn__execution-command">{command}</code>}
+        {execution.files.length > 0 && <span className="assistant-turn__execution-file-count">{execution.files.length} file{execution.files.length === 1 ? "" : "s"}</span>}
         <ChevronRight aria-hidden="true" className="assistant-turn__execution-caret" size={15} />
       </summary>
       <div className="assistant-turn__execution-body">
-        {command && <pre aria-label="Executed command"><code>{command}</code></pre>}
-        {output && <pre aria-label="Command output"><code>{output}</code></pre>}
         {execution.files.length > 0 && (
-          <p className="assistant-turn__execution-files" role="status">
-            Files reported: {execution.files.join(", ")}
+          <p className="assistant-turn__execution-files">
+            {execution.files.join(", ")}
           </p>
         )}
-        {!output && !active && <p>No command output was returned.</p>}
+        {!execution.files.length && !active && <p>The workspace is ready for the next step.</p>}
       </div>
     </details>
   );
 }
 
-function formatExecutionOutput(output: HostedExecutionOutput[]) {
-  return output.map((entry, index) => {
-    const status = entry.timed_out
-      ? "Timed out"
-      : `Exit code: ${entry.exit_code ?? "unknown"}`;
-    const text = [entry.stdout, entry.stderr].filter(Boolean).join("\n");
-    return `${output.length > 1 ? `Command ${index + 1} · ` : ""}${status}${text ? `\n${text}` : ""}`;
-  }).join("\n\n");
+function ActivityGroup({ activities }: { activities: RuntimeActivity[] }) {
+  const active = activities.some((activity) => activity.state === "active");
+  const failed = activities.some((activity) => (
+    activity.state === "failed" || activity.state === "timeout"
+  ));
+  const label = active ? "Working" : activitySummary(activities);
+  const Icon = active ? Circle : failed ? CircleAlert : Check;
+
+  return (
+    <details
+      className={clsx("assistant-turn__activity-group", active && "assistant-turn__activity-group--active")}
+      open={active || failed}
+    >
+      <summary aria-label={`${label}. ${active ? "Activity in progress" : "Show activity details"}`}>
+        <Icon aria-hidden="true" className="assistant-turn__activity-group-status" size={14} />
+        <span>{label}</span>
+        <ChevronRight aria-hidden="true" className="assistant-turn__activity-group-caret" size={15} />
+      </summary>
+      <div className="assistant-turn__activity-group-body">
+        {activities.map((activity) => <ToolActivity activity={activity} key={activity.callId} />)}
+      </div>
+    </details>
+  );
 }
 
 function ToolActivity({ activity }: { activity: RuntimeActivity }) {
@@ -183,28 +196,44 @@ function toolPresentation(activity: RuntimeActivity) {
   const progressCount = numericProgress(activity.progress, "result_count");
   const resultCount = activity.resultCount ?? progressCount;
   const vocabulary: Record<string, { active: string; completed: string; showResultCount?: boolean }> = {
-    knowledge_search: { active: "Đang tìm tài liệu liên quan…", completed: "Đã tìm tài liệu liên quan", showResultCount: true },
-    read_resource: { active: "Đang đọc tài liệu…", completed: "Đã đọc tài liệu" },
-    inspect_resource: { active: "Đang kiểm tra tài liệu…", completed: "Đã kiểm tra tài liệu" },
-    materialize_resource: { active: "Đang chuẩn bị tài liệu…", completed: "Đã chuẩn bị tài liệu" },
-    materialize_sandbox_resource: { active: "Đang chuẩn bị tệp cho không gian làm việc…", completed: "Tệp đã sẵn sàng trong không gian làm việc" },
-    export_sandbox_file: { active: "Đang lưu tệp từ không gian làm việc…", completed: "Đã lưu tệp để dùng lại" },
-    document_edit: { active: "Đang chỉnh sửa tài liệu…", completed: "Đã chỉnh sửa tài liệu" },
-    artifact_create: { active: "Đang hoàn thiện tài liệu…", completed: "Đã tạo tài liệu" },
+    knowledge_search: { active: "Searching company knowledge", completed: "Searched company knowledge", showResultCount: true },
+    read_resource: { active: "Reading a source", completed: "Read a source" },
+    inspect_resource: { active: "Inspecting a source", completed: "Inspected a source" },
+    materialize_resource: { active: "Preparing a resource", completed: "Prepared a resource" },
+    materialize_sandbox_resource: { active: "Preparing your file", completed: "Prepared your file" },
+    export_sandbox_file: { active: "Saving a file", completed: "Saved a file" },
+    document_edit: { active: "Editing a document", completed: "Edited a document" },
+    artifact_create: { active: "Creating a document", completed: "Created a document" },
   };
   const text = vocabulary[activity.toolName] ?? {
-    active: "Đang xử lý yêu cầu…",
-    completed: "Đã hoàn tất thao tác",
+    active: "Working on your request",
+    completed: "Completed an action",
   };
-  if (activity.state === "failed") return { label: "Không thể hoàn tất thao tác", detail: undefined };
-  if (activity.state === "timeout") return { label: "Thao tác mất quá nhiều thời gian", detail: undefined };
-  if (activity.state === "skipped") return { label: "Đã bỏ qua thao tác", detail: undefined };
+  if (activity.state === "failed") return { label: "Could not complete an action", detail: undefined };
+  if (activity.state === "timeout") return { label: "An action took too long", detail: undefined };
+  if (activity.state === "skipped") return { label: "Skipped an action", detail: undefined };
   return {
     label: active ? text.active : text.completed,
     detail: !active && text.showResultCount && resultCount !== undefined
-      ? `${resultCount} tài liệu`
+      ? `${resultCount} document${resultCount === 1 ? "" : "s"}`
       : undefined,
   };
+}
+
+function activitySummary(activities: RuntimeActivity[]) {
+  const resultSources = activities
+    .filter((activity) => activity.toolName === "knowledge_search")
+    .reduce((count, activity) => count + (activity.resultCount ?? 0), 0);
+  const sourceActions = activities.filter((activity) => (
+    activity.toolName === "knowledge_search"
+    || activity.toolName === "read_resource"
+    || activity.toolName === "inspect_resource"
+  )).length;
+  const sourceCount = resultSources || sourceActions;
+  const actions = activities.length;
+  return sourceCount
+    ? `Used ${sourceCount} source${sourceCount === 1 ? "" : "s"} · ${actions} action${actions === 1 ? "" : "s"}`
+    : `Completed ${actions} action${actions === 1 ? "" : "s"}`;
 }
 
 function numericProgress(progress: Record<string, unknown> | undefined, key: string) {

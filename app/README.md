@@ -1,12 +1,12 @@
-# BoThesis mobile
+# Enterprise Agent mobile
 
-Flutter client for the BoThesis enterprise knowledge assistant. The app mirrors
+Flutter client for the Enterprise Agent enterprise knowledge assistant. The app mirrors
 the web chat's OpenResponses event model and renders text, reasoning summaries,
 tool activity, citations, errors, and retries as the backend stream arrives.
 
 ## Run on a physical iPhone
 
-Start the BoThesis API on an interface reachable from the phone, connect the
+Start the Enterprise Agent API on an interface reachable from the phone, connect the
 Mac and iPhone to the same network, and replace the values below:
 
 ```bash

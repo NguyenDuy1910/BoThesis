@@ -1,4 +1,4 @@
-"""Rendering-only widgets for the BoThesis terminal client."""
+"""Rendering-only widgets for the Enterprise Agent terminal client."""
 
 from bothesis.tui.widgets.chat import AssistantTurn, RawEventLog, UserMessage
 

@@ -2,6 +2,7 @@ import type {
   AgentHistoryMessage,
   ChatMessage,
   ChatMessagePart,
+  ConversationCollection,
   ConversationDocument,
 } from "./types";
 import { getMessageText } from "./conversations.ts";
@@ -52,6 +53,7 @@ export function regenerationContext(
   historyMessages: ChatMessage[];
   displayMessages: ChatMessage[];
   documents: ConversationDocument[];
+  collections: ConversationCollection[];
 } | null {
   const targetIndex = targetId
     ? messages.findIndex((message) => message.id === targetId)
@@ -71,6 +73,11 @@ export function regenerationContext(
     documents: user.parts
       .filter((part): part is Extract<ChatMessagePart, { type: "data-document" }> => (
         part.type === "data-document"
+      ))
+      .map((part) => part.data),
+    collections: user.parts
+      .filter((part): part is Extract<ChatMessagePart, { type: "data-collection" }> => (
+        part.type === "data-collection"
       ))
       .map((part) => part.data),
   };

@@ -1,4 +1,4 @@
-"""Public contracts and primary database-backed services for BoThesis.
+"""Public contracts and primary database-backed services for Enterprise Agent.
 
 Service modules contain only their primary service class. Contexts, DTOs,
 errors, and shared constants live here so callers use one stable boundary.

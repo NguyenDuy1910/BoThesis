@@ -6,7 +6,7 @@ response carries output items. The union mirrors the specification's
 ``function_call_output`` and ``compaction`` — plus :class:`ExtensionItem`, the
 escape hatch that preserves any slug-prefixed implementer item verbatim.
 
-``id`` and ``status`` are optional because BoThesis authors input items itself
+``id`` and ``status`` are optional because Enterprise Agent authors input items itself
 (a user message has neither until a server assigns them); every item observed
 on a response stream carries both.
 """
@@ -95,7 +95,7 @@ class ReasoningItem(ProtocolModel):
     ``content`` holds raw reasoning text, ``summary`` the provider-authored
     public summary, and ``encrypted_content`` the opaque blob a provider needs
     to continue a reasoning session. Those three fields are what a reasoning
-    item needs to replay losslessly, so no BoThesis-specific field is added
+    item needs to replay losslessly, so no Enterprise Agent-specific field is added
     here.
     """
 

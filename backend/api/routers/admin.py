@@ -11,6 +11,7 @@ from api.deps import AdminConsole, Caller
 from api.routers import (
     AccessRequestCreate,
     AccessRequestDecision,
+    AppRequestCreate,
     AdminRoleCreate,
     AdminRoleUpdate,
     CollectionAccessGrant,
@@ -279,6 +280,28 @@ async def admin_create_integration_connection(
     admin: AdminConsole,
 ) -> dict[str, Any]:
     return await admin.create_integration_connection(caller, body.model_dump())
+
+
+@router.get("/app-requests")
+async def admin_list_app_requests(
+    caller: Caller,
+    admin: AdminConsole,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+) -> dict[str, Any]:
+    return await admin.list_app_requests(
+        caller, page=page, page_size=page_size, status=status_filter
+    )
+
+
+@router.post("/app-requests", status_code=status.HTTP_201_CREATED)
+async def admin_create_app_request(
+    body: AppRequestCreate,
+    caller: Caller,
+    admin: AdminConsole,
+) -> dict[str, Any]:
+    return await admin.create_app_request(caller, body.model_dump())
 
 
 @router.get("/integration-connections/{integration_connection_id}")

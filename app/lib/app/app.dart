@@ -5,14 +5,14 @@ import '../features/chat/chat_page.dart';
 import 'app_brand.dart';
 import 'app_theme.dart';
 
-class BoThesisApp extends StatefulWidget {
-  const BoThesisApp({super.key});
+class ProductApp extends StatefulWidget {
+  const ProductApp({super.key});
 
   @override
-  State<BoThesisApp> createState() => _BoThesisAppState();
+  State<ProductApp> createState() => _ProductAppState();
 }
 
-class _BoThesisAppState extends State<BoThesisApp> {
+class _ProductAppState extends State<ProductApp> {
   static const _themeKey = 'bothesis-theme';
   final _preferences = SharedPreferencesAsync();
   ThemeMode _themeMode = ThemeMode.system;

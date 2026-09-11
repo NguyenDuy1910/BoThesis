@@ -199,7 +199,7 @@ def _document_citation(
     start: int,
     end: int,
 ) -> Annotation:
-    """Build the one BoThesis annotation type from an evidence record.
+    """Build the one Enterprise Agent annotation type from an evidence record.
 
     Everything here is canonical retrieval metadata. Short-lived preview URLs
     are deliberately absent: the client resolves those per click through the

@@ -1,4 +1,4 @@
-"""BoThesis HTTP application: assemble routers, errors, and the runtime."""
+"""Enterprise Agent HTTP application: assemble routers, errors, and the runtime."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def create_app() -> FastAPI:
     """Build the application; one call per process, or one per test."""
 
     app = FastAPI(
-        title="BoThesis API",
+        title="Enterprise Agent API",
         version="0.1.0",
         description="Enterprise knowledge and BI assistant.",
         lifespan=lifespan,

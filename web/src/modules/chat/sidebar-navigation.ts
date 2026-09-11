@@ -1,17 +1,13 @@
 import {
+  Bot,
+  Grid2X2,
   LibraryBig,
-  PlugZap,
-  RefreshCw,
+  MessageSquare,
   ShieldCheck,
-  Search,
-  SquarePen,
-  Workflow,
   type LucideIcon,
 } from "lucide-react";
 
-export type SidebarNavigationItemId =
-  | "new-chat"
-  | "search-chats";
+export type SidebarNavigationItemId = "chat";
 
 export interface SidebarNavigationItem {
   id: SidebarNavigationItemId;
@@ -20,14 +16,12 @@ export interface SidebarNavigationItem {
 }
 
 export const sidebarNavigationItems: readonly SidebarNavigationItem[] = [
-  { id: "new-chat", label: "New chat", icon: SquarePen },
-  { id: "search-chats", label: "Search chats", icon: Search },
+  { id: "chat", label: "Chat", icon: MessageSquare },
 ];
 
 export const sidebarSecondaryDestinations = [
-  { id: "knowledge", label: "Collections", href: "/admin/collections", icon: LibraryBig },
-  { id: "tools", label: "Connectors", href: "/admin/connectors", icon: PlugZap },
-  { id: "workflows", label: "Workflows", href: "/workflows", icon: Workflow },
-  { id: "sync", label: "Sync activity", href: "/admin/activity", icon: RefreshCw },
-  { id: "admin", label: "Admin console", href: "/admin", icon: ShieldCheck },
+  { id: "knowledge", label: "Knowledge", href: "/admin/collections", icon: LibraryBig },
+  { id: "apps", label: "Apps", href: "/admin/connectors", icon: Grid2X2 },
+  { id: "agents", label: "Agents", href: "/workflows", icon: Bot },
+  { id: "admin", label: "Admin", href: "/admin", icon: ShieldCheck },
 ] as const;

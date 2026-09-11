@@ -1,10 +1,11 @@
 "use client";
 
 import clsx from "clsx";
-import { BookOpen, ChevronRight, ExternalLink } from "lucide-react";
+import { ChevronRight, ExternalLink } from "lucide-react";
 import { memo } from "react";
 
 import { sourcesLabel, type AnswerSource } from "../sources";
+import { FileTypeIcon } from "./ResourceIcon";
 
 /**
  * The optional source summary under a finished answer.
@@ -43,7 +44,7 @@ export const AnswerSources = memo(function AnswerSources({
                   onClick={() => onOpenSource?.(source)}
                   type="button"
                 >
-                  <BookOpen aria-hidden="true" size={11} />
+                  <FileTypeIcon name={source.title} />
                   <span className="answer-sources__title">{source.title}</span>
                 </button>
                 {source.originalUrl && (
