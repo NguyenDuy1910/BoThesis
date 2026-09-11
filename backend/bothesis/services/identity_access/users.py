@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import Group, GroupMembership, Role, TenantMembership, User
 from bothesis.services.audit import AuditService
-from bothesis.services.identity_store import IdentityStoreService
+from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services import (
     ACTIVE_STATUS,
     INACTIVE_STATUS,

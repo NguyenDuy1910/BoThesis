@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Avatar } from "@/components/ui/Avatar";
 import { Badge } from "@/components/ui/Badge";
@@ -23,6 +23,7 @@ import { SearchInput } from "@/components/ui/SearchInput";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Tabs } from "@/components/ui/Tabs";
 import { useToast } from "@/components/ui/Toast";
+import { getAuthSession, hasSessionPermission } from "@/lib/auth/session";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { adminRequest, queryString, useAdminQuery } from "@/modules/admin/api";
 import type { Paginated } from "@/modules/admin/collections";
@@ -55,6 +56,7 @@ const tabConfig: Record<
     emptyTitle: string;
     emptyDescription: string;
     icon: typeof Users;
+    permissionCode: string;
   }
 > = {
   people: {
@@ -65,6 +67,7 @@ const tabConfig: Record<
     emptyDescription:
       "Invite colleagues so they can search this workspace's knowledge with their own permissions.",
     icon: Users,
+    permissionCode: "user.manage",
   },
   groups: {
     label: "Groups",
@@ -74,6 +77,7 @@ const tabConfig: Record<
     emptyDescription:
       "Groups let you grant a whole team access to a collection in one step instead of person by person.",
     icon: UsersRound,
+    permissionCode: "group.manage",
   },
   roles: {
     label: "Roles",
@@ -83,6 +87,7 @@ const tabConfig: Record<
     emptyDescription:
       "A role bundles the actions someone can take in the console, such as managing sources or approving requests.",
     icon: ShieldCheck,
+    permissionCode: "role.manage",
   },
   requests: {
     label: "Requests",
@@ -91,13 +96,15 @@ const tabConfig: Record<
     emptyDescription:
       "When someone asks for access to a collection, their request lands here for you to approve or decline.",
     icon: KeyRound,
+    permissionCode: "access.manage",
   },
 };
 
 const tabOrder: AccessTab[] = ["people", "groups", "roles", "requests"];
 
-function readTab(value: string | null): AccessTab {
-  return tabOrder.includes(value as AccessTab) ? (value as AccessTab) : "people";
+function readTab(value: string | null, availableTabs: readonly AccessTab[]): AccessTab {
+  const requested = value as AccessTab;
+  return availableTabs.includes(requested) ? requested : availableTabs[0];
 }
 
 export function AccessPage() {
@@ -105,8 +112,21 @@ export function AccessPage() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const { toast } = useToast();
+  const availableTabs = useMemo(
+    () => tabOrder.filter((id) =>
+      hasSessionPermission(getAuthSession(), tabConfig[id].permissionCode),
+    ),
+    [],
+  );
+  // Keep hook execution stable for a direct, unauthorized URL. The guarded
+  // render below deliberately makes no request in that case.
+  const selectableTabs: readonly AccessTab[] = availableTabs.length
+    ? availableTabs
+    : ["people"];
 
-  const [tab, setTab] = useState<AccessTab>(() => readTab(searchParams.get("tab")));
+  const [tab, setTab] = useState<AccessTab>(() =>
+    readTab(searchParams.get("tab"), selectableTabs),
+  );
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
@@ -114,15 +134,19 @@ export function AccessPage() {
 
   const config = tabConfig[tab];
   const list = useAdminQuery<Paginated<Row>>(
-    `${config.endpoint}${queryString({ page, page_size: PAGE_SIZE, search })}`,
+    availableTabs.length
+      ? `${config.endpoint}${queryString({ page, page_size: PAGE_SIZE, search })}`
+      : null,
   );
   const pendingRequests = useAdminQuery<Paginated<Row>>(
-    "/access-requests?status=pending&page_size=1",
+    hasSessionPermission(getAuthSession(), "access.manage")
+      ? "/access-requests?status=pending&page_size=1"
+      : null,
   );
 
   const changeTab = useCallback(
     (next: string) => {
-      const value = readTab(next);
+      const value = readTab(next, selectableTabs);
       setTab(value);
       setPage(1);
       setSearch("");
@@ -133,8 +157,14 @@ export function AccessPage() {
         scroll: false,
       });
     },
-    [pathname, router, searchParams],
+    [pathname, router, searchParams, selectableTabs],
   );
+
+  useEffect(() => {
+    if (!availableTabs.length) return;
+    if (availableTabs.includes(tab)) return;
+    changeTab(availableTabs[0]);
+  }, [availableTabs, changeTab, tab]);
 
   const mutate = useCallback(
     async (id: string, label: string, path: string, method: string, body?: unknown) => {
@@ -459,6 +489,16 @@ export function AccessPage() {
   const pendingCount = pendingRequests.data?.total ?? 0;
   const EmptyIcon = config.icon;
 
+  if (!availableTabs.length) {
+    return (
+      <EmptyState
+        description="Your active workspace role does not include access administration."
+        icon={<ShieldCheck className="h-5 w-5" />}
+        title="Access administration is unavailable"
+      />
+    );
+  }
+
   return (
     <>
       <PageHeader
@@ -487,7 +527,7 @@ export function AccessPage() {
         ariaLabel="Access sections"
         className="mb-4"
         onChange={changeTab}
-        tabs={tabOrder.map((id) => ({
+        tabs={availableTabs.map((id) => ({
           id,
           label: tabConfig[id].label,
           count: id === "requests" && pendingCount ? pendingCount : undefined,

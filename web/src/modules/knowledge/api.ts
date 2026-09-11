@@ -1,4 +1,4 @@
-import { getChatConfiguration } from "@/lib/api/config";
+import { getApiConfiguration, requestIdentityHeaders } from "@/lib/api/config";
 import type { KnowledgeCitationResponse, KnowledgeItemViewer } from "./types";
 
 /** A viewer request failed before any source content was exposed. */
@@ -16,17 +16,14 @@ export async function getKnowledgeItemViewer(
   chunkId?: string,
   signal?: AbortSignal,
 ): Promise<KnowledgeItemViewer> {
-  const configuration = getChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new Error("Knowledge viewer is not configured.");
   const query = chunkId ? `?chunk=${encodeURIComponent(chunkId)}` : "";
   const response = await fetch(
     `${configuration.apiUrl}/api/v1/knowledge/items/${encodeURIComponent(itemId)}${query}`,
     {
       cache: "no-store",
-      headers: {
-        "X-Bothesis-User-Id": configuration.userId,
-        "X-Bothesis-Tenant-Id": configuration.tenantId,
-      },
+      headers: requestIdentityHeaders(configuration),
       signal,
     },
   );
@@ -45,16 +42,13 @@ export async function getKnowledgeCitation(
   chunkId: string,
   signal?: AbortSignal,
 ): Promise<KnowledgeCitationResponse> {
-  const configuration = getChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new Error("Knowledge viewer is not configured.");
   const response = await fetch(
     `${configuration.apiUrl}/api/v1/knowledge/items/${encodeURIComponent(itemId)}/citations/${encodeURIComponent(chunkId)}`,
     {
       cache: "no-store",
-      headers: {
-        "X-Bothesis-User-Id": configuration.userId,
-        "X-Bothesis-Tenant-Id": configuration.tenantId,
-      },
+      headers: requestIdentityHeaders(configuration),
       signal,
     },
   );

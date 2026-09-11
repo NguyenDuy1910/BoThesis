@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { AuthGate } from "@/components/auth/AuthGate";
 import { appBrand } from "@/lib/brand";
 import "./globals.css";
 
@@ -43,7 +44,7 @@ export default function RootLayout({
       </head>
       <body>
         <a className="skip-link" href="#main-content">Skip to main content</a>
-        {children}
+        <AuthGate>{children}</AuthGate>
       </body>
     </html>
   );

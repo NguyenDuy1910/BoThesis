@@ -14,12 +14,13 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { memo, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { appBrand } from "@/lib/brand";
 import { AppShell } from "@/components/ui/AppShell";
 import { ProductMark } from "@/components/ui/ProductMark";
-import { getChatConfiguration } from "@/lib/api/config";
+import { getApiConfiguration } from "@/lib/api/config";
 import {
   releaseConversationDocument,
   uploadConversationDocument,
@@ -86,6 +87,7 @@ function createDraftConversationId() {
 }
 
 export default function ChatShell() {
+  const router = useRouter();
   const sidebar = useSidebarState();
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -108,9 +110,14 @@ export default function ChatShell() {
   }, []);
 
   useEffect(() => {
-    setConversationUser(getChatConfiguration()?.userId);
+    const configuration = getApiConfiguration();
+    if (!configuration) {
+      router.replace("/auth/login");
+      return;
+    }
+    setConversationUser(configuration.userId, configuration.tenantId);
     void refresh();
-  }, [refresh]);
+  }, [refresh, router]);
 
   useEffect(() => {
     if (!sidebar.mobileOpen) return;

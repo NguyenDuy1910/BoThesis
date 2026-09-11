@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getChatConfiguration } from "@/lib/api/config";
+import { getApiConfiguration } from "@/lib/api/config";
 import { streamAgentResponse } from "../api";
 import { historyFromMessages, regenerationContext } from "../conversation-history";
 import {
@@ -40,7 +40,13 @@ export function useChat({
   const activeAssistantIdRef = useRef<string | null>(null);
   messagesRef.current = messages;
   onFinishRef.current = onFinish;
-  const isConfigured = Boolean(getChatConfiguration());
+  // Session storage is browser-only. Start false so the server and first client
+  // render agree, then resolve the signed session after hydration.
+  const [isConfigured, setIsConfigured] = useState(false);
+
+  useEffect(() => {
+    setIsConfigured(Boolean(getApiConfiguration()));
+  }, []);
 
   // Reset on a real conversation switch only. ``initialMessages`` gets a fresh
   // array identity from every ChatShell refresh — including the ones behind

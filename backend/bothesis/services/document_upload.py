@@ -17,7 +17,7 @@ from bothesis.storage import (
     ObjectStorageError,
     StoredObject,
 )
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.item import ItemService
 from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (

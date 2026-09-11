@@ -34,6 +34,7 @@ from bothesis.services import (
     IdentityInactiveError,
     IdentityNotFoundError,
     INACTIVE_STATUS,
+    TenantMembershipSummary,
 )
 
 
@@ -371,6 +372,43 @@ class IdentityStoreService:
             role_code=membership.role.code,
             permission_codes=tuple(sorted(set(membership.role.permission_codes))),
             group_ids=group_ids,
+        )
+
+    async def list_active_tenant_memberships(
+        self, user_id: UUID
+    ) -> tuple[TenantMembershipSummary, ...]:
+        """Return only memberships that may be selected as an active tenant."""
+
+        await self.get_user(user_id)
+        rows = (
+            await self._session.execute(
+                select(TenantMembership, Tenant, Role)
+                .join(Tenant, Tenant.id == TenantMembership.tenant_id)
+                .join(
+                    Role,
+                    Role.id == TenantMembership.role_id,
+                )
+                .where(
+                    TenantMembership.user_id == user_id,
+                    TenantMembership.status == ACTIVE_STATUS,
+                    TenantMembership.deleted_at.is_(None),
+                    Tenant.status == ACTIVE_STATUS,
+                    Role.status == ACTIVE_STATUS,
+                    Role.tenant_id == TenantMembership.tenant_id,
+                )
+                .order_by(Tenant.created_at, Tenant.id)
+            )
+        ).all()
+        return tuple(
+            TenantMembershipSummary(
+                tenant_id=tenant.id,
+                tenant_code=tenant.code,
+                tenant_name=tenant.name,
+                role_id=role.id,
+                role_code=role.code,
+                permissions=tuple(sorted(set(role.permission_codes))),
+            )
+            for _, tenant, role in rows
         )
 
     async def require_permissions(

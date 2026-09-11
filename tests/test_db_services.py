@@ -47,11 +47,11 @@ from bothesis.services import (
     SandboxManifestResource,
     SandboxProviderFile,
 )
-from bothesis.services.access_requests import AccessRequestService
+from bothesis.services.identity_access.access_requests import AccessRequestService
 from bothesis.services.artifact import ArtifactService
-from bothesis.services.identity_store import IdentityStoreService
+from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services.citation import CitationService
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.conversation import ConversationService
 from bothesis.services.integration_connections import IntegrationConnectionService
 from bothesis.services.integration_credential import IntegrationCredentialService

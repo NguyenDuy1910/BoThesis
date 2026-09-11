@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bothesis.agent import ResourceRef
 from bothesis.db.models import Conversation, Item, Message, MessageItem
 from bothesis.services import AuthContext, DocumentNotFoundError
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.item import ItemService
 
 

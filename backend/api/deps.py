@@ -10,7 +10,7 @@ from fastapi import Depends, Request
 from bothesis.db.engine import session_scope
 from bothesis.health import HealthService
 from bothesis.runtime import AppRuntime
-from bothesis.services import AuthContext
+from bothesis.services import AuthenticationError, AuthContext, AuthorizationError, JwtClaims
 from bothesis.services.admin_console import AdminConsoleService
 from bothesis.services.artifact import ArtifactService
 from bothesis.services.chat import ChatService
@@ -34,6 +34,7 @@ def get_request_identity(request: Request) -> RequestIdentity:
 
     return RequestIdentity(
         auth_context=getattr(request.state, "auth_context", None),
+        token_claims=getattr(request.state, "jwt_claims", None),
         user_id=request.headers.get("X-Bothesis-User-Id"),
         tenant_id=request.headers.get("X-Bothesis-Tenant-Id"),
     )
@@ -72,6 +73,31 @@ async def get_chat_auth_context(
                 runtime.config.identity.allow_insecure_development_identity
             ),
         )
+
+
+def get_token_claims(request: Request) -> JwtClaims:
+    """Return the verified bearer claims required by token-only auth routes."""
+
+    claims = getattr(request.state, "jwt_claims", None)
+    if not isinstance(claims, JwtClaims):
+        raise AuthenticationError("a valid bearer access token is required")
+    return claims
+
+
+def require_permission(permission_code: str):
+    """Create a dependency that checks a signed active-tenant permission claim."""
+
+    async def check(
+        claims: Annotated[JwtClaims, Depends(get_token_claims)],
+        context: Annotated[AuthContext, Depends(get_auth_context)],
+    ) -> AuthContext:
+        if not claims.has_permission(permission_code) or not context.has_permissions(
+            permission_code
+        ):
+            raise AuthorizationError(f"missing required permissions: {permission_code}")
+        return context
+
+    return check
 
 
 def get_chat_service(
@@ -117,6 +143,7 @@ def get_health_service(
 
 
 Runtime = Annotated[AppRuntime, Depends(get_runtime)]
+TokenClaims = Annotated[JwtClaims, Depends(get_token_claims)]
 Caller = Annotated[AuthContext, Depends(get_auth_context)]
 ChatCaller = Annotated[AuthContext, Depends(get_chat_auth_context)]
 Chat = Annotated[ChatService, Depends(get_chat_service)]
@@ -140,9 +167,12 @@ __all__ = [
     "KnowledgeQuery",
     "KnowledgeView",
     "Runtime",
+    "TokenClaims",
     "get_artifact_service",
     "get_auth_context",
     "get_chat_auth_context",
     "get_request_identity",
+    "get_token_claims",
     "get_runtime",
+    "require_permission",
 ]

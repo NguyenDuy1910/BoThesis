@@ -10,7 +10,7 @@ from bothesis.db.engine import SessionFactory, session_scope
 from bothesis.db.models import Item
 from bothesis.services import AsyncUploadStream, AuthContext
 from bothesis.services.audit import AuditService
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.document_presentation import DocumentPresenter
 from bothesis.services.document_upload import DocumentUploadService
 

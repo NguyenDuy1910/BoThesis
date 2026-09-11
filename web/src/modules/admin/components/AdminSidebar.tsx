@@ -7,10 +7,11 @@ import { usePathname } from "next/navigation";
 import { ProductMark } from "@/components/ui/ProductMark";
 import { appBrand } from "@/lib/brand";
 import { cn } from "@/lib/cn";
+import { getAuthSession } from "@/lib/auth/session";
 import {
   adminNavGroupLabels,
-  adminNavGroups,
   type AdminRoute,
+  visibleAdminNavGroups,
 } from "@/modules/admin/navigation";
 import { useAdminWorkspace } from "@/modules/admin/workspace";
 
@@ -31,6 +32,7 @@ export function AdminSidebar({
 }: AdminSidebarProps) {
   const pathname = usePathname();
   const { tenant, attentionCount } = useAdminWorkspace();
+  const navigationGroups = visibleAdminNavGroups(getAuthSession());
   // On mobile the panel is an overlay, so it always shows its full width.
   const compact = collapsed && !mobileOpen;
 
@@ -94,7 +96,7 @@ export function AdminSidebar({
         </div>
 
         <div className="adm-nav__scroll">
-          {adminNavGroups.map((group) => {
+          {navigationGroups.map((group) => {
             const label = adminNavGroupLabels[group.id];
             if (!group.routes.length) return null;
             return (

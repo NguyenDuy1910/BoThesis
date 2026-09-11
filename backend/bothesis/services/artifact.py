@@ -30,9 +30,9 @@ from bothesis.services import (
     timestamp,
 )
 from bothesis.services.audit import AuditService
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.document_upload import DocumentUploadService
-from bothesis.services.identity_store import resolve_agent_access
+from bothesis.services.identity_access.identity_store import resolve_agent_access
 from bothesis.services.item import ItemService
 from bothesis.storage import DocumentStorage, ObjectNotFoundError
 

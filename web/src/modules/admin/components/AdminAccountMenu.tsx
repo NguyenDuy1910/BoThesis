@@ -12,6 +12,7 @@ import {
 import { useRouter } from "next/navigation";
 
 import { Avatar } from "@/components/ui/Avatar";
+import { getAuthSession, hasSessionPermission } from "@/lib/auth/session";
 import {
   Dropdown,
   DropdownItem,
@@ -109,16 +110,21 @@ export function AdminAccountMenu({ compact }: { compact: boolean }) {
         );
       })}
 
-      <DropdownSeparator />
-      <DropdownItem onClick={() => router.push("/admin/settings")}>
-        <Settings aria-hidden="true" className="h-4 w-4" />
-        Workspace settings
-      </DropdownItem>
-      <DropdownItem onClick={() => router.push("/app")}>
-        <MessageSquareText aria-hidden="true" className="h-4 w-4" />
-        Open knowledge workspace
-      </DropdownItem>
+      {hasSessionPermission(getAuthSession(), "tenant.manage") && (
+        <>
+          <DropdownSeparator />
+          <DropdownItem onClick={() => router.push("/admin/settings")}>
+            <Settings aria-hidden="true" className="h-4 w-4" />
+            Workspace settings
+          </DropdownItem>
+        </>
+      )}
+      {hasSessionPermission(getAuthSession(), "knowledge.read") && (
+        <DropdownItem onClick={() => router.push("/app")}>
+          <MessageSquareText aria-hidden="true" className="h-4 w-4" />
+          Open knowledge workspace
+        </DropdownItem>
+      )}
     </Dropdown>
   );
 }
-

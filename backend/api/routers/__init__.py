@@ -30,6 +30,35 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class CreateAuthSessionRequest(BaseModel):
+    tenant_id: UUID
+
+
+class GoogleCredentialRequest(BaseModel):
+    credential: str = Field(min_length=1, max_length=12_000)
+
+
+class AuthTenant(BaseModel):
+    id: UUID
+    code: str
+    name: str
+    role_id: UUID
+    role_code: str
+    permissions: list[str]
+
+
+class AuthSessionResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_at: str
+    user_id: UUID
+    email: EmailStr
+    display_name: str | None
+    active_tenant_id: UUID
+    permissions: list[str]
+    tenants: list[AuthTenant]
+
+
 class RefreshRequest(BaseModel):
     refresh_token: str
 

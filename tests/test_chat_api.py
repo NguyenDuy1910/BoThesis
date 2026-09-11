@@ -464,7 +464,7 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
         return (UUID(int=12), UUID(int=14))
 
     monkeypatch.setattr(
-        "bothesis.services.collection_access.CollectionAccessService"
+        "bothesis.services.identity_access.collection_access.CollectionAccessService"
         ".allowed_collection_ids",
         allowed_collections,
     )

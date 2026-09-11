@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
 import { useToast } from "@/components/ui/Toast";
-import { getChatConfiguration } from "@/lib/api/config";
+import { getApiConfiguration } from "@/lib/api/config";
 import { cn } from "@/lib/cn";
 import { AdminApiError, adminRequest, uploadCollectionFile } from "@/modules/admin/api";
 import type { CollectionUploadResponse } from "@/modules/admin/collections";
@@ -160,7 +160,7 @@ export function CollectionUploadDialog({
   }
 
   async function requestAccess() {
-    const configuration = getChatConfiguration();
+    const configuration = getApiConfiguration();
     if (!configuration || requestingAccess) return;
     setRequestingAccess(true);
     try {

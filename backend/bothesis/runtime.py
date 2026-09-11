@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from config import AppConfig, get_config
 
 from bothesis.agent import Agent, SessionConfiguration
@@ -32,6 +34,8 @@ from bothesis.health import HealthService, HealthSettings
 from bothesis.knowledge import ItemKnowledgeRetriever, SemanticReranker
 from bothesis.observability import create_tracer
 from bothesis.services.admin_console import AdminConsoleService
+from bothesis.services.identity_access.auth import AuthenticationService
+from bothesis.services.identity_access.google import GoogleIdentityVerifier
 from bothesis.services.artifact import ArtifactService
 from bothesis.services import AuthContext
 from bothesis.services.chat import ChatService
@@ -48,6 +52,7 @@ from bothesis.services.sandbox_session import SandboxSessionService
 from bothesis.services.stored_file_content import StoredFileContentService
 from bothesis.services.workflow.service import TemporalWorkflowService
 from bothesis.services.workspace_documents import WorkspaceDocumentService
+from bothesis.services.identity_access.jwt_tokens import JwtTokenService
 from bothesis.storage import S3DocumentStorage
 
 
@@ -73,6 +78,8 @@ class AppRuntime:
         self._model_transport: OpenRouterTransport | None = None
         self._agent_transport: OpenAITransport | OpenRouterTransport | None = None
         self._contextualization_transport: OpenRouterTransport | None = None
+        self._jwt_tokens: JwtTokenService | None = None
+        self._google_identity: GoogleIdentityVerifier | None = None
 
     @property
     def config(self) -> AppConfig:
@@ -143,12 +150,37 @@ class AppRuntime:
             )
         )
 
+    def authentication_service(self, session: AsyncSession) -> AuthenticationService:
+        """Build a request-scoped authentication workflow from durable identity state."""
+
+        return AuthenticationService(session, tokens=self.jwt_token_service())
+
     # -- Shared collaborators ----------------------------------------------
 
     def sessions(self) -> SessionFactory:
         if self._session_factory is None:
             self._session_factory = LazySessionFactory()
         return self._session_factory
+
+    def jwt_token_service(self) -> JwtTokenService:
+        if self._jwt_tokens is None:
+            identity = self._config.identity
+            self._jwt_tokens = JwtTokenService(
+                secret=identity.jwt_secret,
+                issuer=identity.jwt_issuer,
+                audience=identity.jwt_audience,
+                expires_in_seconds=identity.jwt_expires_in_seconds,
+            )
+        return self._jwt_tokens
+
+    def google_identity_verifier(self) -> GoogleIdentityVerifier:
+        if self._google_identity is None:
+            identity = self._config.identity
+            self._google_identity = GoogleIdentityVerifier(
+                client_id=identity.google_client_id,
+                jwks_url=identity.google_jwks_url,
+            )
+        return self._google_identity
 
     def document_presenter(self) -> DocumentPresenter:
         if self._presenter is None:

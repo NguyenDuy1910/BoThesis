@@ -25,19 +25,19 @@ from bothesis.services import (
     AuthContext,
     require_tenant_permission,
 )
-from bothesis.services.access_requests import AccessRequestService
+from bothesis.services.identity_access.access_requests import AccessRequestService
 from bothesis.services.app_request import AppRequestService
 from bothesis.services.audit import AuditService
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.confluence_environment import ConfluenceEnvironmentService
-from bothesis.services.groups import GroupService
+from bothesis.services.identity_access.groups import GroupService
 from bothesis.services.ingestion_sources import IngestionSourceService
 from bothesis.services.integration_connections import IntegrationConnectionService
 from bothesis.services.item_catalog import ItemCatalogService
 from bothesis.services.item_ingestion import ItemIngestionService
-from bothesis.services.roles import RoleService
-from bothesis.services.tenants import TenantService
-from bothesis.services.users import UserService
+from bothesis.services.identity_access.roles import RoleService
+from bothesis.services.identity_access.tenants import TenantService
+from bothesis.services.identity_access.users import UserService
 from bothesis.services.workflow import (
     IngestionWorkflowInput,
     WorkflowExecutionNotFoundError,

@@ -76,6 +76,13 @@ def integer(*names: str, default: int) -> int:
     return default
 
 
+def _positive_integer(name: str, *, default: int) -> int:
+    value = integer(name, default=default)
+    if value <= 0:
+        raise RuntimeError(f"{name} must be greater than zero")
+    return value
+
+
 def optional_number(name: str) -> float | None:
     """Read one optional floating point setting."""
 
@@ -127,13 +134,30 @@ class IdentityConfig:
     """Trust settings for resolving the caller at the HTTP boundary."""
 
     allow_insecure_development_identity: bool = False
+    jwt_secret: str | None = None
+    jwt_issuer: str = "bothesis"
+    jwt_audience: str = "bothesis-api"
+    jwt_expires_in_seconds: int = 900
+    google_client_id: str | None = None
+    google_jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
 
     @classmethod
     def from_environment(cls) -> IdentityConfig:
         return cls(
             allow_insecure_development_identity=boolean(
                 "BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY"
-            )
+            ),
+            jwt_secret=optional_text("BOTHESIS_AUTH_JWT_SECRET"),
+            jwt_issuer=text("BOTHESIS_AUTH_JWT_ISSUER", "bothesis"),
+            jwt_audience=text("BOTHESIS_AUTH_JWT_AUDIENCE", "bothesis-api"),
+            jwt_expires_in_seconds=_positive_integer(
+                "BOTHESIS_AUTH_JWT_EXPIRES_IN_SECONDS", default=900
+            ),
+            google_client_id=optional_text("BOTHESIS_GOOGLE_CLIENT_ID"),
+            google_jwks_url=text(
+                "BOTHESIS_GOOGLE_JWKS_URL",
+                "https://www.googleapis.com/oauth2/v3/certs",
+            ),
         )
 
 

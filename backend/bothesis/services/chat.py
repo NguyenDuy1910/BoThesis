@@ -32,7 +32,7 @@ from bothesis.services import (
     AuthContext,
     require_tenant_permission,
 )
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.conversation import ConversationService
 
 HistoryTurn = tuple[Literal["user", "assistant"], str]

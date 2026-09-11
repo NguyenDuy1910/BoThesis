@@ -1,4 +1,4 @@
-import { getChatConfiguration } from "@/lib/api/config";
+import { getApiConfiguration, requestIdentityHeaders } from "@/lib/api/config";
 import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type {
   AgentHistoryMessage,
@@ -11,7 +11,7 @@ const uploadIdempotencyKeys = new WeakMap<File, string>();
 export class ChatConfigurationError extends Error {
   constructor() {
     super(
-      "Chat is not configured. Set NEXT_PUBLIC_BOTHESIS_API_URL, NEXT_PUBLIC_BOTHESIS_TENANT_ID, and NEXT_PUBLIC_BOTHESIS_USER_ID."
+      "Chat is unavailable. Sign in, or configure the explicit local development identity."
     );
   }
 }
@@ -27,14 +27,14 @@ export async function streamAgentResponse(
     onEvent: (event: ResponseStreamEvent) => void;
   }
 ): Promise<void> {
-  const configuration = getChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
 
   const response = await fetch(`${configuration.apiUrl}/api/v1/agent/chat`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...developmentIdentityHeaders(configuration),
+      ...requestIdentityHeaders(configuration),
     },
     signal: options.signal,
     body: JSON.stringify({
@@ -108,10 +108,10 @@ export async function uploadConversationDocument(
     onProgress?: (status: "starting" | "uploading" | "validating") => void;
   },
 ): Promise<ConversationDocument> {
-  const configuration = getChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   options.onProgress?.("starting");
-  const identityHeaders = developmentIdentityHeaders(configuration);
+  const identityHeaders = requestIdentityHeaders(configuration);
   const startResponse = await fetch(`${configuration.apiUrl}/api/v1/documents/uploads`, {
     method: "POST",
     headers: {
@@ -161,13 +161,13 @@ export async function uploadConversationDocument(
 }
 
 export async function releaseConversationDocument(documentId: string): Promise<void> {
-  const configuration = getChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(
     `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(documentId)}`,
     {
       method: "DELETE",
-      headers: developmentIdentityHeaders(configuration),
+      headers: requestIdentityHeaders(configuration),
     },
   );
   if (!response.ok && response.status !== 404) {
@@ -284,12 +284,12 @@ async function artifactRequest<T>(
   init: RequestInit,
   fallback: string,
 ): Promise<T> {
-  const configuration = getChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(`${configuration.apiUrl}${path}`, {
     ...init,
     cache: "no-store",
-    headers: { ...(init.headers ?? {}), ...developmentIdentityHeaders(configuration) },
+    headers: { ...(init.headers ?? {}), ...requestIdentityHeaders(configuration) },
   });
   if (!response.ok) throw await responseError(response, fallback);
   return await response.json() as T;
@@ -306,16 +306,6 @@ async function uploadToTarget(
     body: file,
     signal,
   });
-}
-
-function developmentIdentityHeaders(configuration: {
-  userId: string;
-  tenantId: string;
-}): Record<string, string> {
-  return {
-    "X-Bothesis-User-Id": configuration.userId,
-    "X-Bothesis-Tenant-Id": configuration.tenantId,
-  };
 }
 
 function uploadIdempotencyKey(file: File): string {

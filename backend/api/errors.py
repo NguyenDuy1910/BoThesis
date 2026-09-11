@@ -15,6 +15,7 @@ from bothesis.services import (
     DocumentNotFoundError,
     IdentityInactiveError,
     IdentityNotFoundError,
+    IdentityProviderUnavailableError,
     IdentityServiceError,
     UploadConflictError,
     UploadTooLargeError,
@@ -41,6 +42,7 @@ _STATUS_BY_ERROR: tuple[tuple[type[Exception], int], ...] = (
     (UploadValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
     (UploadTooLargeError, status.HTTP_413_CONTENT_TOO_LARGE),
     (IdentityInactiveError, status.HTTP_401_UNAUTHORIZED),
+    (IdentityProviderUnavailableError, status.HTTP_503_SERVICE_UNAVAILABLE),
     (IdentityServiceError, status.HTTP_401_UNAUTHORIZED),
     (PermissionError, status.HTTP_403_FORBIDDEN),
 )

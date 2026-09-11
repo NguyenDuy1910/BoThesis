@@ -6,8 +6,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { appBrand } from "@/lib/brand";
+import { getAuthSession, hasSessionPermission } from "@/lib/auth/session";
 import { adminRequest, queryString } from "@/modules/admin/api";
-import { adminRoutes, type AdminRoute } from "@/modules/admin/navigation";
+import {
+  adminRoutes,
+  canAccessAdminRoute,
+  type AdminRoute,
+} from "@/modules/admin/navigation";
 
 interface PaletteEntry {
   id: string;
@@ -71,7 +76,7 @@ export function AdminCommandPalette({
   // round trip; section matching stays instant and local.
   useEffect(() => {
     const term = query.trim();
-    if (!open || term.length < 2) {
+    if (!open || term.length < 2 || !hasSessionPermission(getAuthSession(), "item.manage")) {
       setItems([]);
       return;
     }
@@ -95,6 +100,7 @@ export function AdminCommandPalette({
   const entries = useMemo<PaletteEntry[]>(() => {
     const term = query.trim().toLowerCase();
     const sections = adminRoutes
+      .filter((route) => canAccessAdminRoute(route, getAuthSession()))
       .filter((route) => !term || matches(route, term))
       .map((route) => {
         const Icon = route.icon;

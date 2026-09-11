@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import AccessRequest, Item, TenantMembership, User
 from bothesis.services.audit import AuditService
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services import (
     ACCESS_MANAGE_PERMISSION,
     ACTIVE_STATUS,

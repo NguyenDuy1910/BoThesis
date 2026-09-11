@@ -22,6 +22,14 @@ import { Input } from "@/components/ui/Input";
 import { ProductMark } from "@/components/ui/ProductMark";
 import { appBrand } from "@/lib/brand";
 import {
+  getAuthSession,
+  hasAnySessionPermission,
+  hasSessionPermission,
+  type AuthSession,
+} from "@/lib/auth/session";
+import { firstAccessibleAdminRoute } from "@/modules/admin/navigation";
+import { switchWorkspace } from "@/modules/auth/api";
+import {
   sidebarNavigationItems,
   sidebarSecondaryDestinations,
   type SidebarNavigationItem,
@@ -249,10 +257,24 @@ function SidebarDestinations({
   collapsed: boolean;
   onCloseMobile: () => void;
 }) {
+  const [session, setSession] = useState<AuthSession | null>(null);
+
+  useEffect(() => setSession(getAuthSession()), []);
+
+  const destinations = sidebarSecondaryDestinations
+    .filter((destination) => hasAnySessionPermission(session, destination.permissionCodes))
+    .map((destination) => (
+      destination.id === "admin"
+        ? { ...destination, href: firstAccessibleAdminRoute(session)?.path ?? destination.href }
+        : destination
+    ));
+
+  if (!destinations.length) return null;
+
   return (
     <nav aria-label="Product areas" className="sidebar-destinations">
       {!collapsed && <p className="sidebar-destinations__label">Product</p>}
-      {sidebarSecondaryDestinations.map((destination) => {
+      {destinations.map((destination) => {
         const Icon = destination.icon;
         return (
           <Link
@@ -575,18 +597,40 @@ function RecentChatList({
 
 function SidebarFooter({ collapsed }: { collapsed: boolean }) {
   const { theme, resolvedTheme, toggleTheme } = useTheme();
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [isSwitchingWorkspace, setIsSwitchingWorkspace] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+
+  useEffect(() => setSession(getAuthSession()), []);
+
+  const changeWorkspace = async (tenantId: string) => {
+    if (tenantId === session?.active_tenant_id) return;
+    setIsSwitchingWorkspace(true);
+    setWorkspaceError(null);
+    try {
+      const next = await switchWorkspace(tenantId);
+      setSession(next);
+      window.location.reload();
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Could not change workspace.");
+    } finally {
+      setIsSwitchingWorkspace(false);
+    }
+  };
 
   return (
     <div className="sidebar-footer">
-      <Link
-        aria-label={collapsed ? "Workspace settings" : undefined}
-        className="sidebar-account-row sidebar-account-row--link"
-        href="/admin/settings"
-        title={collapsed ? "Workspace settings" : undefined}
-      >
-        <Settings2 aria-hidden="true" size={17} />
-        {!collapsed && <span>Workspace settings</span>}
-      </Link>
+      {hasSessionPermission(session, "tenant.manage") && (
+        <Link
+          aria-label={collapsed ? "Workspace settings" : undefined}
+          className="sidebar-account-row sidebar-account-row--link"
+          href="/admin/settings"
+          title={collapsed ? "Workspace settings" : undefined}
+        >
+          <Settings2 aria-hidden="true" size={17} />
+          {!collapsed && <span>Workspace settings</span>}
+        </Link>
+      )}
       <div
         aria-label={collapsed ? "Knowledge workspace" : undefined}
         className="sidebar-account-row"
@@ -595,8 +639,19 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
         <span className="sidebar-account-row__avatar"><UserCircle aria-hidden="true" size={18} /></span>
         {!collapsed && (
           <span className="sidebar-account-row__copy">
-            <strong>Workspace access</strong>
-            <small>Private to your access</small>
+            <strong>{session?.display_name ?? "Workspace access"}</strong>
+            {session && session.tenants.length > 1 ? (
+              <select
+                aria-label="Active workspace"
+                className="sidebar-workspace-select"
+                disabled={isSwitchingWorkspace}
+                onChange={(event) => void changeWorkspace(event.target.value)}
+                value={session.active_tenant_id}
+              >
+                {session.tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+              </select>
+            ) : <small>{session?.tenants[0]?.name ?? "Private to your access"}</small>}
+            {workspaceError ? <small className="sidebar-workspace-error" role="alert">{workspaceError}</small> : null}
           </span>
         )}
         <button

@@ -83,6 +83,14 @@ class AuthorizationError(IdentityServiceError):
     """Raised when an identity lacks the required tenant permission."""
 
 
+class AuthenticationError(IdentityServiceError):
+    """Raised when an internal access token or upstream identity is invalid."""
+
+
+class IdentityProviderUnavailableError(IdentityServiceError):
+    """Raised when a configured external identity provider cannot be reached."""
+
+
 class AdministrationError(Exception):
     """Base exception for governed administration failures."""
 
@@ -122,11 +130,60 @@ class AuthContext:
 
     @property
     def is_admin(self) -> bool:
-        return ADMIN_PERMISSION in self.permission_codes
+        return ADMIN_PERMISSION in self.permission_codes or "*:*" in self.permission_codes
 
     def has_permissions(self, *permission_codes: str) -> bool:
         required = {_permission_code(code) for code in permission_codes}
         return self.is_admin or required.issubset(self.permission_codes)
+
+
+@dataclass(frozen=True, slots=True)
+class JwtClaims:
+    """Signed access-token claims trusted at the HTTP authentication boundary."""
+
+    user_id: UUID
+    email: str
+    active_tenant_id: UUID
+    permissions: tuple[str, ...]
+    issued_at: datetime
+    expires_at: datetime
+
+    def has_permission(self, permission_code: str) -> bool:
+        return "*:*" in self.permissions or _permission_code(permission_code) in self.permissions
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedGoogleIdentity:
+    """Identity emitted only by an OAuth verifier after email verification."""
+
+    email: str
+    display_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class TenantMembershipSummary:
+    """One active tenant membership returned after authentication."""
+
+    tenant_id: UUID
+    tenant_code: str
+    tenant_name: str
+    role_id: UUID
+    role_code: str
+    permissions: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticationSession:
+    """Issued bearer token together with the caller's active workspace context."""
+
+    access_token: str
+    expires_at: datetime
+    user_id: UUID
+    email: str
+    display_name: str | None
+    active_tenant_id: UUID
+    permissions: tuple[str, ...]
+    tenants: tuple[TenantMembershipSummary, ...]
 
 
 SandboxSessionStatus = Literal["active", "expired", "closed"]
@@ -473,6 +530,7 @@ __all__ = [
     "PREVIEW_SCHEMA_VERSION",
     "ROLE_MANAGE_PERMISSION",
     "SOURCE_MANAGE_PERMISSION",
+    "TenantMembershipSummary",
     "TENANT_MANAGE_PERMISSION",
     "USER_MANAGE_PERMISSION",
     "AdminConflictError",
@@ -481,6 +539,8 @@ __all__ = [
     "AdministrationError",
     "AdminValidationError",
     "ArtifactValidationError",
+    "AuthenticationError",
+    "AuthenticationSession",
     "AsyncUploadStream",
     "AuthContext",
     "IdentityServiceError",
@@ -495,7 +555,9 @@ __all__ = [
     "IdentityConflictError",
     "IdentityInactiveError",
     "IdentityNotFoundError",
+    "IdentityProviderUnavailableError",
     "InvalidDocumentStateError",
+    "JwtClaims",
     "KnowledgePreviewView",
     "PreviewAsset",
     "PreviewGenerationError",
@@ -511,6 +573,7 @@ __all__ = [
     "UploadTarget",
     "UploadTooLargeError",
     "UploadValidationError",
+    "VerifiedGoogleIdentity",
     "normalize_code",
     "normalize_codes",
     "normalize_page",

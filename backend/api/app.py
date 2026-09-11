@@ -9,9 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.deps import get_runtime
 from api.errors import register_error_handlers
+from api.authentication import JwtAuthenticationMiddleware
 from api.routers import (
     admin,
     agent,
+    auth,
     artifacts,
     documents,
     health,
@@ -62,8 +64,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(
+        JwtAuthenticationMiddleware,
+        tokens=get_runtime().jwt_token_service(),
+    )
     for router in _ROUTERS:
         app.include_router(router, prefix=API_PREFIX)
+    app.include_router(auth.router, prefix="/api")
     app.include_router(health.router)
     return app
 
