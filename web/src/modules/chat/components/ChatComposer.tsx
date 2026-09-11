@@ -254,25 +254,39 @@ export function ChatComposer({
                     <span>Choose from collection</span>
                     <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={15} />
                   </button>
-                  {collections.length > 3 && (
-                    <button
-                      className="composer-add-popover__row"
-                      onClick={() => {
-                        setCollectionsExpanded(true);
-                        setShowAllCollections((show) => !show);
-                      }}
-                      type="button"
-                    >
-                      <LibraryBig aria-hidden="true" size={16} />
-                      <span>{showAllCollections ? "Show fewer collections" : "Browse all collections"}</span>
-                      <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={15} />
-                    </button>
-                  )}
+                  <button
+                    aria-controls="chat-context-collections"
+                    aria-expanded={collectionsExpanded && !showAllCollections}
+                    className="composer-add-popover__row"
+                    onClick={() => {
+                      setCollectionsExpanded(true);
+                      setShowAllCollections(false);
+                    }}
+                    type="button"
+                  >
+                    <LibraryBig aria-hidden="true" size={16} />
+                    <span>Recent collections</span>
+                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={15} />
+                  </button>
+                  <button
+                    aria-controls="chat-context-collections"
+                    aria-expanded={collectionsExpanded && showAllCollections}
+                    className="composer-add-popover__row"
+                    onClick={() => {
+                      setCollectionsExpanded(true);
+                      setShowAllCollections(true);
+                    }}
+                    type="button"
+                  >
+                    <LibraryBig aria-hidden="true" size={16} />
+                    <span>Browse all collections</span>
+                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={15} />
+                  </button>
                 </div>
                 {collectionsExpanded && (
                   <div className="composer-add-popover__collections" id="chat-context-collections">
                     <div className="composer-add-popover__section-title">
-                      <span>Available collections</span>
+                      <span>{showAllCollections ? "All collections" : "Recent collections"}</span>
                       {collectionsLoading && <LoaderCircle aria-label="Loading collections" className="composer-attachment__spin" size={13} />}
                     </div>
                     {collectionsError ? (

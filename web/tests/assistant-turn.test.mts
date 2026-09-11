@@ -80,7 +80,7 @@ test("presents a verified runtime activity at its function-call position", () =>
   }]);
 });
 
-test("groups adjacent runtime activities without moving interleaved commentary", () => {
+test("groups every runtime activity into one surface while preserving commentary", () => {
   const grouped = groupAssistantTurnItems([
     {
       kind: "message" as const,
@@ -101,6 +101,18 @@ test("groups adjacent runtime activities without moving interleaved commentary",
     },
     {
       kind: "message" as const,
+      id: "commentary-2",
+      phase: "commentary" as const,
+      text: "I am checking the related guidance.",
+      state: "done" as const,
+    },
+    {
+      kind: "activity" as const,
+      id: "inspect-1",
+      activity: { callId: "inspect-1", toolName: "inspect_resource", state: "active" as const, startedAt: 3 },
+    },
+    {
+      kind: "message" as const,
       id: "answer-1",
       phase: "final_answer" as const,
       text: "The allowance is unchanged.",
@@ -112,8 +124,9 @@ test("groups adjacent runtime activities without moving interleaved commentary",
     "message",
     "activity_group",
     "message",
+    "message",
   ]);
-  assert.equal(grouped[1]?.kind === "activity_group" && grouped[1].activities.length, 2);
+  assert.equal(grouped[1]?.kind === "activity_group" && grouped[1].activities.length, 3);
 });
 
 test("presents hosted shell execution with its command and captured output", () => {

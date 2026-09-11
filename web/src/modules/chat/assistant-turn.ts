@@ -114,29 +114,31 @@ export function assistantTurnItems(turn: TurnState | undefined): AssistantTurnIt
 }
 
 /**
- * Keep commentary and answer text exactly where the runtime emitted them,
- * while presenting adjacent tool calls as one calm, expandable activity.
+ * A turn owns one activity surface. Runtime actions can be interleaved with
+ * commentary or later answer text, but rendering each contiguous run as a
+ * separate card turns the conversation into an event log. The first observed
+ * action fixes the surface's place in the transcript; subsequent actions
+ * update that same surface in place.
  */
 export function groupAssistantTurnItems(
   items: AssistantTurnItem[],
 ): AssistantTurnRenderableItem[] {
   const grouped: AssistantTurnRenderableItem[] = [];
+  const activities = items.flatMap((item) => item.kind === "activity" ? [item.activity] : []);
+  let insertedActivitySurface = false;
 
   for (const item of items) {
-    if (item.kind !== "activity") {
-      grouped.push(item);
+    if (item.kind === "activity") {
+      if (insertedActivitySurface) continue;
+      insertedActivitySurface = true;
+      grouped.push({
+        kind: "activity_group",
+        id: `activities:${item.id}`,
+        activities,
+      });
       continue;
     }
-    const previous = grouped.at(-1);
-    if (previous?.kind === "activity_group") {
-      previous.activities.push(item.activity);
-      continue;
-    }
-    grouped.push({
-      kind: "activity_group",
-      id: `activities:${item.id}`,
-      activities: [item.activity],
-    });
+    grouped.push(item);
   }
   return grouped;
 }

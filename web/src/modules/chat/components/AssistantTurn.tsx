@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { Check, ChevronRight, Circle, CircleAlert, FileCog } from "lucide-react";
+import { Check, ChevronRight, CircleAlert, FileCog, LoaderCircle } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
 
 import { assistantTurnItems, groupAssistantTurnItems } from "../assistant-turn";
@@ -64,12 +64,18 @@ export const AssistantTurn = memo(function AssistantTurn({
             );
           }
           if (item.kind === "activity_group") {
-            return <ActivityGroup activities={item.activities} key={item.id} />;
+            return (
+              <ActivityGroup
+                activities={item.activities}
+                key={item.id}
+                sourceCount={sources?.length}
+              />
+            );
           }
           return <HostedExecutionActivity execution={item} key={item.id} />;
         })}
         {showPending && (
-          <span aria-label={`${appBrand.productName} is working`} className="assistant-turn__pending" role="status">{appBrand.productName}</span>
+          <span aria-label={`${appBrand.productName} is starting`} className="assistant-turn__pending" role="status">Starting</span>
         )}
       </div>
     </CitationRenderingProvider>
@@ -103,7 +109,7 @@ function HostedExecutionActivity({
       : execution.state === "failed"
         ? "Could not complete file work"
         : "File work completed";
-  const Icon = active ? Circle : failed ? CircleAlert : Check;
+  const Icon = active ? LoaderCircle : failed ? CircleAlert : Check;
 
   return (
     <details
@@ -129,20 +135,50 @@ function HostedExecutionActivity({
   );
 }
 
-function ActivityGroup({ activities }: { activities: RuntimeActivity[] }) {
+function ActivityGroup({
+  activities,
+  sourceCount,
+}: {
+  activities: RuntimeActivity[];
+  sourceCount?: number;
+}) {
   const active = activities.some((activity) => activity.state === "active");
   const failed = activities.some((activity) => (
     activity.state === "failed" || activity.state === "timeout"
   ));
-  const label = active ? "Working" : activitySummary(activities);
-  const Icon = active ? Circle : failed ? CircleAlert : Check;
+  // The activity surface is deliberately a single, quiet line. The newest
+  // in-progress operation adds just enough useful context without turning
+  // the conversation into a running tool log.
+  const currentActivity = [...activities].reverse().find((activity) => activity.state === "active")
+    ?? activities.at(-1);
+  const currentLabel = currentActivity ? toolPresentation(currentActivity).label : "Working";
+  const label = active
+    ? `Working · ${currentLabel}`
+    : activitySummary(activities, sourceCount);
+  const Icon = active ? LoaderCircle : failed ? CircleAlert : Check;
+
+  // Active work has no disclosure at all. Besides matching the Figma progress
+  // primitive, this prevents a native <details> state from leaving a tool log
+  // visibly expanded while the response is still being streamed.
+  if (active) {
+    return (
+      <div
+        aria-label={`${label}. Activity in progress`}
+        className="assistant-turn__activity-group assistant-turn__activity-group--active"
+        role="status"
+      >
+        <Icon aria-hidden="true" className="assistant-turn__activity-group-status" size={14} />
+        <span>{label}</span>
+      </div>
+    );
+  }
 
   return (
     <details
-      className={clsx("assistant-turn__activity-group", active && "assistant-turn__activity-group--active")}
-      open={active || failed}
+      className="assistant-turn__activity-group"
+      open={failed}
     >
-      <summary aria-label={`${label}. ${active ? "Activity in progress" : "Show activity details"}`}>
+      <summary aria-label={`${label}. Show activity details`}>
         <Icon aria-hidden="true" className="assistant-turn__activity-group-status" size={14} />
         <span>{label}</span>
         <ChevronRight aria-hidden="true" className="assistant-turn__activity-group-caret" size={15} />
@@ -159,7 +195,7 @@ function ToolActivity({ activity }: { activity: RuntimeActivity }) {
   const active = activity.state === "active";
   const error = activity.state === "failed" || activity.state === "timeout";
   const elapsed = useElapsedSeconds(activity.startedAt, active);
-  const Icon = active ? Circle : error ? CircleAlert : Check;
+  const Icon = active ? LoaderCircle : error ? CircleAlert : Check;
   const elapsedLabel = active && elapsed >= 10 ? `${elapsed}s` : undefined;
   const accessibleLabel = [presentation.label, presentation.detail, elapsedLabel]
     .filter(Boolean)
@@ -220,20 +256,13 @@ function toolPresentation(activity: RuntimeActivity) {
   };
 }
 
-function activitySummary(activities: RuntimeActivity[]) {
-  const resultSources = activities
-    .filter((activity) => activity.toolName === "knowledge_search")
-    .reduce((count, activity) => count + (activity.resultCount ?? 0), 0);
-  const sourceActions = activities.filter((activity) => (
-    activity.toolName === "knowledge_search"
-    || activity.toolName === "read_resource"
-    || activity.toolName === "inspect_resource"
-  )).length;
-  const sourceCount = resultSources || sourceActions;
+function activitySummary(activities: RuntimeActivity[], sourceCount?: number) {
   const actions = activities.length;
+  // Citation identities are the source of truth. Search result counts are not
+  // evidence used in the final answer and must not be presented as such.
   return sourceCount
     ? `Used ${sourceCount} source${sourceCount === 1 ? "" : "s"} · ${actions} action${actions === 1 ? "" : "s"}`
-    : `Completed ${actions} action${actions === 1 ? "" : "s"}`;
+    : `${actions} action${actions === 1 ? "" : "s"}`;
 }
 
 function numericProgress(progress: Record<string, unknown> | undefined, key: string) {
