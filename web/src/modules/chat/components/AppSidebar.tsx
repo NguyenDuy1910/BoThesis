@@ -1,7 +1,7 @@
 "use client";
 
 import clsx from "clsx";
-import { type FormEvent, type RefObject, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Laptop,
   MessageSquare,
@@ -10,6 +10,7 @@ import {
   PanelLeftOpen,
   Search,
   Settings2,
+  SquarePen,
   Sun,
   UserCircle,
   X,
@@ -19,6 +20,15 @@ import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
 import { ProductMark } from "@/components/ui/ProductMark";
+import { appBrand } from "@/lib/brand";
+import {
+  getAuthSession,
+  hasAnySessionPermission,
+  hasSessionPermission,
+  type AuthSession,
+} from "@/lib/auth/session";
+import { firstAccessibleAdminRoute } from "@/modules/admin/navigation";
+import { switchWorkspace } from "@/modules/auth/api";
 import {
   sidebarNavigationItems,
   sidebarSecondaryDestinations,
@@ -56,28 +66,17 @@ export function AppSidebar({
   onDeleteConversation,
 }: AppSidebarProps) {
   const isCollapsed = collapsed && !mobileOpen;
-  const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const activateNavigationItem = (item: SidebarNavigationItem) => {
+    if (item.id === "chat") onCloseMobile();
+  };
 
   useEffect(() => {
-    if (!searchOpen || isCollapsed) return;
-    searchInputRef.current?.focus();
-  }, [isCollapsed, searchOpen]);
-
-  const activateNavigationItem = (item: SidebarNavigationItem) => {
-    if (item.id === "new-chat") {
-      setQuery("");
-      setSearchOpen(false);
-      onNewChat();
-      return;
-    }
-    if (item.id === "search-chats") {
-      if (isCollapsed) onToggleCollapse();
-      setSearchOpen(true);
-      searchInputRef.current?.focus();
-    }
-  };
+    if (!isCollapsed) return;
+    setSearchOpen(false);
+    setSearchQuery("");
+  }, [isCollapsed]);
 
   return (
     <aside
@@ -95,32 +94,27 @@ export function AppSidebar({
       />
 
       <SidebarNavigation
-        activeConversationId={activeId}
         collapsed={isCollapsed}
         onActivate={activateNavigationItem}
-        searchOpen={searchOpen}
       />
 
       <SidebarDestinations collapsed={isCollapsed} onCloseMobile={onCloseMobile} />
 
-      {!isCollapsed && searchOpen && (
-        <SidebarSearch
-          inputRef={searchInputRef}
-          onClose={() => {
-            setQuery("");
-            setSearchOpen(false);
-          }}
-          onQuery={setQuery}
-          query={query}
-        />
-      )}
+      <SidebarChatContext
+        collapsed={isCollapsed}
+        onNewChat={onNewChat}
+        onSearchChange={setSearchQuery}
+        searchOpen={searchOpen}
+        searchQuery={searchQuery}
+        setSearchOpen={setSearchOpen}
+      />
 
       <RecentChatList
-        query={query}
         collapsed={isCollapsed}
         conversations={conversations}
         activeId={activeId}
         isLoading={isLoading}
+        searchQuery={searchQuery}
         onSelect={(id) => {
           onSelectConversation(id);
           onCloseMobile();
@@ -151,8 +145,7 @@ function SidebarHeader({
         <div className="brand">
           <ProductMark decorative size="md" />
           <span className="brand-lockup">
-            <span className="brand-wordmark">BoThesis</span>
-            <span className="brand-caption">Knowledge workspace</span>
+            <span className="brand-wordmark">{appBrand.productName}</span>
           </span>
         </div>
       )}
@@ -171,26 +164,18 @@ function SidebarHeader({
 }
 
 function SidebarNavigation({
-  activeConversationId,
   collapsed,
   onActivate,
-  searchOpen,
 }: {
-  activeConversationId: string | null;
   collapsed: boolean;
   onActivate: (item: SidebarNavigationItem) => void;
-  searchOpen: boolean;
 }) {
   return (
     <nav aria-label="Workspace" className="sidebar-navigation">
       {sidebarNavigationItems.map((item) => {
-        const active = item.id === "search-chats"
-          ? searchOpen
-          : item.id === "new-chat" && activeConversationId === null;
-
         return (
           <SidebarRow
-            active={active}
+            active
             collapsed={collapsed}
             item={item}
             key={item.id}
@@ -202,6 +187,69 @@ function SidebarNavigation({
   );
 }
 
+function SidebarChatContext({
+  collapsed,
+  onNewChat,
+  onSearchChange,
+  searchOpen,
+  searchQuery,
+  setSearchOpen,
+}: {
+  collapsed: boolean;
+  onNewChat: () => void;
+  onSearchChange: (value: string) => void;
+  searchOpen: boolean;
+  searchQuery: string;
+  setSearchOpen: (open: boolean) => void;
+}) {
+  if (collapsed) return null;
+
+  return (
+    <section aria-label="Chat actions" className="sidebar-chat-context">
+      <p className="sidebar-chat-context__label">Chat</p>
+      <button className="sidebar-row" onClick={onNewChat} type="button">
+        <SquarePen aria-hidden="true" className="sidebar-row__icon" size={16} />
+        <span className="sidebar-row__label">New chat</span>
+      </button>
+      <button
+        aria-expanded={searchOpen}
+        className="sidebar-row"
+        onClick={() => setSearchOpen(!searchOpen)}
+        type="button"
+      >
+        <Search aria-hidden="true" className="sidebar-row__icon" size={16} />
+        <span className="sidebar-row__label">Search chats</span>
+      </button>
+      {searchOpen && (
+        <div className="sidebar-search-wrap">
+          <label className="sidebar-search">
+            <Search aria-hidden="true" size={14} />
+            <input
+              aria-label="Search conversations"
+              autoFocus
+              onChange={(event) => onSearchChange(event.target.value)}
+              placeholder="Search recent chats"
+              type="search"
+              value={searchQuery}
+            />
+          </label>
+          <button
+            aria-label="Close conversation search"
+            className="sidebar-search__close"
+            onClick={() => {
+              onSearchChange("");
+              setSearchOpen(false);
+            }}
+            type="button"
+          >
+            <X aria-hidden="true" size={15} />
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function SidebarDestinations({
   collapsed,
   onCloseMobile,
@@ -209,10 +257,24 @@ function SidebarDestinations({
   collapsed: boolean;
   onCloseMobile: () => void;
 }) {
+  const [session, setSession] = useState<AuthSession | null>(null);
+
+  useEffect(() => setSession(getAuthSession()), []);
+
+  const destinations = sidebarSecondaryDestinations
+    .filter((destination) => hasAnySessionPermission(session, destination.permissionCodes))
+    .map((destination) => (
+      destination.id === "admin"
+        ? { ...destination, href: firstAccessibleAdminRoute(session)?.path ?? destination.href }
+        : destination
+    ));
+
+  if (!destinations.length) return null;
+
   return (
     <nav aria-label="Product areas" className="sidebar-destinations">
       {!collapsed && <p className="sidebar-destinations__label">Product</p>}
-      {sidebarSecondaryDestinations.map((destination) => {
+      {destinations.map((destination) => {
         const Icon = destination.icon;
         return (
           <Link
@@ -281,48 +343,6 @@ function SidebarRowContent({
   );
 }
 
-function SidebarSearch({
-  inputRef,
-  query,
-  onClose,
-  onQuery,
-}: {
-  inputRef: RefObject<HTMLInputElement | null>;
-  query: string;
-  onClose: () => void;
-  onQuery: (q: string) => void;
-}) {
-  return (
-    <div className="sidebar-search-wrap" role="search">
-      <label className="sidebar-search" htmlFor="conversation-search">
-        <Search aria-hidden="true" size={16} />
-        <input
-          id="conversation-search"
-          autoComplete="off"
-          name="conversation-search"
-          onChange={(e) => onQuery(e.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Escape") onClose();
-          }}
-          placeholder="Search chats…"
-          ref={inputRef}
-          spellCheck={false}
-          type="search"
-          value={query}
-        />
-      </label>
-      <button
-        aria-label="Close conversation search"
-        className="sidebar-search__close"
-        onClick={onClose}
-        type="button"
-      >
-        <X aria-hidden="true" size={15} />
-      </button>
-    </div>
-  );
-}
-
 const SKELETON_WIDTHS = ["75%", "90%", "68%", "82%", "72%"];
 
 function SkeletonRows() {
@@ -340,7 +360,6 @@ function SkeletonRows() {
 }
 
 function RecentChatList({
-  query,
   collapsed,
   conversations,
   activeId,
@@ -348,8 +367,8 @@ function RecentChatList({
   onSelect,
   onRename,
   onDelete,
+  searchQuery,
 }: {
-  query: string;
   collapsed: boolean;
   conversations: ChatConversation[];
   activeId: string | null;
@@ -357,6 +376,7 @@ function RecentChatList({
   onSelect: (id: string) => void;
   onRename: (id: string, title: string) => void | Promise<void>;
   onDelete: (id: string) => void | Promise<void>;
+  searchQuery: string;
 }) {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
@@ -366,16 +386,19 @@ function RecentChatList({
   const [savingRename, setSavingRename] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const matchingConversations = useMemo(() => {
+    const query = searchQuery.trim().toLocaleLowerCase();
+    if (!query) return conversations;
+    return conversations.filter((conversation) => (
+      formatConversationTitle(conversation.title).toLocaleLowerCase().includes(query)
+    ));
+  }, [conversations, searchQuery]);
   const groupedConversations = useMemo(
-    () => groupConversations(conversations, query),
-    [conversations, query]
+    () => groupConversations(matchingConversations),
+    [matchingConversations],
   );
-  const hasConversations = conversations.length > 0;
-  const hasResults = groupedConversations.some((group) => group.items.length > 0);
-
-  useEffect(() => {
-    setOpenMenuId(null);
-  }, [collapsed, query]);
+  const hasConversations = matchingConversations.length > 0;
+  useEffect(() => setOpenMenuId(null), [collapsed]);
 
   return (
     <div className="sidebar-list">
@@ -391,18 +414,8 @@ function RecentChatList({
               <span className="sidebar-list__empty-icon">
                 <MessageSquare aria-hidden="true" size={16} />
               </span>
-              <strong>Start your first brief</strong>
-              <span>Your conversations will appear here.</span>
-            </div>
-          )
-        ) : !hasResults ? (
-          !collapsed && (
-            <div className="sidebar-list__empty">
-              <span className="sidebar-list__empty-icon">
-                <Search aria-hidden="true" size={16} />
-              </span>
-              <strong>No matching conversations</strong>
-              <span>Try a shorter search term.</span>
+              <strong>{searchQuery ? "No matching chats" : "Start a conversation"}</strong>
+              <span>{searchQuery ? "Try another search term." : "Your conversations will appear here."}</span>
             </div>
           )
         ) : (
@@ -584,18 +597,40 @@ function RecentChatList({
 
 function SidebarFooter({ collapsed }: { collapsed: boolean }) {
   const { theme, resolvedTheme, toggleTheme } = useTheme();
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const [isSwitchingWorkspace, setIsSwitchingWorkspace] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+
+  useEffect(() => setSession(getAuthSession()), []);
+
+  const changeWorkspace = async (tenantId: string) => {
+    if (tenantId === session?.active_tenant_id) return;
+    setIsSwitchingWorkspace(true);
+    setWorkspaceError(null);
+    try {
+      const next = await switchWorkspace(tenantId);
+      setSession(next);
+      window.location.reload();
+    } catch (error) {
+      setWorkspaceError(error instanceof Error ? error.message : "Could not change workspace.");
+    } finally {
+      setIsSwitchingWorkspace(false);
+    }
+  };
 
   return (
     <div className="sidebar-footer">
-      <Link
-        aria-label={collapsed ? "Workspace settings" : undefined}
-        className="sidebar-account-row sidebar-account-row--link"
-        href="/admin/settings"
-        title={collapsed ? "Workspace settings" : undefined}
-      >
-        <Settings2 aria-hidden="true" size={17} />
-        {!collapsed && <span>Workspace settings</span>}
-      </Link>
+      {hasSessionPermission(session, "tenant.manage") && (
+        <Link
+          aria-label={collapsed ? "Workspace settings" : undefined}
+          className="sidebar-account-row sidebar-account-row--link"
+          href="/admin/settings"
+          title={collapsed ? "Workspace settings" : undefined}
+        >
+          <Settings2 aria-hidden="true" size={17} />
+          {!collapsed && <span>Workspace settings</span>}
+        </Link>
+      )}
       <div
         aria-label={collapsed ? "Knowledge workspace" : undefined}
         className="sidebar-account-row"
@@ -604,8 +639,19 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
         <span className="sidebar-account-row__avatar"><UserCircle aria-hidden="true" size={18} /></span>
         {!collapsed && (
           <span className="sidebar-account-row__copy">
-            <strong>Workspace access</strong>
-            <small>Private to your access</small>
+            <strong>{session?.display_name ?? "Workspace access"}</strong>
+            {session && session.tenants.length > 1 ? (
+              <select
+                aria-label="Active workspace"
+                className="sidebar-workspace-select"
+                disabled={isSwitchingWorkspace}
+                onChange={(event) => void changeWorkspace(event.target.value)}
+                value={session.active_tenant_id}
+              >
+                {session.tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+              </select>
+            ) : <small>{session?.tenants[0]?.name ?? "Private to your access"}</small>}
+            {workspaceError ? <small className="sidebar-workspace-error" role="alert">{workspaceError}</small> : null}
           </span>
         )}
         <button
@@ -629,13 +675,7 @@ function SidebarFooter({ collapsed }: { collapsed: boolean }) {
   );
 }
 
-function groupConversations(conversations: ChatConversation[], query: string) {
-  const normalizedQuery = query.trim().toLowerCase();
-  const filtered = normalizedQuery
-    ? conversations.filter((conversation) =>
-        conversation.title.toLowerCase().includes(normalizedQuery)
-      )
-    : conversations;
+function groupConversations(conversations: ChatConversation[]) {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const recent = today - 24 * 60 * 60 * 1000;
@@ -645,27 +685,27 @@ function groupConversations(conversations: ChatConversation[], query: string) {
   return [
     {
       label: "Recent",
-      items: filtered.filter((conversation) => conversation.updatedAt >= recent),
+      items: conversations.filter((conversation) => conversation.updatedAt >= recent),
     },
     {
       label: "Previous 7 days",
-      items: filtered.filter(
+      items: conversations.filter(
         (conversation) =>
-          conversation.updatedAt < recent &&
+        conversation.updatedAt < recent &&
           conversation.updatedAt >= previousSevenDays
       ),
     },
     {
       label: "Previous 30 days",
-      items: filtered.filter(
+      items: conversations.filter(
         (conversation) =>
-          conversation.updatedAt < previousSevenDays &&
+        conversation.updatedAt < previousSevenDays &&
           conversation.updatedAt >= previousThirtyDays
       ),
     },
     {
       label: "Older",
-      items: filtered.filter((conversation) => conversation.updatedAt < previousThirtyDays),
+      items: conversations.filter((conversation) => conversation.updatedAt < previousThirtyDays),
     },
   ];
 }

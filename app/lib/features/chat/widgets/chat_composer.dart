@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../../../app/app_brand.dart';
 import '../../../app/app_theme.dart';
 import '../models/chat_models.dart';
 import '../services/chat_service.dart';
@@ -280,7 +281,7 @@ class _ChatComposerState extends State<ChatComposer> {
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(
-                'BoThesis can make mistakes. Verify important decisions with the cited sources.',
+                '${AppBrand.productName} can make mistakes. Verify important decisions with the cited sources.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodySmall
                     ?.copyWith(fontSize: 11),
@@ -422,7 +423,7 @@ class _SourcePicker extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  'Choose what BoThesis may search for this conversation.',
+                  'Choose what ${AppBrand.productName} may search for this conversation.',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 const SizedBox(height: 14),

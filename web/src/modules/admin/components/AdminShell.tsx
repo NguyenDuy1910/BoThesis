@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 
 import { ToastProvider } from "@/components/ui/Toast";
 import { useLocalStorage } from "@/lib/hooks/useLocalStorage";
@@ -13,8 +14,10 @@ import { AdminWorkspaceProvider } from "@/modules/admin/workspace";
 import { AdminCommandPalette } from "./AdminCommandPalette";
 import { AdminSidebar } from "./AdminSidebar";
 import { AdminTopbar } from "./AdminTopbar";
+import { AppsShell } from "./AppsShell";
 
 export function AdminShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
   const [collapsed, setCollapsed] = useLocalStorage("bothesis-admin-nav", false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -36,7 +39,9 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
     <AdminWorkspaceProvider>
       <AdminBreadcrumbProvider>
         <ToastProvider>
-          <AdminFrame
+          {pathname.startsWith("/admin/connectors") ? (
+            <AppsShell>{children}</AppsShell>
+          ) : <AdminFrame
             collapsed={collapsed}
             mobileOpen={mobileOpen}
             onCloseMobile={closeMobile}
@@ -48,7 +53,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             searchOpen={searchOpen}
           >
             {children}
-          </AdminFrame>
+          </AdminFrame>}
         </ToastProvider>
       </AdminBreadcrumbProvider>
     </AdminWorkspaceProvider>

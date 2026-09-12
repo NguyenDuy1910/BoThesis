@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../app/app_brand.dart';
 import '../../../app/app_theme.dart';
 import 'product_mark.dart';
 
@@ -51,7 +52,7 @@ class WelcomeView extends StatelessWidget {
               const ProductMark(size: 44),
               const SizedBox(height: 16),
               Text(
-                'BOTHESIS WORKSPACE',
+                AppBrand.productName.toUpperCase(),
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
                   color: colors.textMuted,
                   fontFamily: 'monospace',

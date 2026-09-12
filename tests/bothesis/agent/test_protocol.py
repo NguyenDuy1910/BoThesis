@@ -39,7 +39,7 @@ from bothesis.agent.protocol import (
     Refusal,
     Response,
     ResponseError,
-    ResponseRequest,
+    Prompt,
     ResponseStreamEventAdapter,
     ResponseUsage,
     SummaryText,
@@ -206,7 +206,7 @@ def test_reasoning_item_exposes_content_and_summary_separately() -> None:
     assert item.reasoning_text == "raw thought"
     assert item.summary_text == "plan"
     # ``encrypted_content`` is the specified continuation blob, so no
-    # BoThesis-specific field is needed to replay a reasoning item.
+    # Product-specific field is needed to replay a reasoning item.
     assert item.encrypted_content == "opaque"
 
 
@@ -251,14 +251,14 @@ def test_tool_union_separates_function_and_provider_tools() -> None:
 
 @pytest.mark.parametrize("mode", ["none", "auto", "required"])
 def test_tool_choice_accepts_the_plain_modes(mode: str) -> None:
-    assert ResponseRequest(input=(), tool_choice=mode).tool_choice == mode
+    assert Prompt(input=(), tool_choice=mode).tool_choice == mode
 
 
 def test_tool_choice_accepts_a_named_function_and_allowed_tools() -> None:
-    named = ResponseRequest(
+    named = Prompt(
         input=(), tool_choice=FunctionToolChoice(name="search")
     ).tool_choice
-    allowed = ResponseRequest(
+    allowed = Prompt(
         input=(),
         tool_choice=AllowedTools(mode="required", tools=({"name": "search"},)),
     ).tool_choice
@@ -274,7 +274,7 @@ def test_allowed_tools_requires_at_least_one_tool() -> None:
 
 
 def test_request_round_trips_through_json() -> None:
-    request = ResponseRequest(
+    prompt = Prompt(
         input=(
             MessageItem(role="user", content=(InputText(text="hello"),)),
             ReasoningItem(summary=(SummaryText(text="plan"),), encrypted_content="x"),
@@ -289,9 +289,9 @@ def test_request_round_trips_through_json() -> None:
         provider_options={"reasoning": {"effort": "low"}},
     )
 
-    restored = ResponseRequest.model_validate_json(request.model_dump_json())
+    restored = Prompt.model_validate_json(prompt.model_dump_json())
 
-    assert restored == request
+    assert restored == prompt
 
 
 def test_response_round_trips_through_json() -> None:

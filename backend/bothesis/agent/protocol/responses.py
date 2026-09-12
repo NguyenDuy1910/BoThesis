@@ -6,6 +6,7 @@ from typing import Any, Literal, TypeAlias
 
 from pydantic import Field
 
+from bothesis.agent.execution import ExecutionCapability
 from bothesis.agent.protocol import ProtocolModel
 from bothesis.agent.protocol.content import Annotation, OutputText
 from bothesis.agent.protocol.items import FunctionCallItem, Item, MessageItem
@@ -59,7 +60,7 @@ class IncompleteDetails(ProtocolModel):
     reason: str
 
 
-class ResponseRequest(ProtocolModel):
+class Prompt(ProtocolModel):
     """One provider-neutral model request.
 
     Field names follow ``CreateResponseBody``. ``provider_options`` is the
@@ -67,7 +68,7 @@ class ResponseRequest(ProtocolModel):
     body verbatim, which keeps provider-only knobs (reasoning effort, routing
     preferences, caching hints) out of the common contract.
 
-    ``previous_response_id`` names the response this one continues. BoThesis
+    ``previous_response_id`` names the response this one continues. Enterprise Agent
     replays the full item history on every request, so an adapter must not
     forward it to a provider that would then re-expand server-side state; it is
     stamped onto the emitted :class:`Response` so a client can chain the
@@ -88,6 +89,9 @@ class ResponseRequest(ProtocolModel):
     store: bool | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
     provider_options: dict[str, Any] = Field(default_factory=dict)
+    # This runtime contract is consumed by the provider adapter, never emitted
+    # directly into the wire payload by the shared Responses renderer.
+    execution_capability: ExecutionCapability | None = None
 
 
 class Response(ProtocolModel):
@@ -173,7 +177,7 @@ __all__ = [
     "OutputTokensDetails",
     "Response",
     "ResponseError",
-    "ResponseRequest",
+    "Prompt",
     "ResponseStatus",
     "ResponseUsage",
 ]

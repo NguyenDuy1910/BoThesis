@@ -2,16 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../features/chat/chat_page.dart';
+import 'app_brand.dart';
 import 'app_theme.dart';
 
-class BoThesisApp extends StatefulWidget {
-  const BoThesisApp({super.key});
+class ProductApp extends StatefulWidget {
+  const ProductApp({super.key});
 
   @override
-  State<BoThesisApp> createState() => _BoThesisAppState();
+  State<ProductApp> createState() => _ProductAppState();
 }
 
-class _BoThesisAppState extends State<BoThesisApp> {
+class _ProductAppState extends State<ProductApp> {
   static const _themeKey = 'bothesis-theme';
   final _preferences = SharedPreferencesAsync();
   ThemeMode _themeMode = ThemeMode.system;
@@ -47,7 +48,7 @@ class _BoThesisAppState extends State<BoThesisApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'BoThesis',
+      title: AppBrand.productName,
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,

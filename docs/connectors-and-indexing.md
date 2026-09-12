@@ -1,6 +1,6 @@
 # Connectors and indexing
 
-The connector boundary turns external source data into canonical BoThesis
+The connector boundary turns external source data into canonical Enterprise Agent
 Items. It owns provider-specific behavior so retrieval and the agent operate on
 one consistent source and evidence model.
 
@@ -61,7 +61,7 @@ tombstone, and principal filters before reranking and evidence projection.
 Connector credentials and reader permissions serve different purposes:
 
 ```text
-encrypted ConnectorCredential → lets BoThesis read a provider
+encrypted ConnectorCredential → lets Enterprise Agent read a provider
 Item allowed/denied principals → lets a user retrieve source evidence
 ```
 

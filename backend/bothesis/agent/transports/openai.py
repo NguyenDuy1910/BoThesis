@@ -17,11 +17,14 @@ from openai.types.responses import (
     ResponseStreamEvent,
 )
 
+from bothesis.agent.execution import ExecutionCapability
+
+
 TextFormat = TypeVar("TextFormat")
 
 
 class OpenAITransport:
-    """Expose OpenAI Responses, embeddings, and files without normalization."""
+    """Expose OpenAI Responses, embeddings, and files unnormalized."""
 
     provider = "openai"
 
@@ -29,6 +32,7 @@ class OpenAITransport:
         self,
         *,
         api_key: str | None = None,
+        base_url: str | None = None,
         model: str | None = None,
         embedding_model: str | None = None,
         timeout: float = 60.0,
@@ -40,6 +44,7 @@ class OpenAITransport:
         self.embedding_model = embedding_model or os.getenv("OPENAI_EMBEDDING_MODEL")
         self._client = client or AsyncOpenAI(
             api_key=api_key or os.getenv("OPENAI_API_KEY"),
+            base_url=base_url or os.getenv("OPENAI_BASE_URL") or None,
             timeout=timeout,
         )
         self._owns_client = client is None
@@ -49,11 +54,13 @@ class OpenAITransport:
         *,
         input: str | ResponseInputParam,
         model: str | None = None,
+        execution_capability: ExecutionCapability | None = None,
         **params: Any,
     ) -> Response:
         """Create a normal OpenAI Response and return the SDK object unchanged."""
 
         selected_model = self._model(model)
+        self._validate_execution_capability(execution_capability)
         if "stream" in params:
             raise ValueError("use stream_response for streaming Responses requests")
         response = await self._client.responses.create(
@@ -68,11 +75,13 @@ class OpenAITransport:
         *,
         input: str | ResponseInputParam,
         model: str | None = None,
+        execution_capability: ExecutionCapability | None = None,
         **params: Any,
     ) -> AsyncStream[ResponseStreamEvent]:
         """Create a streaming Response using the SDK's typed event stream."""
 
         selected_model = self._model(model)
+        self._validate_execution_capability(execution_capability)
         if "stream" in params:
             raise ValueError("stream_response controls the stream parameter")
         stream = await self._client.responses.create(
@@ -159,6 +168,14 @@ class OpenAITransport:
         if not selected_model:
             raise ValueError("OpenAI model is required")
         return selected_model
+
+    def _validate_execution_capability(
+        self, capability: ExecutionCapability | None
+    ) -> None:
+        if capability is not None and capability.hosted_shell:
+            raise ValueError(
+                "OpenAI transport does not provide the configured hosted shell"
+            )
 
 
 __all__ = ["OpenAITransport"]

@@ -1,4 +1,4 @@
-"""BoThesis source adapters and validated ingestion hand-off contracts.
+"""Enterprise Agent source adapters and validated ingestion hand-off contracts.
 
 Each sub-package (confluence, jira, file, google_drive) implements the connector
 contracts defined in ``connector.base`` and produces canonical items defined in

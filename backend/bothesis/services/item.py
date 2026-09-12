@@ -22,7 +22,7 @@ from bothesis.db.models import (
     MessageItem,
     IngestionSource,
 )
-from bothesis.services.identity_store import IdentityStoreService
+from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services import (
     ACTIVE_STATUS,
     MESSAGE_ITEM_RELATIONS,
@@ -482,7 +482,7 @@ class ItemService:
         return external_resource.item
 
     async def get_item(self, item_id: UUID, *, access: AuthContext) -> Item:
-        from bothesis.services.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.collection_access import CollectionAccessService
 
         return await CollectionAccessService(self._session).require_item_access(
             item_id, access=access
@@ -504,7 +504,7 @@ class ItemService:
         limit: int = 100,
         offset: int = 0,
     ) -> list[Item]:
-        from bothesis.services.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.collection_access import CollectionAccessService
 
         if not 1 <= limit <= 1_000 or offset < 0:
             raise ValueError("invalid item pagination")
@@ -576,7 +576,7 @@ class ItemService:
     ) -> Item:
         """Load a native upload through its governing collection permission."""
 
-        from bothesis.services.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.collection_access import CollectionAccessService
 
         authorized = await CollectionAccessService(self._session).require_item_access(
             item_id,
@@ -701,7 +701,7 @@ class ItemService:
         return link
 
     async def soft_delete_item(self, item_id: UUID, *, actor: AuthContext) -> Item:
-        from bothesis.services.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.collection_access import CollectionAccessService
 
         item = await CollectionAccessService(self._session).require_item_access(
             item_id, access=actor, minimum_role="editor"

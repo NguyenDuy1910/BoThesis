@@ -26,7 +26,7 @@ from bothesis.services.workflow.ingestion_workflow import IngestionWorkflow
 
 
 class TemporalWorker:
-    """Register and run BoThesis application workflows and Activities."""
+    """Register and run Enterprise Agent application workflows and Activities."""
 
     def __init__(
         self,
@@ -103,6 +103,7 @@ class TemporalWorker:
             credential_encryption_key=(
                 self._config.integration.credential_encryption_key
             ),
+            confluence_environment=self._config.integration.confluence,
             preview=self._runtime.knowledge_preview(),
         )
 

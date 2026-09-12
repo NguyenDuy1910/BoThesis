@@ -1,6 +1,6 @@
 # Architecture
 
-BoThesis is organized around explicit ownership boundaries. The goal is to
+Enterprise Agent is organized around explicit ownership boundaries. The goal is to
 keep HTTP handling thin, make business flow testable in services, and prevent
 connector or storage concerns from leaking into chat and retrieval behavior.
 
@@ -32,8 +32,7 @@ orchestration, document transformation, or application decisions.
 | `document_index` | Contextual chunk construction, embedding, payload projection, and Qdrant writes. |
 | `preview` | Derived knowledge-asset rendering, versioned preview manifests, and short-lived preview URLs. |
 | `knowledge` | Tenant and ACL filtering, retrieval, reranking, and evidence construction. |
-| `agent` | Conversation orchestration, model transports, tool execution, streaming, and cited answers. |
-| `sandbox` | Disposable, isolated execution of the fixed document operations the agent may request; never the source of truth. |
+| `agent` | Conversation orchestration, model transports, tool execution, streaming, and cited answers. Execution of file work is the provider's native Code Interpreter and Shell, in a container the conversation owns; the container is never the source of truth. |
 | `db` | SQLAlchemy schema and database engine composition. |
 | `tui` | A terminal API client; it does not bypass the HTTP boundary. |
 

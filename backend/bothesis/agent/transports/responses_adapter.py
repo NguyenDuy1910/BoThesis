@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 from openai.types.responses import Response as NativeResponse
 
@@ -51,7 +51,7 @@ from bothesis.agent.protocol import (
     ResponseReasoningSummaryTextDoneEvent,
     ResponseRefusalDeltaEvent,
     ResponseRefusalDoneEvent,
-    ResponseRequest,
+    Prompt,
     ResponseStatus,
     ResponseStreamEvent,
     ResponseUsage,
@@ -79,17 +79,22 @@ class ResponsesStream:
         return getattr(self._transport, "model", None)
 
     async def stream(
-        self, request: ResponseRequest
+        self, prompt: Prompt
     ) -> AsyncIterator[ResponseStreamEvent]:
         """Yield one canonical event per native event, without buffering."""
 
+        request = render_request(prompt)
+        if prompt.execution_capability is not None:
+            request["execution_capability"] = prompt.execution_capability
         stream = await self._transport.stream_response(
-            input=cast(Any, render_input(request.input)),
-            model=request.model,
-            **_native_params(request),
+            input=cast(Any, request.pop("input")),
+            model=cast(str | None, request.pop("model")),
+            **request,
         )
+        normalize_item = getattr(self._transport, "normalize_output_item", None)
+        item_normalizer = normalize_item if callable(normalize_item) else None
         async for native in stream:
-            for event in _project(native, request):
+            for event in _project(native, prompt, item_normalizer=item_normalizer):
                 yield event
 
 
@@ -97,7 +102,7 @@ def render_input(items: Sequence[Item]) -> list[dict[str, Any]]:
     """Render canonical items as OpenAI Responses input items.
 
     Annotations are dropped: OpenAI only accepts ``url_citation`` on replayed
-    output text, and BoThesis document citations are its own annotation type.
+    output text, and Enterprise Agent document citations are its own annotation type.
     """
 
     rendered: list[dict[str, Any]] = []
@@ -108,7 +113,17 @@ def render_input(items: Sequence[Item]) -> list[dict[str, Any]]:
     return rendered
 
 
-def _native_params(request: ResponseRequest) -> dict[str, Any]:
+def render_request(prompt: Prompt) -> dict[str, Any]:
+    """Render the exact provider request body before the transport sends it."""
+
+    return {
+        "model": prompt.model,
+        "input": render_input(prompt.input),
+        **_native_params(prompt),
+    }
+
+
+def _native_params(prompt: Prompt) -> dict[str, Any]:
     """Render the specified request fields as native ``/responses`` parameters.
 
     ``provider_options`` is not merged here: it holds keys outside the
@@ -118,36 +133,41 @@ def _native_params(request: ResponseRequest) -> dict[str, Any]:
     """
 
     params: dict[str, Any] = {}
-    if request.instructions is not None:
-        params["instructions"] = request.instructions
-    if request.temperature is not None:
-        params["temperature"] = request.temperature
-    if request.top_p is not None:
-        params["top_p"] = request.top_p
-    if request.max_output_tokens is not None:
-        params["max_output_tokens"] = request.max_output_tokens
-    if request.max_tool_calls is not None:
-        params["max_tool_calls"] = request.max_tool_calls
-    if request.store is not None:
-        params["store"] = request.store
-    if request.metadata:
-        params["metadata"] = dict(request.metadata)
-    tools = _function_tools(request.tools)
+    if prompt.instructions is not None:
+        params["instructions"] = prompt.instructions
+    if prompt.temperature is not None:
+        params["temperature"] = prompt.temperature
+    if prompt.top_p is not None:
+        params["top_p"] = prompt.top_p
+    if prompt.max_output_tokens is not None:
+        params["max_output_tokens"] = prompt.max_output_tokens
+    if prompt.max_tool_calls is not None:
+        params["max_tool_calls"] = prompt.max_tool_calls
+    if prompt.store is not None:
+        params["store"] = prompt.store
+    if prompt.metadata:
+        params["metadata"] = dict(prompt.metadata)
+    tools = _native_tools(prompt.tools)
     if tools:
-        params["tools"] = _native_tools(tools)
-        params["tool_choice"] = _native_tool_choice(request)
-    if request.parallel_tool_calls is not None:
-        params["parallel_tool_calls"] = request.parallel_tool_calls
-    if request.provider_options:
-        params["extra_body"] = dict(request.provider_options)
+        params["tools"] = tools
+        params["tool_choice"] = _native_tool_choice(prompt)
+    if prompt.parallel_tool_calls is not None:
+        params["parallel_tool_calls"] = prompt.parallel_tool_calls
+    if prompt.provider_options:
+        params["extra_body"] = dict(prompt.provider_options)
     return params
 
 
-def _function_tools(tools: Sequence[Tool]) -> list[FunctionTool]:
-    return [tool for tool in tools if isinstance(tool, FunctionTool)]
+def _native_tools(tools: Sequence[Tool]) -> list[dict[str, Any]]:
+    """Render every declared tool, function and provider-hosted alike.
 
+    A function tool has a fixed shape the protocol models in full. A
+    provider-specific tool travels as an
+    :class:`~bothesis.agent.protocol.ExtensionTool` and is forwarded verbatim:
+    its fields are the provider's own, so naming any of them here would pull
+    that provider's vocabulary into the adapter for no gain.
+    """
 
-def _native_tools(tools: Sequence[FunctionTool]) -> list[dict[str, Any]]:
     return [
         {
             "type": "function",
@@ -156,12 +176,14 @@ def _native_tools(tools: Sequence[FunctionTool]) -> list[dict[str, Any]]:
             "parameters": tool.parameters,
             "strict": tool.strict,
         }
+        if isinstance(tool, FunctionTool)
+        else tool.model_dump(mode="json", exclude_none=True)
         for tool in tools
     ]
 
 
-def _native_tool_choice(request: ResponseRequest) -> Any:
-    choice = request.tool_choice
+def _native_tool_choice(prompt: Prompt) -> Any:
+    choice = prompt.tool_choice
     if choice is None:
         return "auto"
     if isinstance(choice, str):
@@ -213,6 +235,8 @@ def _input_item(item: Item) -> dict[str, Any] | None:
         if item.id is not None:
             block["id"] = item.id
         return block
+    if item.type in {"hosted_execution_call", "hosted_execution_result"}:
+        return item.model_dump(mode="json", exclude_none=True)
     if isinstance(item, ExtensionItem):
         return item.model_dump(mode="json", exclude_none=True)
     return None
@@ -247,7 +271,10 @@ def _input_content(item: MessageItem) -> str | list[dict[str, Any]]:
 
 
 def _project(
-    native: Any, request: ResponseRequest
+    native: Any,
+    prompt: Prompt,
+    *,
+    item_normalizer: Callable[[Any], Item | None] | None = None,
 ) -> tuple[ResponseStreamEvent, ...]:
     """Map one native event onto zero or one canonical events."""
 
@@ -255,27 +282,60 @@ def _project(
     if kind == "response.created":
         return (
             ResponseCreatedEvent(
-                response=_response(native.response, request, status="in_progress")
+                response=_response(
+                    native.response,
+                    prompt,
+                    status="in_progress",
+                    item_normalizer=item_normalizer,
+                )
             ),
         )
     if kind == "response.queued":
         return (
             ResponseQueuedEvent(
-                response=_response(native.response, request, status="queued")
+                response=_response(
+                    native.response,
+                    prompt,
+                    status="queued",
+                    item_normalizer=item_normalizer,
+                )
             ),
         )
     if kind == "response.in_progress":
         return (
             ResponseInProgressEvent(
-                response=_response(native.response, request, status="in_progress")
+                response=_response(
+                    native.response,
+                    prompt,
+                    status="in_progress",
+                    item_normalizer=item_normalizer,
+                )
             ),
         )
     if kind == "response.completed":
-        return (ResponseCompletedEvent(response=_response(native.response, request)),)
+        return (
+            ResponseCompletedEvent(
+                response=_response(
+                    native.response, prompt, item_normalizer=item_normalizer
+                )
+            ),
+        )
     if kind == "response.incomplete":
-        return (ResponseIncompleteEvent(response=_response(native.response, request)),)
+        return (
+            ResponseIncompleteEvent(
+                response=_response(
+                    native.response, prompt, item_normalizer=item_normalizer
+                )
+            ),
+        )
     if kind == "response.failed":
-        return (ResponseFailedEvent(response=_response(native.response, request)),)
+        return (
+            ResponseFailedEvent(
+                response=_response(
+                    native.response, prompt, item_normalizer=item_normalizer
+                )
+            ),
+        )
     if kind == "error":
         return (
             ErrorEvent(
@@ -287,7 +347,7 @@ def _project(
             ),
         )
     if kind == "response.output_item.added":
-        item = _item(native.item)
+        item = _item(native.item, item_normalizer=item_normalizer)
         return (
             (
                 ResponseOutputItemAddedEvent(
@@ -298,7 +358,7 @@ def _project(
             else ()
         )
     if kind == "response.output_item.done":
-        item = _item(native.item)
+        item = _item(native.item, item_normalizer=item_normalizer)
         return (
             (ResponseOutputItemDoneEvent(output_index=native.output_index, item=item),)
             if item is not None
@@ -448,15 +508,16 @@ def _project(
                 arguments=native.arguments or "",
             ),
         )
-    # Hosted-tool and audio lifecycles BoThesis never declares.
+    # Hosted-tool and audio lifecycles Enterprise Agent never declares.
     return ()
 
 
 def _response(
     native: NativeResponse,
-    request: ResponseRequest,
+    prompt: Prompt,
     *,
     status: ResponseStatus | None = None,
+    item_normalizer: Callable[[Any], Item | None] | None = None,
 ) -> Response:
     return Response(
         id=native.id,
@@ -464,9 +525,13 @@ def _response(
         created_at=int(native.created_at),
         completed_at=_optional_int(getattr(native, "completed_at", None)),
         model=native.model,
-        previous_response_id=request.previous_response_id,
+        previous_response_id=prompt.previous_response_id,
         output=tuple(
-            item for item in (_item(entry) for entry in native.output) if item is not None
+            item
+            for item in (
+                _item(entry, item_normalizer=item_normalizer) for entry in native.output
+            )
+            if item is not None
         ),
         usage=_usage(native),
         error=_error(native),
@@ -515,9 +580,17 @@ def _usage(native: NativeResponse) -> ResponseUsage | None:
     )
 
 
-def _item(native: Any) -> Item | None:
+def _item(
+    native: Any,
+    *,
+    item_normalizer: Callable[[Any], Item | None] | None = None,
+) -> Item | None:
     """Map one native output item, discriminated by ``type`` as specified."""
 
+    if item_normalizer is not None:
+        normalized = item_normalizer(native)
+        if normalized is not None:
+            return normalized
     kind = getattr(native, "type", None)
     if kind == "message":
         return MessageItem(
@@ -564,7 +637,7 @@ def _item(native: Any) -> Item | None:
             call_id=payload.get("call_id", ""),
             output=payload.get("output", ""),
         )
-    # A hosted-tool item BoThesis does not model is preserved verbatim so it can
+    # A hosted-tool item Enterprise Agent does not model is preserved verbatim so it can
     # be replayed to the provider that produced it.
     return ExtensionItem(**payload)
 
@@ -601,4 +674,4 @@ def _dump(native: Any) -> dict[str, Any] | None:
     return dict(native) if isinstance(native, dict) else None
 
 
-__all__ = ["ResponsesStream", "render_input"]
+__all__ = ["ResponsesStream", "render_input", "render_request"]

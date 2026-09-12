@@ -1,4 +1,4 @@
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getApiConfiguration, requestIdentityHeaders } from "@/lib/api/config";
 import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type {
   AgentHistoryMessage,
@@ -11,7 +11,7 @@ const uploadIdempotencyKeys = new WeakMap<File, string>();
 export class ChatConfigurationError extends Error {
   constructor() {
     super(
-      "Chat is not configured. Set NEXT_PUBLIC_BOTHESIS_API_URL, NEXT_PUBLIC_BOTHESIS_TENANT_ID, and NEXT_PUBLIC_BOTHESIS_USER_ID."
+      "Chat is unavailable. Sign in, or configure the explicit local development identity."
     );
   }
 }
@@ -21,28 +21,28 @@ export async function streamAgentResponse(
   options: {
     conversationId?: string | null;
     history: AgentHistoryMessage[];
-    documentIds?: string[];
+    attachmentIds?: string[];
+    collectionItemIds?: string[];
     signal: AbortSignal;
     onEvent: (event: ResponseStreamEvent) => void;
   }
 ): Promise<void> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
 
   const response = await fetch(`${configuration.apiUrl}/api/v1/agent/chat`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...developmentIdentityHeaders(configuration),
+      ...requestIdentityHeaders(configuration),
     },
     signal: options.signal,
     body: JSON.stringify({
       message,
       conversation_id: options.conversationId ?? null,
       history: options.history,
-      document_ids: options.documentIds ?? [],
-      knowledge_mode: "auto",
-      collection_item_ids: [],
+      attachment_ids: options.attachmentIds ?? [],
+      collection_item_ids: options.collectionItemIds ?? [],
     }),
   });
   if (!response.ok || !response.body) {
@@ -108,10 +108,10 @@ export async function uploadConversationDocument(
     onProgress?: (status: "starting" | "uploading" | "validating") => void;
   },
 ): Promise<ConversationDocument> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   options.onProgress?.("starting");
-  const identityHeaders = developmentIdentityHeaders(configuration);
+  const identityHeaders = requestIdentityHeaders(configuration);
   const startResponse = await fetch(`${configuration.apiUrl}/api/v1/documents/uploads`, {
     method: "POST",
     headers: {
@@ -161,24 +161,18 @@ export async function uploadConversationDocument(
 }
 
 export async function releaseConversationDocument(documentId: string): Promise<void> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(
     `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(documentId)}`,
     {
       method: "DELETE",
-      headers: developmentIdentityHeaders(configuration),
+      headers: requestIdentityHeaders(configuration),
     },
   );
   if (!response.ok && response.status !== 404) {
     throw await responseError(response, "Could not remove the document.");
   }
-}
-
-export interface ArtifactExport {
-  file_name: string;
-  size_bytes: number;
-  download_url: string | null;
 }
 
 export interface ArtifactRevision {
@@ -187,7 +181,6 @@ export interface ArtifactRevision {
   size_bytes: number;
   created_at: string | null;
   download_url: string | null;
-  exports: Record<string, ArtifactExport>;
 }
 
 export interface ArtifactDetail {
@@ -203,7 +196,6 @@ export interface ArtifactDetail {
   created_at: string | null;
   updated_at: string | null;
   download_url: string | null;
-  exports: Record<string, ArtifactExport>;
   revisions: ArtifactRevision[];
 }
 
@@ -256,21 +248,6 @@ export async function getArtifactContent(
   );
 }
 
-export async function exportArtifact(
-  artifactId: string,
-  format: "pdf" = "pdf",
-): Promise<ArtifactDetail> {
-  return artifactRequest<ArtifactDetail>(
-    `/api/v1/artifacts/${encodeURIComponent(artifactId)}/export`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ format }),
-    },
-    "Could not export the document.",
-  );
-}
-
 /**
  * The Collections the caller may publish an artifact into.
  *
@@ -307,12 +284,12 @@ async function artifactRequest<T>(
   init: RequestInit,
   fallback: string,
 ): Promise<T> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(`${configuration.apiUrl}${path}`, {
     ...init,
     cache: "no-store",
-    headers: { ...(init.headers ?? {}), ...developmentIdentityHeaders(configuration) },
+    headers: { ...(init.headers ?? {}), ...requestIdentityHeaders(configuration) },
   });
   if (!response.ok) throw await responseError(response, fallback);
   return await response.json() as T;
@@ -329,16 +306,6 @@ async function uploadToTarget(
     body: file,
     signal,
   });
-}
-
-function developmentIdentityHeaders(configuration: {
-  userId: string;
-  tenantId: string;
-}): Record<string, string> {
-  return {
-    "X-Bothesis-User-Id": configuration.userId,
-    "X-Bothesis-Tenant-Id": configuration.tenantId,
-  };
 }
 
 function uploadIdempotencyKey(file: File): string {

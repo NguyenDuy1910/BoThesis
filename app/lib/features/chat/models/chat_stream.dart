@@ -29,6 +29,20 @@ abstract final class ChatStreamReducer {
 
     final payload = event.payload;
     switch (event.type) {
+      case 'tool_started':
+        turn.modelPending = false;
+        _upsertRuntimeActivity(turn, payload, state: 'active');
+      case 'tool_progress':
+        turn.modelPending = false;
+        _upsertRuntimeActivity(turn, payload, progress: payload['data']);
+      case 'tool_completed':
+        turn.modelPending = true;
+        _upsertRuntimeActivity(
+          turn,
+          payload,
+          state: payload['status'] as String? ?? 'failed',
+          resultCount: payload['result_count'] as int?,
+        );
       case 'response.created':
       case 'response.queued':
       case 'response.in_progress':
@@ -39,9 +53,11 @@ abstract final class ChatStreamReducer {
         turn.status = 'streaming';
         turn.error = null;
       case 'response.output_item.added':
-        _upsertItem(turn, payload, done: false);
+        final item = _upsertItem(turn, payload, done: false);
+        _clearPendingForMessage(turn, item);
       case 'response.output_item.done':
-        _upsertItem(turn, payload, done: true);
+        final item = _upsertItem(turn, payload, done: true);
+        _clearPendingForMessage(turn, item);
       case 'response.content_part.added':
       case 'response.content_part.done':
         final part = payload['part'];
@@ -54,10 +70,13 @@ abstract final class ChatStreamReducer {
         }
       case 'response.output_text.delta':
         final part = _contentPart(turn, payload, type: 'output_text');
-        part.text += payload['delta'] as String? ?? '';
+        final delta = payload['delta'] as String? ?? '';
+        part.text += delta;
+        if (delta.trim().isNotEmpty) turn.modelPending = false;
       case 'response.output_text.done':
         final part = _contentPart(turn, payload, type: 'output_text');
         part.text = payload['text'] as String? ?? '';
+        if (part.text.trim().isNotEmpty) turn.modelPending = false;
       case 'response.output_text.annotation.added':
         final annotation = payload['annotation'];
         if (annotation is Map) {
@@ -116,10 +135,12 @@ abstract final class ChatStreamReducer {
         if (responsePayload == null) return;
         _reconcileResponse(turn, responsePayload);
         turn.status = 'failed';
+        turn.modelPending = false;
         turn.error = _responseFailure(responsePayload);
       case 'error':
         final error = payload['error'];
         turn.status = 'failed';
+        turn.modelPending = false;
         turn.error = error is Map
             ? error['message'] as String? ??
                   'The response could not be completed.'
@@ -163,20 +184,55 @@ abstract final class ChatStreamReducer {
     return response;
   }
 
-  static void _upsertItem(
+  static ChatOutputItem? _upsertItem(
     ChatTurnState turn,
     Map<String, dynamic> payload, {
     required bool done,
   }) {
     final incoming = payload['item'];
-    if (incoming is! Map) return;
+    if (incoming is! Map) return null;
     final response = _activeResponse(turn);
-    _mergeItem(
+    return _mergeItem(
       response,
       payload['output_index'] as int? ?? response.itemOrder.length,
       Map<String, dynamic>.from(incoming),
       done: done,
     );
+  }
+
+  static void _clearPendingForMessage(
+    ChatTurnState turn,
+    ChatOutputItem? item,
+  ) {
+    if (item?.type == 'message' && item!.messageText.trim().isNotEmpty) {
+      turn.modelPending = false;
+    }
+  }
+
+  static void _upsertRuntimeActivity(
+    ChatTurnState turn,
+    Map<String, dynamic> payload, {
+    String? state,
+    int? resultCount,
+    Object? progress,
+  }) {
+    final callId = payload['call_id'] as String?;
+    if (callId == null || callId.isEmpty) return;
+    final activity = turn.runtimeActivities
+        .where((activity) => activity.callId == callId)
+        .firstOrNull;
+    final value =
+        activity ??
+        RuntimeActivity(
+          callId: callId,
+          toolName: payload['tool_name'] as String? ?? 'tool',
+          state: state ?? 'active',
+        );
+    value.toolName = payload['tool_name'] as String? ?? value.toolName;
+    if (state != null) value.state = state;
+    if (resultCount != null) value.resultCount = resultCount;
+    if (progress is Map) value.progress = Map<String, dynamic>.from(progress);
+    if (activity == null) turn.runtimeActivities.add(value);
   }
 
   static ChatOutputItem _mergeItem(

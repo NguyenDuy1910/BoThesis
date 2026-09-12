@@ -1,6 +1,7 @@
 "use client";
 
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getApiConfiguration, requestIdentityHeaders } from "@/lib/api/config";
+import { appBrand } from "@/lib/brand";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export class AdminApiError extends Error {
@@ -17,10 +18,10 @@ export async function adminRequest<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) {
     throw new AdminApiError(
-      "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
+      `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
     );
   }
   let response: Response;
@@ -33,8 +34,7 @@ export async function adminRequest<T>(
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
-          "X-Bothesis-Tenant-Id": configuration.tenantId,
-          "X-Bothesis-User-Id": configuration.userId,
+          ...requestIdentityHeaders(configuration),
           ...init.headers,
         },
       },
@@ -72,7 +72,7 @@ export function queryString(values: Record<string, string | number | null | unde
  * next to the request boundary gives every admin surface the same cancellation
  * and retry behaviour without duplicating fetch effects.
  */
-export function useAdminQuery<T>(path: string) {
+export function useAdminQuery<T>(path: string | null) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -82,6 +82,12 @@ export function useAdminQuery<T>(path: string) {
   const hasData = useRef(false);
 
   useEffect(() => {
+    if (!path) {
+      setLoading(false);
+      setRefreshing(false);
+      setError(null);
+      return;
+    }
     const controller = new AbortController();
     // Only the first fetch for a path is "loading". A refresh keeps the
     // current rows on screen: swapping them for a skeleton would unmount
@@ -121,10 +127,10 @@ export function uploadDatasourceFile<T>(
   file: File,
   options: { onProgress?: (percent: number) => void; signal?: AbortSignal } = {},
 ): Promise<T> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) {
     return Promise.reject(new AdminApiError(
-      "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
+      `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
     ));
   }
 
@@ -137,8 +143,9 @@ export function uploadDatasourceFile<T>(
     request.responseType = "json";
     request.setRequestHeader("Accept", "application/json");
     request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
-    request.setRequestHeader("X-Bothesis-Tenant-Id", configuration.tenantId);
-    request.setRequestHeader("X-Bothesis-User-Id", configuration.userId);
+    for (const [name, value] of Object.entries(requestIdentityHeaders(configuration))) {
+      request.setRequestHeader(name, value);
+    }
     request.setRequestHeader("X-Bothesis-File-Name", encodeURIComponent(file.name));
     request.upload.onprogress = (event) => {
       if (event.lengthComputable) options.onProgress?.(Math.round((event.loaded / event.total) * 100));
@@ -171,10 +178,10 @@ export function uploadCollectionFile<T>(
     onProcessing?: () => void;
   },
 ): Promise<T> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) {
     return Promise.reject(new AdminApiError(
-      "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
+      `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
     ));
   }
 
@@ -189,8 +196,9 @@ export function uploadCollectionFile<T>(
     request.responseType = "json";
     request.setRequestHeader("Accept", "application/json");
     request.setRequestHeader("Idempotency-Key", options.idempotencyKey);
-    request.setRequestHeader("X-Bothesis-Tenant-Id", configuration.tenantId);
-    request.setRequestHeader("X-Bothesis-User-Id", configuration.userId);
+    for (const [name, value] of Object.entries(requestIdentityHeaders(configuration))) {
+      request.setRequestHeader(name, value);
+    }
     request.upload.onprogress = (event) => {
       if (event.lengthComputable) {
         options.onProgress?.(Math.round((event.loaded / event.total) * 100));
@@ -198,7 +206,7 @@ export function uploadCollectionFile<T>(
     };
     request.upload.onload = () => options.onProcessing?.();
     request.onerror = () => reject(new AdminApiError(
-      "The upload could not reach the BoThesis API.",
+      `The upload could not reach the ${appBrand.productName} API.`,
     ));
     request.onload = () => {
       const payload = request.response as { detail?: unknown } | T | null;
@@ -217,10 +225,10 @@ export function uploadCollectionFile<T>(
 
 /** Retry indexing from a previously stored native upload. */
 export async function retryCollectionDocument<T>(documentId: string): Promise<T> {
-  const configuration = getBothesisChatConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) {
     throw new AdminApiError(
-      "Admin access is not configured. Set the BoThesis API, tenant, and user environment values.",
+      `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
     );
   }
   let response: Response;
@@ -232,14 +240,13 @@ export async function retryCollectionDocument<T>(documentId: string): Promise<T>
         cache: "no-store",
         headers: {
           Accept: "application/json",
-          "X-Bothesis-Tenant-Id": configuration.tenantId,
-          "X-Bothesis-User-Id": configuration.userId,
+          ...requestIdentityHeaders(configuration),
         },
       },
     );
   } catch {
     throw new AdminApiError(
-      "The indexing retry could not reach the BoThesis API.",
+      `The indexing retry could not reach the ${appBrand.productName} API.`,
     );
   }
   const payload = await response.json().catch(() => null) as { detail?: unknown } | T | null;

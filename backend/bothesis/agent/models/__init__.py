@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from bothesis.agent.protocol import FunctionCallItem
+from bothesis.agent.protocol import InputContent, ToolCall
 from bothesis.knowledge import Evidence
+
+
+if TYPE_CHECKING:
+    from bothesis.agent import ResourceRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,46 +23,8 @@ class ConversationMessage:
 
 
 @dataclass(frozen=True, slots=True)
-class ConversationDocument:
-    """Server-validated Document context available to one model run."""
-
-    id: str
-    title: str
-    content_type: str
-    mode: Literal["direct", "indexed"]
-    citation_id: str
-    content_block: Mapping[str, Any] | None = None
-    extracted_text: str | None = None
-    evidence: tuple[Evidence, ...] = ()
-    provider_annotations: tuple[Mapping[str, Any], ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationDocumentReference:
-    """A knowledge document an earlier turn of this conversation referenced.
-
-    Only the access-checked identity travels here — never content. It lets a
-    follow-up such as "fill that form for me" resolve the Document ID the
-    conversation already surfaced, without a second search; every use of the
-    id (for example ``artifact_create``) is re-checked against the caller's
-    Item ACL at execution time.
-    """
-
-    id: str
-    title: str
-    document_type: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class ConversationArtifact:
-    """A document the agent created or revised for the user.
-
-    It travels two ways. On :attr:`AgentContext.artifacts` it is the working
-    set of this conversation, with a bounded ``content`` so the model can make
-    precise edits. On :attr:`ToolOutput.artifacts` it is the revision a tool
-    just produced, without content, which the stream projects onto the answer
-    as a ``bothesis:artifact`` annotation.
-    """
+    """A durable artifact revision reference owned by ArtifactService."""
 
     id: str
     title: str
@@ -67,7 +33,6 @@ class ConversationArtifact:
     revision: int
     size_bytes: int
     updated_at: str
-    exports: tuple[str, ...] = ()
     source_document_id: str | None = None
     content: str | None = None
     content_truncated: bool = False
@@ -76,7 +41,6 @@ class ConversationArtifact:
     def from_payload(cls, payload: Mapping[str, Any]) -> ConversationArtifact:
         """Build the reference an artifact service payload describes."""
 
-        exports = payload.get("exports")
         source_document_id = payload.get("source_document_id")
         return cls(
             id=str(payload["id"]),
@@ -86,7 +50,6 @@ class ConversationArtifact:
             revision=int(payload["revision"]),
             size_bytes=int(payload["size_bytes"]),
             updated_at=str(payload["updated_at"]),
-            exports=tuple(sorted(exports)) if isinstance(exports, Mapping) else (),
             source_document_id=(
                 str(source_document_id) if source_document_id else None
             ),
@@ -103,7 +66,6 @@ class ConversationArtifact:
             "revision": self.revision,
             "size_bytes": self.size_bytes,
             "updated_at": self.updated_at,
-            "exports": list(self.exports),
         }
 
 
@@ -122,9 +84,7 @@ class AgentContext:
     trace_step: int | None = None
     retrieval_round: int = 0
     retrieval_query_count: int = 0
-    documents: tuple[ConversationDocument, ...] = ()
-    document_references: tuple[ConversationDocumentReference, ...] = ()
-    artifacts: tuple[ConversationArtifact, ...] = ()
+    resources: tuple["ResourceRef", ...] = ()
     model_extra_body: Mapping[str, Any] | None = None
 
 
@@ -165,78 +125,60 @@ class CitationReferences:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolContext:
-    """Authenticated runtime context supplied to one tool execution."""
-
-    agent_context: AgentContext
-    references: CitationReferences = field(default_factory=CitationReferences)
-
-
-@dataclass(frozen=True, slots=True)
-class ToolOutput:
+class ToolResult:
     """A tool result before the runtime binds it to a provider call ID."""
 
     content: str
     evidence: list[Evidence] = field(default_factory=list)
     error: str | None = None
     metadata: dict[str, str | int | float | bool] = field(default_factory=dict)
-    artifacts: tuple[ConversationArtifact, ...] = ()
+    model_content: tuple[InputContent, ...] = ()
+
+
+# Existing tool implementations and integrations import this name. New code
+# uses ToolResult, whose extra model_content channel supports explicit native
+# multimodal materialization without smuggling it through a text observation.
+ToolOutput = ToolResult
 
 
 @dataclass(frozen=True, slots=True)
 class ToolObservation:
     """One model invocation paired with the outcome observed by the runtime."""
 
-    call: FunctionCallItem
-    output: ToolOutput
+    call: ToolCall
+    result: ToolResult
     duration_ms: int
 
     @property
     def result_count(self) -> int | None:
-        value = self.output.metadata.get("result_count")
+        value = self.result.metadata.get("result_count")
         return value if isinstance(value, int) else None
 
     @property
     def status(self) -> Literal["completed", "failed", "timeout", "skipped"]:
-        if not self.output.error:
+        if not self.result.error:
             return "completed"
-        outcome = self.output.metadata.get("outcome")
+        outcome = self.result.metadata.get("outcome")
         if outcome == "timeout":
             return "timeout"
         if outcome in {"duplicate_call", "tool_call_limit"}:
             return "skipped"
         return "failed"
 
+    @property
+    def output(self) -> ToolResult:
+        """Compatibility name for callers that have not moved to result yet."""
 
-@dataclass(slots=True)
-class ConversationRun:
-    """Mutable accounting and grounded evidence for one user-initiated run."""
-
-    user_message: str
-    model_iteration: int = 0
-    tool_round: int = 0
-    tool_call_count: int = 0
-    model_duration_ms: int = 0
-    tool_duration_ms: int = 0
-    tool_context_characters: int = 0
-    answer_character_count: int = 0
-    evidence: dict[str, Evidence] = field(default_factory=dict)
-    used_evidence_ids: set[str] = field(default_factory=set)
-    executed_tool_signatures: set[str] = field(default_factory=set)
-    references: CitationReferences = field(default_factory=CitationReferences)
-    artifacts: dict[str, ConversationArtifact] = field(default_factory=dict)
+        return self.result
 
 
 __all__ = [
     "AgentContext",
     "CitationReferences",
     "ConversationArtifact",
-    "ConversationDocument",
-    "ConversationDocumentReference",
     "ConversationMessage",
-    "ConversationRun",
     "Evidence",
-    "ToolContext",
     "ToolObservation",
+    "ToolResult",
     "ToolOutput",
 ]

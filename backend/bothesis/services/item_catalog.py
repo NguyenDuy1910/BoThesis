@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from bothesis.db.models import ExternalResource, IngestionSource, Item
 from bothesis.services.audit import AuditService
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.item import ItemService
 from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   conversationAdapter,
   setConversationUser,
+  uiToCachedMessage,
 } from "../src/modules/chat/conversations.ts";
 
 class MemoryStorage {
@@ -54,4 +55,55 @@ test("conversation adapter persists custom rename metadata and confirmed deletio
     (await conversationAdapter.getConversationMessages("chat-1"))[0]?.content,
     "Retain this message",
   );
+});
+
+test("does not persist pending or runtime activity as conversation history", () => {
+  const cached = uiToCachedMessage({
+    id: "assistant-1",
+    role: "assistant",
+    parts: [],
+    turn: {
+      id: "assistant-1",
+      status: "streaming",
+      responses: {},
+      responseOrder: [],
+      modelPending: true,
+      runtimeActivities: [{
+        callId: "call-1",
+        toolName: "knowledge_search",
+        state: "active",
+        startedAt: Date.now(),
+      }],
+    },
+  });
+
+  assert.equal(cached.turn?.modelPending, undefined);
+  assert.equal(cached.turn?.runtimeActivities, undefined);
+});
+
+test("retains collection context on a persisted user turn", async () => {
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { localStorage: new MemoryStorage() },
+  });
+  setConversationUser("collection-context-test");
+
+  await conversationAdapter.createConversation("Policy question", "chat-collections");
+  await conversationAdapter.saveConversationMessages("chat-collections", [{
+    id: "message-collection",
+    role: "user",
+    content: "What changed in the policy?",
+    parts: [
+      { type: "text", text: "What changed in the policy?", state: "done" },
+      {
+        type: "data-collection",
+        id: "collection-policy",
+        data: { id: "collection-policy", title: "Policy workspace" },
+      },
+    ],
+    createdAt: Date.now(),
+  }]);
+
+  const restored = await conversationAdapter.getConversationMessages("chat-collections");
+  assert.equal(restored[0]?.parts[1]?.type, "data-collection");
 });

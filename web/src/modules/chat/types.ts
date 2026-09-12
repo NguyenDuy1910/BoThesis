@@ -17,6 +17,12 @@ export interface ConversationDocument {
   status: "available" | "failed";
 }
 
+/** A Collection explicitly attached to one user turn as retrieval context. */
+export interface ConversationCollection {
+  id: string;
+  title: string;
+}
+
 /** The OpenResponses item state machine. */
 export type OutputItemStatus = "in_progress" | "completed" | "incomplete";
 
@@ -73,17 +79,18 @@ export interface CitationSource {
   url?: string | null;
 }
 
-/** The BoThesis citation annotation type; the specification only defines url_citation. */
+/** The Enterprise Agent citation annotation type; the specification only defines url_citation. */
 export const DOCUMENT_CITATION_TYPE = "bothesis:document_citation";
 
 /**
- * The BoThesis artifact annotation type: a document the turn created or
- * revised, attached to the answer that presents it. Zero-width at the end of
- * the text, the way a provider attaches a sandbox-generated file to a message.
+ * The Enterprise Agent artifact annotation type: a file the turn produced, attached to
+ * the answer that presents it. Zero-width at the end of the text, and the
+ * replacement for the provider's own `container_file_citation`, which the
+ * backend consumes so no container or provider file id reaches a client.
  */
 export const ARTIFACT_ANNOTATION_TYPE = "bothesis:artifact";
 
-/** The description of one artifact revision; never its content. */
+/** The description of one produced file revision; never its content. */
 export interface ArtifactReference {
   id: string;
   title: string;
@@ -92,7 +99,6 @@ export interface ArtifactReference {
   revision: number;
   size_bytes: number;
   updated_at: string;
-  exports?: string[];
 }
 
 /**
@@ -175,6 +181,32 @@ export interface FunctionCallOutputItem extends OutputItemBase {
   output: string;
 }
 
+/** A command dispatched and executed by the provider's hosted environment. */
+export interface HostedExecutionCallItem extends OutputItemBase {
+  type: "hosted_execution_call";
+  call_id: string;
+  commands: string[];
+  timeout_ms?: number;
+  max_output_characters?: number;
+}
+
+export interface HostedExecutionOutput {
+  stdout: string;
+  stderr: string;
+  exit_code?: number | null;
+  timed_out: boolean;
+}
+
+/** The provider's finished hosted-shell observation used by the chat renderer. */
+export interface HostedExecutionResultItem extends OutputItemBase {
+  type: "hosted_execution_result";
+  call_id: string;
+  commands: string[];
+  output: HostedExecutionOutput[];
+  /** Safe file names reported by the workspace; never provider file IDs. */
+  workspace_files?: string[];
+}
+
 export interface ReasoningItem extends OutputItemBase {
   type: "reasoning";
   /** Raw reasoning text, when the provider exposes it. */
@@ -193,6 +225,8 @@ export type OutputItem =
   | MessageItem
   | FunctionCallItem
   | FunctionCallOutputItem
+  | HostedExecutionCallItem
+  | HostedExecutionResultItem
   | ReasoningItem
   | ExtensionOutputItem;
 
@@ -232,6 +266,19 @@ export interface TurnState {
    */
   currentResponseId?: string;
   error?: string;
+  /** Live-only state. It is intentionally omitted from saved conversations. */
+  modelPending?: boolean;
+  /** Runtime facts, never model output. They only exist during this stream. */
+  runtimeActivities?: RuntimeActivity[];
+}
+
+export interface RuntimeActivity {
+  callId: string;
+  toolName: string;
+  state: "active" | "completed" | "failed" | "timeout" | "skipped";
+  startedAt: number;
+  resultCount?: number;
+  progress?: Record<string, unknown>;
 }
 
 interface StreamEventBase {
@@ -259,6 +306,25 @@ interface SummaryEventBase extends StreamEventBase {
  * one agent turn produces.
  */
 export type ResponseStreamEvent =
+  | (StreamEventBase & {
+      type: "tool_started";
+      call_id: string;
+      tool_name: string;
+    })
+  | (StreamEventBase & {
+      type: "tool_progress";
+      call_id: string;
+      tool_name: string;
+      data: Record<string, unknown>;
+    })
+  | (StreamEventBase & {
+      type: "tool_completed";
+      call_id: string;
+      tool_name: string;
+      status: "completed" | "failed" | "timeout" | "skipped";
+      result_count?: number | null;
+      duration_ms: number;
+    })
   | (StreamEventBase & {
       type:
         | "response.created"
@@ -328,7 +394,8 @@ export type ChatMessagePart =
       state: "streaming" | "done";
       annotations?: OutputTextAnnotation[];
     }
-  | { type: "data-document"; id?: string; data: ConversationDocument };
+  | { type: "data-document"; id?: string; data: ConversationDocument }
+  | { type: "data-collection"; id?: string; data: ConversationCollection };
 
 export interface ChatMessage {
   id: string;

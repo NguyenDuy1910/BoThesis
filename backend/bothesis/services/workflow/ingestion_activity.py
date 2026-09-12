@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from config import ConfluenceEnvironmentConfig
+
 from bothesis.connector import ConnectorPipeline, ConnectorPipelineConfig
 from bothesis.connector.file.file_connector import FileConnector
 from bothesis.connector.pipeline import ConnectorPipelineError, PipelineResult
@@ -51,6 +53,7 @@ class IngestionActivity:
         *,
         registry: ConnectorRegistry | None = None,
         credential_encryption_key: str | None = None,
+        confluence_environment: ConfluenceEnvironmentConfig | None = None,
         pipeline_config: ConnectorPipelineConfig | None = None,
         preview: KnowledgePreview | None = None,
     ) -> None:
@@ -59,6 +62,7 @@ class IngestionActivity:
         self._raw_storage = raw_storage
         self._registry = registry
         self._credential_encryption_key = credential_encryption_key
+        self._confluence_environment = confluence_environment
         self._pipeline_config = pipeline_config
         self._preview = preview
 
@@ -131,6 +135,7 @@ class IngestionActivity:
                 session,
                 registry=self._registry,
                 credential_encryption_key=self._credential_encryption_key,
+                confluence_environment=self._confluence_environment,
             ).runtime_for_source(source_id)
             resolved_source_id = source.id
             integration_connection_id = source.integration_connection_id

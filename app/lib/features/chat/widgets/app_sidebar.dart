@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../app/app_brand.dart';
 import '../../../app/app_config.dart';
 import '../../../app/app_theme.dart';
 import '../models/chat_models.dart';
@@ -70,7 +71,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'BoThesis',
+                              AppBrand.productName,
                               style: Theme.of(context).textTheme.labelLarge,
                             ),
                             Text(

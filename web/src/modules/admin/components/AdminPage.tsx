@@ -14,7 +14,7 @@ import { ActivityPage } from "@/modules/admin/pages/ActivityPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
 import { CollectionDetailPage } from "@/modules/admin/pages/CollectionDetailPage";
 import { CollectionsPage } from "@/modules/admin/pages/CollectionsPage";
-import { ConnectorsPage } from "@/modules/admin/pages/ConnectorsPage";
+import { AppsPage } from "@/modules/admin/pages/AppsPage";
 import { DashboardPage } from "@/modules/admin/pages/DashboardPage";
 import { DocumentsPage } from "@/modules/admin/pages/DocumentsPage";
 import { SchedulesPage } from "@/modules/admin/pages/SchedulesPage";
@@ -45,7 +45,7 @@ export function AdminPage({ section: rawSection }: { section: string }) {
     case "documents":
       return <DocumentsPage />;
     case "connectors":
-      return <ConnectorsPage />;
+      return <AppsPage />;
     case "schedules":
       return <SchedulesPage />;
     case "activity":

@@ -14,7 +14,7 @@ from bothesis.services import (
     AuthContext,
     require_tenant_permission,
 )
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 
 
 class KnowledgeQueryService:

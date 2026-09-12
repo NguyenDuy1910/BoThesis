@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
 import { useToast } from "@/components/ui/Toast";
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getApiConfiguration } from "@/lib/api/config";
 import { cn } from "@/lib/cn";
 import { AdminApiError, adminRequest, uploadCollectionFile } from "@/modules/admin/api";
 import type { CollectionUploadResponse } from "@/modules/admin/collections";
@@ -51,7 +51,7 @@ const statusTone: Record<
 };
 
 function fileIdentity(file: File) {
-  return `${file.name}:${file.size}:${file.lastModified}`;
+  return `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`;
 }
 
 export function CollectionUploadDialog({
@@ -67,6 +67,7 @@ export function CollectionUploadDialog({
 }) {
   const { toast } = useToast();
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const browseRef = useRef<HTMLButtonElement | null>(null);
   const [queue, setQueue] = useState<QueuedUpload[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -159,7 +160,7 @@ export function CollectionUploadDialog({
   }
 
   async function requestAccess() {
-    const configuration = getBothesisChatConfiguration();
+    const configuration = getApiConfiguration();
     if (!configuration || requestingAccess) return;
     setRequestingAccess(true);
     try {
@@ -243,16 +244,25 @@ export function CollectionUploadDialog({
           className="h-7 w-7 text-[var(--text-muted)]"
         />
         <p className="text-[0.875rem] font-medium text-[var(--text)]">
-          Drag files here
+          Drag files or folders here
         </p>
-        <Button
-          onClick={() => inputRef.current?.click()}
-          ref={browseRef}
-          size="sm"
-          variant="secondary"
-        >
-          Choose files
-        </Button>
+        <div className="flex flex-wrap justify-center gap-2">
+          <Button
+            onClick={() => inputRef.current?.click()}
+            ref={browseRef}
+            size="sm"
+            variant="secondary"
+          >
+            Choose files
+          </Button>
+          <Button
+            onClick={() => folderInputRef.current?.click()}
+            size="sm"
+            variant="secondary"
+          >
+            Choose folder
+          </Button>
+        </div>
         <input
           accept={COLLECTION_UPLOAD_ACCEPT.join(",")}
           className="sr-only"
@@ -265,8 +275,23 @@ export function CollectionUploadDialog({
           tabIndex={-1}
           type="file"
         />
+        <input
+          accept={COLLECTION_UPLOAD_ACCEPT.join(",")}
+          className="sr-only"
+          multiple
+          onChange={(event) => {
+            if (event.target.files) addFiles(event.target.files);
+            event.target.value = "";
+          }}
+          ref={(element) => {
+            folderInputRef.current = element;
+            if (element) element.setAttribute("webkitdirectory", "");
+          }}
+          tabIndex={-1}
+          type="file"
+        />
         <p className="mt-1 text-[0.75rem] leading-4 text-[var(--text-muted)]">
-          PDF, Office, text, data and image files. Up to 100 MB each.
+          PDF, Office, text, data and image files. Up to 100 MB each; unsupported files are skipped.
         </p>
       </div>
 

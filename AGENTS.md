@@ -1,7 +1,7 @@
-# BoThesis Agent Rules
+# Enterprise Agent Rules
 
 ## Project intent
-BoThesis is an enterprise knowledge and BI assistant. It connects to trusted company sources, indexes domain knowledge, answers with grounded citations, and helps users analyze business data.
+Enterprise Agent is an enterprise knowledge and BI assistant. It connects to trusted company sources, indexes domain knowledge, answers with grounded citations, and helps users analyze business data.
 
 Primary source types:
 - Confluence
@@ -43,6 +43,22 @@ Primary source types:
 - Log operational events without leaking private content or secrets.
 
 ## Application boundaries and naming
+- Before implementing or moving any tool or feature, trace its complete current
+  path: composition root, API/service entry point, runtime invocation, domain
+  boundary, persistence/retrieval dependencies, and tests. Extend the existing
+  cohesive concept and folder when it owns the behavior; create a new folder or
+  module only when a distinct current boundary requires it.
+- Keep model tools thin. A tool owns its provider-facing declaration, conversion
+  between `ToolInvocation` and `ToolResult`, and no more orchestration than is
+  required at that boundary. Put request-scoped orchestration shared by agent
+  tools in `bothesis.services.agent_runtime`; keep retrieval policy in
+  `bothesis.knowledge`, Item lifecycle in Item services, durable file access in
+  `bothesis.storage`, and connector-specific behavior in connector adapters.
+- Every new feature must preserve the current ownership model, package layout,
+  naming conventions, typed public contracts, permission boundaries, source
+  lineage, and citation flow. Do not introduce a parallel implementation,
+  generic catch-all service, or convenience import merely because it is faster
+  to add locally.
 - `backend/main.py` is executable bootstrap only: load local environment, configure
   process logging, and start the ASGI application. It must not define HTTP
   schemas, routers, request parsing, or business workflows.
@@ -51,6 +67,19 @@ Primary source types:
   mapping, application lifespan, and transport-specific application facades.
   API modules may depend on services; services must never import FastAPI,
   `Request`, `Response`, or API request DTOs.
+- When adding or changing an HTTP API, first identify the durable resource and
+  extend the router that owns it. Use resource-oriented REST paths: plural
+  nouns for collections, an identifier for one resource, and standard methods
+  (`GET` read, `POST` create, `PATCH` partial update, `PUT` replacement, and
+  `DELETE` lifecycle removal). Do not expose workflow verbs such as
+  `/switch-tenant`; model the resulting resource/state instead (for example,
+  `POST /api/auth/session` creates a token with a selected active tenant).
+  Use an action subpath only when the operation cannot be represented as a
+  resource or state transition, and name that action narrowly.
+- Every new API route must define boundary DTOs in `backend/api`, validate
+  input before calling a service, use the existing identity/permission
+  dependency where it protects tenant data, preserve the established API
+  prefix/version for its router, and have a focused API-level verification.
 - Parse all environment configuration at an executable/composition boundary and
   inject typed dependencies into application and service objects. Do not create
   storage clients, model transports, index clients, or workflow clients inside

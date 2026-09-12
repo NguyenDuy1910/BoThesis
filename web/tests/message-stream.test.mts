@@ -7,6 +7,7 @@ import {
   finalTurnText,
   reduceResponseStreamEvent,
 } from "../src/modules/chat/message-stream.ts";
+import { recoveryForTurn } from "../src/modules/chat/recovery.ts";
 import { DOCUMENT_CITATION_TYPE } from "../src/modules/chat/types.ts";
 import type { ChatMessage, OutputItem, TurnState } from "../src/modules/chat/types.ts";
 
@@ -220,6 +221,67 @@ test("a stream error fails the Turn", () => {
 
   assert.equal(turn.status, "failed");
   assert.equal(turn.error, "upstream down");
+});
+
+test("recovery stays local to a failed knowledge search", () => {
+  const turn = {
+    ...emptyTurnState("turn-1"),
+    status: "failed" as const,
+    error: "Knowledge provider timed out",
+    runtimeActivities: [{
+      callId: "search-1",
+      toolName: "knowledge_search",
+      state: "timeout" as const,
+      startedAt: 1,
+    }],
+  };
+
+  assert.deepEqual(recoveryForTurn(turn), {
+    variant: "knowledge_unavailable",
+    title: "Company knowledge is temporarily unavailable",
+    detail: "I couldn’t reach company knowledge, so I won’t invent an enterprise answer.",
+    retryLabel: "Retry search",
+  });
+});
+
+test("a failed turn with partial output is an interrupted response, not a model-start failure", () => {
+  const turn = reduceResponseStreamEvent(emptyTurnState("turn-1"), {
+    type: "response.completed",
+    response: {
+      ...envelope("response-1"),
+      status: "completed",
+      output: [message("answer-1", "Partial answer.", "final_answer")],
+    },
+  });
+  const failed = { ...turn, status: "failed" as const, error: "Connection closed" };
+
+  assert.equal(recoveryForTurn(failed)?.variant, "stream_interrupted");
+});
+
+test("runtime activity drives pending state without becoming model content", () => {
+  let turn = emptyTurnState("turn-1");
+  assert.equal(turn.modelPending, true);
+
+  turn = reduceResponseStreamEvent(turn, {
+    type: "tool_started", call_id: "call-1", tool_name: "knowledge_search",
+  });
+  assert.equal(turn.modelPending, false);
+  assert.deepEqual(turn.runtimeActivities?.[0], {
+    callId: "call-1", toolName: "knowledge_search", state: "active", startedAt: turn.runtimeActivities?.[0]?.startedAt,
+  });
+
+  turn = reduceResponseStreamEvent(turn, {
+    type: "tool_completed", call_id: "call-1", tool_name: "knowledge_search",
+    status: "completed", result_count: 6, duration_ms: 120,
+  });
+  assert.equal(turn.modelPending, true);
+  assert.equal(turn.runtimeActivities?.[0]?.resultCount, 6);
+
+  turn = reduceResponseStreamEvent(turn, {
+    type: "response.output_text.delta", item_id: "answer-1", output_index: 0,
+    content_index: 0, delta: "Here is the answer.",
+  });
+  assert.equal(turn.modelPending, false);
 });
 
 function envelope(id: string) {

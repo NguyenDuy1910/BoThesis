@@ -1,5 +1,6 @@
 import { BookOpenCheck } from "lucide-react";
 
+import { appBrand } from "@/lib/brand";
 import { cn } from "@/lib/cn";
 
 interface ProductMarkProps {
@@ -18,7 +19,7 @@ const sizeClasses = {
 export function ProductMark({
   className,
   decorative = false,
-  label = "BoThesis",
+  label = appBrand.productName,
   size = "md",
 }: ProductMarkProps) {
   return (

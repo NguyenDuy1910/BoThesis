@@ -1,17 +1,17 @@
 ---
 sidebar_position: 3
-title: "BoThesis Agent Architecture"
+title: "Enterprise Agent Architecture"
 description: "OpenResponses as the canonical language of the agent: items, events, reducer, provider adapters, conversation loop, tools, grounding"
 ---
 
-# BoThesis Agent Architecture
+# Enterprise Agent Architecture
 
-This document is implementation context for the BoThesis conversational agent.
+This document is implementation context for the Enterprise Agent conversational agent.
 Keep it aligned with the code when changing agent behavior.
 
 ## Purpose and boundaries
 
-BoThesis is an enterprise knowledge and analytics assistant. The agent answers
+Enterprise Agent is an enterprise knowledge and analytics assistant. The agent answers
 from the current conversation when sufficient, retrieves enterprise knowledge
 only when needed, preserves source lineage for citations, and enforces the
 authenticated tenant and reader scope before evidence reaches the model.
@@ -26,7 +26,7 @@ The agent speaks [Open Responses](https://www.openresponses.org) (version
 `2026-04-24`), an open, vendor-neutral specification for LLM APIs. It is the
 canonical language of the agent, not one of several dialects:
 
-- there is no BoThesis event model, and no translation step into or out of one;
+- there is no Enterprise Agent event model, and no translation step into or out of one;
 - a provider's native protocol exists only inside its transport adapter;
 - anything above the transport layer works with the same canonical models.
 
@@ -48,7 +48,7 @@ OpenAI  POST /responses          OpenRouter  POST /responses
                        │
              reducer.py (Response state)
                        │
-             conversation_loop.py
+             turn.py
 ```
 
 Only one function in the process resolves a provider,
@@ -61,17 +61,15 @@ and no per-provider stream reconstruction.
 | --- | --- |
 | `protocol/` | The OpenResponses data contracts and nothing else: content parts, items, request/response envelopes, tools, and the streaming event union. Immutable Pydantic models that reject unknown fields. Never imports a provider SDK. |
 | `transports/openai.py`, `transports/openrouter.py` | Thin async boundaries over each provider's native API — base URL, credentials, attribution headers, and whatever extra APIs that provider offers. No normalization. Both expose the same `stream_response()`. |
-| `transports/responses_adapter.py` | The one adapter: renders a `ResponseRequest` into the native `/responses` request and projects native events onto canonical events, one native event at a time. |
+| `transports/responses_adapter.py` | The one adapter: renders a `Prompt` into the native `/responses` request and projects native events onto canonical events, one native event at a time. |
 | `reducer.py` | `ResponseReducer` — the only component that reconstructs a `Response` from its event stream. |
 | `citation_stream.py` | `CitationProjection` — rewrites the canonical stream so internal citation markers become annotations. Canonical in, canonical out. |
-| `artifact_stream.py` | `ArtifactProjection` — attaches the documents a turn produced to the answer text as annotations. Canonical in, canonical out. |
 | `sampling.py` | `sample()` — retries one sampling request when the transport failed with nothing emitted. |
-| `conversation_loop.py` | `ConversationLoop` — orchestrates one user turn as a chain of responses. |
-| `tools/` | Tool declarations, registry, execution policy, validation, limits, and evidence projection. |
-| `citation.py` | Streaming-safe removal of `[[cite:ID]]` markers from model text. |
-| `conversation_compression.py` | Bounds history and builds the initial canonical items and instructions. Makes no routing decisions. |
+| `session.py`, `turn.py` | `Session` captures one `StepContext` per sample; `run_turn` orchestrates the resulting chain of responses. |
+| `tools/` | `ToolExecutor`, `ToolRegistry`, `ToolRouter`, and `ToolOrchestrator`. |
+| `context_manager.py` | `ContextManager` bounds history, stores canonical model items, and builds initial instructions. |
 | `agent.py` | Public streaming façade. Validates the request, wraps the transport in its adapter, assigns stream-wide `sequence_number`s, and converts unhandled failures into `response.failed`. |
-| `prompts/` | File-backed prompt roles: `agent_base`, `capability_base`, `conversation_compression`. |
+| `prompts/` | File-backed agent and retrieval prompt roles. |
 
 ## One user turn
 
@@ -84,11 +82,11 @@ call a declared tool.
 user message + AgentContext
           │
           ▼
-ConversationMemory.prepare()  →  PreparedConversation(items, instructions)
+ContextManager.start_turn()  →  canonical initial items and instructions
           │
           ├──────────────────────────────────────────────────────────┐
           ▼                                                          │
-ResponseRequest(input=items, previous_response_id=…)                  │
+Session.capture_step_context() → Prompt(input=items, previous_response_id=…)
           │                                                          │
           ▼                                                          │
 sample()  →  adapter  →  CitationProjection  →  ResponseReducer       │
@@ -99,7 +97,7 @@ Response (settled by response.completed / .incomplete / .failed)      │
     ┌─────┴──────────────┐                                           │
     │ no function calls  │ function calls                            │
     ▼                    ▼                                           │
-final_answer_text   ToolExecutor.execute()                            │
+final_answer_text   ToolOrchestrator → ToolExecutor.handle()          │
                          │ validate → execute → evidence             │
                          ▼                                           │
                   FunctionCallOutputItem(s) ────────────────────────┘
@@ -111,18 +109,17 @@ followed by the tool observations. Each response records the previous one in
 
 ### Turn state and limits
 
-`ConversationRun` is mutable state for exactly one turn: model iterations, tool
+`TurnContext` is mutable state for exactly one turn: model iterations, tool
 rounds, tool-call count, durations, discovered evidence, used evidence IDs, and
-executed tool signatures.
-
-`AgentConfig` provides circuit breakers only — model turns, tool rounds, total
+executed tool signatures. `SessionConfiguration` provides circuit breakers only — model turns, tool rounds, total
 tool calls, tool execution time, tool-output context size, history size,
 user-message size, and provider retry count. They are safety limits, not a
 prescribed workflow.
 
 ### Sampling requests and retries
 
-A `ResponseRequest` is built once per sampling request and is immutable, so a
+A `Prompt` is built once per sampling request from a newly captured
+`StepContext` and is immutable, so a
 retry replays exactly the same request. `sample()` retries only while nothing
 has reached the caller: once any canonical event has been forwarded, the client
 has observed part of that response and the request is no longer retryable.
@@ -221,7 +218,7 @@ async for provider_event in stream:
 ```
 
 Nothing accumulates deltas until the provider finishes. The one bounded
-exception is a citation marker split across deltas: `CitationRenderer` holds
+exception is a citation marker split across deltas: `CitationProjection` holds
 back only the partial-marker suffix, never the text before it.
 
 Both providers emit per-item lifecycle events natively, so nothing has to be
@@ -231,23 +228,19 @@ inferred or deferred: the adapter forwards each `output_item.added`,
 ## Custom extensions
 
 The specification requires implementer-specific types to be slug-prefixed and
-permits optional fields on standard types when documented. BoThesis adds exactly
+permits optional fields on standard types when documented. Enterprise Agent adds exactly
 two things, both annotations, both because OpenResponses does not cover the
 requirement:
 
 | Extension | Why |
 | --- | --- |
 | `bothesis:document_citation` annotation | The specification defines only `url_citation`, which cannot carry enterprise document lineage (document id, page, section, access source). |
-| `bothesis:artifact` annotation | A document the turn created or revised is attached to the answer that presents it — the same shape as a provider's `container_file_citation` for a sandbox-generated file. It is zero-width at the end of the text and carries the artifact's description (id, title, revision, size, exports), never its content. |
-
-That is the entire extension surface. There is no artifact event: the client
-learns about a document from the answer's annotations, exactly as it learns
-about citations. A reasoning item, in particular, needs no BoThesis-specific
-field: `summary` plus `encrypted_content` are what every provider uses to
-continue a reasoning session.
+That is the entire extension surface. A reasoning item, in particular, needs no
+Enterprise Agent-specific field: `summary` plus `encrypted_content` are what every
+provider uses to continue a reasoning session.
 
 Before adding anything else, check whether an existing item, annotation, content
-part, `ExtensionItem`, `ExtensionTool`, or `ResponseRequest.provider_options`
+part, `ExtensionItem`, `ExtensionTool`, or `Prompt.provider_options`
 already covers it.
 
 ## Citations and enterprise grounding
@@ -271,11 +264,11 @@ citation.
 
 ## Tools
 
-`ToolRegistry` is the explicit allowlist. A `Tool` owns its `ToolDefinition`
+`ToolRegistry` holds executable tools. A `ToolExecutor` owns its `ToolSpec`
 (name, description, JSON Schema, activity label/category) and its own
-`execute(arguments, ToolContext)`.
+`handle(ToolInvocation)`.
 
-`ToolExecutor` owns generic runtime policy:
+`ToolOrchestrator` owns generic runtime policy:
 
 1. parse function-call JSON and validate it against the registered schema;
 2. reject unknown tools, invalid arguments, duplicate exact calls, or calls
@@ -286,7 +279,7 @@ citation.
 5. register evidence and create bounded `FunctionCallOutputItem`s for the next
    sampling request.
 
-`ToolContext` carries `AgentContext`; tools must use the authenticated tenant,
+`ToolInvocation` carries the originating `StepContext`, whose environment carries `AgentContext`; tools must use the authenticated tenant,
 roles, reader IDs, and admin state, never a model-supplied identity.
 
 `KnowledgeSearch` is the standard retrieval example. It requires a
@@ -294,102 +287,34 @@ roles, reader IDs, and admin state, never a model-supplied identity.
 document and source lineage, bounds content, and returns evidence IDs the
 citation projection can resolve.
 
-### Documents and artifacts
-
-Everything ingested into BoThesis is knowledge: a template or form is an
-ordinary indexed document with useful metadata (`document_type`, tags), not a
-separate retrieval domain. `knowledge_search` is the only search tool, and it
-is the entry point for both grounded answers and document sources — each
-result carries a `Document ID` (the canonical Item id) alongside the compact
-citation reference. Three tools then let the model work on documents without
-ever running a command:
-
-| Tool | What it does |
-| --- | --- |
-| `artifact_create` | Starts a document from a source Document ID (an editable copy of that document) or from Markdown the model wrote. |
-| `artifact_edit` | Revises an existing document with exact find/replace edits, or a full rewrite, as a new revision of the same artifact. |
-| `artifact_export` | Renders the current revision to PDF, attached to that revision. |
-
-`artifact_create`'s `source_document_id` is exactly the `Document ID` a
-`knowledge_search` result exposed — there is no second document identity.
-Creating an artifact never modifies the source; it copies the source's bytes
-into a new Item under the caller's private artifact Collection. The tools call
-`ArtifactService`, which re-resolves the authenticated caller from the
-identifiers in `AgentContext`, applies the same Item ACL that gated the
-original `knowledge_search`/`require_item_access` read, and hands every file
-operation to a `SandboxExecutor`. The Docker executor runs a fixed runner
-(`write`, `replace`, `import`, `export_pdf`) in a disposable, non-root,
-network-less, read-only container; only its output is persisted, as an
-`ArtifactRevision` object in storage plus a row in PostgreSQL.
-
-Document-format knowledge lives in sandbox **skills**, not in the runner, the
-tools, or `ArtifactService`: `bothesis/sandbox/skills/` holds one standalone
-module per format capability (`docx.py` converts Word sources to Markdown,
-`pdf.py` renders Markdown exports), shipped into `/workspace/context/skills/`
-alongside the runner. The runner selects a skill deterministically from the
-file format of the operation — the model never chooses code, a skill, or a
-command. Supporting a new format (for example xlsx or pptx) is additive: a new
-skill module, a runner table entry, and the libraries in the sandbox image.
-
-A produced revision travels back as `ToolOutput.artifacts`. `ConversationRun`
-keeps the newest revision per artifact, and `ArtifactProjection` annotates the
-answer with it. On the next turn `ChatService` loads the conversation's working
-documents into `AgentContext.artifacts`, and `ConversationMemory` supplies their
-bounded content so a follow-up such as "change the date" becomes one precise
-`artifact_edit` on the same artifact.
-
-Referenced knowledge documents persist the same way. `ConversationService`
-records the documents an answer cited as durable `MessageItem` links, and on
-the next turn `ConversationService.referenced_documents` loads those identities
-back — ACL-checked again at read time — into
-`AgentContext.document_references`, which `ConversationMemory` renders as a
-compact system block (Document ID, title, type; never content). So a follow-up
-such as "fill that form for me" resolves the Document ID the conversation
-already surfaced and goes straight to `artifact_create`, without a second
-search. The whole flow is conversation-native:
-
-```text
-find knowledge (knowledge_search)
-  → discuss it (citations persist MessageItem references)
-    → user asks to act on "that document"
-      → resolve its Document ID from conversation document references
-        → artifact_create(source_document_id) — ACL re-checked
-          → sandbox materializes and transforms it via the format's skill
-            → ArtifactRevision persisted → artifact annotation on the answer
-```
-
 ## Prompt roles
 
 | Prompt | Runtime role |
 | --- | --- |
-| `agent_base.md` | Primary conversational-agent instruction used by `ConversationMemory.prepare()`. Dynamic retrieval/tool/grounding guidance without prescribed stages. |
-| `capability_base.md` | Base instruction for an isolated structured capability, if such an operation is introduced. Not the conversational agent prompt. |
-| `conversation_compression.md` | Instruction for a specialized conversation-compression operation. |
+| `agent_base.md` | Primary conversational-agent instruction used by `ContextManager.start_turn()`. |
 
-`template_render.py` only loads files, renders declared variables, and rejects
-missing or unexpected values. It must contain no routing, retrieval, fallback,
-or workflow logic.
+Prompt rendering is centralized in `bothesis.render_prompt()`.
 
 ## Change rules
 
 - Start from the specification. If OpenResponses represents a concept, use its
   representation; do not reshape it around an internal convenience.
 - Keep `protocol/` free of behavior and free of provider imports.
-- Add provider knowledge only inside a transport adapter. The conversation loop
+- Add provider knowledge only inside a transport adapter. The turn runtime
   must never branch on a provider.
 - Reconstruct response state only in `ResponseReducer`.
 - Preserve canonical items across sampling requests, including reasoning
   continuation data and `phase`.
-- Preserve `AgentContext` and `ToolContext` permission boundaries. Never let
+- Preserve `AgentContext` and `ToolInvocation` permission boundaries. Never let
   model-provided arguments choose tenant or user identity.
 - Keep stream payloads safe to serialize: no raw documents, secrets, or
   unfiltered tool arguments.
 - Emit evidence only after access checks, retaining enough lineage for
   citations.
 - Keep tools isolated adapters. Generic execution policy belongs in
-  `ToolExecutor`.
+  `ToolOrchestrator`.
 - Tests live under `tests/`, mirroring the package: `test_protocol.py`,
-  `test_reducer.py`, `test_responses_adapter.py`, `test_conversation_loop.py`.
+  `test_reducer.py`, `test_responses_adapter.py`, `test_turn_runtime.py`.
   `tests/native_responses.py` builds native provider events, and the adapter and
   loop suites run the same scripts for every provider.
 
@@ -397,7 +322,7 @@ or workflow logic.
 
 1. One `Agent.run` is one user turn; a turn may contain many sampling requests,
    chained by `previous_response_id`.
-2. One `ResponseRequest` is immutable for one sampling request and all of its
+2. One `Prompt` is immutable for one sampling request and all of its
    retries.
 3. A function call and its output are both canonical history items, correlated
    by `call_id`.

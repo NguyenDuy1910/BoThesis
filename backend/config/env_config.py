@@ -1,4 +1,4 @@
-"""Single source of truth for BoThesis process configuration.
+"""Single source of truth for Enterprise Agent process configuration.
 
 Every environment variable the application depends on is read here, once, and
 handed to the rest of the system as validated values. No module outside this
@@ -11,6 +11,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import Literal
 
 from bothesis.services import (
     DEFAULT_MAX_UPLOAD_BYTES,
@@ -75,6 +76,13 @@ def integer(*names: str, default: int) -> int:
     return default
 
 
+def _positive_integer(name: str, *, default: int) -> int:
+    value = integer(name, default=default)
+    if value <= 0:
+        raise RuntimeError(f"{name} must be greater than zero")
+    return value
+
+
 def optional_number(name: str) -> float | None:
     """Read one optional floating point setting."""
 
@@ -126,13 +134,30 @@ class IdentityConfig:
     """Trust settings for resolving the caller at the HTTP boundary."""
 
     allow_insecure_development_identity: bool = False
+    jwt_secret: str | None = None
+    jwt_issuer: str = "bothesis"
+    jwt_audience: str = "bothesis-api"
+    jwt_expires_in_seconds: int = 900
+    google_client_id: str | None = None
+    google_jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
 
     @classmethod
     def from_environment(cls) -> IdentityConfig:
         return cls(
             allow_insecure_development_identity=boolean(
                 "BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY"
-            )
+            ),
+            jwt_secret=optional_text("BOTHESIS_AUTH_JWT_SECRET"),
+            jwt_issuer=text("BOTHESIS_AUTH_JWT_ISSUER", "bothesis"),
+            jwt_audience=text("BOTHESIS_AUTH_JWT_AUDIENCE", "bothesis-api"),
+            jwt_expires_in_seconds=_positive_integer(
+                "BOTHESIS_AUTH_JWT_EXPIRES_IN_SECONDS", default=900
+            ),
+            google_client_id=optional_text("BOTHESIS_GOOGLE_CLIENT_ID"),
+            google_jwks_url=text(
+                "BOTHESIS_GOOGLE_JWKS_URL",
+                "https://www.googleapis.com/oauth2/v3/certs",
+            ),
         )
 
 
@@ -273,21 +298,44 @@ class ModelConfig:
     openai_base_url: str = OPENAI_DEFAULT_BASE_URL
     openai_api_key: str | None = None
     chat_model: str | None = None
+    agent_provider: Literal["openai", "openrouter"] = "openai"
     embedding_model: str | None = None
     contextualization_enabled: bool = True
     contextualization_model: str | None = None
     reranker_model: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.agent_provider not in {"openai", "openrouter"}:
+            raise ValueError("agent provider must be 'openai' or 'openrouter'")
+
     @classmethod
     def from_environment(cls) -> ModelConfig:
+        configured_provider = optional_text("BOTHESIS_AGENT_MODEL_PROVIDER")
+        openrouter_api_key = optional_text("OPENROUTER_API_KEY")
+        openrouter_model = optional_text("OPENROUTER_MODEL")
+        # A fully configured OpenRouter agent is the only provider that offers
+        # hosted shell execution. Prefer it automatically, while retaining an
+        # explicit provider setting as an intentional deployment override.
+        agent_provider = configured_provider or (
+            "openrouter" if openrouter_api_key and openrouter_model else "openai"
+        )
+        if agent_provider not in {"openai", "openrouter"}:
+            raise RuntimeError(
+                "BOTHESIS_AGENT_MODEL_PROVIDER must be 'openai' or 'openrouter'"
+            )
         return cls(
             openrouter_base_url=text(
                 "OPEN_ROUTER_BASE_URL", OPENROUTER_DEFAULT_BASE_URL
             ),
-            openrouter_api_key=optional_text("OPENROUTER_API_KEY"),
+            openrouter_api_key=openrouter_api_key,
             openai_base_url=text("OPENAI_BASE_URL", OPENAI_DEFAULT_BASE_URL),
             openai_api_key=optional_text("OPENAI_API_KEY"),
-            chat_model=optional_text("OPENAI_MODEL"),
+            chat_model=(
+                openrouter_model or optional_text("OPENAI_MODEL")
+                if agent_provider == "openrouter"
+                else optional_text("OPENAI_MODEL")
+            ),
+            agent_provider=agent_provider,
             embedding_model=optional_text("EMBEDDING_MODEL"),
             contextualization_enabled=boolean(
                 "BOTHESIS_CONTEXTUALIZATION_ENABLED", default=True
@@ -335,21 +383,27 @@ class RetrievalConfig:
 
 @dataclass(frozen=True, slots=True)
 class AgentRuntimeConfig:
-    """Turn, tool, and history budgets applied to one agent run."""
+    """Turn, tool, and history budgets applied to one agent run.
 
-    max_model_turns: int = 3
-    max_tool_rounds: int = 2
+    A file turn is several sampling requests — search the knowledge base, open
+    the source document, run the workspace, then answer — so the turn budget
+    has to leave room for the whole sequence rather than only for retrieval.
+    """
+
+    max_model_turns: int = 8
+    max_tool_rounds: int = 4
     max_tool_calls: int = 6
     max_history_messages: int = 24
     max_history_characters: int = 24_000
     recent_history_messages: int = 6
     tool_timeout_seconds: float = 30.0
+    max_resource_read_characters: int = 12_000
 
     @classmethod
     def from_environment(cls) -> AgentRuntimeConfig:
         return cls(
-            max_model_turns=integer("BOTHESIS_MAX_MODEL_TURNS", default=3),
-            max_tool_rounds=integer("BOTHESIS_MAX_TOOL_ROUNDS", default=2),
+            max_model_turns=integer("BOTHESIS_MAX_MODEL_TURNS", default=8),
+            max_tool_rounds=integer("BOTHESIS_MAX_TOOL_ROUNDS", default=4),
             max_tool_calls=integer("BOTHESIS_MAX_TOOL_CALLS", default=6),
             max_history_messages=integer("BOTHESIS_MAX_HISTORY_MESSAGES", default=24),
             max_history_characters=integer(
@@ -361,40 +415,8 @@ class AgentRuntimeConfig:
             tool_timeout_seconds=number(
                 "BOTHESIS_TOOL_TIMEOUT_SECONDS", default=30.0
             ),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class SandboxConfig:
-    """Isolation limits for the disposable Docker sandbox that edits artifacts."""
-
-    image: str = "bothesis-sandbox:local"
-    timeout_seconds: float = 30.0
-    memory_bytes: int = 256 * 1024 * 1024
-    cpu_count: float = 1.0
-    pids_limit: int = 64
-    max_output_bytes: int = 20 * 1024 * 1024
-
-    def __post_init__(self) -> None:
-        if not self.image.strip():
-            raise RuntimeError("BOTHESIS_SANDBOX_IMAGE must not be blank")
-        if self.timeout_seconds <= 0 or self.cpu_count <= 0:
-            raise RuntimeError("sandbox timeout and CPU limits must be positive")
-        if min(self.memory_bytes, self.pids_limit, self.max_output_bytes) < 1:
-            raise RuntimeError("sandbox memory, pid, and output limits must be positive")
-
-    @classmethod
-    def from_environment(cls) -> SandboxConfig:
-        return cls(
-            image=text("BOTHESIS_SANDBOX_IMAGE", "bothesis-sandbox:local"),
-            timeout_seconds=number("BOTHESIS_SANDBOX_TIMEOUT_SECONDS", default=30.0),
-            memory_bytes=integer(
-                "BOTHESIS_SANDBOX_MEMORY_BYTES", default=256 * 1024 * 1024
-            ),
-            cpu_count=number("BOTHESIS_SANDBOX_CPUS", default=1.0),
-            pids_limit=integer("BOTHESIS_SANDBOX_PIDS_LIMIT", default=64),
-            max_output_bytes=integer(
-                "BOTHESIS_SANDBOX_MAX_OUTPUT_BYTES", default=20 * 1024 * 1024
+            max_resource_read_characters=integer(
+                "BOTHESIS_MAX_RESOURCE_READ_CHARACTERS", default=12_000
             ),
         )
 
@@ -530,17 +552,46 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfluenceEnvironmentConfig:
+    """One deployment-managed Confluence account for demo and local setup."""
+
+    base_url: str | None = None
+    username: str | None = None
+    api_token: str | None = None
+    is_cloud: bool = True
+    timeout_seconds: int = 30
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.username and self.api_token)
+
+    @classmethod
+    def from_environment(cls) -> ConfluenceEnvironmentConfig:
+        return cls(
+            base_url=optional_text("BOTHESIS_CONFLUENCE_BASE_URL"),
+            username=optional_text("BOTHESIS_CONFLUENCE_USERNAME"),
+            api_token=optional_text("BOTHESIS_CONFLUENCE_API_TOKEN"),
+            is_cloud=boolean("BOTHESIS_CONFLUENCE_IS_CLOUD", default=True),
+            timeout_seconds=integer("BOTHESIS_CONFLUENCE_TIMEOUT_SECONDS", default=30),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class IntegrationConfig:
     """Secrets protecting stored connector credentials."""
 
     credential_encryption_key: str | None = None
+    confluence: ConfluenceEnvironmentConfig = field(
+        default_factory=ConfluenceEnvironmentConfig
+    )
 
     @classmethod
     def from_environment(cls) -> IntegrationConfig:
         return cls(
             credential_encryption_key=optional_text(
                 "BOTHESIS_INTEGRATION_ENCRYPTION_KEY"
-            )
+            ),
+            confluence=ConfluenceEnvironmentConfig.from_environment(),
         )
 
 
@@ -580,7 +631,6 @@ class AppConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     agent: AgentRuntimeConfig = field(default_factory=AgentRuntimeConfig)
-    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     artifact: ArtifactConfig = field(default_factory=ArtifactConfig)
     upload: UploadConfig = field(default_factory=UploadConfig)
     preview: PreviewConfig = field(default_factory=PreviewConfig)
@@ -600,7 +650,6 @@ class AppConfig:
             model=ModelConfig.from_environment(),
             retrieval=RetrievalConfig.from_environment(),
             agent=AgentRuntimeConfig.from_environment(),
-            sandbox=SandboxConfig.from_environment(),
             artifact=ArtifactConfig.from_environment(),
             upload=UploadConfig.from_environment(),
             preview=PreviewConfig.from_environment(),
@@ -626,6 +675,7 @@ def reset_config() -> None:
 __all__ = [
     "AWS_S3_PROVIDER",
     "CLOUDFLARE_R2_PROVIDER",
+    "ConfluenceEnvironmentConfig",
     "LANGFUSE_DEFAULT_BASE_URL",
     "OPENAI_DEFAULT_BASE_URL",
     "OPENROUTER_DEFAULT_BASE_URL",
@@ -639,7 +689,6 @@ __all__ = [
     "ObservabilityConfig",
     "PreviewConfig",
     "RetrievalConfig",
-    "SandboxConfig",
     "ServerConfig",
     "UploadConfig",
     "VectorIndexConfig",

@@ -13,7 +13,6 @@ LOCAL_TEMPORAL_TARGET ?= 127.0.0.1:7233
 LOCAL_TEMPORAL_UI ?= http://127.0.0.1:8080
 QDRANT_COLLECTION ?= bothesis
 QDRANT_VECTOR_SIZE ?= 1536
-SANDBOX_IMAGE ?= bothesis-sandbox:local
 
 DEV_TENANT_ID ?= 00000000-0000-0000-0000-000000000001
 DEV_USER_ID ?= 00000000-0000-0000-0000-000000000002
@@ -21,16 +20,16 @@ DEV_ROLE_ID ?= 00000000-0000-0000-0000-000000000003
 DEV_TENANT_CODE ?= local
 DEV_USER_EMAIL ?= local-admin@bothesis.dev
 
-.PHONY: help init reset-all config services _temporal-reset db-init db-seed db-reset qdrant-init sandbox-image status
+.PHONY: help init reset-all config services _temporal-reset db-init db-seed db-reset qdrant-init status
 
 help: ## Show available local-development commands.
-	@echo "BoThesis local development"
+	@echo "Enterprise Agent local development"
 	@echo
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-14s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-init: reset-all sandbox-image ## Initialize the complete local BoThesis environment.
+init: reset-all ## Initialize the complete local Enterprise Agent environment.
 	@echo
-	@echo "BoThesis local environment is ready."
+	@echo "Enterprise Agent local environment is ready."
 	@echo "  API:       http://127.0.0.1:8000"
 	@echo "  Qdrant:    $(LOCAL_QDRANT_URL)/dashboard"
 	@echo "  MinIO:     http://127.0.0.1:9001"
@@ -129,7 +128,7 @@ db-init: services ## Apply the current database design from the ORM model.
 
 db-seed: services ## Create or refresh the deterministic local admin identity.
 	@set -euo pipefail
-	@tenant_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO tenants (id, code, name, status, settings) VALUES ('$(DEV_TENANT_ID)', '$(DEV_TENANT_CODE)', 'BoThesis Local', 'active', '{}'::jsonb) ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, status = 'active', updated_at = now() RETURNING id" )"; \
+	@tenant_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO tenants (id, code, name, status, settings) VALUES ('$(DEV_TENANT_ID)', '$(DEV_TENANT_CODE)', 'Enterprise Agent Local', 'active', '{}'::jsonb) ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, status = 'active', updated_at = now() RETURNING id" )"; \
 	user_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO users (id, email, display_name, status, preferences) VALUES ('$(DEV_USER_ID)', '$(DEV_USER_EMAIL)', 'Local Administrator', 'active', '{}'::jsonb) ON CONFLICT (email) DO UPDATE SET display_name = EXCLUDED.display_name, status = 'active', updated_at = now() RETURNING id" )"; \
 	role_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO roles (id, tenant_id, code, display_name, permission_codes, status) VALUES ('$(DEV_ROLE_ID)', '$$tenant_id', 'admin', 'Administrator', ARRAY['admin'], 'active') ON CONFLICT (tenant_id, code) DO UPDATE SET display_name = EXCLUDED.display_name, permission_codes = EXCLUDED.permission_codes, status = 'active', updated_at = now() RETURNING id" )"; \
 	$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO tenant_memberships (user_id, tenant_id, role_id, status, joined_at, deleted_at) VALUES ('$$user_id', '$$tenant_id', '$$role_id', 'active', now(), NULL) ON CONFLICT (user_id, tenant_id) DO UPDATE SET role_id = EXCLUDED.role_id, status = 'active', deleted_at = NULL" >/dev/null; \
@@ -161,11 +160,6 @@ qdrant-init: services ## Rebuild the derived contextual-hybrid Qdrant collection
 		-H 'Content-Type: application/json' \
 		-d '{"vectors":{"content":{"size":$(QDRANT_VECTOR_SIZE),"distance":"Cosine"}},"sparse_vectors":{"content_bm25":{"modifier":"idf"}}}' >/dev/null; \
 	echo "Rebuilt Qdrant collection $(QDRANT_COLLECTION) with content + content_bm25."
-
-sandbox-image: ## Build the disposable artifact sandbox image used by the API.
-	@set -euo pipefail
-	@docker build --quiet -t "$(SANDBOX_IMAGE)" deployment/sandbox >/dev/null
-	@echo "Built artifact sandbox image $(SANDBOX_IMAGE)."
 
 status: ## Show the current local dependency and application health.
 	@$(COMPOSE) ps

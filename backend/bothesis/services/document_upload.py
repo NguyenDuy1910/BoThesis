@@ -17,7 +17,7 @@ from bothesis.storage import (
     ObjectStorageError,
     StoredObject,
 )
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.item import ItemService
 from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (
@@ -92,7 +92,6 @@ class DocumentUploadService:
 
         assert item.upload is not None
         if item.upload.status == "available":
-            item = await self._index_available(item, access=access)
             return UploadStart(
                 item=item, upload=item.upload, upload_required=False, target=None
             )
@@ -213,7 +212,7 @@ class DocumentUploadService:
             )
             assert item.upload is not None
             if item.upload.status == "available":
-                return await self._index_available(item, access=access)
+                return item
             storage_key = item.storage_key
             expected_size = item.size_bytes
             expected_type = item.mime_type
@@ -250,7 +249,12 @@ class DocumentUploadService:
                     "version_id": stored.version_id,
                 },
             )
-        return await self._index_available(item, access=access)
+        # A personal upload is a conversation resource, not Knowledge Base
+        # content. Marking bytes available never parses, chunks, embeds, OCRs,
+        # summarizes, or indexes them. Explicit resource tools resolve it only
+        # if an agent needs it; collection uploads keep their separate
+        # deliberate ingestion path above.
+        return item
 
     async def retry_indexing(
         self,

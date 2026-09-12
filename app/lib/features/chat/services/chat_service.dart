@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import '../../../app/app_brand.dart';
 import '../../../app/app_config.dart';
 import '../models/chat_models.dart';
 import '../models/chat_stream.dart';
@@ -246,7 +247,7 @@ class ChatService {
   static Object _connectionError(Object error) {
     if (error is http.ClientException) {
       return ChatRequestException(
-        'Could not reach the BoThesis API at ${AppConfig.apiBaseUrl}. '
+        'Could not reach the ${AppBrand.productName} API at ${AppConfig.apiBaseUrl}. '
         'Check that the backend is running and this device is on the same network.',
       );
     }

@@ -1,4 +1,4 @@
-"""Shared provider-neutral contracts for the BoThesis application."""
+"""Shared provider-neutral contracts for the Enterprise Agent application."""
 
 from __future__ import annotations
 

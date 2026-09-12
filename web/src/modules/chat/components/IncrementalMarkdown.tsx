@@ -323,11 +323,22 @@ function MarkdownHeading3({
   return <h3 {...props}>{children}</h3>;
 }
 
+/**
+ * A link to a file inside the assistant's execution workspace.
+ *
+ * The model writes these when it names a file it produced, and the path is
+ * meaningless outside that workspace — the file itself is offered as a card
+ * under the answer. So the label is kept and the link is dropped, rather than
+ * showing a reader a path they cannot open.
+ */
+const WORKSPACE_LINK = /^(sandbox|file|attachment):/i;
+
 function MarkdownLink({
   children,
   href,
   ...props
 }: AnchorHTMLAttributes<HTMLAnchorElement> & { children?: ReactNode }) {
+  if (href && WORKSPACE_LINK.test(href)) return <>{children}</>;
   const isExternal = Boolean(href && /^https?:\/\//i.test(href));
 
   return (

@@ -1,22 +1,13 @@
 "use client";
 
 import clsx from "clsx";
-import {
-  Check,
-  ChevronRight,
-  Database,
-  FileDown,
-  FilePenLine,
-  FilePlus2,
-  LoaderCircle,
-  Search,
-  Wrench,
-} from "lucide-react";
-import { memo, useMemo } from "react";
+import { Check, ChevronRight, CircleAlert, FileCog, LoaderCircle } from "lucide-react";
+import { memo, useEffect, useMemo, useState } from "react";
 
-import { assistantTurnItems, type AssistantTurnItem } from "../assistant-turn";
+import { assistantTurnItems, groupAssistantTurnItems } from "../assistant-turn";
 import type { AnswerSource } from "../sources";
-import type { TurnState } from "../types";
+import type { RuntimeActivity, TurnState } from "../types";
+import { appBrand } from "@/lib/brand";
 import {
   CitationRenderingProvider,
   citationRenderingSources,
@@ -25,7 +16,6 @@ import {
 
 export const AssistantTurn = memo(function AssistantTurn({
   activeCitationId,
-  activityConnectorLabel,
   isStreaming,
   onOpenSource,
   onRevealingChange,
@@ -33,7 +23,6 @@ export const AssistantTurn = memo(function AssistantTurn({
   turn,
 }: {
   activeCitationId?: string;
-  activityConnectorLabel?: string;
   isStreaming: boolean;
   onOpenSource?: (source: AnswerSource) => void;
   /** Report while the turn's newest text is still easing onto screen. */
@@ -43,8 +32,9 @@ export const AssistantTurn = memo(function AssistantTurn({
   turn?: TurnState;
 }) {
   const items = assistantTurnItems(turn);
-  const lastItem = items.at(-1);
-  const showPending = isStreaming && !lastItem;
+  const renderItems = groupAssistantTurnItems(items);
+  const pending = Boolean(isStreaming && turn?.modelPending);
+  const { visible: showPending } = usePendingIndicator(pending);
   const revealingItemId = items.filter((item) => item.kind === "message").at(-1)?.id;
   const citations = useMemo(() => ({
     sources: citationRenderingSources(sources ?? []),
@@ -57,10 +47,14 @@ export const AssistantTurn = memo(function AssistantTurn({
   return (
     <CitationRenderingProvider value={citations}>
       <div className="assistant-turn">
-        {items.map((item) => {
+        {renderItems.map((item) => {
           if (item.kind === "message") {
             return (
-              <div className="assistant-content" key={item.id}>
+              <div
+                className={clsx("assistant-content", item.phase === "commentary" && "assistant-content--commentary")}
+                data-assistant-phase={item.phase}
+                key={item.id}
+              >
                 <IncrementalMarkdown
                   isStreaming={isStreaming && item.state === "streaming"}
                   onRevealingChange={item.id === revealingItemId ? onRevealingChange : undefined}
@@ -69,109 +63,209 @@ export const AssistantTurn = memo(function AssistantTurn({
               </div>
             );
           }
-          if (item.kind === "tool") return <ToolActivity connectorLabel={activityConnectorLabel} item={item} key={item.id} />;
-          return <ReasoningActivity item={item} key={item.id} />;
+          if (item.kind === "activity_group") {
+            return (
+              <ActivityGroup
+                activities={item.activities}
+                key={item.id}
+                sourceCount={sources?.length}
+              />
+            );
+          }
+          return <HostedExecutionActivity execution={item} key={item.id} />;
         })}
         {showPending && (
-          <span aria-label="Assistant is working" className="assistant-turn__pending" role="status">
-            <LoaderCircle aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
-            <span>Analyzing…</span>
-          </span>
+          <span aria-label={`${appBrand.productName} is starting`} className="assistant-turn__pending" role="status">Starting</span>
         )}
       </div>
     </CitationRenderingProvider>
   );
 });
 
-function ToolActivity({ connectorLabel, item }: { connectorLabel?: string; item: Extract<AssistantTurnItem, { kind: "tool" }> }) {
-  const presentation = toolPresentation(item.name, item.state, connectorLabel);
-  const Icon = item.state === "active" ? LoaderCircle : presentation.icon;
-
-  return (
-    <div
-      aria-label={presentation.label}
-      className={clsx("assistant-turn__tool", `assistant-turn__tool--${item.state}`)}
-      role={item.state === "active" ? "status" : undefined}
-    >
-      {item.state === "completed" ? (
-        <Check aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
-      ) : (
-        <Icon aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
-      )}
-      <span className="assistant-turn__tool-label">{presentation.label}</span>
-    </div>
-  );
+function usePendingIndicator(pending: boolean) {
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!pending) {
+      setVisible(false);
+      return;
+    }
+    const timeout = window.setTimeout(() => setVisible(true), 700);
+    return () => window.clearTimeout(timeout);
+  }, [pending]);
+  return { visible: pending && visible };
 }
 
-function ReasoningActivity({ item }: { item: Extract<AssistantTurnItem, { kind: "reasoning" }> }) {
-  if (item.state === "active") {
-    return (
-      <div className="assistant-turn__reasoning" role="status">
-        <LoaderCircle aria-hidden="true" className="assistant-turn__tool-icon" size={13} />
-        <span>Thinking…</span>
-      </div>
-    );
-  }
-  if (!item.text) return null;
+function HostedExecutionActivity({
+  execution,
+}: {
+  execution: Extract<ReturnType<typeof assistantTurnItems>[number], { kind: "execution" }>;
+}) {
+  const active = execution.state === "running";
+  const failed = execution.state === "failed" || execution.state === "timeout";
+  const label = active
+    ? "Working with your file"
+    : execution.state === "timeout"
+      ? "File work took too long"
+      : execution.state === "failed"
+        ? "Could not complete file work"
+        : "File work completed";
+  const Icon = active ? LoaderCircle : failed ? CircleAlert : Check;
+
   return (
-    <details className="assistant-turn__reasoning">
-      <summary>
-        <ChevronRight aria-hidden="true" className="assistant-turn__reasoning-caret" size={13} />
-        <span>Thought process</span>
+    <details
+      className={clsx("assistant-turn__execution", `assistant-turn__execution--${execution.state}`)}
+      open={active || failed}
+    >
+      <summary aria-label={label}>
+        <Icon aria-hidden="true" className="assistant-turn__execution-status" size={14} />
+        <FileCog aria-hidden="true" className="assistant-turn__execution-terminal" size={15} />
+        <span className="assistant-turn__execution-label">{label}</span>
+        {execution.files.length > 0 && <span className="assistant-turn__execution-file-count">{execution.files.length} file{execution.files.length === 1 ? "" : "s"}</span>}
+        <ChevronRight aria-hidden="true" className="assistant-turn__execution-caret" size={15} />
       </summary>
-      <div className="assistant-turn__reasoning-summary">{item.text}</div>
+      <div className="assistant-turn__execution-body">
+        {execution.files.length > 0 && (
+          <p className="assistant-turn__execution-files">
+            {execution.files.join(", ")}
+          </p>
+        )}
+        {!execution.files.length && !active && <p>The workspace is ready for the next step.</p>}
+      </div>
     </details>
   );
 }
 
-function toolPresentation(
-  name: string,
-  state: Extract<AssistantTurnItem, { kind: "tool" }> ["state"],
-  connectorLabel?: string,
-) {
-  const completed = state === "completed";
-  if (name === "knowledge_search") {
-    return {
-      label: state === "error"
-        ? "Knowledge search could not complete"
-        : completed
-          ? `Searched ${connectorLabel ?? "knowledge"}`
-          : `Searching ${connectorLabel ?? "knowledge"}…`,
-      icon: Search,
-    };
+function ActivityGroup({
+  activities,
+  sourceCount,
+}: {
+  activities: RuntimeActivity[];
+  sourceCount?: number;
+}) {
+  const active = activities.some((activity) => activity.state === "active");
+  const failed = activities.some((activity) => (
+    activity.state === "failed" || activity.state === "timeout"
+  ));
+  // The activity surface is deliberately a single, quiet line. The newest
+  // in-progress operation adds just enough useful context without turning
+  // the conversation into a running tool log.
+  const currentActivity = [...activities].reverse().find((activity) => activity.state === "active")
+    ?? activities.at(-1);
+  const currentLabel = currentActivity ? toolPresentation(currentActivity).label : "Working";
+  const label = active
+    ? `Working · ${currentLabel}`
+    : activitySummary(activities, sourceCount);
+  const Icon = active ? LoaderCircle : failed ? CircleAlert : Check;
+
+  // Active work has no disclosure at all. Besides matching the Figma progress
+  // primitive, this prevents a native <details> state from leaving a tool log
+  // visibly expanded while the response is still being streamed.
+  if (active) {
+    return (
+      <div
+        aria-label={`${label}. Activity in progress`}
+        className="assistant-turn__activity-group assistant-turn__activity-group--active"
+        role="status"
+      >
+        <Icon aria-hidden="true" className="assistant-turn__activity-group-status" size={14} />
+        <span>{label}</span>
+      </div>
+    );
   }
-  if (name === "sql_query") {
-    return {
-      label: state === "error"
-        ? "Data query could not complete"
-        : completed ? "Queried data" : "Querying data…",
-      icon: Database,
-    };
-  }
-  if (name === "artifact_create") {
-    return {
-      label: state === "error"
-        ? "Document could not be created"
-        : completed ? "Created document" : "Creating document…",
-      icon: FilePlus2,
-    };
-  }
-  if (name === "artifact_edit") {
-    return {
-      label: state === "error"
-        ? "Document could not be updated"
-        : completed ? "Updated document" : "Updating document…",
-      icon: FilePenLine,
-    };
-  }
-  if (name === "artifact_export") {
-    return {
-      label: state === "error"
-        ? "Document could not be exported"
-        : completed ? "Exported document" : "Exporting document…",
-      icon: FileDown,
-    };
-  }
-  if (state === "error") return { label: "Tool could not complete", icon: Wrench };
-  return { label: completed ? "Completed tool activity" : "Running tool…", icon: Wrench };
+
+  return (
+    <details
+      className="assistant-turn__activity-group"
+      open={failed}
+    >
+      <summary aria-label={`${label}. Show activity details`}>
+        <Icon aria-hidden="true" className="assistant-turn__activity-group-status" size={14} />
+        <span>{label}</span>
+        <ChevronRight aria-hidden="true" className="assistant-turn__activity-group-caret" size={15} />
+      </summary>
+      <div className="assistant-turn__activity-group-body">
+        {activities.map((activity) => <ToolActivity activity={activity} key={activity.callId} />)}
+      </div>
+    </details>
+  );
+}
+
+function ToolActivity({ activity }: { activity: RuntimeActivity }) {
+  const presentation = toolPresentation(activity);
+  const active = activity.state === "active";
+  const error = activity.state === "failed" || activity.state === "timeout";
+  const elapsed = useElapsedSeconds(activity.startedAt, active);
+  const Icon = active ? LoaderCircle : error ? CircleAlert : Check;
+  const elapsedLabel = active && elapsed >= 10 ? `${elapsed}s` : undefined;
+  const accessibleLabel = [presentation.label, presentation.detail, elapsedLabel]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <div
+      aria-label={accessibleLabel}
+      className={clsx("assistant-turn__activity", `assistant-turn__activity--${activity.state}`)}
+      role={active ? "status" : undefined}
+      title={accessibleLabel}
+    >
+      <Icon aria-hidden="true" className="assistant-turn__activity-icon" size={13} />
+      <span className="assistant-turn__activity-label">{presentation.label}</span>
+      {presentation.detail && <span className="assistant-turn__activity-detail">· {presentation.detail}</span>}
+      {elapsedLabel && <time>· {elapsedLabel}</time>}
+    </div>
+  );
+}
+
+function useElapsedSeconds(startedAt: number, active: boolean) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [active, startedAt]);
+  return Math.max(0, Math.floor((now - startedAt) / 1_000));
+}
+
+function toolPresentation(activity: RuntimeActivity) {
+  const active = activity.state === "active";
+  const progressCount = numericProgress(activity.progress, "result_count");
+  const resultCount = activity.resultCount ?? progressCount;
+  const vocabulary: Record<string, { active: string; completed: string; showResultCount?: boolean }> = {
+    knowledge_search: { active: "Searching company knowledge", completed: "Searched company knowledge", showResultCount: true },
+    read_resource: { active: "Reading a source", completed: "Read a source" },
+    inspect_resource: { active: "Inspecting a source", completed: "Inspected a source" },
+    materialize_resource: { active: "Preparing a resource", completed: "Prepared a resource" },
+    materialize_sandbox_resource: { active: "Preparing your file", completed: "Prepared your file" },
+    export_sandbox_file: { active: "Saving a file", completed: "Saved a file" },
+    document_edit: { active: "Editing a document", completed: "Edited a document" },
+    artifact_create: { active: "Creating a document", completed: "Created a document" },
+  };
+  const text = vocabulary[activity.toolName] ?? {
+    active: "Working on your request",
+    completed: "Completed an action",
+  };
+  if (activity.state === "failed") return { label: "Could not complete an action", detail: undefined };
+  if (activity.state === "timeout") return { label: "An action took too long", detail: undefined };
+  if (activity.state === "skipped") return { label: "Skipped an action", detail: undefined };
+  return {
+    label: active ? text.active : text.completed,
+    detail: !active && text.showResultCount && resultCount !== undefined
+      ? `${resultCount} document${resultCount === 1 ? "" : "s"}`
+      : undefined,
+  };
+}
+
+function activitySummary(activities: RuntimeActivity[], sourceCount?: number) {
+  const actions = activities.length;
+  // Citation identities are the source of truth. Search result counts are not
+  // evidence used in the final answer and must not be presented as such.
+  return sourceCount
+    ? `Used ${sourceCount} source${sourceCount === 1 ? "" : "s"} · ${actions} action${actions === 1 ? "" : "s"}`
+    : `${actions} action${actions === 1 ? "" : "s"}`;
+}
+
+function numericProgress(progress: Record<string, unknown> | undefined, key: string) {
+  const value = progress?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }

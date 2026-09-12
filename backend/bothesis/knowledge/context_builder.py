@@ -73,11 +73,8 @@ class EvidenceContextBuilder:
         # The chunk-level source reference is a compact, per-run id: it is the
         # only thing the model may echo back as a citation marker, and a
         # fabricated one simply fails to resolve. The document id is the real,
-        # stable Item identity; it is exposed so the model can pass it to
-        # artifact_create as provenance for a working copy. That is safe
-        # because every use of it is independently re-checked against the
-        # caller's Item ACL at execution time, and it is never accepted as a
-        # citation marker, so it carries no ability to fabricate grounding.
+        # stable Item identity. It is never accepted as a citation marker, so
+        # it carries no ability to fabricate grounding.
         lines = [
             f"--- Document: {item.title or 'Untitled source'} ---",
             f"Document ID: {item.item_id}",

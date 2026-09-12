@@ -5,29 +5,27 @@ import {
   BookUp,
   Download,
   Eye,
-  FileDown,
   FilePenLine,
-  FileText,
   LoaderCircle,
 } from "lucide-react";
 import { memo, useCallback, useState } from "react";
 
 import {
-  exportArtifact,
   getArtifact,
   listCollections,
   publishArtifact,
-  type ArtifactDetail,
   type Collection,
 } from "../api";
 import { artifactFormatLabel, artifactSizeLabel, type TurnArtifact } from "../artifacts";
+import { ChatButton, type ChatButtonTone } from "./ChatButton";
+import { FileTypeIcon } from "./ResourceIcon";
 
 /**
- * The documents a turn produced, shown under the answer that presents them.
+ * The files a turn produced, shown under the answer that presents them.
  *
  * A card carries only what the stream annotated; every action re-resolves the
- * document through the authorized artifact API, so download links stay fresh
- * and a restored conversation never trusts a stale URL.
+ * file through the authorized artifact API, so download links stay fresh and a
+ * restored conversation never trusts a stale URL.
  */
 export const ArtifactCards = memo(function ArtifactCards({
   activeArtifactId,
@@ -56,7 +54,7 @@ export const ArtifactCards = memo(function ArtifactCards({
   );
 });
 
-type Busy = "download" | "export" | "publish" | null;
+type Busy = "download" | "publish" | null;
 
 function ArtifactCard({
   active,
@@ -69,13 +67,11 @@ function ArtifactCard({
   onEdit?: (artifact: TurnArtifact) => void;
   onPreview?: (artifact: TurnArtifact) => void;
 }) {
-  const [detail, setDetail] = useState<ArtifactDetail>();
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [collections, setCollections] = useState<Collection[]>();
   const [collectionId, setCollectionId] = useState("");
-  const hasPdf = artifact.exports.includes("pdf") || Boolean(detail?.exports.pdf?.download_url);
 
   const run = useCallback(async (kind: Busy, action: () => Promise<void>) => {
     if (busy) return;
@@ -93,14 +89,7 @@ function ArtifactCard({
 
   const download = useCallback(() => run("download", async () => {
     const resolved = await getArtifact(artifact.id);
-    setDetail(resolved);
     openUrl(resolved.download_url, "The download link is not available.");
-  }), [artifact.id, run]);
-
-  const exportPdf = useCallback(() => run("export", async () => {
-    const resolved = await exportArtifact(artifact.id, "pdf");
-    setDetail(resolved);
-    openUrl(resolved.exports.pdf?.download_url, "The PDF is not available.");
   }), [artifact.id, run]);
 
   const startPublish = useCallback(() => run("publish", async () => {
@@ -126,7 +115,7 @@ function ArtifactCard({
 
   return (
     <div className={clsx("artifact-card", active && "artifact-card--active")}>
-      <span className="artifact-card__icon"><FileText aria-hidden="true" size={18} /></span>
+      <FileTypeIcon className="artifact-card__icon" name={artifact.fileName} />
       <div className="artifact-card__body">
         <div className="artifact-card__heading">
           <span className="artifact-card__title" title={artifact.fileName}>{artifact.title}</span>
@@ -137,6 +126,7 @@ function ArtifactCard({
               artifactSizeLabel(artifact.sizeBytes),
             ].join(" · ")}
           </span>
+          <span className="artifact-card__state">Ready</span>
         </div>
         <div className="artifact-card__actions">
           {onPreview && (
@@ -145,23 +135,19 @@ function ArtifactCard({
               label="Preview"
               onClick={() => onPreview(artifact)}
               pressed={active}
+              tone="secondary"
             />
           )}
-          <ActionButton busy={busy === "download"} icon={Download} label="Download" onClick={download} />
+          <ActionButton busy={busy === "download"} icon={Download} label="Download" onClick={download} tone="contextual" />
           {onEdit && (
-            <ActionButton icon={FilePenLine} label="Edit" onClick={() => onEdit(artifact)} />
+            <ActionButton icon={FilePenLine} label="Continue editing" onClick={() => onEdit(artifact)} tone="soft" />
           )}
-          <ActionButton
-            busy={busy === "export"}
-            icon={FileDown}
-            label={hasPdf ? "Download PDF" : "Export PDF"}
-            onClick={exportPdf}
-          />
           <ActionButton
             busy={busy === "publish" && !collections}
             icon={BookUp}
-            label="Publish to Knowledge Base"
+            label="Save to knowledge"
             onClick={startPublish}
+            tone="success"
           />
         </div>
         {collections && (
@@ -185,18 +171,21 @@ function ArtifactCard({
                 <option key={collection.id} value={collection.id}>{collection.title}</option>
               ))}
             </select>
-            <button className="artifact-card__action artifact-card__action--primary" disabled={busy !== null} type="submit">
-              {busy === "publish" ? <LoaderCircle aria-hidden="true" className="artifact-card__spinner" size={13} /> : null}
-              <span>Publish</span>
-            </button>
-            <button
-              className="artifact-card__action"
+            <ChatButton
+              loading={busy === "publish"}
+              tone="success"
+              type="submit"
+            >
+              Publish
+            </ChatButton>
+            <ChatButton
               disabled={busy !== null}
               onClick={() => setCollections(undefined)}
+              tone="ghost"
               type="button"
             >
               Cancel
-            </button>
+            </ChatButton>
           </form>
         )}
         {error && <div className="artifact-card__note artifact-card__note--error" role="alert">{error}</div>}
@@ -212,27 +201,28 @@ function ActionButton({
   label,
   onClick,
   pressed,
+  tone,
 }: {
   busy?: boolean;
   icon: typeof Download;
   label: string;
   onClick: () => void;
   pressed?: boolean;
+  tone: ChatButtonTone;
 }) {
   return (
-    <button
+    <ChatButton
       aria-pressed={pressed}
-      className={clsx("artifact-card__action", pressed && "artifact-card__action--active")}
-      disabled={busy}
+      className={clsx("artifact-card__action", `artifact-card__action--${tone}`, pressed && "artifact-card__action--active")}
+      icon={busy ? <LoaderCircle aria-hidden="true" className="artifact-card__spinner" size={13} /> : <Icon aria-hidden="true" size={13} />}
+      loading={busy}
       onClick={onClick}
       title={label}
+      tone={tone}
       type="button"
     >
-      {busy
-        ? <LoaderCircle aria-hidden="true" className="artifact-card__spinner" size={13} />
-        : <Icon aria-hidden="true" size={13} />}
-      <span>{label}</span>
-    </button>
+      {label}
+    </ChatButton>
   );
 }
 

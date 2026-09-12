@@ -21,8 +21,14 @@ function normalizeUserNamespace(identity: string | null | undefined) {
   return value || ANONYMOUS_USER_NAMESPACE;
 }
 
-export function setConversationUser(identity: string | null | undefined) {
-  const next = normalizeUserNamespace(identity);
+/** Keep browser-local drafts isolated by both signed-in user and active tenant. */
+export function setConversationUser(
+  identity: string | null | undefined,
+  tenantId?: string | null,
+) {
+  const user = normalizeUserNamespace(identity);
+  const tenant = normalizeUserNamespace(tenantId);
+  const next = `${user}:${tenant}`;
   if (next === activeUserNamespace) return;
   activeUserNamespace = next;
   memoryConversations = [];
@@ -125,7 +131,9 @@ function normalizeStoredPart(part: ChatMessagePart): ChatMessagePart | undefined
   if (part.type === "text" && part.state === "streaming") {
     return { ...part, state: "done" };
   }
-  return part.type === "text" || part.type === "data-document" ? part : undefined;
+  return part.type === "text" || part.type === "data-document" || part.type === "data-collection"
+    ? part
+    : undefined;
 }
 
 function normalizeCachedMessages(messages: CachedChatMessage[]) {
@@ -176,6 +184,7 @@ export function cachedToUIMessage(message: CachedChatMessage): ChatMessage {
 }
 
 export function uiToCachedMessage(message: ChatMessage): CachedChatMessage {
+  const turn = message.turn && withoutTransientTurnState(message.turn);
   return {
     id: message.id,
     role: message.role === "user" ? "user" : "assistant",
@@ -184,9 +193,14 @@ export function uiToCachedMessage(message: ChatMessage): CachedChatMessage {
       const normalized = normalizeStoredPart(part);
       return normalized ? [normalized] : [];
     }),
-    turn: message.turn,
+    turn,
     createdAt: Date.now(),
   };
+}
+
+function withoutTransientTurnState(turn: NonNullable<ChatMessage["turn"]>) {
+  const { modelPending: _modelPending, runtimeActivities: _runtimeActivities, ...stored } = turn;
+  return stored;
 }
 
 export const conversationAdapter: ConversationAdapter = {

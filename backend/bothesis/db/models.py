@@ -1,4 +1,4 @@
-"""PostgreSQL models for durable BoThesis business and domain state.
+"""PostgreSQL models for durable Enterprise Agent business and domain state.
 
 Canonical knowledge and authorization live here. Original bytes remain in
 S3/R2, while chunks and retrieval representations remain in Qdrant.
@@ -123,6 +123,14 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="reviewed_by_user",
         foreign_keys="AccessRequest.reviewed_by_user_id",
     )
+    app_requests: Mapped[list[AppRequest]] = relationship(
+        back_populates="requester_user",
+        foreign_keys="AppRequest.requester_user_id",
+    )
+    reviewed_app_requests: Mapped[list[AppRequest]] = relationship(
+        back_populates="reviewed_by_user",
+        foreign_keys="AppRequest.reviewed_by_user_id",
+    )
     audit_events: Mapped[list[AuditLog]] = relationship(back_populates="actor_user")
 
 
@@ -146,6 +154,7 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     items: Mapped[list[Item]] = relationship(back_populates="tenant")
     access_requests: Mapped[list[AccessRequest]] = relationship(back_populates="tenant")
+    app_requests: Mapped[list[AppRequest]] = relationship(back_populates="tenant")
     audit_logs: Mapped[list[AuditLog]] = relationship(back_populates="tenant")
 
 
@@ -262,6 +271,50 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     user: Mapped[User] = relationship(back_populates="conversations")
     messages: Mapped[list[Message]] = relationship(back_populates="conversation")
     memories: Mapped[list[Memory]] = relationship(back_populates="conversation")
+
+
+class SandboxSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Durable recovery metadata for a provider-backed conversation workspace.
+
+    The provider container and files are opaque values in ``provider_state``;
+    durable Enterprise Agent Item identities stay in the provider-neutral ``manifest``.
+    Neither field contains workspace output bytes.
+    """
+
+    __tablename__ = "sandbox_sessions"
+    __table_args__ = (
+        Index(None, "tenant_id", "conversation_id", "status"),
+        Index(None, "conversation_id", "provider", "status"),
+        CheckConstraint(
+            "status IN ('active', 'expired', 'closed')",
+            name="sandbox_session_status_is_valid",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(manifest) = 'object'", name="sandbox_manifest_is_object"
+        ),
+        CheckConstraint(
+            "jsonb_typeof(provider_state) = 'object'",
+            name="sandbox_provider_state_is_object",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
+    )
+    conversation_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest: Mapped[JsonObject] = _json_object_column()
+    provider_state: Mapped[JsonObject] = _json_object_column()
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Message(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
@@ -763,6 +816,46 @@ class AccessRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
+class AppRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A tenant-scoped request to enable an app before it can be connected."""
+
+    __tablename__ = "app_requests"
+    __table_args__ = (
+        Index(None, "tenant_id", "status", "created_at"),
+        Index(None, "requester_user_id", "status"),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'denied', 'cancelled')",
+            name="app_request_status_is_valid",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
+    )
+    requester_user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    connector_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id")
+    )
+    review_note: Mapped[str | None] = mapped_column(Text)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    tenant: Mapped[Tenant] = relationship(back_populates="app_requests")
+    requester_user: Mapped[User] = relationship(
+        back_populates="app_requests", foreign_keys=[requester_user_id]
+    )
+    reviewed_by_user: Mapped[User | None] = relationship(
+        back_populates="reviewed_app_requests", foreign_keys=[reviewed_by_user_id]
+    )
+
+
 class AuditLog(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __tablename__ = "audit_logs"
     __table_args__ = (
@@ -924,6 +1017,7 @@ event.listen(
 
 __all__ = [
     "AccessRequest",
+    "AppRequest",
     "ArtifactRevision",
     "AuditLog",
     "Base",

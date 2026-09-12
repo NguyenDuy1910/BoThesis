@@ -8,25 +8,36 @@ services share (object storage, vector index, model transports, the agent).
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import AppConfig, get_config
 
-from bothesis.agent import Agent, AgentConfig
+from bothesis.agent import Agent, SessionConfiguration
 from bothesis.agent.tools import ToolRegistry
-from bothesis.agent.tools.artifact_create import ArtifactCreate
-from bothesis.agent.tools.artifact_edit import ArtifactEdit
-from bothesis.agent.tools.artifact_export import ArtifactExport
 from bothesis.agent.tools.knowledge_search import KnowledgeSearch
+from bothesis.agent.tools.inspect_resource import InspectResource
+from bothesis.agent.tools.materialize_resource import MaterializeResource
+from bothesis.agent.tools.materialize_sandbox_resource import MaterializeSandboxResource
+from bothesis.agent.tools.read_resource import ReadResource
+from bothesis.agent.tools.export_sandbox_file import ExportSandboxFile
+from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
+from bothesis.agent.transports.openrouter_execution_capability import (
+    OpenRouterExecutionCapabilityResolver,
+)
 from bothesis.connector.file import FileProcessor
 from bothesis.db.engine import LazySessionFactory, SessionFactory
 from bothesis.document_index import ItemIndex, SemanticContextualizer
 from bothesis.health import HealthService, HealthSettings
 from bothesis.knowledge import ItemKnowledgeRetriever, SemanticReranker
-from bothesis.observability import create_langfuse_tracing
-from bothesis.sandbox import DockerSandboxExecutor, SandboxExecutor
+from bothesis.observability import create_tracer
 from bothesis.services.admin_console import AdminConsoleService
+from bothesis.services.identity_access.auth import AuthenticationService
+from bothesis.services.identity_access.google import GoogleIdentityVerifier
 from bothesis.services.artifact import ArtifactService
+from bothesis.services import AuthContext
 from bothesis.services.chat import ChatService
 from bothesis.services.conversation import ConversationService
 from bothesis.services.document_presentation import DocumentPresenter
@@ -35,9 +46,13 @@ from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services.knowledge_query import KnowledgeQueryService
 from bothesis.services.knowledge_view import KnowledgeViewService
 from bothesis.services.preview import KnowledgePreview
+from bothesis.services.agent_runtime.item_resource_resolver import ItemResourceResolver
+from bothesis.services.agent_runtime.sandbox_workspace import SandboxWorkspace
+from bothesis.services.sandbox_session import SandboxSessionService
 from bothesis.services.stored_file_content import StoredFileContentService
 from bothesis.services.workflow.service import TemporalWorkflowService
 from bothesis.services.workspace_documents import WorkspaceDocumentService
+from bothesis.services.identity_access.jwt_tokens import JwtTokenService
 from bothesis.storage import S3DocumentStorage
 
 
@@ -55,12 +70,16 @@ class AppRuntime:
         self._ingestion: ItemIngestionService | None = None
         self._uploads: DocumentUploadService | None = None
         self._conversations: ConversationService | None = None
-        self._sandbox: SandboxExecutor | None = None
         self._artifacts: ArtifactService | None = None
         self._agent: Agent | None = None
+        self._stored_file_content: StoredFileContentService | None = None
+        self._sandbox_sessions: SandboxSessionService | None = None
         self._retriever: ItemKnowledgeRetriever | None = None
         self._model_transport: OpenRouterTransport | None = None
+        self._agent_transport: OpenAITransport | OpenRouterTransport | None = None
         self._contextualization_transport: OpenRouterTransport | None = None
+        self._jwt_tokens: JwtTokenService | None = None
+        self._google_identity: GoogleIdentityVerifier | None = None
 
     @property
     def config(self) -> AppConfig:
@@ -73,8 +92,13 @@ class AppRuntime:
             self.sessions(),
             agent=self.agent(),
             conversations=self.conversation_service(),
-            artifacts=self.artifact_service(),
-            artifact_context_characters=self._config.artifact.context_characters,
+            resource_resolver=lambda access: ItemResourceResolver(
+                self.sessions(),
+                access=access,
+                content=self.stored_file_content(),
+                max_read_characters=self._config.agent.max_resource_read_characters,
+            ),
+            sandbox_runtime=self._sandbox_workspace,
         )
 
     def knowledge_query_service(self) -> KnowledgeQueryService:
@@ -126,12 +150,37 @@ class AppRuntime:
             )
         )
 
+    def authentication_service(self, session: AsyncSession) -> AuthenticationService:
+        """Build a request-scoped authentication workflow from durable identity state."""
+
+        return AuthenticationService(session, tokens=self.jwt_token_service())
+
     # -- Shared collaborators ----------------------------------------------
 
     def sessions(self) -> SessionFactory:
         if self._session_factory is None:
             self._session_factory = LazySessionFactory()
         return self._session_factory
+
+    def jwt_token_service(self) -> JwtTokenService:
+        if self._jwt_tokens is None:
+            identity = self._config.identity
+            self._jwt_tokens = JwtTokenService(
+                secret=identity.jwt_secret,
+                issuer=identity.jwt_issuer,
+                audience=identity.jwt_audience,
+                expires_in_seconds=identity.jwt_expires_in_seconds,
+            )
+        return self._jwt_tokens
+
+    def google_identity_verifier(self) -> GoogleIdentityVerifier:
+        if self._google_identity is None:
+            identity = self._config.identity
+            self._google_identity = GoogleIdentityVerifier(
+                client_id=identity.google_client_id,
+                jwks_url=identity.google_jwks_url,
+            )
+        return self._google_identity
 
     def document_presenter(self) -> DocumentPresenter:
         if self._presenter is None:
@@ -153,19 +202,6 @@ class AppRuntime:
             self._conversations = ConversationService(self.sessions())
         return self._conversations
 
-    def sandbox_executor(self) -> SandboxExecutor:
-        if self._sandbox is None:
-            sandbox = self._config.sandbox
-            self._sandbox = DockerSandboxExecutor(
-                image=sandbox.image,
-                timeout_seconds=sandbox.timeout_seconds,
-                memory_bytes=sandbox.memory_bytes,
-                cpu_count=sandbox.cpu_count,
-                pids_limit=sandbox.pids_limit,
-                max_output_bytes=sandbox.max_output_bytes,
-            )
-        return self._sandbox
-
     def artifact_service(self) -> ArtifactService:
         if self._artifacts is None:
             artifact = self._config.artifact
@@ -174,12 +210,16 @@ class AppRuntime:
             self._artifacts = ArtifactService(
                 self.sessions(),
                 object_storage=self.object_storage,
-                sandbox=self.sandbox_executor(),
                 uploads=self.upload_service,
                 max_content_bytes=artifact.max_content_bytes,
                 download_url_seconds=artifact.download_url_seconds,
             )
         return self._artifacts
+
+    def sandbox_session_service(self) -> SandboxSessionService:
+        if self._sandbox_sessions is None:
+            self._sandbox_sessions = SandboxSessionService(self.sessions())
+        return self._sandbox_sessions
 
     def object_storage(self) -> Any:
         if self._storage is None:
@@ -242,24 +282,58 @@ class AppRuntime:
                 self.sessions(),
                 object_storage=self.object_storage(),
                 ingestion_service=self.ingestion_service(),
-                document_source=StoredFileContentService(
-                    object_storage=self.object_storage(),
-                    processor=FileProcessor(
-                        max_file_bytes=upload.processing_max_bytes
-                    ),
-                    max_processing_bytes=upload.processing_max_bytes,
-                ),
+                document_source=self.stored_file_content(),
                 max_upload_bytes=upload.max_upload_bytes,
                 upload_url_seconds=upload.upload_url_seconds,
             )
         return self._uploads
 
+    def stored_file_content(self) -> StoredFileContentService:
+        """The lazy source adapter used by explicit resource reads and ingestion."""
+
+        if self._stored_file_content is None:
+            upload = self._config.upload
+            self._stored_file_content = StoredFileContentService(
+                object_storage=self.object_storage(),
+                processor=FileProcessor(max_file_bytes=upload.processing_max_bytes),
+                max_processing_bytes=upload.processing_max_bytes,
+            )
+        return self._stored_file_content
+
     def model_transport(self) -> OpenRouterTransport:
+        """The transport the retrieval-side models (reranking) run on."""
+
         if self._model_transport is None:
             self._model_transport = OpenRouterTransport(
                 base_url=self._config.model.openrouter_base_url
             )
         return self._model_transport
+
+    def agent_transport(self) -> OpenAITransport | OpenRouterTransport:
+        """The transport the conversation agent runs on.
+
+        The selected provider owns any native model capabilities. The agent
+        loop stays provider-neutral; OpenRouter's hosted shell is enabled only
+        when both its provider selection and the execution policy allow it.
+        """
+
+        if self._agent_transport is None:
+            model = self._config.model
+            if model.agent_provider == "openrouter":
+                self._agent_transport = OpenRouterTransport(
+                    api_key=model.openrouter_api_key,
+                    base_url=model.openrouter_base_url,
+                    model=model.chat_model,
+                    embedding_model=model.embedding_model,
+                )
+            else:
+                self._agent_transport = OpenAITransport(
+                    api_key=model.openai_api_key,
+                    base_url=model.openai_base_url,
+                    model=model.chat_model,
+                    embedding_model=model.embedding_model,
+                )
+        return self._agent_transport
 
     def knowledge_retriever(self) -> ItemKnowledgeRetriever:
         if self._retriever is None:
@@ -284,39 +358,31 @@ class AppRuntime:
         if self._agent is None:
             retrieval = self._config.retrieval
             agent = self._config.agent
-            tracing = create_langfuse_tracing(
+            tracer = create_tracer(
                 self._config.observability.langfuse_public_key,
                 self._config.observability.langfuse_secret_key,
             )
-            artifact = self._config.artifact
             registry = ToolRegistry()
             registry.register(
                 KnowledgeSearch(
                     self.knowledge_retriever(),
                     result_limit=retrieval.final_top_k,
                     max_context_characters=retrieval.context_characters,
-                    tracing=tracing,
+                    tracer=tracer,
                 )
             )
+            registry.register(InspectResource())
             registry.register(
-                ArtifactCreate(
-                    self.artifact_service(),
-                    max_content_characters=artifact.max_content_bytes,
-                    max_result_characters=artifact.result_characters,
-                )
+                ReadResource(max_characters=agent.max_resource_read_characters)
             )
-            registry.register(
-                ArtifactEdit(
-                    self.artifact_service(),
-                    max_content_characters=artifact.max_content_bytes,
-                    max_result_characters=artifact.result_characters,
-                )
-            )
-            registry.register(ArtifactExport(self.artifact_service()))
+            registry.register(MaterializeResource())
+            if isinstance(self.agent_transport(), OpenRouterTransport):
+                registry.register(MaterializeSandboxResource())
+                registry.register(ExportSandboxFile())
             self._agent = Agent(
-                model=self.model_transport(),
+                model=self.agent_transport(),
                 tools=registry,
-                config=AgentConfig(
+                configuration=SessionConfiguration(
                     max_model_turns=agent.max_model_turns,
                     max_tool_rounds=agent.max_tool_rounds,
                     max_tool_calls=agent.max_tool_calls,
@@ -325,9 +391,27 @@ class AppRuntime:
                     recent_history_messages=agent.recent_history_messages,
                     tool_timeout_seconds=agent.tool_timeout_seconds,
                 ),
-                tracing=tracing,
+                tracer=tracer,
+                execution_capability_resolver=OpenRouterExecutionCapabilityResolver(),
             )
         return self._agent
+
+    def _sandbox_workspace(
+        self, access: AuthContext, conversation_id: UUID, request_id: str
+    ) -> SandboxWorkspace | None:
+        """Build a request-scoped workspace only for the selected provider."""
+
+        transport = self.agent().model
+        if not isinstance(transport, OpenRouterTransport):
+            return None
+        return SandboxWorkspace(
+            access=access,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            provider=transport,
+            sessions=self.sandbox_session_service(),
+            artifacts=self.artifact_service(),
+        )
 
     async def aclose(self) -> None:
         """Release every client this runtime opened."""
@@ -337,6 +421,7 @@ class AppRuntime:
         for transport in (
             self._contextualization_transport,
             self._model_transport,
+            self._agent_transport,
         ):
             close = getattr(transport, "aclose", None)
             if close is not None:

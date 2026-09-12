@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="web/public/bothesis-logo.png" alt="BoThesis" width="88" />
+  <img src="web/public/bothesis-logo.png" alt="Enterprise Agent" width="88" />
 </p>
 
-<h1 align="center">BoThesis</h1>
+<h1 align="center">Enterprise Agent</h1>
 
 <p align="center">
   <strong>A grounded enterprise knowledge assistant for trusted, permission-aware answers.</strong>
@@ -15,7 +15,7 @@
   <a href="#development">Development</a>
 </p>
 
-BoThesis connects company knowledge to conversations without losing the things
+Enterprise Agent connects company knowledge to conversations without losing the things
 that make enterprise answers trustworthy: tenant isolation, access control,
 source lineage, and citations. It is an early-stage project designed around a
 simple rule: the model reasons over evidence; it does not invent a source of
@@ -23,10 +23,10 @@ truth.
 
 ## What it provides
 
-| Capability | How BoThesis approaches it |
+| Capability | How Enterprise Agent approaches it |
 | --- | --- |
 | Grounded answers | Retrieves tenant-scoped evidence and returns citations back to canonical source Items. |
-| Working documents | Starts an editable artifact from any indexed document (found via the same `knowledge_search`, e.g. a template or form) or from written content, revises it through the conversation, and exports it; every edit runs in a disposable Docker sandbox and is kept as a revision. |
+| Working files | Runs file work in a per-conversation OpenAI container through the native Code Interpreter and Shell tools: attached uploads and any indexed document the user asks for (`open_document`) are placed there, and every file the answer presents is stored as a downloadable revision. Conversation files are never written back into the knowledge base. |
 | Contextual hybrid retrieval | Uses contextual chunk text with dense embeddings and Qdrant BM25, fused for retrieval and filtered before evidence is exposed. |
 | Governed ingestion | Ingests managed files and Confluence content through connector-owned normalization, ACL mapping, checkpoints, and retry-safe replacement. |
 | Clear storage ownership | PostgreSQL holds business state; S3-compatible storage holds original bytes; Qdrant is a rebuildable retrieval projection. |
@@ -84,13 +84,11 @@ backend/
     ├── document_index/        Contextualization, embeddings, Qdrant projection
     ├── knowledge/             Retrieval, ACL filtering, evidence, reranking
     ├── agent/                 Conversation loop, tools, model transports
-    ├── sandbox/               Disposable Docker sandbox for document operations
     ├── db/                    SQLAlchemy models and database engine
     └── tui/                   Terminal chat client
 web/                           Next.js workspace for chat and administration
 app/bothesis/                  Flutter client scaffold
 deployment/                    Local PostgreSQL, Qdrant, and MinIO Compose stack
-                               plus the artifact sandbox image
 docs/                          Architecture, setup, operations, and reference docs
 tests/                         Backend and integration tests
 ```
@@ -124,8 +122,7 @@ make init
 `make init` creates missing local environment files, starts PostgreSQL, Qdrant,
 MinIO, and Temporal, creates the raw-object bucket, rebuilds the local database
 schema, seeds a development administrator, recreates the derived Qdrant
-collection, registers Temporal Search Attributes, and builds the Docker sandbox
-image the assistant uses to draft and revise documents.
+collection, and registers Temporal Search Attributes.
 
 > **Local-development reset:** `make init` intentionally resets the application
 > schema, Temporal persistence, and Qdrant collection. Do not use it against an
@@ -200,7 +197,6 @@ make db-init     # reset only the local PostgreSQL schema
 make db-seed     # seed the development administrator
 make db-reset    # reset PostgreSQL and seed the development administrator
 make qdrant-init # recreate only the derived Qdrant collection
-make sandbox-image # build the artifact sandbox image
 ```
 
 Run the verification suite from the repository root:
@@ -235,7 +231,7 @@ For deployment and operational detail, start with
 
 ## Project status
 
-BoThesis is in active early development. The schema is initialized directly
+Enterprise Agent is in active early development. The schema is initialized directly
 from the current ORM models and is intentionally optimized for the present
 architecture rather than backwards compatibility. Expect APIs and connectors to
 evolve; preserve the core invariants of tenant isolation, ACL enforcement,

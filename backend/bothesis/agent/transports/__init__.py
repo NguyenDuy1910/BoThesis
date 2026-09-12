@@ -8,7 +8,7 @@ headers, and whatever extra APIs that provider offers.
 Every supported provider serves ``POST /responses`` in OpenResponses format, so
 one adapter — :class:`~bothesis.agent.transports.responses_adapter.ResponsesStream`
 — is the whole normalization layer. It renders a
-:class:`~bothesis.agent.protocol.ResponseRequest` into the native request and
+:class:`~bothesis.agent.protocol.Prompt` into the native request and
 projects native events onto canonical events, one native event at a time. There
 is no per-provider reconstruction and no intermediate event vocabulary.
 
@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
 from bothesis import ModelResponseClient
-from bothesis.agent.protocol import ResponseRequest, ResponseStreamEvent
+from bothesis.agent.protocol import Prompt, ResponseStreamEvent
 
 
 @runtime_checkable
@@ -33,7 +33,7 @@ class ResponseStream(Protocol):
     model: str | None
 
     def stream(
-        self, request: ResponseRequest
+        self, prompt: Prompt
     ) -> AsyncIterator[ResponseStreamEvent]:
         """Yield canonical events for one sampling request, as they arrive."""
         ...
@@ -48,6 +48,15 @@ from bothesis.agent.transports.responses_adapter import (  # noqa: E402
 )
 from bothesis.agent.transports.openai import OpenAITransport  # noqa: E402
 from bothesis.agent.transports.openrouter import OpenRouterTransport  # noqa: E402
+from bothesis.agent.transports.openrouter_execution_capability import (  # noqa: E402
+    OpenRouterExecutionCapabilityResolver,
+)
+from bothesis.agent.transports.openrouter_execution_mapper import (  # noqa: E402
+    OpenRouterExecutionMapper,
+)
+from bothesis.agent.transports.openrouter_tool_builder import (  # noqa: E402
+    OpenRouterToolBuilder,
+)
 
 RESPONSES_PROVIDERS = frozenset({"openai", "openrouter"})
 """Providers whose ``/responses`` endpoint speaks OpenResponses format."""
@@ -73,6 +82,9 @@ def response_stream(transport: Any) -> ResponseStream:
 __all__ = [
     "RESPONSES_PROVIDERS",
     "OpenAITransport",
+    "OpenRouterExecutionCapabilityResolver",
+    "OpenRouterExecutionMapper",
+    "OpenRouterToolBuilder",
     "OpenRouterTransport",
     "ResponseClient",
     "ResponseStream",

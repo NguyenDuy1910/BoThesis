@@ -9,7 +9,8 @@ import {
   useState,
 } from "react";
 
-import { getBothesisChatConfiguration } from "@/lib/api/config";
+import { getApiConfiguration } from "@/lib/api/config";
+import { getAuthSession, hasSessionPermission } from "@/lib/auth/session";
 import { adminRequest } from "@/modules/admin/api";
 
 export interface AdminTenant {
@@ -70,17 +71,30 @@ export function AdminWorkspaceProvider({ children }: { children: React.ReactNode
 
   useEffect(() => {
     const controller = new AbortController();
-    const userId = getBothesisChatConfiguration()?.userId;
+    const configuration = getApiConfiguration();
+    const session = getAuthSession();
+    const userId = configuration?.userId;
+    const canViewOverview = hasSessionPermission(session, "admin");
+    const canViewPeople = hasSessionPermission(session, "user.manage");
+    const sessionViewer = session
+      ? {
+          id: session.user_id,
+          email: session.email,
+          display_name: session.display_name,
+        }
+      : null;
     setLoading(true);
     setError(null);
 
     Promise.all([
-      adminRequest<AdminOverview>("/overview", { signal: controller.signal }),
-      userId
+      canViewOverview
+        ? adminRequest<AdminOverview>("/overview", { signal: controller.signal })
+        : Promise.resolve(null),
+      userId && canViewPeople
         ? adminRequest<AdminViewer>(`/users/${userId}`, {
             signal: controller.signal,
           }).catch(() => null)
-        : Promise.resolve(null),
+        : Promise.resolve(sessionViewer),
     ])
       .then(([nextOverview, nextViewer]) => {
         if (controller.signal.aborted) return;

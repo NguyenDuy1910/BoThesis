@@ -10,7 +10,7 @@ from bothesis.db.engine import SessionFactory, session_scope
 from bothesis.db.models import Item
 from bothesis.services import AsyncUploadStream, AuthContext
 from bothesis.services.audit import AuditService
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.document_presentation import DocumentPresenter
 from bothesis.services.document_upload import DocumentUploadService
 
@@ -84,7 +84,7 @@ class WorkspaceDocumentService:
     async def complete_upload(
         self, access: AuthContext, document_id: UUID
     ) -> dict[str, Any]:
-        """Mark a presigned upload available and index its content."""
+        """Mark a personal upload available without ingesting its content."""
 
         document = await self._uploads.complete_upload(access, document_id)
         return self._presenter.metadata(document)

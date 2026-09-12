@@ -23,6 +23,7 @@ from __future__ import annotations
 import math
 import os
 from typing import Any, cast
+from urllib.parse import quote
 
 import httpx
 from openai import AsyncOpenAI, AsyncStream
@@ -31,6 +32,13 @@ from openai.types.responses import (
     ResponseInputParam,
     ResponseStreamEvent,
 )
+
+from bothesis.agent.execution import ExecutionCapability
+from bothesis.agent.protocol import Item, ProviderResourceRef
+from bothesis.agent.transports.openrouter_execution_mapper import (
+    OpenRouterExecutionMapper,
+)
+from bothesis.agent.transports.openrouter_tool_builder import OpenRouterToolBuilder
 
 
 class OpenRouterTransport:
@@ -49,6 +57,8 @@ class OpenRouterTransport:
         site_url: str | None = None,
         app_name: str | None = None,
         timeout: float = 60.0,
+        execution_mapper: OpenRouterExecutionMapper | None = None,
+        tool_builder: OpenRouterToolBuilder | None = None,
         client: httpx.AsyncClient | None = None,
         responses_client: AsyncOpenAI | None = None,
     ) -> None:
@@ -74,6 +84,8 @@ class OpenRouterTransport:
         self._headers.update(attribution)
         self._attribution = attribution
         self._timeout = timeout
+        self._execution_mapper = execution_mapper or OpenRouterExecutionMapper()
+        self._tool_builder = tool_builder or OpenRouterToolBuilder()
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self._owns_client = client is None
         # Built on first model call: a transport created only for embeddings
@@ -96,6 +108,7 @@ class OpenRouterTransport:
         *,
         input: str | ResponseInputParam,
         model: str | None = None,
+        execution_capability: ExecutionCapability | None = None,
         **params: Any,
     ) -> Response:
         """Create a non-streaming response and return the payload unchanged."""
@@ -104,8 +117,8 @@ class OpenRouterTransport:
             raise ValueError("use stream_response for streaming Responses requests")
         response = await self._responses().responses.create(
             model=self._model(model),
-            input=input,
-            **params,
+            input=self._execution_mapper.render_input(input),
+            **self._execution_params(params, execution_capability),
         )
         return cast(Response, response)
 
@@ -114,6 +127,7 @@ class OpenRouterTransport:
         *,
         input: str | ResponseInputParam,
         model: str | None = None,
+        execution_capability: ExecutionCapability | None = None,
         **params: Any,
     ) -> AsyncStream[ResponseStreamEvent]:
         """Create a streaming response over OpenRouter's OpenResponses endpoint."""
@@ -122,9 +136,9 @@ class OpenRouterTransport:
             raise ValueError("stream_response controls the stream parameter")
         stream = await self._responses().responses.create(
             model=self._model(model),
-            input=input,
+            input=self._execution_mapper.render_input(input),
             stream=True,
-            **params,
+            **self._execution_params(params, execution_capability),
         )
         return cast(AsyncStream[ResponseStreamEvent], stream)
 
@@ -156,6 +170,50 @@ class OpenRouterTransport:
             raise ValueError("OpenRouter returned a non-object response")
         return payload
 
+    async def upload_file(
+        self, *, file_name: str, mime_type: str, data: bytes
+    ) -> ProviderResourceRef:
+        """Upload one already-authorized file through OpenRouter's Files API."""
+
+        name = _file_name(file_name)
+        content_type = mime_type.strip() or "application/octet-stream"
+        if not data:
+            raise ValueError("sandbox file must not be empty")
+        headers = {
+            key: value for key, value in self._headers.items() if key != "Content-Type"
+        }
+        response = await self._client.post(
+            f"{self._base_url}/files",
+            headers=headers,
+            files={"file": (name, data, content_type)},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("OpenRouter returned an invalid uploaded file")
+        identifier = _provider_identifier(payload.get("id"), "file id")
+        reported_name = payload.get("filename")
+        return ProviderResourceRef(
+            provider=self.provider,
+            id=identifier,
+            name=reported_name if isinstance(reported_name, str) and reported_name else name,
+        )
+
+    async def download_file(
+        self, *, environment_id: str, file_id: str
+    ) -> bytes:
+        """Download a reported container file only for explicit artifact export."""
+
+        container = _provider_identifier(environment_id, "container id")
+        file = _provider_identifier(file_id, "file id")
+        response = await self._client.get(
+            f"{self._base_url}/containers/{quote(container, safe='')}/files/"
+            f"{quote(file, safe='')}/content",
+            headers=self._headers,
+        )
+        response.raise_for_status()
+        return response.content
+
     async def embed_query(self, query: str) -> list[float]:
         """Embed one non-empty query for document retrieval."""
 
@@ -185,6 +243,24 @@ class OpenRouterTransport:
         if not selected_model:
             raise ValueError("OpenRouter model is required")
         return selected_model
+
+    def _execution_params(
+        self,
+        params: dict[str, Any],
+        capability: ExecutionCapability | None,
+    ) -> dict[str, Any]:
+        rendered = dict(params)
+        rendered["tools"] = self._tool_builder.with_hosted_shell(
+            rendered.get("tools", ()), capability
+        )
+        if not rendered["tools"]:
+            rendered.pop("tools")
+        return rendered
+
+    def normalize_output_item(self, native: Any) -> Item | None:
+        """Normalize OpenRouter shell output before it crosses the adapter boundary."""
+
+        return self._execution_mapper.normalize_output_item(native)
 
     async def _embed(self, inputs: list[str]) -> list[list[float]]:
         payload = await self.embeddings(
@@ -216,6 +292,24 @@ class OpenRouterTransport:
         if [index for index, _ in indexed] != list(range(len(inputs))):
             raise ValueError("embedding response indexes are invalid")
         return [vector for _, vector in indexed]
+
+
+def _file_name(value: str) -> str:
+    name = value.strip()
+    if not name or "/" in name or "\\" in name or "\x00" in name:
+        raise ValueError("sandbox upload file name is invalid")
+    if len(name) > 255:
+        raise ValueError("sandbox upload file name is invalid")
+    return name
+
+
+def _provider_identifier(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"OpenRouter {label} is invalid")
+    identifier = value.strip()
+    if any(character in identifier for character in "/\\?#"):
+        raise ValueError(f"OpenRouter {label} is invalid")
+    return identifier
 
 
 __all__ = ["OpenRouterTransport"]

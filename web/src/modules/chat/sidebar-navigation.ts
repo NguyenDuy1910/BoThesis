@@ -1,17 +1,13 @@
 import {
+  Bot,
+  Grid2X2,
   LibraryBig,
-  PlugZap,
-  RefreshCw,
+  MessageSquare,
   ShieldCheck,
-  Search,
-  SquarePen,
-  Workflow,
   type LucideIcon,
 } from "lucide-react";
 
-export type SidebarNavigationItemId =
-  | "new-chat"
-  | "search-chats";
+export type SidebarNavigationItemId = "chat";
 
 export interface SidebarNavigationItem {
   id: SidebarNavigationItemId;
@@ -19,15 +15,56 @@ export interface SidebarNavigationItem {
   icon: LucideIcon;
 }
 
+export interface SidebarDestination {
+  id: "knowledge" | "apps" | "agents" | "admin";
+  label: string;
+  href: string;
+  icon: LucideIcon;
+  /** Any one of these permissions makes this product area relevant. */
+  permissionCodes: readonly string[];
+}
+
 export const sidebarNavigationItems: readonly SidebarNavigationItem[] = [
-  { id: "new-chat", label: "New chat", icon: SquarePen },
-  { id: "search-chats", label: "Search chats", icon: Search },
+  { id: "chat", label: "Chat", icon: MessageSquare },
 ];
 
-export const sidebarSecondaryDestinations = [
-  { id: "knowledge", label: "Collections", href: "/admin/collections", icon: LibraryBig },
-  { id: "tools", label: "Connectors", href: "/admin/connectors", icon: PlugZap },
-  { id: "workflows", label: "Workflows", href: "/workflows", icon: Workflow },
-  { id: "sync", label: "Sync activity", href: "/admin/activity", icon: RefreshCw },
-  { id: "admin", label: "Admin console", href: "/admin", icon: ShieldCheck },
-] as const;
+export const sidebarSecondaryDestinations: readonly SidebarDestination[] = [
+  {
+    id: "knowledge",
+    label: "Knowledge",
+    href: "/admin/collections",
+    icon: LibraryBig,
+    permissionCodes: ["item.manage"],
+  },
+  {
+    id: "apps",
+    label: "Apps",
+    href: "/admin/connectors",
+    icon: Grid2X2,
+    permissionCodes: ["source.manage"],
+  },
+  {
+    id: "agents",
+    label: "Agents",
+    href: "/workflows",
+    icon: Bot,
+    permissionCodes: ["source.manage"],
+  },
+  {
+    id: "admin",
+    label: "Admin",
+    href: "/admin",
+    icon: ShieldCheck,
+    permissionCodes: [
+      "admin",
+      "item.manage",
+      "source.manage",
+      "user.manage",
+      "role.manage",
+      "group.manage",
+      "access.manage",
+      "audit.read",
+      "tenant.manage",
+    ],
+  },
+];

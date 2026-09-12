@@ -19,7 +19,6 @@ function artifact(overrides: Partial<Record<string, unknown>> = {}): OutputTextA
       revision: 1,
       size_bytes: 2048,
       updated_at: "2026-09-06T00:00:00+00:00",
-      exports: [],
       ...overrides,
     },
   };
@@ -49,7 +48,7 @@ function turnWithAnnotations(perResponse: OutputTextAnnotation[][]): TurnState {
   return { id: "turn", status: "completed", responses, responseOrder };
 }
 
-test("collects a produced document once, from its annotation", () => {
+test("collects a produced file once, from its annotation", () => {
   const artifacts = turnArtifacts(turnWithAnnotations([[artifact()]]));
 
   assert.equal(artifacts.length, 1);
@@ -61,22 +60,69 @@ test("collects a produced document once, from its annotation", () => {
     revision: 1,
     sizeBytes: 2048,
     updatedAt: "2026-09-06T00:00:00+00:00",
-    exports: [],
   });
 });
 
-test("a document presented twice keeps its newest revision and first position", () => {
+test("a file presented twice keeps its newest revision and first position", () => {
   const artifacts = turnArtifacts(turnWithAnnotations([
     [artifact({ revision: 1 }), artifact({ id: "artifact-2", title: "Checklist" })],
-    [artifact({ revision: 2, size_bytes: 4096, exports: ["pdf"] })],
+    [artifact({ revision: 2, size_bytes: 4096 })],
   ]));
 
   assert.deepEqual(artifacts.map((entry) => [entry.id, entry.revision]), [
     ["artifact-1", 2],
     ["artifact-2", 1],
   ]);
-  assert.deepEqual(artifacts[0]?.exports, ["pdf"]);
   assert.equal(artifacts[0]?.sizeBytes, 4096);
+});
+
+test("collects an explicitly exported workspace artifact from tool progress", () => {
+  const turn: TurnState = {
+    id: "turn-1",
+    status: "streaming",
+    responseOrder: [],
+    responses: {},
+    runtimeActivities: [{
+      callId: "export-1",
+      toolName: "export_sandbox_file",
+      state: "completed",
+      startedAt: 1,
+      progress: {
+        artifact: {
+          id: "artifact-1",
+          title: "Analysis",
+          file_name: "analysis.csv",
+          mime_type: "text/csv",
+          revision: 1,
+          size_bytes: 42,
+          updated_at: "2026-09-10T00:00:00Z",
+        },
+      },
+    }],
+  };
+
+  assert.deepEqual(turnArtifacts(turn), [{
+    id: "artifact-1",
+    title: "Analysis",
+    fileName: "analysis.csv",
+    mimeType: "text/csv",
+    revision: 1,
+    sizeBytes: 42,
+    updatedAt: "2026-09-10T00:00:00Z",
+  }]);
+});
+
+test("a container file citation never reaches the client as one", () => {
+  // The backend consumes the provider's own citation and republishes it as a
+  // Product file, so an unknown provider annotation contributes nothing.
+  const provider: OutputTextAnnotation = {
+    type: "container_file_citation",
+    container_id: "cntr_1",
+    file_id: "cfile_1",
+    filename: "/mnt/data/Q3-memo.md",
+  };
+
+  assert.deepEqual(turnArtifacts(turnWithAnnotations([[provider]])), []);
 });
 
 test("citation and unknown annotations are ignored", () => {

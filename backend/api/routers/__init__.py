@@ -30,6 +30,35 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class CreateAuthSessionRequest(BaseModel):
+    tenant_id: UUID
+
+
+class GoogleCredentialRequest(BaseModel):
+    credential: str = Field(min_length=1, max_length=12_000)
+
+
+class AuthTenant(BaseModel):
+    id: UUID
+    code: str
+    name: str
+    role_id: UUID
+    role_code: str
+    permissions: list[str]
+
+
+class AuthSessionResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_at: str
+    user_id: UUID
+    email: EmailStr
+    display_name: str | None
+    active_tenant_id: UUID
+    permissions: list[str]
+    tenants: list[AuthTenant]
+
+
 class RefreshRequest(BaseModel):
     refresh_token: str
 
@@ -122,15 +151,13 @@ class ChatRequest(BaseModel):
     roles: list[str] = Field(default_factory=list, deprecated=True)
     conversation_id: UUID | None = None
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=24)
-    knowledge_mode: Literal["auto", "selected", "off"] = "auto"
     collection_item_ids: list[UUID] = Field(default_factory=list, max_length=20)
+    # Stable identities for resources attached to this turn. Uploading them
+    # stores bytes only; the agent resolves content lazily when needed.
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def validate_collection_selection(self) -> ChatRequest:
-        if self.knowledge_mode == "selected" and not self.collection_item_ids:
-            raise ValueError("selected knowledge mode requires at least one Collection")
-        if self.knowledge_mode != "selected" and self.collection_item_ids:
-            raise ValueError("Collection IDs are only accepted in selected mode")
         if len(self.collection_item_ids) != len(set(self.collection_item_ids)):
             raise ValueError("Collection IDs must be unique")
         return self
@@ -220,19 +247,12 @@ class DocumentDetail(BaseModel):
 # --- Conversation artifacts ---
 
 
-class ArtifactExportView(BaseModel):
-    file_name: str
-    size_bytes: int = Field(ge=0)
-    download_url: str | None = None
-
-
 class ArtifactRevisionView(BaseModel):
     revision: int = Field(ge=1)
     summary: str | None = None
     size_bytes: int = Field(ge=0)
     created_at: str | None = None
     download_url: str | None = None
-    exports: dict[str, ArtifactExportView] = Field(default_factory=dict)
 
 
 class ArtifactDetail(BaseModel):
@@ -250,7 +270,6 @@ class ArtifactDetail(BaseModel):
     created_at: str | None = None
     updated_at: str | None = None
     download_url: str | None = None
-    exports: dict[str, ArtifactExportView] = Field(default_factory=dict)
     revisions: list[ArtifactRevisionView]
 
 
@@ -260,10 +279,6 @@ class ArtifactContent(BaseModel):
     mime_type: str
     content: str
     truncated: bool = False
-
-
-class ArtifactExportRequest(BaseModel):
-    format: Literal["pdf"] = "pdf"
 
 
 class ArtifactPublishRequest(BaseModel):
@@ -480,6 +495,11 @@ class IntegrationConnectionUpdate(AdminRequest):
     status: Literal["draft", "active", "disabled", "error"] | None = None
 
 
+class AppRequestCreate(AdminRequest):
+    connector_key: str = Field(min_length=1, max_length=64)
+    reason: str | None = Field(default=None, max_length=2_000)
+
+
 class ScheduleInput(AdminRequest):
     schedule_type: Literal["cron", "interval"] = "cron"
     cron_expression: str = Field(min_length=1, max_length=255)
@@ -539,14 +559,13 @@ class CollectionAccessGrant(AdminRequest):
 
 __all__ = [
     "AccessRequestCreate",
+    "AppRequestCreate",
     "AccessRequestDecision",
     "AdminRequest",
     "AdminRoleCreate",
     "AdminRoleUpdate",
     "ArtifactContent",
     "ArtifactDetail",
-    "ArtifactExportRequest",
-    "ArtifactExportView",
     "ArtifactPublishRequest",
     "ArtifactPublishResponse",
     "ArtifactRevisionView",

@@ -1,4 +1,4 @@
-"""BoThesis HTTP application: assemble routers, errors, and the runtime."""
+"""Enterprise Agent HTTP application: assemble routers, errors, and the runtime."""
 
 from __future__ import annotations
 
@@ -9,7 +9,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.deps import get_runtime
 from api.errors import register_error_handlers
-from api.routers import admin, agent, artifacts, documents, health, knowledge
+from api.authentication import JwtAuthenticationMiddleware
+from api.routers import (
+    admin,
+    agent,
+    auth,
+    artifacts,
+    documents,
+    health,
+    knowledge,
+)
 from api.routers.planned import PLANNED_ROUTERS
 
 API_PREFIX = "/api/v1"
@@ -39,7 +48,7 @@ def create_app() -> FastAPI:
     """Build the application; one call per process, or one per test."""
 
     app = FastAPI(
-        title="BoThesis API",
+        title="Enterprise Agent API",
         version="0.1.0",
         description="Enterprise knowledge and BI assistant.",
         lifespan=lifespan,
@@ -55,8 +64,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(
+        JwtAuthenticationMiddleware,
+        tokens=get_runtime().jwt_token_service(),
+    )
     for router in _ROUTERS:
         app.include_router(router, prefix=API_PREFIX)
+    app.include_router(auth.router, prefix="/api")
     app.include_router(health.router)
     return app
 

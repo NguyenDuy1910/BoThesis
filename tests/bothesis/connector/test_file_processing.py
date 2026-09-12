@@ -120,8 +120,8 @@ def test_file_processor_extracts_text_and_json_through_docling() -> None:
     text = processor.process_bytes(b"alpha\r\n\r\nbeta", file_name="notes.txt")
     assert text.text == "alpha\n\nbeta"
 
-    structured = processor.process_bytes(b'{"name":"BoThesis"}', file_name="data.json")
-    assert '"name": "BoThesis"' in structured.text
+    structured = processor.process_bytes(b'{"name":"Enterprise Agent"}', file_name="data.json")
+    assert '"name": "Enterprise Agent"' in structured.text
 
     assert structured.item == structured.item.model_validate(
         structured.item.model_dump(mode="json")

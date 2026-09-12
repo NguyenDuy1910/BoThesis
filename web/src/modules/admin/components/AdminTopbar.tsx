@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 
 import { Button } from "@/components/ui/Button";
 import { Tooltip } from "@/components/ui/Tooltip";
+import { appBrand } from "@/lib/brand";
 import { adminRoutes } from "@/modules/admin/navigation";
 
 interface Crumb {
@@ -103,7 +104,7 @@ export function AdminTopbar({
 
       <div className="adm-top__actions">
         <button
-          aria-label="Search BoThesis Admin"
+          aria-label={`Search ${appBrand.productName} Admin`}
           className="adm-search"
           onClick={onSearchOpen}
           type="button"

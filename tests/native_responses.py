@@ -1,6 +1,6 @@
 """Builders for native ``/responses`` streaming events, shared by agent tests.
 
-Every provider BoThesis supports emits the same OpenResponses-format events, so
+Every provider Enterprise Agent supports emits the same OpenResponses-format events, so
 these builders describe one provider stream and are reused for all of them. They
 produce real OpenAI SDK event objects, which is exactly what both transports
 hand to the adapter.
@@ -33,6 +33,7 @@ from openai.types.responses import (
     ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseOutputText,
+    ResponseOutputTextAnnotationAddedEvent,
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
@@ -100,8 +101,13 @@ def message(
     output_index: int,
     deltas: Sequence[str],
     phase: str | None = None,
+    annotations: Sequence[dict[str, Any]] = (),
 ) -> list[Any]:
-    """The specified event order for one streamed assistant message."""
+    """The specified event order for one streamed assistant message.
+
+    ``annotations`` are emitted between the text deltas and the settling
+    events, which is where a provider places them.
+    """
 
     seq = _Sequencer()
     text = "".join(deltas)
@@ -136,6 +142,18 @@ def message(
         )
         for delta in deltas
     )
+    events.extend(
+        ResponseOutputTextAnnotationAddedEvent(
+            type="response.output_text.annotation.added",
+            sequence_number=seq.take(),
+            item_id=item_id,
+            output_index=output_index,
+            content_index=0,
+            annotation_index=index,
+            annotation=annotation,
+        )
+        for index, annotation in enumerate(annotations)
+    )
     events.append(
         ResponseTextDoneEvent(
             type="response.output_text.done",
@@ -147,7 +165,9 @@ def message(
             logprobs=[],
         )
     )
-    part = ResponseOutputText(type="output_text", text=text, annotations=[])
+    part = ResponseOutputText(
+        type="output_text", text=text, annotations=list(annotations)
+    )
     events.append(
         ResponseContentPartDoneEvent(
             type="response.content_part.done",

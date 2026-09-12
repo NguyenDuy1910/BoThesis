@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../app/app_brand.dart';
 import '../../../app/app_theme.dart';
 
 class ProductMark extends StatelessWidget {
@@ -10,7 +11,7 @@ class ProductMark extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Semantics(
-      label: 'BoThesis',
+      label: AppBrand.productName,
       image: true,
       child: Container(
         width: size,

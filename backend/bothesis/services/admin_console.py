@@ -25,17 +25,19 @@ from bothesis.services import (
     AuthContext,
     require_tenant_permission,
 )
-from bothesis.services.access_requests import AccessRequestService
+from bothesis.services.identity_access.access_requests import AccessRequestService
+from bothesis.services.app_request import AppRequestService
 from bothesis.services.audit import AuditService
-from bothesis.services.collection_access import CollectionAccessService
-from bothesis.services.groups import GroupService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.confluence_environment import ConfluenceEnvironmentService
+from bothesis.services.identity_access.groups import GroupService
 from bothesis.services.ingestion_sources import IngestionSourceService
 from bothesis.services.integration_connections import IntegrationConnectionService
 from bothesis.services.item_catalog import ItemCatalogService
 from bothesis.services.item_ingestion import ItemIngestionService
-from bothesis.services.roles import RoleService
-from bothesis.services.tenants import TenantService
-from bothesis.services.users import UserService
+from bothesis.services.identity_access.roles import RoleService
+from bothesis.services.identity_access.tenants import TenantService
+from bothesis.services.identity_access.users import UserService
 from bothesis.services.workflow import (
     IngestionWorkflowInput,
     WorkflowExecutionNotFoundError,
@@ -227,6 +229,21 @@ class AdminConsoleService:
             return await self._connections(session).validate_connection(
                 actor, integration_connection_id
             )
+
+    async def confluence_environment_status(self, actor: AuthContext) -> dict[str, Any]:
+        return await ConfluenceEnvironmentService(self._integration.confluence).status(actor)
+
+    async def list_confluence_environment_spaces(
+        self, actor: AuthContext
+    ) -> dict[str, Any]:
+        return await ConfluenceEnvironmentService(self._integration.confluence).spaces(actor)
+
+    async def list_confluence_environment_pages(
+        self, actor: AuthContext, *, space: str
+    ) -> dict[str, Any]:
+        return await ConfluenceEnvironmentService(self._integration.confluence).pages(
+            actor, space=space
+        )
 
     # -- Ingestion sources --------------------------------------------------
 
@@ -546,6 +563,16 @@ class AdminConsoleService:
 
     # -- Access requests and audit -----------------------------------------
 
+    async def list_app_requests(self, actor: AuthContext, **filters: Any) -> dict[str, Any]:
+        async with self._unit_of_work() as session:
+            return await AppRequestService(session).list_requests(actor, **filters)
+
+    async def create_app_request(
+        self, actor: AuthContext, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        async with self._unit_of_work() as session:
+            return await AppRequestService(session).create_request(actor, **values)
+
     async def list_access_requests(
         self, actor: AuthContext, **filters: Any
     ) -> dict[str, Any]:
@@ -684,12 +711,14 @@ class AdminConsoleService:
         return IntegrationConnectionService(
             session,
             credential_encryption_key=self._integration.credential_encryption_key,
+            confluence_environment=self._integration.confluence,
         )
 
     def _sources(self, session: AsyncSession) -> IngestionSourceService:
         return IngestionSourceService(
             session,
             credential_encryption_key=self._integration.credential_encryption_key,
+            confluence_environment=self._integration.confluence,
         )
 
 

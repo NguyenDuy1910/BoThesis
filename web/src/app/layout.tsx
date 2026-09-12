@@ -1,9 +1,18 @@
 import type { Metadata, Viewport } from "next";
+import { AuthGate } from "@/components/auth/AuthGate";
+import { appBrand } from "@/lib/brand";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "BoThesis",
+  title: appBrand.productName,
   description: "Enterprise knowledge and BI assistant.",
+  applicationName: appBrand.productName,
+  manifest: "/site.webmanifest",
+  openGraph: {
+    title: appBrand.productName,
+    description: "Enterprise knowledge and BI assistant.",
+    siteName: appBrand.productName,
+  },
 };
 
 export const viewport: Viewport = {
@@ -35,7 +44,7 @@ export default function RootLayout({
       </head>
       <body>
         <a className="skip-link" href="#main-content">Skip to main content</a>
-        {children}
+        <AuthGate>{children}</AuthGate>
       </body>
     </html>
   );

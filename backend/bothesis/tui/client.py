@@ -1,4 +1,4 @@
-"""HTTP and SSE boundary for the BoThesis terminal client."""
+"""HTTP and SSE boundary for the Enterprise Agent terminal client."""
 
 from __future__ import annotations
 

@@ -12,6 +12,11 @@ import {
   Workflow,
 } from "lucide-react";
 
+import {
+  hasAnySessionPermission,
+  type AuthSession,
+} from "@/lib/auth/session";
+
 /**
  * One registry behind the sidebar, the breadcrumb, the page header and the
  * command palette. A section can only be reached through an entry here, so a
@@ -32,6 +37,8 @@ export interface AdminRoute {
   external?: boolean;
   /** Hidden from the sidebar but still routable and searchable. */
   hidden?: boolean;
+  /** Any matching permission exposes this section in the control plane. */
+  permissionCodes: readonly string[];
 }
 
 export type AdminNavGroupId = "root" | "knowledge" | "operations" | "governance";
@@ -52,6 +59,7 @@ export const adminRoutes: AdminRoute[] = [
     icon: LayoutDashboard,
     group: "root",
     keywords: ["home", "overview", "start"],
+    permissionCodes: ["admin"],
   },
   {
     id: "collections",
@@ -62,6 +70,7 @@ export const adminRoutes: AdminRoute[] = [
     icon: Boxes,
     group: "knowledge",
     keywords: ["knowledge base", "kb", "corpus", "library"],
+    permissionCodes: ["item.manage"],
   },
   {
     id: "documents",
@@ -72,6 +81,7 @@ export const adminRoutes: AdminRoute[] = [
     icon: FileText,
     group: "knowledge",
     keywords: ["files", "items", "content", "uploads"],
+    permissionCodes: ["item.manage"],
   },
   {
     id: "connectors",
@@ -82,6 +92,7 @@ export const adminRoutes: AdminRoute[] = [
     icon: Plug,
     group: "knowledge",
     keywords: ["sources", "integrations", "confluence", "slack", "jira", "drive"],
+    permissionCodes: ["source.manage"],
   },
   {
     id: "schedules",
@@ -92,6 +103,7 @@ export const adminRoutes: AdminRoute[] = [
     icon: CalendarClock,
     group: "operations",
     keywords: ["cron", "automation", "recurring", "sync schedule"],
+    permissionCodes: ["source.manage"],
   },
   {
     id: "activity",
@@ -101,6 +113,7 @@ export const adminRoutes: AdminRoute[] = [
     icon: Waypoints,
     group: "operations",
     keywords: ["runs", "ingestion", "jobs", "history", "imports"],
+    permissionCodes: ["source.manage"],
   },
   {
     id: "workflows",
@@ -110,6 +123,7 @@ export const adminRoutes: AdminRoute[] = [
     icon: Workflow,
     group: "operations",
     external: true,
+    permissionCodes: ["source.manage"],
   },
   {
     id: "access",
@@ -130,6 +144,12 @@ export const adminRoutes: AdminRoute[] = [
       "requests",
       "policies",
     ],
+    permissionCodes: [
+      "user.manage",
+      "role.manage",
+      "group.manage",
+      "access.manage",
+    ],
   },
   {
     id: "audit",
@@ -139,6 +159,7 @@ export const adminRoutes: AdminRoute[] = [
     icon: ScrollText,
     group: "governance",
     keywords: ["history", "events", "compliance", "who did what"],
+    permissionCodes: ["audit.read"],
   },
   {
     id: "settings",
@@ -148,6 +169,7 @@ export const adminRoutes: AdminRoute[] = [
     icon: Settings,
     group: "governance",
     keywords: ["workspace", "tenant", "space", "profile", "appearance", "theme"],
+    permissionCodes: ["tenant.manage"],
   },
 ];
 
@@ -157,6 +179,29 @@ export const adminNavGroups: { id: AdminNavGroupId; routes: AdminRoute[] }[] = (
   id,
   routes: adminRoutes.filter((route) => route.group === id && !route.hidden),
 }));
+
+export function canAccessAdminRoute(
+  route: AdminRoute,
+  session: AuthSession | null,
+): boolean {
+  return hasAnySessionPermission(session, route.permissionCodes);
+}
+
+export function visibleAdminNavGroups(session: AuthSession | null) {
+  return adminNavGroups
+    .map((group) => ({
+      ...group,
+      routes: group.routes.filter((route) => canAccessAdminRoute(route, session)),
+    }))
+    .filter((group) => group.routes.length > 0);
+}
+
+/** The first allowed console section is the safe Admin destination. */
+export function firstAccessibleAdminRoute(session: AuthSession | null) {
+  return adminRoutes.find((route) =>
+    !route.external && canAccessAdminRoute(route, session),
+  );
+}
 
 /**
  * Paths this console used to publish. They still resolve so existing links and

@@ -9,7 +9,7 @@ Three families share one ``type``-discriminated union:
 * reasoning parts (``reasoning_text``, ``summary_text``) live inside a
   ``reasoning`` item.
 
-``input_video`` is specified but never authored by BoThesis, so it is not
+``input_video`` is specified but never authored by Enterprise Agent, so it is not
 modelled. Nothing here knows about a provider.
 """
 
@@ -26,28 +26,18 @@ Annotation: TypeAlias = dict[str, Any]
 
 Kept opaque because members are provider and tool specific: OpenAI emits
 ``url_citation``, ``file_citation``, ``file_path`` and container references,
-OpenRouter emits file-cache descriptors, and BoThesis adds
+OpenRouter emits file-cache descriptors, and Enterprise Agent adds
 :data:`DOCUMENT_CITATION_TYPE`. Typing the union would pull every provider's
 vocabulary into the common contract for no gain.
 """
 
 DOCUMENT_CITATION_TYPE = "bothesis:document_citation"
-"""The BoThesis citation annotation type.
+"""The Enterprise Agent citation annotation type.
 
 OpenResponses only specifies ``url_citation``, which cannot carry enterprise
 document lineage (document id, page, section, access source). The spec requires
 implementer-specific types to be slug-prefixed, hence ``bothesis:``.
 """
-
-ARTIFACT_ANNOTATION_TYPE = "bothesis:artifact"
-"""The BoThesis artifact annotation type.
-
-A document the run created or revised is attached to the answer that presents
-it, the way a provider's ``container_file_citation`` attaches a sandbox-generated
-file to a message. The annotation is zero-width at the end of the text and
-carries only the artifact's description, never its content.
-"""
-
 
 class InputText(ProtocolModel):
     """Plain text supplied to the model."""
@@ -146,7 +136,6 @@ TEXT_PART_TYPES = (InputText, OutputText, ReasoningText, SummaryText)
 """Every part exposing a plain ``text`` attribute."""
 
 __all__ = [
-    "ARTIFACT_ANNOTATION_TYPE",
     "DOCUMENT_CITATION_TYPE",
     "TEXT_PART_TYPES",
     "Annotation",

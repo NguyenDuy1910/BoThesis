@@ -1,4 +1,4 @@
-// BoThesis canonical knowledge architecture.
+// Enterprise Agent canonical knowledge architecture.
 // PostgreSQL owns durable domain state. Raw bytes live in S3/R2. Retrieval
 // chunks, embeddings, and BM25 representation live in Qdrant.
 

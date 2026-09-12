@@ -17,6 +17,7 @@ import { CardListSkeleton, Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useToast } from "@/components/ui/Toast";
 import { Tooltip } from "@/components/ui/Tooltip";
+import { appBrand } from "@/lib/brand";
 import { adminRequest, useAdminQuery } from "@/modules/admin/api";
 import { ConnectorSetupDrawer } from "@/modules/admin/components/ConnectorSetupDrawer";
 import { errorMessage, pluralize, titleCase } from "@/modules/admin/format";
@@ -263,7 +264,7 @@ export function ConnectorsPage() {
             )}
             {notYet.length > 0 && (
               <ConnectorSection
-                description="Supported by BoThesis but not enabled here yet. Ask your platform team to turn one on."
+                description={`Supported by ${appBrand.productName} but not enabled here yet. Ask your platform team to turn one on.`}
                 items={notYet}
                 onSelect={openSetup}
                 title="Not available yet"

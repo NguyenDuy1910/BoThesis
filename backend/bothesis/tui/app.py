@@ -1,4 +1,4 @@
-"""Textual application for testing the BoThesis chat API from a terminal."""
+"""Textual application for testing the Enterprise Agent chat API from a terminal."""
 
 from __future__ import annotations
 
@@ -20,9 +20,9 @@ DEFAULT_DEVELOPMENT_USER_ID = "00000000-0000-0000-0000-000000000002"
 
 
 class BothesisTui(App[None]):
-    """A thin, streaming terminal view over the existing BoThesis API."""
+    """A thin, streaming terminal view over the existing Enterprise Agent API."""
 
-    TITLE = "BoThesis"
+    TITLE = "Enterprise Agent"
     SUB_TITLE = "Enterprise knowledge chat"
     CSS = """
     Screen {
@@ -210,11 +210,11 @@ class BothesisTui(App[None]):
 def run_tui(argv: Sequence[str] | None = None) -> None:
     """Parse terminal configuration and run the Textual client."""
 
-    parser = argparse.ArgumentParser(description="BoThesis terminal chat client")
+    parser = argparse.ArgumentParser(description="Enterprise Agent terminal chat client")
     parser.add_argument(
         "--api-url",
         default=os.getenv("BOTHESIS_API_URL", "http://127.0.0.1:8000"),
-        help="BoThesis API base URL (default: BOTHESIS_API_URL or localhost)",
+        help="Enterprise Agent API base URL (default: BOTHESIS_API_URL or localhost)",
     )
     parser.add_argument(
         "--user-id",

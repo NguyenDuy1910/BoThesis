@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../app/app_brand.dart';
 import '../../../app/app_theme.dart';
 import '../models/chat_models.dart';
 import '../state/chat_controller.dart';
@@ -191,7 +192,8 @@ class AssistantTurnView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final items = turn?.presentationItems ?? const <AssistantTurnItem>[];
-    if (items.isEmpty && !isStreaming) return const SizedBox.shrink();
+    final pending = isStreaming && (turn?.modelPending ?? false);
+    if (items.isEmpty && !pending) return const SizedBox.shrink();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -199,31 +201,34 @@ class AssistantTurnView extends StatelessWidget {
           Padding(
             padding: EdgeInsets.only(bottom: item == items.last ? 0 : 8),
             child: switch (item.kind) {
-              AssistantTurnItemKind.message => _MarkdownAnswer(text: item.text),
+              AssistantTurnItemKind.message => _MarkdownAnswer(
+                text: item.text,
+                muted: item.phase == 'commentary',
+              ),
               AssistantTurnItemKind.tool => _ToolActivity(
                 item: item,
                 connectorLabel: connectorLabel,
               ),
-              AssistantTurnItemKind.reasoning => _ReasoningActivity(item: item),
+              AssistantTurnItemKind.reasoning => const SizedBox.shrink(),
             },
           ),
-        if (items.isEmpty && isStreaming)
-          const _StatusLine(label: 'Analyzing…'),
+        if (pending) const _PendingIndicator(),
       ],
     );
   }
 }
 
 class _MarkdownAnswer extends StatelessWidget {
-  const _MarkdownAnswer({required this.text});
+  const _MarkdownAnswer({required this.text, this.muted = false});
 
   final String text;
+  final bool muted;
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final bodyStyle = Theme.of(context).textTheme.bodyLarge
-        ?.copyWith(height: 1.65);
+        ?.copyWith(height: 1.65, color: muted ? colors.textSecondary : null);
     return MarkdownBody(
       data: text,
       selectable: true,
@@ -300,37 +305,45 @@ class _ToolActivity extends StatelessWidget {
     final presentation = _toolPresentation(
       item.name,
       item.state,
-      connectorLabel,
+      item.resultCount,
     );
     final active = item.state == 'active';
-    final error = item.state == 'error';
+    final error = item.state == 'failed' || item.state == 'timeout';
     return Semantics(
       liveRegion: active,
       label: presentation.label,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (active)
-            const SizedBox(
-              width: 14,
-              height: 14,
-              child: CircularProgressIndicator(strokeWidth: 1.8),
-            )
-          else
-            Icon(
-              error ? Icons.error_outline_rounded : Icons.check_rounded,
-              size: 15,
-              color: error ? context.colors.danger : context.colors.brand,
-            ),
+          Icon(
+            active
+                ? Icons.circle_outlined
+                : error
+                ? Icons.error_outline_rounded
+                : Icons.check_rounded,
+            size: 15,
+            color: error ? context.colors.danger : context.colors.textMuted,
+          ),
           const SizedBox(width: 7),
-          Text(
-            presentation.label,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: error
-                  ? context.colors.danger
-                  : context.colors.textSecondary,
-              fontWeight: FontWeight.w500,
-            ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                presentation.label,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: error
+                      ? context.colors.danger
+                      : context.colors.textSecondary,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              if (presentation.detail != null)
+                Text(
+                  presentation.detail!,
+                  style: Theme.of(context).textTheme.labelSmall
+                      ?.copyWith(color: context.colors.textMuted),
+                ),
+            ],
           ),
         ],
       ),
@@ -338,68 +351,52 @@ class _ToolActivity extends StatelessWidget {
   }
 }
 
-class _ReasoningActivity extends StatelessWidget {
-  const _ReasoningActivity({required this.item});
-
-  final AssistantTurnItem item;
+class _PendingIndicator extends StatefulWidget {
+  const _PendingIndicator();
 
   @override
-  Widget build(BuildContext context) {
-    if (item.state == 'active') return const _StatusLine(label: 'Thinking…');
-    if (item.text.isEmpty) return const SizedBox.shrink();
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: const EdgeInsets.fromLTRB(0, 0, 0, 8),
-        dense: true,
-        visualDensity: VisualDensity.compact,
-        leading: Icon(
-          Icons.psychology_outlined,
-          size: 17,
-          color: context.colors.textMuted,
-        ),
-        title: Text(
-          'Thought process',
-          style: Theme.of(context).textTheme.bodySmall
-              ?.copyWith(fontWeight: FontWeight.w500),
-        ),
-        children: [
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              item.text,
-              style: Theme.of(context).textTheme.bodySmall
-                  ?.copyWith(color: context.colors.textSecondary),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  State<_PendingIndicator> createState() => _PendingIndicatorState();
 }
 
-class _StatusLine extends StatelessWidget {
-  const _StatusLine({required this.label});
+class _PendingIndicatorState extends State<_PendingIndicator>
+    with SingleTickerProviderStateMixin {
+  var _visible = false;
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 2000),
+  )..repeat(reverse: true);
 
-  final String label;
+  @override
+  void initState() {
+    super.initState();
+    Future<void>.delayed(const Duration(milliseconds: 700), () {
+      if (mounted) setState(() => _visible = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    if (!_visible) return const SizedBox(height: 18);
     return Semantics(
       liveRegion: true,
-      label: label,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(
-            width: 14,
-            height: 14,
-            child: CircularProgressIndicator(strokeWidth: 1.8),
+      label: '${AppBrand.productName} is working',
+      child: FadeTransition(
+        opacity: Tween<double>(begin: 0.25, end: 0.7).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+        ),
+        child: Text(
+          AppBrand.productName,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: context.colors.textSecondary,
+            fontWeight: FontWeight.w400,
           ),
-          const SizedBox(width: 7),
-          Text(label, style: Theme.of(context).textTheme.bodySmall),
-        ],
+        ),
       ),
     );
   }
@@ -495,35 +492,68 @@ class _ErrorBox extends StatelessWidget {
   }
 }
 
-({String label}) _toolPresentation(
+({String label, String? detail}) _toolPresentation(
   String name,
   String state,
-  String? connectorLabel,
+  int? resultCount,
 ) {
   final completed = state == 'completed';
   if (name == 'knowledge_search') {
     return (
-      label: state == 'error'
-          ? 'Knowledge search could not complete'
+      label: state == 'failed' || state == 'timeout'
+          ? 'Không thể hoàn tất thao tác'
           : completed
-          ? 'Searched ${connectorLabel ?? 'knowledge'}'
-          : 'Searching ${connectorLabel ?? 'knowledge'}…',
+          ? 'Đã tìm tài liệu liên quan'
+          : 'Đang tìm tài liệu liên quan…',
+      detail: completed && resultCount != null
+          ? '$resultCount tài liệu phù hợp'
+          : 'Đang kiểm tra các tài liệu phù hợp',
     );
   }
-  if (name == 'sql_query') {
-    return (
-      label: state == 'error'
-          ? 'Data query could not complete'
-          : completed
-          ? 'Queried data'
-          : 'Querying data…',
-    );
+  const vocabulary =
+      <String, ({String active, String completed, String detail})>{
+        'read_resource': (
+          active: 'Đang đọc tài liệu…',
+          completed: 'Đã đọc tài liệu',
+          detail: 'Đang đọc nội dung tài liệu',
+        ),
+        'inspect_resource': (
+          active: 'Đang kiểm tra tài liệu…',
+          completed: 'Đã kiểm tra tài liệu',
+          detail: 'Đang xem thông tin tài liệu',
+        ),
+        'materialize_resource': (
+          active: 'Đang chuẩn bị tài liệu…',
+          completed: 'Đã chuẩn bị tài liệu',
+          detail: 'Đang chuẩn bị nội dung để phân tích',
+        ),
+        'document_edit': (
+          active: 'Đang chỉnh sửa tài liệu…',
+          completed: 'Đã chỉnh sửa tài liệu',
+          detail: 'Đang cập nhật nội dung tài liệu',
+        ),
+        'artifact_create': (
+          active: 'Đang hoàn thiện tài liệu…',
+          completed: 'Đã tạo tài liệu',
+          detail: 'Đang tạo phiên bản tài liệu',
+        ),
+      };
+  final text =
+      vocabulary[name] ??
+      (
+        active: 'Đang xử lý yêu cầu…',
+        completed: 'Đã hoàn tất thao tác',
+        detail: 'Đang thực hiện thao tác cần thiết',
+      );
+  if (state == 'failed') {
+    return (label: 'Không thể hoàn tất thao tác', detail: null);
   }
+  if (state == 'timeout') {
+    return (label: 'Thao tác mất quá nhiều thời gian', detail: null);
+  }
+  if (state == 'skipped') return (label: 'Đã bỏ qua thao tác', detail: null);
   return (
-    label: state == 'error'
-        ? 'Tool could not complete'
-        : completed
-        ? 'Completed tool activity'
-        : 'Running tool…',
+    label: completed ? text.completed : text.active,
+    detail: completed ? null : text.detail,
   );
 }

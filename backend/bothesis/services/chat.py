@@ -6,29 +6,43 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from typing import Literal
 from uuid import UUID, uuid4
 
-from bothesis.agent import Agent
+from bothesis.agent import (
+    Agent,
+    AttachmentInput,
+    AttachmentRef,
+    ImageInput,
+    ResourceResolver,
+    SandboxRuntime,
+    TextInput,
+    UserTurn,
+)
 from bothesis.agent.models import AgentContext, ConversationMessage
-from bothesis.agent.protocol import Response, ResponseCompletedEvent
+from bothesis.agent.protocol import (
+    HostedExecutionCallItem,
+    HostedExecutionResultItem,
+    Item,
+    Response,
+    ResponseCompletedEvent,
+    ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent,
+)
 from bothesis.db.engine import SessionFactory, session_scope
 from bothesis.services import (
     KNOWLEDGE_READ_PERMISSION,
     AuthContext,
     require_tenant_permission,
 )
-from bothesis.services.artifact import ArtifactService, produced_artifact_ids
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.conversation import ConversationService
 
-KnowledgeMode = Literal["auto", "selected", "off"]
 HistoryTurn = tuple[Literal["user", "assistant"], str]
-
-# Retrieval tools follow the knowledge mode; document tools are always available
-# because a document can be written from the conversation alone.
-KNOWLEDGE_TOOL_NAMES: tuple[str, ...] = ("knowledge_search",)
-ARTIFACT_TOOL_NAMES: tuple[str, ...] = (
-    "artifact_create",
-    "artifact_edit",
-    "artifact_export",
+_RESOURCE_TOOL_NAMES = frozenset(
+    {
+        "inspect_resource",
+        "read_resource",
+        "materialize_resource",
+        "materialize_sandbox_resource",
+    }
 )
 
 
@@ -41,16 +55,15 @@ class ChatService:
         *,
         agent: Agent,
         conversations: ConversationService,
-        artifacts: ArtifactService,
-        artifact_context_characters: int = 20_000,
+        resource_resolver: Callable[[AuthContext], ResourceResolver] | None = None,
+        sandbox_runtime: Callable[[AuthContext, UUID, str], SandboxRuntime | None]
+        | None = None,
     ) -> None:
-        if artifact_context_characters < 1:
-            raise ValueError("artifact_context_characters must be at least one")
         self._sessions = session_factory
         self._agent = agent
         self._conversations = conversations
-        self._artifacts = artifacts
-        self._artifact_context_characters = artifact_context_characters
+        self._resource_resolver = resource_resolver
+        self._sandbox_runtime = sandbox_runtime
 
     async def stream_turn(
         self,
@@ -59,8 +72,8 @@ class ChatService:
         message: str,
         conversation_id: UUID | None,
         history: Sequence[HistoryTurn],
-        knowledge_mode: KnowledgeMode,
         collection_item_ids: Sequence[UUID],
+        attachment_ids: Sequence[UUID] = (),
         is_disconnected: Callable[[], Awaitable[bool]],
     ) -> AsyncIterator[str]:
         """Yield serialized agent events for one authorized chat turn."""
@@ -68,28 +81,18 @@ class ChatService:
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         if access.tenant_id is None:
             raise PermissionError("an active tenant membership is required for chat")
-        selected_ids, knowledge_tools = await self._resolve_knowledge_scope(
-            access,
-            knowledge_mode=knowledge_mode,
-            collection_item_ids=collection_item_ids,
-        )
+        selected_ids = await self._resolve_knowledge_scope(access, collection_item_ids)
         resolved_conversation_id = conversation_id or uuid4()
-        # A brand-new conversation has no working documents or references yet.
-        artifacts = (
-            await self._artifacts.conversation_artifacts(
-                access,
-                resolved_conversation_id,
-                content_characters=self._artifact_context_characters,
-            )
-            if conversation_id is not None
-            else ()
-        )
-        document_references = (
-            await self._conversations.referenced_documents(
+        referenced_resources = (
+            await self._conversations.referenced_resources(
                 resolved_conversation_id, access=access
             )
             if conversation_id is not None
             else ()
+        )
+        attachments = tuple(dict.fromkeys(attachment_ids))
+        attachment_resources = await self._conversations.resources(
+            attachments, access=access
         )
         context = AgentContext(
             user_id=str(access.user_id),
@@ -102,38 +105,67 @@ class ChatService:
                 ConversationMessage(role=role, content=content)
                 for role, content in history
             ),
-            allowed_tool_names=(*knowledge_tools, *ARTIFACT_TOOL_NAMES),
-            document_references=document_references,
-            artifacts=artifacts,
+            allowed_tool_names=self._available_tool_names(
+                resources_available=bool(attachment_resources or referenced_resources)
+            ),
+            resources=referenced_resources,
+        )
+        user_turn = UserTurn(
+            inputs=(
+                TextInput(text=message),
+                *(
+                    ImageInput(resource=resource)
+                    if resource.is_image
+                    else AttachmentInput(attachment=AttachmentRef(resource=resource))
+                    for resource in attachment_resources
+                ),
+            )
         )
         await self._conversations.start_turn(
             resolved_conversation_id,
             access=access,
             content=message,
-            document_ids=(),
+            attachment_ids=attachments,
             request_id=context.request_id or "",
         )
         return self._event_stream(
-            message,
+            user_turn,
             context,
             access=access,
             conversation_id=resolved_conversation_id,
+            resource_resolver=(
+                self._resource_resolver(access)
+                if self._resource_resolver is not None
+                and (attachment_resources or referenced_resources)
+                else None
+            ),
+            sandbox_runtime=(
+                self._sandbox_runtime(access, resolved_conversation_id, context.request_id or "")
+                if self._sandbox_runtime is not None
+                else None
+            ),
             is_disconnected=is_disconnected,
         )
 
     async def _event_stream(
         self,
-        message: str,
+        user_turn: UserTurn,
         context: AgentContext,
         *,
         access: AuthContext,
         conversation_id: UUID,
+        resource_resolver: ResourceResolver | None,
+        sandbox_runtime: SandboxRuntime | None,
         is_disconnected: Callable[[], Awaitable[bool]],
     ) -> AsyncIterator[str]:
-        stream = self._agent.run(message, context)
+        stream = self._agent.run(
+            user_turn,
+            context,
+            resource_resolver=resource_resolver,
+            sandbox_runtime=sandbox_runtime,
+        )
         final_answer: str | None = None
         referenced_document_ids: tuple[UUID, ...] = ()
-        artifact_ids: tuple[UUID, ...] = ()
         try:
             async for event in stream:
                 if await is_disconnected():
@@ -143,10 +175,7 @@ class ChatService:
                     if answer:
                         final_answer = answer
                         referenced_document_ids = referenced_item_ids(event.response)
-                        artifact_ids = produced_artifact_ids(
-                            event.response.output_annotations
-                        )
-                yield event.model_dump_json()
+                yield _public_event(event).model_dump_json()
         finally:
             await stream.aclose()
         if final_answer:
@@ -156,31 +185,36 @@ class ChatService:
                 content=final_answer,
                 referenced_document_ids=referenced_document_ids,
                 request_id=context.request_id or "",
-                artifact_ids=artifact_ids,
+                artifact_ids=_artifact_ids(sandbox_runtime),
             )
 
     async def _resolve_knowledge_scope(
         self,
         access: AuthContext,
-        *,
-        knowledge_mode: KnowledgeMode,
         collection_item_ids: Sequence[UUID],
-    ) -> tuple[tuple[UUID, ...], tuple[str, ...] | None]:
+    ) -> tuple[UUID, ...]:
         """Bind the turn to Collections the caller may actually read."""
 
-        if knowledge_mode == "off":
-            return (), ()
         async with session_scope(self._sessions) as session:
             allowed_ids = await CollectionAccessService(session).allowed_collection_ids(
                 access
             )
-        if knowledge_mode == "auto":
-            return allowed_ids, KNOWLEDGE_TOOL_NAMES
-        if not collection_item_ids or not set(collection_item_ids).issubset(
-            set(allowed_ids)
-        ):
+        if not collection_item_ids:
+            return allowed_ids
+        if not set(collection_item_ids).issubset(set(allowed_ids)):
             raise PermissionError("one or more selected Collections are unavailable")
-        return tuple(dict.fromkeys(collection_item_ids)), KNOWLEDGE_TOOL_NAMES
+        return tuple(dict.fromkeys(collection_item_ids))
+
+    def _available_tool_names(
+        self, *, resources_available: bool = True
+    ) -> tuple[str, ...]:
+        """Expose the runtime's registered chat tools for this turn."""
+
+        return tuple(
+            name
+            for name, _ in self._agent.tools.executors()
+            if resources_available or name not in _RESOURCE_TOOL_NAMES
+        )
 
 
 def referenced_item_ids(response: Response) -> tuple[UUID, ...]:
@@ -202,11 +236,50 @@ def referenced_item_ids(response: Response) -> tuple[UUID, ...]:
     return tuple(result)
 
 
+def _artifact_ids(sandbox: SandboxRuntime | None) -> tuple[UUID, ...]:
+    if sandbox is None:
+        return ()
+    result: list[UUID] = []
+    for value in sandbox.artifact_ids:
+        try:
+            artifact_id = UUID(value)
+        except ValueError:
+            continue
+        if artifact_id not in result:
+            result.append(artifact_id)
+    return tuple(result)
+
+
+def _public_event(event):  # type: ignore[no-untyped-def]
+    """Remove opaque execution bindings before an agent event reaches the web."""
+
+    if isinstance(event, (ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent)):
+        return event.model_copy(update={"item": _public_item(event.item)})
+    if isinstance(event, ResponseCompletedEvent):
+        return event.model_copy(
+            update={
+                "response": event.response.model_copy(
+                    update={
+                        "output": tuple(
+                            _public_item(item) for item in event.response.output
+                        )
+                    }
+                )
+            }
+        )
+    return event
+
+
+def _public_item(item: Item) -> Item:
+    if isinstance(item, HostedExecutionCallItem):
+        return item.model_copy(update={"environment": None})
+    if isinstance(item, HostedExecutionResultItem):
+        return item.model_copy(update={"environment": None, "files": ()})
+    return item
+
+
 __all__ = [
-    "ARTIFACT_TOOL_NAMES",
-    "KNOWLEDGE_TOOL_NAMES",
     "ChatService",
     "HistoryTurn",
-    "KnowledgeMode",
     "referenced_item_ids",
 ]

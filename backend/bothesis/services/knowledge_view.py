@@ -13,7 +13,7 @@ from bothesis.document_index import ItemIndex
 from bothesis.knowledge import CitationResolver
 from bothesis.services import AuthContext, DocumentNotFoundError
 from bothesis.services.citation import CitationService
-from bothesis.services.collection_access import CollectionAccessService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.document_presentation import DocumentPresenter, viewer_elements
 from bothesis.services.item import ItemService
 

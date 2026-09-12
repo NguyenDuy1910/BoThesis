@@ -1,6 +1,6 @@
-# BoThesis Claude Instructions
+# Enterprise Agent Claude Instructions
 
-BoThesis is an enterprise knowledge and BI assistant.
+Enterprise Agent is an enterprise knowledge and BI assistant.
 
 ## Default behavior
 - Keep changes simple and local.

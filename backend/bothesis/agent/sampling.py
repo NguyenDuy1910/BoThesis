@@ -3,7 +3,7 @@
 A retry repeats the identical request because the transport failed in a way that
 carried no model output — a dropped connection, a rate limit, a 5xx. It is never
 a turn continuation: continuing because tool results now exist is the
-:class:`~bothesis.agent.conversation_loop.ConversationLoop`'s job.
+:func:`bothesis.agent.turn.run_turn`'s job.
 
 Once any canonical event has reached the caller the request is no longer
 retryable, because the client has already observed part of that response.
@@ -24,7 +24,7 @@ from openai import (
 )
 
 from bothesis.agent import AgentExecutionError
-from bothesis.agent.protocol import ResponseRequest, ResponseStreamEvent
+from bothesis.agent.protocol import Prompt, ResponseStreamEvent
 from bothesis.agent.transports import ResponseStream
 
 _RETRYABLE_OPENAI_ERRORS: tuple[type[Exception], ...] = (
@@ -38,7 +38,7 @@ _RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 async def sample(
     transport: ResponseStream,
-    request: ResponseRequest,
+    prompt: Prompt,
     *,
     max_retries: int,
     retry_base_delay_seconds: float,
@@ -49,7 +49,7 @@ async def sample(
     while True:
         emitted = False
         try:
-            async for event in transport.stream(request):
+            async for event in transport.stream(prompt):
                 emitted = True
                 yield event
             return
