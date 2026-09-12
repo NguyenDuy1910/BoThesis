@@ -46,8 +46,8 @@ export function AdminAccountMenu({ compact }: { compact: boolean }) {
       ariaLabel="Account and preferences"
       buttonClassName={
         compact
-          ? "h-9 w-9 justify-center bg-transparent px-0 shadow-none hover:bg-[var(--adm-row-hover)] hover:shadow-none"
-          : "h-11 w-full justify-start gap-2.5 bg-transparent px-1.5 shadow-none hover:bg-[var(--adm-row-hover)] hover:shadow-none"
+          ? "h-9 w-9 justify-center bg-transparent px-0 shadow-none hover:bg-[var(--surface-hover)] hover:shadow-none"
+          : "h-11 w-full justify-start gap-2.5 bg-transparent px-1.5 shadow-none hover:bg-[var(--surface-hover)] hover:shadow-none"
       }
       className="w-full"
       label={
@@ -55,11 +55,11 @@ export function AdminAccountMenu({ compact }: { compact: boolean }) {
           <Avatar name={name} size={compact ? "md" : "lg"} />
           {!compact && (
             <span className="grid min-w-0 flex-1 text-left leading-tight">
-              <span className="truncate text-[0.8125rem] font-semibold text-[var(--text)]">
+              <span className="truncate text-[0.8125rem] font-semibold text-[var(--text-primary)]">
                 {name}
               </span>
               {role && (
-                <span className="truncate text-[0.6875rem] font-normal text-[var(--text-muted)]">
+                <span className="truncate text-[0.6875rem] font-normal text-[var(--text-tertiary)]">
                   {role}
                 </span>
               )}
@@ -68,7 +68,7 @@ export function AdminAccountMenu({ compact }: { compact: boolean }) {
           {!compact && (
             <ChevronsUpDown
               aria-hidden="true"
-              className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]"
+              className="h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)]"
             />
           )}
         </>
@@ -79,11 +79,11 @@ export function AdminAccountMenu({ compact }: { compact: boolean }) {
       {!compact && (
         <>
           <div className="px-2.5 py-2">
-            <p className="truncate text-[0.8125rem] font-semibold text-[var(--text)]">
+            <p className="truncate text-[0.8125rem] font-semibold text-[var(--text-primary)]">
               {name}
             </p>
             {viewer?.email && (
-              <p className="truncate text-[0.75rem] text-[var(--text-muted)]">
+              <p className="truncate text-[0.75rem] text-[var(--text-tertiary)]">
                 {viewer.email}
               </p>
             )}

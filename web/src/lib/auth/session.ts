@@ -2,7 +2,7 @@ export interface AuthTenant {
   id: string;
   code: string;
   name: string;
-  role_id: string;
+  role_id: string | null;
   role_code: string;
   permissions: string[];
 }
@@ -17,6 +17,7 @@ export interface AuthSession {
   active_tenant_id: string;
   permissions: string[];
   tenants: AuthTenant[];
+  platform_scopes: string[];
 }
 
 const storageKey = "bothesis.auth.session";
@@ -41,6 +42,13 @@ export function hasAnySessionPermission(
   permissions: readonly string[],
 ): boolean {
   return permissions.some((permission) => hasSessionPermission(session, permission));
+}
+
+export function hasPlatformScope(
+  session: AuthSession | null,
+  scope: string,
+): boolean {
+  return Boolean(session?.platform_scopes.includes(scope));
 }
 
 export function getAuthSession(): AuthSession | null {
@@ -84,6 +92,7 @@ function isAuthSession(value: unknown): value is AuthSession {
     typeof session.email === "string" &&
     typeof session.active_tenant_id === "string" &&
     Array.isArray(session.permissions) &&
-    Array.isArray(session.tenants)
+    Array.isArray(session.tenants) &&
+    Array.isArray(session.platform_scopes)
   );
 }

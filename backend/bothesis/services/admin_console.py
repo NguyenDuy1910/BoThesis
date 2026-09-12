@@ -70,6 +70,18 @@ class AdminConsoleService:
         async with self._unit_of_work() as session:
             return await TenantService(session).overview(actor)
 
+    async def platform_overview(self, actor: AuthContext) -> dict[str, Any]:
+        async with self._unit_of_work() as session:
+            return await TenantService(session).platform_overview(actor)
+
+    async def list_platform_workspaces(
+        self, actor: AuthContext, **filters: Any
+    ) -> dict[str, Any]:
+        async with self._unit_of_work() as session:
+            return await TenantService(session).list_platform_workspaces(
+                actor, **filters
+            )
+
     async def list_spaces(self, actor: AuthContext) -> dict[str, Any]:
         async with self._unit_of_work() as session:
             return await TenantService(session).list_tenants(actor)
@@ -91,6 +103,12 @@ class AdminConsoleService:
     async def list_users(self, actor: AuthContext, **filters: Any) -> dict[str, Any]:
         async with self._unit_of_work() as session:
             return await UserService(session).list_users(actor, **filters)
+
+    async def list_platform_users(
+        self, actor: AuthContext, **filters: Any
+    ) -> dict[str, Any]:
+        async with self._unit_of_work() as session:
+            return await UserService(session).list_platform_users(actor, **filters)
 
     async def create_user(
         self, actor: AuthContext, values: dict[str, Any]
@@ -593,6 +611,12 @@ class AdminConsoleService:
     ) -> dict[str, Any]:
         async with self._unit_of_work() as session:
             return await AuditService(session).list_events(actor, **filters)
+
+    async def list_platform_audit_logs(
+        self, actor: AuthContext, **filters: Any
+    ) -> dict[str, Any]:
+        async with self._unit_of_work() as session:
+            return await AuditService(session).list_platform_events(actor, **filters)
 
     # -- Internals ----------------------------------------------------------
 

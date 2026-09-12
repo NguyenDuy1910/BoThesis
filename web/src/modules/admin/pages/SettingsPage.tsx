@@ -115,10 +115,10 @@ export function SettingsPage() {
 function Detail({ children, label }: { children: React.ReactNode; label: string }) {
   return (
     <div>
-      <dt className="text-[0.6875rem] font-medium uppercase tracking-[0.04em] text-[var(--text-muted)]">
+      <dt className="text-[0.6875rem] font-medium uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
         {label}
       </dt>
-      <dd className="mt-1 text-[0.875rem] text-[var(--text)]">{children}</dd>
+      <dd className="mt-1 text-[0.875rem] text-[var(--text-primary)]">{children}</dd>
     </div>
   );
 }
@@ -138,11 +138,11 @@ function ThemePicker() {
           <button
             aria-checked={active}
             className={cn(
-              "flex items-center gap-2.5 rounded-[var(--adm-r-md)] px-3 py-2.5 text-left transition-colors",
+              "flex items-center gap-2.5 rounded-[var(--radius-md)] px-3 py-2.5 text-left transition-colors",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
               active
-                ? "bg-[var(--surface-selected)] text-[var(--brand-accent)] shadow-[inset_0_0_0_1px_var(--brand-accent)]"
-                : "text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--adm-hairline-strong)] hover:bg-[var(--adm-inset)]",
+                ? "bg-[var(--surface-selected)] text-[var(--text-accent)] shadow-[inset_0_0_0_1px_var(--text-accent)]"
+                : "text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] hover:bg-[var(--surface-inset)]",
             )}
             key={choice.value}
             onClick={() => setTheme(choice.value)}

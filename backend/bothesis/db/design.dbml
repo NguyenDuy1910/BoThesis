@@ -6,7 +6,8 @@ Table users {
   id uuid [pk]
   email varchar(255) [not null, unique]
   display_name varchar(255)
-  status varchar(16) [not null, default: 'active']
+  status boolean [not null, default: true]
+  is_root_admin boolean [not null, default: false, note: 'Global cross-workspace administrator; distinct from a tenant role']
   preferences jsonb [not null, default: `{}`]
   last_login_at timestamptz
   created_at timestamptz [not null]

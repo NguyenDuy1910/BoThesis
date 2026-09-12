@@ -81,7 +81,7 @@ export function ConnectorSetupDrawer({
           <ConnectorLogo provider={connector.provider} size="lg" />
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h3 className="text-[1.0625rem] font-semibold tracking-[-0.015em] text-[var(--text)]">
+              <h3 className="text-[1.0625rem] font-semibold tracking-[-0.015em] text-[var(--text-primary)]">
                 {connector.name}
               </h3>
               {connections.length > 0 && (
@@ -90,10 +90,10 @@ export function ConnectorSetupDrawer({
                 </Badge>
               )}
             </div>
-            <p className="mt-1 text-[0.8125rem] leading-5 text-[var(--text-muted)]">
+            <p className="mt-1 text-[0.8125rem] leading-5 text-[var(--text-tertiary)]">
               {connector.description}
             </p>
-            <p className="mt-2 text-[0.75rem] text-[var(--text-muted)]">
+            <p className="mt-2 text-[0.75rem] text-[var(--text-tertiary)]">
               Signs in with {connector.authentication}. Credentials are encrypted
               before they are stored, and {appBrand.productName} only reads what the account
               you connect can already see.
@@ -103,16 +103,16 @@ export function ConnectorSetupDrawer({
 
         {connections.length > 0 && (
           <section className="mt-6" aria-label="Existing connections">
-            <h4 className="mb-2 text-[0.75rem] font-semibold uppercase tracking-[0.04em] text-[var(--text-muted)]">
+            <h4 className="mb-2 text-[0.75rem] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
               Already connected
             </h4>
             <ul className="space-y-1.5">
               {connections.map((connection) => (
                 <li
-                  className="flex items-center justify-between gap-3 rounded-[var(--adm-r-sm)] bg-[var(--adm-inset)] px-3 py-2 shadow-[inset_0_0_0_1px_var(--adm-hairline)]"
+                  className="flex items-center justify-between gap-3 rounded-[var(--radius-sm)] bg-[var(--surface-inset)] px-3 py-2 shadow-[inset_0_0_0_1px_var(--border-subtle)]"
                   key={connection.id}
                 >
-                  <span className="min-w-0 truncate text-[0.8125rem] text-[var(--text)]">
+                  <span className="min-w-0 truncate text-[0.8125rem] text-[var(--text-primary)]">
                     {connection.display_name}
                   </span>
                   <Badge
@@ -131,10 +131,10 @@ export function ConnectorSetupDrawer({
           aria-label="Connection setup"
           className={cn(
             "mt-6",
-            connections.length > 0 && "border-t border-[var(--adm-hairline)] pt-6",
+            connections.length > 0 && "border-t border-[var(--border-subtle)] pt-6",
           )}
         >
-          <h4 className="mb-3 text-[0.75rem] font-semibold uppercase tracking-[0.04em] text-[var(--text-muted)]">
+          <h4 className="mb-3 text-[0.75rem] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
             {connections.length ? "Add another connection" : "Set up"}
           </h4>
 
@@ -173,22 +173,22 @@ function NotAvailable({
   error: string | null;
 }) {
   return (
-    <div className="rounded-[var(--adm-r-md)] bg-[var(--adm-inset)] p-4 shadow-[inset_0_0_0_1px_var(--adm-hairline)]">
+    <div className="rounded-[var(--radius-md)] bg-[var(--surface-inset)] p-4 shadow-[inset_0_0_0_1px_var(--border-subtle)]">
       <div className="flex gap-2.5">
         <Info
           aria-hidden="true"
-          className="mt-px h-4 w-4 shrink-0 text-[var(--info)]"
+          className="mt-px h-4 w-4 shrink-0 text-[var(--status-info-solid)]"
         />
         <div className="min-w-0">
-          <p className="text-[0.8125rem] font-medium text-[var(--text)]">
+          <p className="text-[0.8125rem] font-medium text-[var(--text-primary)]">
             {connector.name} is not switched on for this deployment
           </p>
-          <p className="mt-1 text-[0.8125rem] leading-5 text-[var(--text-muted)]">
+          <p className="mt-1 text-[0.8125rem] leading-5 text-[var(--text-tertiary)]">
             {appBrand.productName} supports it, but the service has not been enabled here yet.
             Ask whoever runs your {appBrand.productName} deployment to turn it on.
           </p>
           {error && (
-            <p className="mt-2 text-[0.75rem] leading-4 text-[var(--danger-text)]">
+            <p className="mt-2 text-[0.75rem] leading-4 text-[var(--status-danger-text)]">
               Availability check failed: {error}
             </p>
           )}
@@ -202,7 +202,7 @@ function NotAvailable({
 function Advanced({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="rounded-[var(--adm-r-sm)] bg-[var(--adm-inset)] shadow-[inset_0_0_0_1px_var(--adm-hairline)]">
+    <div className="rounded-[var(--radius-sm)] bg-[var(--surface-inset)] shadow-[inset_0_0_0_1px_var(--border-subtle)]">
       <button
         aria-expanded={open}
         className="flex w-full items-center justify-between gap-2 px-3 py-2 text-[0.8125rem] font-medium text-[var(--text-secondary)]"
@@ -213,12 +213,12 @@ function Advanced({ children }: { children: React.ReactNode }) {
         <ChevronDown
           aria-hidden="true"
           className={cn(
-            "h-4 w-4 transition-transform duration-[var(--adm-fast)]",
+            "h-4 w-4 transition-transform duration-[var(--duration-fast)]",
             open && "rotate-180",
           )}
         />
       </button>
-      {open && <div className="space-y-3.5 border-t border-[var(--adm-hairline)] p-3">{children}</div>}
+      {open && <div className="space-y-3.5 border-t border-[var(--border-subtle)] p-3">{children}</div>}
     </div>
   );
 }
@@ -357,7 +357,7 @@ function ConfluenceSetup({
             value={name}
           />
         </FormField>
-        <p className="rounded-[var(--adm-r-sm)] bg-[var(--adm-inset)] px-3 py-2 text-[0.8125rem] leading-5 text-[var(--text-secondary)]">
+        <p className="rounded-[var(--radius-sm)] bg-[var(--surface-inset)] px-3 py-2 text-[0.8125rem] leading-5 text-[var(--text-secondary)]">
           Credentials are loaded from the server environment and never sent to this browser.
           {environmentReady === null ? " Checking connection…" : environmentReady ? " Connection verified." : " Connection is unavailable."}
         </p>
@@ -396,15 +396,15 @@ function ConfluenceSetup({
           <label className="flex cursor-pointer items-start gap-2.5 text-[0.8125rem] text-[var(--text-secondary)]">
             <input
               checked={includeChildren}
-              className="mt-0.5 h-3.5 w-3.5 accent-[var(--brand-accent)]"
+              className="mt-0.5 h-3.5 w-3.5 accent-[var(--text-accent)]"
               onChange={(event) => setIncludeChildren(event.target.checked)}
               type="checkbox"
             />
             <span>
-              <span className="font-medium text-[var(--text)]">
+              <span className="font-medium text-[var(--text-primary)]">
                 Include child pages
               </span>
-              <span className="mt-0.5 block text-[0.75rem] leading-4 text-[var(--text-muted)]">
+              <span className="mt-0.5 block text-[0.75rem] leading-4 text-[var(--text-tertiary)]">
                 Keeps nested pages in scope on every sync.
               </span>
             </span>
@@ -494,7 +494,7 @@ function FileSetup({
             value={name}
           />
         </FormField>
-        <p className="rounded-[var(--adm-r-sm)] bg-[var(--adm-inset)] px-3 py-2.5 text-[0.8125rem] leading-5 text-[var(--text-muted)] shadow-[inset_0_0_0_1px_var(--adm-hairline)]">
+        <p className="rounded-[var(--radius-sm)] bg-[var(--surface-inset)] px-3 py-2.5 text-[0.8125rem] leading-5 text-[var(--text-tertiary)] shadow-[inset_0_0_0_1px_var(--border-subtle)]">
           You can already upload files straight into a collection. Set this up
           only if you want uploads tracked as their own managed source.
         </p>
@@ -516,7 +516,7 @@ function SetupFooter({
   loading: boolean;
 }) {
   return (
-    <div className="mt-5 flex items-center justify-end border-t border-[var(--adm-hairline)] pt-4">
+    <div className="mt-5 flex items-center justify-end border-t border-[var(--border-subtle)] pt-4">
       <Button disabled={disabled} form={form} loading={loading} type="submit">
         {created ? "Test again" : "Connect"}
       </Button>

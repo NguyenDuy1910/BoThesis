@@ -25,10 +25,10 @@ function buildCrumbs(pathname: string, detailTitle?: string): Crumb[] {
   const segments = pathname.split("/").filter(Boolean);
   if (segments[0] !== "admin") return [];
   const rest = segments.slice(1);
-  if (!rest.length) return [{ label: "Dashboard" }];
+  if (!rest.length) return [{ label: "Workspace" }];
 
   const route = adminRoutes.find((entry) => entry.path === `/admin/${rest[0]}`);
-  const crumbs: Crumb[] = [{ label: "Dashboard", href: "/admin" }];
+  const crumbs: Crumb[] = [{ label: "Workspace", href: "/admin" }];
   crumbs.push({
     label: route?.label ?? rest[0].replace(/[-_]/g, " "),
     href: rest.length > 1 ? (route?.path ?? `/admin/${rest[0]}`) : undefined,

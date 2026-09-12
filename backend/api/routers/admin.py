@@ -7,7 +7,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Response, status
 
-from api.deps import AdminConsole, Caller
+from api.deps import AdminConsole, Caller, Health
+from bothesis.services import require_platform_root
 from api.routers import (
     ApprovalRequestCreate,
     ApprovalRequestUpdate,
@@ -36,6 +37,62 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 @router.get("/overview")
 async def admin_overview(caller: Caller, admin: AdminConsole) -> dict[str, Any]:
     return await admin.overview(caller)
+
+
+@router.get("/platform/overview")
+async def platform_overview(caller: Caller, admin: AdminConsole) -> dict[str, Any]:
+    return await admin.platform_overview(caller)
+
+
+@router.get("/platform/workspaces")
+async def platform_list_workspaces(
+    caller: Caller,
+    admin: AdminConsole,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    search: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    return await admin.list_platform_workspaces(
+        caller,
+        page=page,
+        page_size=page_size,
+        search=search,
+        status=status,
+    )
+
+
+@router.get("/platform/users")
+async def platform_list_users(
+    caller: Caller,
+    admin: AdminConsole,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    search: str | None = None,
+    status: bool | None = None,
+) -> dict[str, Any]:
+    return await admin.list_platform_users(
+        caller, page=page, page_size=page_size, search=search, status=status
+    )
+
+
+@router.get("/platform/audit")
+async def platform_list_audit(
+    caller: Caller,
+    admin: AdminConsole,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
+    search: str | None = None,
+) -> dict[str, Any]:
+    return await admin.list_platform_audit_logs(
+        caller, page=page, page_size=page_size, search=search
+    )
+
+
+@router.get("/platform/health")
+async def platform_health(caller: Caller, health: Health) -> dict[str, Any]:
+    require_platform_root(caller)
+    return (await health.check()).model_dump(mode="json")
 
 
 @router.get("/spaces")
@@ -71,7 +128,7 @@ async def admin_list_users(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     search: str | None = None,
-    status_filter: Annotated[str | None, Query(alias="status")] = None,
+    status: bool | None = None,
     role_id: UUID | None = None,
     sort: str = "name",
     direction: str = "asc",
@@ -81,7 +138,7 @@ async def admin_list_users(
         page=page,
         page_size=page_size,
         search=search,
-        status=status_filter,
+        status=status,
         role_id=role_id,
         sort=sort,
         direction=direction,

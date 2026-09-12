@@ -107,11 +107,18 @@ function readTab(value: string | null, availableTabs: readonly AccessTab[]): Acc
   return availableTabs.includes(requested) ? requested : availableTabs[0];
 }
 
-export function AccessPage() {
+export function AccessPage({
+  initialTab,
+  title = "Access",
+}: {
+  initialTab?: AccessTab;
+  title?: string;
+} = {}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const { toast } = useToast();
+  const memberView = title === "Members & access";
   const availableTabs = useMemo(
     () => tabOrder.filter((id) =>
       hasSessionPermission(getAuthSession(), tabConfig[id].permissionCode),
@@ -125,7 +132,7 @@ export function AccessPage() {
     : ["people"];
 
   const [tab, setTab] = useState<AccessTab>(() =>
-    readTab(searchParams.get("tab"), selectableTabs),
+    readTab(searchParams.get("tab") ?? initialTab ?? null, selectableTabs),
   );
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -200,7 +207,7 @@ export function AccessPage() {
       return [
         {
           key: "display_name",
-          label: "Person",
+          label: memberView ? "Member" : "Person",
           sortable: true,
           render: (row) => (
             <CellTitle
@@ -212,14 +219,14 @@ export function AccessPage() {
         },
         {
           key: "role",
-          label: "Role",
+          label: memberView ? "Workspace role" : "Role",
           priority: "medium",
           minWidth: 150,
           render: (row) => row.membership?.role?.display_name ?? "No role",
         },
         {
           key: "groups",
-          label: "Groups",
+          label: memberView ? "Knowledge access" : "Groups",
           priority: "low",
           minWidth: 160,
           render: (row) =>
@@ -231,13 +238,17 @@ export function AccessPage() {
           key: "status",
           label: "Status",
           width: 120,
-          render: (row) => <StatusBadge status={row.status} />,
+          render: (row) => <StatusBadge status={row.status ? "active" : "inactive"} />,
         },
         {
-          key: "last_login_at",
-          label: "Last active",
+          key: memberView ? "permission_codes" : "last_login_at",
+          label: memberView ? "App actions" : "Last active",
           width: 130,
-          render: (row) => formatRelative(row.last_login_at, "Never signed in"),
+          render: (row) => memberView
+            ? row.permission_codes?.includes("source.manage") || row.permission_codes?.includes("access.manage")
+              ? "Manage"
+              : "Use approved apps"
+            : formatRelative(row.last_login_at, "Never signed in"),
         },
       ];
     }
@@ -318,7 +329,7 @@ export function AccessPage() {
                 )}
               </span>
             ) : (
-              <span className="text-[var(--text-muted)]">Nothing yet</span>
+              <span className="text-[var(--text-tertiary)]">Nothing yet</span>
             ),
         },
         {
@@ -352,8 +363,8 @@ export function AccessPage() {
           render: (row) => (
             <span>
               {titleCase(row.request_type.replace(/_/g, " "))}
-              <span className="text-[var(--text-muted)]"> · {row.target_id}</span>
-              {row.details?.role && <span className="text-[var(--text-muted)]"> · {row.details.role}</span>}
+              <span className="text-[var(--text-tertiary)]"> · {row.target_id}</span>
+              {row.details?.role && <span className="text-[var(--text-tertiary)]"> · {row.details.role}</span>}
             </span>
           ),
         },
@@ -362,7 +373,7 @@ export function AccessPage() {
           label: "Reason",
           priority: "low",
           minWidth: 200,
-          render: (row) => row.reason || <span className="text-[var(--text-muted)]">Not given</span>,
+          render: (row) => row.reason || <span className="text-[var(--text-tertiary)]">Not given</span>,
         },
         {
           key: "status",
@@ -418,7 +429,7 @@ export function AccessPage() {
         render: (row) => formatRelative(row.updated_at),
       },
     ];
-  }, [tab]);
+  }, [memberView, tab]);
 
   const rowActions = useCallback(
     (row: Row) => {
@@ -467,7 +478,7 @@ export function AccessPage() {
       }
 
       const endpoint = tabConfig[tab].endpoint;
-      const disabling = row.status === "active";
+      const disabling = tab === "people" ? row.status : row.status === "active";
       return (
         <Button
           loading={busyId === row.id}
@@ -477,7 +488,9 @@ export function AccessPage() {
               disabling ? "Disabled" : "Enabled",
               `${endpoint}/${row.id}`,
               "PATCH",
-              { status: disabling ? "inactive" : "active" },
+              tab === "people"
+                ? { status: !row.status }
+                : { status: disabling ? "inactive" : "active" },
             )
           }
           size="sm"
@@ -523,8 +536,17 @@ export function AccessPage() {
           )
         }
         description="Who belongs to this workspace, and what each person is allowed to reach."
-        title="Access"
+        title={title}
       />
+
+      {memberView && tab === "people" && (
+        <div className="mb-4 grid gap-2 rounded-[var(--radius-md)] bg-[var(--surface-base)] p-3 shadow-[inset_0_0_0_1px_var(--border-subtle)] sm:grid-cols-4">
+          {(["owner", "admin", "member", "guest"] as const).map((role) => {
+            const count = (list.data?.items ?? []).filter((row) => row.membership?.role?.code === role && row.status).length;
+            return <div className="px-2 py-1" key={role}><p className="text-[0.75rem] font-semibold capitalize text-[var(--text-primary)]">{role}</p><p className="mt-1 text-xl font-semibold text-[var(--text-primary)]">{count}</p></div>;
+          })}
+        </div>
+      )}
 
       <Tabs
         activeTab={tab}
@@ -583,7 +605,7 @@ export function AccessPage() {
             />
             <div className="adm-toolbar__spacer" />
             {list.data && (
-              <p className="text-[0.75rem] text-[var(--text-muted)]">
+              <p className="text-[0.75rem] text-[var(--text-tertiary)]">
                 {pluralize(list.data.total, "record")}
               </p>
             )}

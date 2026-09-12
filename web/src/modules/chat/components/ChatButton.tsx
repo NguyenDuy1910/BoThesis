@@ -18,19 +18,19 @@ export type ChatButtonTone =
 export type ChatButtonSize = "m" | "l";
 
 const toneClasses: Record<ChatButtonTone, string> = {
-  primary: "bg-[var(--chat-action-primary)] text-[var(--chat-action-primary-on)] shadow-[var(--chat-shadow-control)] hover:bg-[var(--chat-action-primary-hover)] active:bg-[var(--chat-action-primary-pressed)]",
-  secondary: "bg-[var(--chat-surface-raised)] text-[var(--chat-text-primary)] shadow-[inset_0_0_0_1px_var(--chat-border-strong)] hover:bg-[var(--chat-surface-hover)] active:bg-[var(--chat-surface-selected)]",
-  soft: "bg-[var(--chat-action-soft)] text-[var(--chat-text-accent)] hover:bg-[var(--chat-action-soft-hover)] active:bg-[var(--chat-action-soft-pressed)]",
-  ghost: "bg-transparent text-[var(--chat-text-secondary)] hover:bg-[var(--chat-surface-hover)] hover:text-[var(--chat-text-primary)] active:bg-[var(--chat-surface-selected)]",
-  success: "bg-[var(--chat-action-success)] text-[var(--chat-action-success-on)] hover:bg-[var(--chat-action-success-hover)] active:bg-[var(--chat-action-success-pressed)]",
-  warning: "bg-[var(--chat-action-warning)] text-[var(--chat-action-warning-on)] hover:bg-[var(--chat-action-warning-hover)] active:bg-[var(--chat-action-warning-pressed)]",
-  danger: "bg-[var(--chat-action-danger)] text-[var(--chat-action-danger-on)] hover:bg-[var(--chat-action-danger-hover)] active:bg-[var(--chat-action-danger-pressed)]",
-  contextual: "bg-[var(--chat-action-contextual)] text-[var(--chat-action-contextual-on)] hover:bg-[var(--chat-action-contextual-hover)] active:bg-[var(--chat-action-contextual-pressed)]",
+  primary: "bg-[var(--accent-primary)] text-[var(--text-on-accent)] shadow-[var(--elevation-2)] hover:bg-[var(--accent-hover)] active:bg-[var(--accent-pressed)]",
+  secondary: "bg-[var(--surface-base)] text-[var(--text-primary)] shadow-[inset_0_0_0_1px_var(--border-default)] hover:bg-[var(--surface-hover)] active:bg-[var(--surface-selected)]",
+  soft: "bg-[var(--accent-soft)] text-[var(--text-accent)] hover:bg-[var(--accent-soft-hover)] active:bg-[var(--accent-soft-pressed)]",
+  ghost: "bg-transparent text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] active:bg-[var(--surface-selected)]",
+  success: "bg-[var(--status-success-solid)] text-[var(--text-on-accent)] hover:bg-[var(--status-success-text)] active:bg-[var(--status-success-text)]",
+  warning: "bg-[var(--status-warning-bg)] text-[var(--status-warning-text)] hover:bg-[var(--status-warning-border)] active:bg-[var(--status-warning-border)]",
+  danger: "bg-[var(--status-danger-solid)] text-[var(--text-on-accent)] hover:bg-[var(--status-danger-text)] active:bg-[var(--status-danger-text)]",
+  contextual: "bg-[var(--status-info-bg)] text-[var(--status-info-text)] hover:bg-[var(--status-info-border)] active:bg-[var(--status-info-border)]",
 };
 
 const sizeClasses: Record<ChatButtonSize, string> = {
-  m: "h-8 gap-1.5 rounded-[var(--chat-radius-control)] px-3 text-xs",
-  l: "h-9 gap-2 rounded-[var(--chat-radius-control)] px-3.5 text-sm",
+  m: "h-8 gap-1.5 rounded-[var(--radius-md)] px-3 text-xs",
+  l: "h-9 gap-2 rounded-[var(--radius-md)] px-3.5 text-sm",
 };
 
 interface ChatButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -64,8 +64,8 @@ export const ChatButton = forwardRef<HTMLButtonElement, ChatButtonProps>(functio
       aria-busy={loading || undefined}
       className={cn(
         "inline-flex shrink-0 items-center justify-center font-medium leading-none",
-        "transition-[background-color,color,box-shadow,opacity] duration-[var(--chat-duration-base)] ease-[var(--chat-ease)]",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--chat-focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--chat-surface-canvas)]",
+        "transition-[background-color,color,box-shadow,opacity] duration-[var(--duration-base)] ease-[var(--ease-out)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]",
         "disabled:pointer-events-none disabled:opacity-45",
         toneClasses[tone],
         sizeClasses[size],

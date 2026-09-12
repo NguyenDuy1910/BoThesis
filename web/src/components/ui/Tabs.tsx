@@ -24,7 +24,7 @@ export function Tabs({ tabs, activeTab, onChange, className, density = "default"
   const tabsId = useId();
 
   return (
-    <div className={cn("border-b border-[var(--adm-hairline)]", className)}>
+    <div className={cn("border-b border-[var(--border-subtle)]", className)}>
       <div aria-label={ariaLabel} className="flex gap-4 overflow-x-auto" role="tablist">
         {tabs.map((tab, index) => (
           <button
@@ -46,11 +46,11 @@ export function Tabs({ tabs, activeTab, onChange, className, density = "default"
             tabIndex={activeTab === tab.id ? 0 : -1}
             type="button"
             className={cn(
-              "relative -mb-px shrink-0 border-b-2 border-transparent font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--adm-canvas)]",
+              "relative -mb-px shrink-0 border-b-2 border-transparent font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]",
               compact ? "h-8 px-0.5 text-[0.8125rem]" : "h-10 px-0.5 text-[0.875rem]",
               activeTab === tab.id
-                ? "border-[var(--brand-accent)] text-[var(--brand-accent)]"
-                : "text-[var(--text-muted)] hover:border-[var(--adm-hairline-strong)] hover:text-[var(--text)]"
+                ? "border-[var(--text-accent)] text-[var(--text-accent)]"
+                : "text-[var(--text-tertiary)] hover:border-[var(--border-default)] hover:text-[var(--text-primary)]"
             )}
           >
             <span className="inline-flex h-full items-center gap-1.5">
@@ -58,7 +58,7 @@ export function Tabs({ tabs, activeTab, onChange, className, density = "default"
               {tab.count !== undefined && (
                 <span className={cn(
                   "rounded-full px-1.5 py-0.5 text-[0.6875rem] leading-none",
-                  activeTab === tab.id ? "bg-[var(--primary-soft)] text-[var(--brand-accent)]" : "bg-[var(--bg-subtle)] text-[var(--text-muted)]"
+                  activeTab === tab.id ? "bg-[var(--accent-soft)] text-[var(--text-accent)]" : "bg-[var(--surface-subtle)] text-[var(--text-tertiary)]"
                 )}>
                   {tab.count}
                 </span>

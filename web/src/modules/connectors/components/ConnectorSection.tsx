@@ -24,16 +24,16 @@ export function ConnectorSection({
     <section aria-labelledby={id}>
       <div className="mb-2.5">
         <h3
-          className="text-[0.8125rem] font-semibold text-[var(--text)]"
+          className="text-[0.8125rem] font-semibold text-[var(--text-primary)]"
           id={id}
         >
           {title}
-          <span className="ml-2 font-normal tabular-nums text-[var(--text-muted)]">
+          <span className="ml-2 font-normal tabular-nums text-[var(--text-tertiary)]">
             {items.length}
           </span>
         </h3>
         {description && (
-          <p className="mt-0.5 text-[0.75rem] text-[var(--text-muted)]">{description}</p>
+          <p className="mt-0.5 text-[0.75rem] text-[var(--text-tertiary)]">{description}</p>
         )}
       </div>
       <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">

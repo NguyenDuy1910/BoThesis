@@ -30,7 +30,7 @@ export function ResizeHandle({ onPointerDown, onDoubleClick, className }: Resize
       )}
     >
       <div className="absolute inset-y-0 flex items-center justify-center pointer-events-none">
-        <GripVertical aria-hidden="true" className="h-4 w-4 text-[var(--border-strong)] transition-colors group-hover:text-[var(--text-muted)] group-active:text-[var(--text-secondary)]" />
+        <GripVertical aria-hidden="true" className="h-4 w-4 text-[var(--border-default)] transition-colors group-hover:text-[var(--text-tertiary)] group-active:text-[var(--text-secondary)]" />
       </div>
     </div>
   );

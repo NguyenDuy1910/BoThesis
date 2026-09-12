@@ -22,6 +22,7 @@ from bothesis.services import (
     AuthContext,
     IdentityConflictError,
     normalize_page,
+    require_platform_root,
     require_tenant_permission,
     timestamp,
 )
@@ -48,7 +49,7 @@ class UserService:
         page: int = 1,
         page_size: int = 20,
         search: str | None = None,
-        status: str | None = None,
+        status: bool | None = None,
         role_id: UUID | None = None,
         sort: str = "name",
         direction: str = "asc",
@@ -64,11 +65,8 @@ class UserService:
             filters.append(
                 or_(User.email.ilike(term), User.display_name.ilike(term))
             )
-        if status:
-            normalized_status = status.strip().casefold()
-            if normalized_status not in {ACTIVE_STATUS, INACTIVE_STATUS}:
-                raise AdminValidationError("user status must be active or inactive")
-            filters.append(User.status == normalized_status)
+        if status is not None:
+            filters.append(User.status.is_(status))
         if role_id is not None:
             filters.append(TenantMembership.role_id == role_id)
 
@@ -118,6 +116,58 @@ class UserService:
         groups = (await self._groups_for_users(tenant_id, [user_id])).get(user_id, [])
         return _user_payload(user, membership, role, groups)
 
+    async def list_platform_users(
+        self,
+        actor: AuthContext,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        status: bool | None = None,
+    ) -> dict[str, Any]:
+        """Return user identities with every active workspace membership."""
+
+        require_platform_root(actor)
+        page, page_size, offset = normalize_page(page, page_size)
+        statement = select(User)
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            statement = statement.where(
+                or_(User.email.ilike(term), User.display_name.ilike(term))
+            )
+        if status is not None:
+            statement = statement.where(User.status.is_(status))
+        total = int(
+            await self._session.scalar(select(func.count()).select_from(statement.subquery()))
+            or 0
+        )
+        users = list(
+            await self._session.scalars(
+                statement.order_by(
+                    func.coalesce(User.display_name, User.email), User.id
+                )
+                .limit(page_size)
+                .offset(offset)
+            )
+        )
+        memberships = await self._platform_memberships([user.id for user in users])
+        return {
+            "items": [
+                {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "display_name": user.display_name,
+                    "status": user.status,
+                    "platform_scopes": ["root_admin"] if user.is_root_admin else [],
+                    "memberships": memberships.get(user.id, []),
+                }
+                for user in users
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
     async def create_user(
         self,
         actor: AuthContext,
@@ -156,7 +206,7 @@ class UserService:
         *,
         display_name: str | None = None,
         role_id: UUID | None = None,
-        status: str | None = None,
+        status: bool | None = None,
         group_ids: list[UUID] | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, USER_MANAGE_PERMISSION)
@@ -175,14 +225,11 @@ class UserService:
             membership.role_id = role.id
             changed.append("role_id")
         if status is not None:
-            normalized_status = status.strip().casefold()
-            if normalized_status not in {ACTIVE_STATUS, INACTIVE_STATUS}:
-                raise AdminValidationError("user status must be active or inactive")
-            if user_id == actor.user_id and normalized_status != ACTIVE_STATUS:
+            if user_id == actor.user_id and not status:
                 raise AdminConflictError("an administrator cannot disable their own user")
-            user.status = normalized_status
-            membership.status = normalized_status
-            if normalized_status == ACTIVE_STATUS:
+            user.status = status
+            membership.status = "active" if status else INACTIVE_STATUS
+            if status:
                 membership.deleted_at = None
             changed.append("status")
         groups = (
@@ -256,6 +303,36 @@ class UserService:
         result: dict[UUID, list[Group]] = {}
         for user_id, group in rows:
             result.setdefault(user_id, []).append(group)
+        return result
+
+    async def _platform_memberships(
+        self, user_ids: list[UUID]
+    ) -> dict[UUID, list[dict[str, str]]]:
+        if not user_ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(TenantMembership.user_id, TenantMembership, Role, Tenant)
+                .join(Role, Role.id == TenantMembership.role_id)
+                .join(Tenant, Tenant.id == TenantMembership.tenant_id)
+                .where(
+                    TenantMembership.user_id.in_(user_ids),
+                    TenantMembership.status == ACTIVE_STATUS,
+                    TenantMembership.deleted_at.is_(None),
+                )
+                .order_by(Tenant.name, Tenant.id)
+            )
+        ).all()
+        result: dict[UUID, list[dict[str, str]]] = {user_id: [] for user_id in user_ids}
+        for user_id, _, role, tenant in rows:
+            result[user_id].append(
+                {
+                    "workspace_id": str(tenant.id),
+                    "workspace_name": tenant.name,
+                    "role_code": role.code,
+                    "role_name": role.display_name,
+                }
+            )
         return result
 
     async def _replace_groups(

@@ -7,11 +7,11 @@ type IconButtonVariant = "ghost" | "secondary" | "danger" | "primary";
 type IconButtonSize = "sm" | "md" | "lg";
 
 const variantClasses: Record<IconButtonVariant, string> = {
-  ghost: "border border-transparent text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
+  ghost: "border border-transparent text-[var(--text-tertiary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
   secondary:
-    "border border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)] hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
-  danger: "border border-transparent text-[var(--text-muted)] hover:bg-[var(--danger-soft)] hover:text-[var(--danger)]",
-  primary: "border border-[var(--primary)] bg-[var(--primary)] text-[var(--text-on-brand)] hover:bg-[var(--primary-hover)]",
+    "border border-[var(--border-subtle)] bg-[var(--surface-base)] text-[var(--text-tertiary)] hover:border-[var(--border-default)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
+  danger: "border border-transparent text-[var(--text-tertiary)] hover:bg-[var(--status-danger-bg)] hover:text-[var(--status-danger-solid)]",
+  primary: "border border-[var(--accent-primary)] bg-[var(--accent-primary)] text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)]",
 };
 
 const sizeClasses: Record<IconButtonSize, string> = {
@@ -44,9 +44,9 @@ export function IconButton({
       aria-label={label}
       title={props.title ?? label}
       className={cn(
-        "inline-flex shrink-0 items-center justify-center transition-[background-color,border-color,color,box-shadow,opacity] duration-[var(--duration-base)] ease-[var(--ease-standard)]",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface)]",
-        "disabled:pointer-events-none disabled:border-[var(--border)] disabled:bg-[var(--bg-subtle)] disabled:text-[var(--text-muted)] disabled:opacity-50 disabled:shadow-none",
+        "inline-flex shrink-0 items-center justify-center transition-[background-color,border-color,color,box-shadow,opacity] duration-[var(--duration-base)] ease-[var(--ease-out)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-base)]",
+        "disabled:pointer-events-none disabled:border-[var(--border-subtle)] disabled:bg-[var(--surface-subtle)] disabled:text-[var(--text-tertiary)] disabled:opacity-50 disabled:shadow-none",
         variantClasses[variant],
         sizeClasses[size],
         className

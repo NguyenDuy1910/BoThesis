@@ -10,31 +10,23 @@ import {
   PanelLeftOpen,
   Search,
   Settings2,
-  SquarePen,
   Sun,
   UserCircle,
   X,
 } from "lucide-react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
 import { ProductMark } from "@/components/ui/ProductMark";
+import { ProductSidebarGlobalNavigation } from "@/components/ui/ProductSidebarGlobalNavigation";
 import { appBrand } from "@/lib/brand";
-import { isProductNavigationActive } from "@/lib/product-navigation";
 import {
   getAuthSession,
-  hasAnySessionPermission,
   hasSessionPermission,
   type AuthSession,
 } from "@/lib/auth/session";
 import { switchWorkspace } from "@/modules/auth/api";
-import {
-  sidebarNavigationItems,
-  sidebarSecondaryDestinations,
-  type SidebarNavigationItem,
-} from "@/modules/chat/sidebar-navigation";
 import type { ChatConversation } from "@/modules/chat/types";
 import { ConversationActionsMenu } from "./ConversationActionsMenu";
 import { useTheme } from "../hooks/useTheme";
@@ -51,6 +43,8 @@ interface AppSidebarProps {
   onSelectConversation: (id: string) => void;
   onRenameConversation: (id: string, title: string) => void | Promise<void>;
   onDeleteConversation: (id: string) => void | Promise<void>;
+  searchRequested?: boolean;
+  onSearchRequestHandled?: () => void;
 }
 
 export function AppSidebar({
@@ -65,20 +59,23 @@ export function AppSidebar({
   onSelectConversation,
   onRenameConversation,
   onDeleteConversation,
+  searchRequested = false,
+  onSearchRequestHandled,
 }: AppSidebarProps) {
   const isCollapsed = collapsed && !mobileOpen;
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [session, setSession] = useState<AuthSession | null>(null);
-  const activateNavigationItem = (_item: SidebarNavigationItem) => onCloseMobile();
-
-  useEffect(() => setSession(getAuthSession()), []);
-
   useEffect(() => {
     if (!isCollapsed) return;
     setSearchOpen(false);
     setSearchQuery("");
   }, [isCollapsed]);
+
+  useEffect(() => {
+    if (!searchRequested) return;
+    setSearchOpen(true);
+    onSearchRequestHandled?.();
+  }, [onSearchRequestHandled, searchRequested]);
 
   return (
     <aside
@@ -95,17 +92,15 @@ export function AppSidebar({
         onToggleCollapse={onToggleCollapse}
       />
 
-      <SidebarNavigation
-        collapsed={isCollapsed}
-        onActivate={activateNavigationItem}
-        session={session}
-      />
-
-      <SidebarDestinations collapsed={isCollapsed} onCloseMobile={onCloseMobile} />
-
-      <SidebarChatContext
+      <ProductSidebarGlobalNavigation
         collapsed={isCollapsed}
         onNewChat={onNewChat}
+        onNavigate={onCloseMobile}
+        onSearchChats={() => setSearchOpen(true)}
+      />
+
+      <SidebarChatSearch
+        collapsed={isCollapsed}
         onSearchChange={setSearchQuery}
         searchOpen={searchOpen}
         searchQuery={searchQuery}
@@ -166,191 +161,48 @@ function SidebarHeader({
   );
 }
 
-function SidebarNavigation({
+function SidebarChatSearch({
   collapsed,
-  onActivate,
-  session,
-}: {
-  collapsed: boolean;
-  onActivate: (item: SidebarNavigationItem) => void;
-  session: AuthSession | null;
-}) {
-  const pathname = usePathname();
-  return (
-    <nav aria-label="Workspace" className="sidebar-navigation">
-      {sidebarNavigationItems
-        .filter((item) => !item.permissionCodes || hasAnySessionPermission(session, item.permissionCodes))
-        .map((item) => {
-        return (
-          <SidebarRow
-            active={isCurrentPath(pathname, item.href)}
-            collapsed={collapsed}
-            item={item}
-            key={item.id}
-            onClick={() => onActivate(item)}
-          />
-        );
-        })}
-    </nav>
-  );
-}
-
-function SidebarChatContext({
-  collapsed,
-  onNewChat,
   onSearchChange,
   searchOpen,
   searchQuery,
   setSearchOpen,
 }: {
   collapsed: boolean;
-  onNewChat: () => void;
   onSearchChange: (value: string) => void;
   searchOpen: boolean;
   searchQuery: string;
   setSearchOpen: (open: boolean) => void;
 }) {
-  if (collapsed) return null;
+  if (collapsed || !searchOpen) return null;
 
   return (
-    <section aria-label="Chat actions" className="sidebar-chat-context">
-      <p className="sidebar-chat-context__label">Chat</p>
-      <button className="sidebar-row" onClick={onNewChat} type="button">
-        <SquarePen aria-hidden="true" className="sidebar-row__icon" size={16} />
-        <span className="sidebar-row__label">New chat</span>
-      </button>
-      <button
-        aria-expanded={searchOpen}
-        className="sidebar-row"
-        onClick={() => setSearchOpen(!searchOpen)}
-        type="button"
-      >
-        <Search aria-hidden="true" className="sidebar-row__icon" size={16} />
-        <span className="sidebar-row__label">Search chats</span>
-      </button>
-      {searchOpen && (
-        <div className="sidebar-search-wrap">
-          <label className="sidebar-search">
-            <Search aria-hidden="true" size={14} />
-            <input
-              aria-label="Search conversations"
-              autoFocus
-              onChange={(event) => onSearchChange(event.target.value)}
-              placeholder="Search recent chats"
-              type="search"
-              value={searchQuery}
-            />
-          </label>
-          <button
-            aria-label="Close conversation search"
-            className="sidebar-search__close"
-            onClick={() => {
-              onSearchChange("");
-              setSearchOpen(false);
-            }}
-            type="button"
-          >
-            <X aria-hidden="true" size={15} />
-          </button>
-        </div>
-      )}
+    <section aria-label="Search chats" className="sidebar-chat-context">
+      <div className="sidebar-search-wrap">
+        <label className="sidebar-search">
+          <Search aria-hidden="true" size={14} />
+          <input
+            aria-label="Search conversations"
+            autoFocus
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder="Search recent chats"
+            type="search"
+            value={searchQuery}
+          />
+        </label>
+        <button
+          aria-label="Close conversation search"
+          className="sidebar-search__close"
+          onClick={() => {
+            onSearchChange("");
+            setSearchOpen(false);
+          }}
+          type="button"
+        >
+          <X aria-hidden="true" size={15} />
+        </button>
+      </div>
     </section>
-  );
-}
-
-function SidebarDestinations({
-  collapsed,
-  onCloseMobile,
-}: {
-  collapsed: boolean;
-  onCloseMobile: () => void;
-}) {
-  const pathname = usePathname();
-  const [session, setSession] = useState<AuthSession | null>(null);
-
-  useEffect(() => setSession(getAuthSession()), []);
-
-  const destinations = sidebarSecondaryDestinations
-    .filter((destination) => !destination.permissionCodes || hasAnySessionPermission(session, destination.permissionCodes));
-
-  if (!destinations.length) return null;
-
-  return (
-    <nav aria-label="Product areas" className="sidebar-destinations">
-      {!collapsed && <p className="sidebar-destinations__label">Product</p>}
-      {destinations.map((destination) => {
-        const Icon = destination.icon;
-        const active = isProductNavigationActive(pathname, destination.href);
-        return (
-          <Link
-            aria-current={active ? "page" : undefined}
-            aria-label={collapsed ? destination.label : undefined}
-            className="sidebar-row"
-            data-active={active}
-            href={destination.href}
-            key={destination.id}
-            onClick={onCloseMobile}
-            title={collapsed ? destination.label : undefined}
-          >
-            <Icon aria-hidden="true" className="sidebar-row__icon" size={18} />
-            {!collapsed && <span className="sidebar-row__label">{destination.label}</span>}
-          </Link>
-        );
-      })}
-    </nav>
-  );
-}
-
-function SidebarRow({
-  active = false,
-  collapsed,
-  item,
-  onClick,
-}: {
-  active?: boolean;
-  collapsed: boolean;
-  item: SidebarNavigationItem;
-  onClick: () => void;
-}) {
-  const tooltip = item.label;
-
-  return (
-    <Link
-      aria-current={active ? "page" : undefined}
-      aria-label={collapsed ? tooltip : undefined}
-      className="sidebar-row"
-      data-active={active}
-      href={item.href}
-      onClick={onClick}
-      title={collapsed ? tooltip : undefined}
-    >
-      <SidebarRowContent collapsed={collapsed} item={item} />
-    </Link>
-  );
-}
-
-function isCurrentPath(pathname: string, href: string) {
-  return isProductNavigationActive(pathname, href);
-}
-
-function SidebarRowContent({
-  collapsed,
-  item,
-}: {
-  collapsed: boolean;
-  item: SidebarNavigationItem;
-}) {
-  const Icon = item.icon;
-
-  return (
-    <>
-      <Icon aria-hidden="true" className="sidebar-row__icon" size={18} />
-      {!collapsed && (
-        <>
-          <span className="sidebar-row__label">{item.label}</span>
-        </>
-      )}
-    </>
   );
 }
 

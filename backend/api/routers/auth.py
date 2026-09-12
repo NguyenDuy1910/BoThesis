@@ -57,6 +57,7 @@ def _response(result: AuthenticationSession) -> AuthSessionResponse:
         display_name=result.display_name,
         active_tenant_id=result.active_tenant_id,
         permissions=list(result.permissions),
+        platform_scopes=list(result.platform_scopes),
         tenants=[
             AuthTenant(
                 id=tenant.tenant_id,

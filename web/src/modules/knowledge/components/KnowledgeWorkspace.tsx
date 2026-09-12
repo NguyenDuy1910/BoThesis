@@ -2,7 +2,7 @@
 
 import clsx from "clsx";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowRight,
   BookOpen,
@@ -14,7 +14,6 @@ import {
   FileImage,
   FileSpreadsheet,
   FileText,
-  FileUp,
   FolderKanban,
   LibraryBig,
   LoaderCircle,
@@ -23,7 +22,6 @@ import {
   PanelLeftClose,
   Plus,
   Search,
-  Settings2,
   ShieldCheck,
   Sparkles,
   Sun,
@@ -39,13 +37,13 @@ import {
 } from "react";
 
 import { ProductMark } from "@/components/ui/ProductMark";
+import { GlobalAssistantLauncher } from "@/components/ui/GlobalAssistantLauncher";
+import { ProductSidebarGlobalNavigation } from "@/components/ui/ProductSidebarGlobalNavigation";
 import { Dialog } from "@/components/ui/Dialog";
 import { appBrand } from "@/lib/brand";
-import { isProductNavigationActive, productNavigationItems } from "@/lib/product-navigation";
 import {
   getAuthSession,
   hasAnySessionPermission,
-  type AuthSession,
 } from "@/lib/auth/session";
 import { useTheme } from "@/modules/chat/hooks/useTheme";
 import {
@@ -68,6 +66,7 @@ interface KnowledgeWorkspaceProps {
 }
 
 export function KnowledgeWorkspace({ collectionId }: KnowledgeWorkspaceProps) {
+  const searchParams = useSearchParams();
   const [home, setHome] = useState<KnowledgeHome>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -93,29 +92,39 @@ export function KnowledgeWorkspace({ collectionId }: KnowledgeWorkspaceProps) {
   }, [reloadHome]);
 
   return (
-    <div className="knowledge-shell">
-      <KnowledgeSidebar
-        collections={home?.items ?? []}
-        currentCollectionId={collectionId}
-        loading={loading}
-        personalCollectionId={home?.personal_collection_id}
-      />
-      <main className="knowledge-main" id="main-content">
-        {collectionId ? (
-          <CollectionWorkspace
-            collectionId={collectionId}
-            onCollectionChanged={() => void reloadHome()}
-          />
-        ) : (
-          <KnowledgeHomeView
-            error={error}
-            home={home}
-            loading={loading}
-            onRetry={() => void reloadHome()}
-          />
-        )}
-      </main>
-    </div>
+    <>
+      <div className="knowledge-shell">
+        <KnowledgeSidebar
+          collections={home?.items ?? []}
+          currentCollectionId={collectionId}
+          loading={loading}
+          personalCollectionId={home?.personal_collection_id}
+        />
+        <main className="knowledge-main" id="main-content">
+          {collectionId ? (
+            <CollectionWorkspace
+              collectionId={collectionId}
+              onCollectionChanged={() => void reloadHome()}
+            />
+          ) : searchParams.get("view") === "library" ? (
+            <KnowledgeLibraryView
+              error={error}
+              home={home}
+              loading={loading}
+              onRetry={() => void reloadHome()}
+            />
+          ) : (
+            <KnowledgeHomeView
+              error={error}
+              home={home}
+              loading={loading}
+              onRetry={() => void reloadHome()}
+            />
+          )}
+        </main>
+      </div>
+      <GlobalAssistantLauncher />
+    </>
   );
 }
 
@@ -131,11 +140,7 @@ function KnowledgeSidebar({
   personalCollectionId?: string | null;
 }) {
   const { resolvedTheme, theme, toggleTheme } = useTheme();
-  const pathname = usePathname();
-  const [session, setSession] = useState<AuthSession | null>(null);
   const [collapsed, setCollapsed] = useState(false);
-
-  useEffect(() => setSession(getAuthSession()), []);
 
   return (
     <aside className={clsx("knowledge-sidebar", collapsed && "knowledge-sidebar--collapsed")}>
@@ -156,27 +161,14 @@ function KnowledgeSidebar({
         </button>
       </div>
 
-      <nav aria-label="Workspace" className="knowledge-sidebar__primary-nav">
-        {productNavigationItems
-          .filter((destination) => !destination.permissionCodes || hasAnySessionPermission(session, destination.permissionCodes))
-          .map((destination) => (
-            <KnowledgeNavLink
-              active={isProductNavigationActive(pathname, destination.href)}
-              collapsed={collapsed}
-              href={destination.href}
-              icon={destination.icon}
-              key={destination.label}
-              label={destination.label}
-            />
-          ))}
-      </nav>
+      <ProductSidebarGlobalNavigation collapsed={collapsed} />
 
       {!collapsed && (
         <div className="knowledge-sidebar__collections">
           <p>Knowledge</p>
           <Link className={clsx("knowledge-sidebar__collection-link", !currentCollectionId && "is-active")} href="/knowledge">
             <BookOpen aria-hidden="true" size={15} />
-            <span>All collections</span>
+            <span>My collections</span>
           </Link>
           {personalCollectionId ? (
             <Link
@@ -197,7 +189,7 @@ function KnowledgeSidebar({
               <span>My collection</span>
             </span>
           )}
-          <p className="knowledge-sidebar__section-label">Shared with you</p>
+          <p className="knowledge-sidebar__section-label">Shared with me</p>
           {loading ? (
             <span className="knowledge-sidebar__loading"><LoaderCircle aria-hidden="true" size={14} />Loading collections</span>
           ) : collections.length ? (
@@ -217,6 +209,14 @@ function KnowledgeSidebar({
           ) : (
             <span className="knowledge-sidebar__empty">No collections are available to this account.</span>
           )}
+          <Link className="knowledge-sidebar__collection-link" href="/knowledge?view=library">
+            <FileText aria-hidden="true" size={15} />
+            <span>Recent</span>
+          </Link>
+          <Link className="knowledge-sidebar__collection-link" href="/admin/apps-permissions">
+            <Database aria-hidden="true" size={15} />
+            <span>Connected sources</span>
+          </Link>
         </div>
       )}
 
@@ -233,27 +233,6 @@ function KnowledgeSidebar({
         </button>
       </div>
     </aside>
-  );
-}
-
-function KnowledgeNavLink({
-  active,
-  collapsed,
-  href,
-  icon: Icon,
-  label,
-}: {
-  active: boolean;
-  collapsed: boolean;
-  href: string;
-  icon: typeof LibraryBig;
-  label: string;
-}) {
-  return (
-    <Link aria-current={active ? "page" : undefined} className={clsx("knowledge-nav-link", active && "is-active")} href={href} title={collapsed ? label : undefined}>
-      <Icon aria-hidden="true" size={17} />
-      {!collapsed && <span>{label}</span>}
-    </Link>
   );
 }
 
@@ -413,6 +392,78 @@ function KnowledgeHomeView({
         onCreated={(collectionId) => router.push(`/knowledge/collections/${collectionId}`)}
         open={createOpen}
       />
+    </div>
+  );
+}
+
+function KnowledgeLibraryView({
+  error,
+  home,
+  loading,
+  onRetry,
+}: {
+  error?: string;
+  home?: KnowledgeHome;
+  loading: boolean;
+  onRetry: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<KnowledgeSearchResult[]>();
+  const [searchError, setSearchError] = useState<string>();
+  const [searching, setSearching] = useState(false);
+
+  const submitSearch = async (event: FormEvent) => {
+    event.preventDefault();
+    const value = query.trim();
+    if (!value) {
+      setResults(undefined);
+      setSearchError(undefined);
+      return;
+    }
+    setSearching(true);
+    setSearchError(undefined);
+    try {
+      setResults(await searchKnowledge(value));
+    } catch (cause) {
+      setSearchError(messageFrom(cause, "Could not search your library."));
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  if (loading) return <KnowledgeLoading label="Loading your accessible library" />;
+  if (error) return <KnowledgeFailure detail={error} onRetry={onRetry} />;
+
+  const documents = home?.recent_documents ?? [];
+  return (
+    <div className="knowledge-page knowledge-home">
+      <header className="knowledge-header">
+        <div>
+          <p className="knowledge-eyebrow">Workspace library</p>
+          <h1>Library</h1>
+          <p>Browse recently updated documents that you are allowed to open and cite.</p>
+        </div>
+      </header>
+      <form className="knowledge-search" onSubmit={(event) => void submitSearch(event)}>
+        <Search aria-hidden="true" size={17} />
+        <input aria-label="Search your library" onChange={(event) => setQuery(event.target.value)} placeholder="Search accessible documents…" type="search" value={query} />
+        <button className="knowledge-search__submit" disabled={searching || !query.trim()} type="submit">
+          {searching ? <LoaderCircle aria-hidden="true" className="animate-spin" size={15} /> : "Search"}
+        </button>
+      </form>
+      {(results || searchError) && (
+        <section aria-label="Library search results" className="knowledge-search-results">
+          {searchError ? <KnowledgeInlineError detail={searchError} /> : results?.length ? (
+            <div className="knowledge-result-list">
+              {results.map((result) => <Link className="knowledge-result-row" href={`/knowledge/items/${result.id}${result.metadata.chunk_id ? `?chunk=${encodeURIComponent(result.metadata.chunk_id)}` : ""}`} key={`${result.id}:${result.metadata.chunk_id ?? ""}`}><DocumentTypeIcon contentType={undefined} /><span><strong>{result.title}</strong><small>{result.excerpt}</small></span><ArrowRight aria-hidden="true" size={16} /></Link>)}
+            </div>
+          ) : <KnowledgeEmpty title="No matching documents" detail="Try a more specific phrase." />}
+        </section>
+      )}
+      <section className="knowledge-overview">
+        <div className="knowledge-section-heading"><div><p>Recently updated</p><span>Documents from sources you can access</span></div></div>
+        {documents.length ? <div className="knowledge-recent-card"><div className="knowledge-recent-list">{documents.map((document) => <DocumentCompactRow document={document} key={document.id} />)}</div></div> : <KnowledgeEmpty title="Your library is empty" detail="Documents appear here after an approved source indexes content you can access." />}
+      </section>
     </div>
   );
 }

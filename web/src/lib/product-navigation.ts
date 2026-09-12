@@ -1,15 +1,25 @@
 import {
   Bot,
+  BookOpen,
+  FileText,
   Grid2X2,
-  LibraryBig,
-  MessageSquare,
+  Plus,
+  Search,
   ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
 
-/** The five product-level destinations shown in every product launcher. */
+/** Product-wide actions always take a person back to Chat with explicit intent. */
+export interface ProductNavigationAction {
+  id: "new-chat" | "search-chats";
+  label: string;
+  href: string;
+  icon: LucideIcon;
+}
+
+/** Product destinations shared by every module shell. */
 export interface ProductNavigationItem {
-  id: "chat" | "knowledge" | "apps" | "agents" | "admin";
+  id: "knowledge" | "library" | "apps" | "agents" | "workspace";
   label: string;
   href: string;
   icon: LucideIcon;
@@ -17,23 +27,34 @@ export interface ProductNavigationItem {
   permissionCodes?: readonly string[];
 }
 
+export const productNavigationActions: readonly ProductNavigationAction[] = [
+  { id: "new-chat", label: "New chat", href: "/app?action=new", icon: Plus },
+  { id: "search-chats", label: "Search chats", href: "/app?action=search", icon: Search },
+];
+
 /**
  * One source of truth for product navigation. Shells may present these links
  * differently, but they must never change their icon, URL, or active rule.
  */
 export const productNavigationItems: readonly ProductNavigationItem[] = [
-  { id: "chat", label: "Chat", href: "/app", icon: MessageSquare },
   {
     id: "knowledge",
     label: "Knowledge",
     href: "/knowledge",
-    icon: LibraryBig,
+    icon: BookOpen,
+    permissionCodes: ["knowledge.read"],
+  },
+  {
+    id: "library",
+    label: "Library",
+    href: "/knowledge?view=library",
+    icon: FileText,
     permissionCodes: ["knowledge.read"],
   },
   {
     id: "apps",
     label: "Apps",
-    href: "/admin/connectors",
+    href: "/apps",
     icon: Grid2X2,
     permissionCodes: ["source.manage"],
   },
@@ -45,8 +66,8 @@ export const productNavigationItems: readonly ProductNavigationItem[] = [
     permissionCodes: ["source.manage"],
   },
   {
-    id: "admin",
-    label: "Admin",
+    id: "workspace",
+    label: "Workspace",
     href: "/admin",
     icon: ShieldCheck,
     permissionCodes: [
@@ -64,14 +85,27 @@ export const productNavigationItems: readonly ProductNavigationItem[] = [
 ];
 
 /** Product routes own their entire nested path; Chat owns only its root. */
-export function isProductNavigationActive(pathname: string, href: string) {
-  if (href === "/app") return pathname === href;
-  // Apps is nested under the Admin URL namespace, but it is a distinct
-  // product destination. Do not light both product tabs at once.
-  if (href === "/admin") {
-    return pathname === href || (
-      pathname.startsWith(`${href}/`) && !pathname.startsWith("/admin/connectors")
+export function isProductNavigationActive(pathname: string, href: string, search = "") {
+  const [destinationPath, destinationQuery] = href.split("?");
+  const query = new URLSearchParams(destinationQuery);
+  const currentQuery = new URLSearchParams(search);
+  if (destinationPath === "/app") return pathname === destinationPath;
+  if (destinationPath === "/knowledge" && query.get("view") === "library") {
+    return pathname === "/knowledge" && currentQuery.get("view") === "library";
+  }
+  if (destinationPath === "/knowledge") {
+    return (pathname === destinationPath || pathname.startsWith(`${destinationPath}/`))
+      && (pathname !== destinationPath || currentQuery.get("view") !== "library");
+  }
+  // Workspace owns only its own admin namespace, never another product
+  // destination such as Apps or Agents.
+  if (destinationPath === "/admin") {
+    return pathname === destinationPath || (
+      pathname.startsWith(`${destinationPath}/`) &&
+      !pathname.startsWith("/admin/connectors") &&
+      !pathname.startsWith("/admin/apps-permissions") &&
+      !pathname.startsWith("/admin/agents-policies")
     );
   }
-  return pathname === href || pathname.startsWith(`${href}/`);
+  return pathname === destinationPath || pathname.startsWith(`${destinationPath}/`);
 }

@@ -40,11 +40,11 @@ export function ConnectorCard({
     <button
       aria-haspopup="dialog"
       className={cn(
-        "group flex w-full flex-col items-start gap-3 rounded-[var(--adm-r-lg)] p-3.5 text-left",
-        "bg-[var(--adm-surface)] shadow-[var(--adm-e1)]",
-        "transition-[box-shadow,transform] duration-[var(--adm-base)] ease-[var(--adm-ease)]",
-        "hover:shadow-[var(--adm-e2)] motion-safe:hover:-translate-y-px",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--adm-canvas)]",
+        "group flex w-full flex-col items-start gap-3 rounded-[var(--radius-lg)] p-3.5 text-left",
+        "bg-[var(--surface-base)] shadow-[var(--elevation-1)]",
+        "transition-[box-shadow,transform] duration-[var(--duration-base)] ease-[var(--ease-out)]",
+        "hover:shadow-[var(--elevation-2)] motion-safe:hover:-translate-y-px",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]",
         unavailable && "opacity-60",
       )}
       onClick={onClick}
@@ -56,16 +56,16 @@ export function ConnectorCard({
       </div>
 
       <div className="min-w-0">
-        <p className="truncate text-[0.875rem] font-semibold text-[var(--text)]">
+        <p className="truncate text-[0.875rem] font-semibold text-[var(--text-primary)]">
           {connector.name}
         </p>
-        <p className="mt-0.5 line-clamp-2 text-[0.75rem] leading-4 text-[var(--text-muted)]">
+        <p className="mt-0.5 line-clamp-2 text-[0.75rem] leading-4 text-[var(--text-tertiary)]">
           {connector.description}
         </p>
       </div>
 
       <div className="mt-auto flex w-full items-center justify-between gap-2 pt-1 text-[0.75rem] font-medium">
-        <span className="text-[var(--text-muted)]">
+        <span className="text-[var(--text-tertiary)]">
           {connectionCount
             ? `${connectionCount} connection${connectionCount === 1 ? "" : "s"}`
             : unavailable
@@ -73,7 +73,7 @@ export function ConnectorCard({
               : connector.authentication}
         </span>
         {!unavailable && (
-          <span className="inline-flex items-center gap-1 text-[var(--brand-accent)]">
+          <span className="inline-flex items-center gap-1 text-[var(--text-accent)]">
             {connectionCount ? (
               <>
                 Manage

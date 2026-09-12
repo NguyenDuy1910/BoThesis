@@ -118,7 +118,7 @@ export function DataTable<T extends Record<string, unknown>>({
                 <input
                   aria-label="Select every row"
                   checked={allSelected}
-                  className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand-accent)]"
+                  className="h-3.5 w-3.5 cursor-pointer accent-[var(--text-accent)]"
                   onChange={() =>
                     setSelected(
                       allSelected
@@ -156,7 +156,7 @@ export function DataTable<T extends Record<string, unknown>>({
                   <button
                     // Negative margin plus matching padding makes the whole
                     // header cell the hit area instead of just the label.
-                    className="-mx-3.5 -my-2 inline-flex items-center gap-1 px-3.5 py-2 transition-colors hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--focus-ring)]"
+                    className="-mx-3.5 -my-2 inline-flex items-center gap-1 px-3.5 py-2 transition-colors hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--focus-ring)]"
                     onClick={() => {
                       if (sortKey === column.key) {
                         setSortDirection(sortDirection === "asc" ? "desc" : "asc");
@@ -213,7 +213,7 @@ export function DataTable<T extends Record<string, unknown>>({
                     <input
                       aria-label="Select row"
                       checked={selected}
-                      className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand-accent)]"
+                      className="h-3.5 w-3.5 cursor-pointer accent-[var(--text-accent)]"
                       onChange={() =>
                         setSelected(
                           selected
@@ -272,9 +272,9 @@ export function CellTitle({
     <div className="flex min-w-0 items-center gap-2.5">
       {icon}
       <span className="min-w-0">
-        <span className="block truncate font-medium text-[var(--text)]">{title}</span>
+        <span className="block truncate font-medium text-[var(--text-primary)]">{title}</span>
         {subtitle && (
-          <span className="block truncate text-[0.75rem] text-[var(--text-muted)]">
+          <span className="block truncate text-[0.75rem] text-[var(--text-tertiary)]">
             {subtitle}
           </span>
         )}

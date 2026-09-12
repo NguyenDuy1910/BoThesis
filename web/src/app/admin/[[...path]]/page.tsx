@@ -22,6 +22,11 @@ export default async function AdminRoute({
   if (section === "documents" || section === "all-items" || section === "items") {
     redirect("/knowledge");
   }
+  // Apps became a product-level surface. Preserve historical Admin links and
+  // connector aliases without loading an extra Admin shell first.
+  if (section === "apps-permissions" || section === "connectors" || section === "sources") {
+    redirect("/apps");
+  }
 
   return <AdminPage section={path.join("/")} />;
 }

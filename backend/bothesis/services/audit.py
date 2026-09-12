@@ -8,12 +8,13 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.db.models import AuditLog, User
+from bothesis.db.models import AuditLog, Tenant, User
 from bothesis.services import (
     AUDIT_READ_PERMISSION,
     AuthContext,
     normalize_page,
     normalize_required_text,
+    require_platform_root,
     require_tenant_permission,
     timestamp,
 )
@@ -123,6 +124,72 @@ class AuditService:
                     "created_at": timestamp(event.created_at),
                 }
                 for event, email, display_name in rows
+            ],
+            "total": int(total or 0),
+            "page": page,
+            "page_size": page_size,
+        }
+
+    async def list_platform_events(
+        self,
+        actor: AuthContext,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+    ) -> dict[str, Any]:
+        """Return safe audit metadata across workspaces to root-scoped actors."""
+
+        require_platform_root(actor)
+        page, page_size, offset = normalize_page(page, page_size)
+        filters: list[Any] = []
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            filters.append(
+                or_(
+                    AuditLog.action.ilike(term),
+                    AuditLog.resource_id.ilike(term),
+                    User.email.ilike(term),
+                    User.display_name.ilike(term),
+                    Tenant.name.ilike(term),
+                )
+            )
+        base = (
+            select(AuditLog, User.email, User.display_name, Tenant.name)
+            .join(Tenant, Tenant.id == AuditLog.tenant_id)
+            .outerjoin(User, User.id == AuditLog.actor_user_id)
+            .where(*filters)
+        )
+        total = await self._session.scalar(
+            select(func.count()).select_from(base.subquery())
+        )
+        rows = (
+            await self._session.execute(
+                base.order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                .limit(page_size)
+                .offset(offset)
+            )
+        ).all()
+        return {
+            "items": [
+                {
+                    "id": str(event.id),
+                    "workspace": {"id": str(event.tenant_id), "name": tenant_name},
+                    "action": event.action,
+                    "resource_type": event.resource_type,
+                    "resource_id": event.resource_id,
+                    "outcome": event.outcome,
+                    "details": dict(event.details),
+                    "actor": {
+                        "id": str(event.actor_user_id)
+                        if event.actor_user_id is not None
+                        else None,
+                        "email": email,
+                        "display_name": display_name,
+                    },
+                    "created_at": timestamp(event.created_at),
+                }
+                for event, email, display_name, tenant_name in rows
             ],
             "total": int(total or 0),
             "page": page,

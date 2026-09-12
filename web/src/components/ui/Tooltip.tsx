@@ -26,8 +26,8 @@ export function Tooltip({ label, children, side = "bottom", className }: Tooltip
       <span
         className={cn(
           "pointer-events-none absolute left-1/2 z-[70] hidden -translate-x-1/2 whitespace-nowrap",
-          "rounded-[var(--adm-r-xs)] bg-[var(--text)] px-1.5 py-1 text-[0.6875rem] font-medium text-[var(--adm-surface)]",
-          "shadow-[var(--adm-e2)] group-focus-within/tooltip:block group-hover/tooltip:block",
+          "rounded-[var(--radius-xs)] bg-[var(--text-primary)] px-1.5 py-1 text-[0.6875rem] font-medium text-[var(--surface-base)]",
+          "shadow-[var(--elevation-2)] group-focus-within/tooltip:block group-hover/tooltip:block",
           sideClasses[side],
         )}
         role="tooltip"

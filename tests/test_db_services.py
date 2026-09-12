@@ -130,6 +130,21 @@ async def test_identity_supports_multiple_tenant_memberships(
         assert first_context.permission_codes == ("knowledge.read",)
         assert second_context.permission_codes == ("knowledge.read", "source.manage")
 
+        third_tenant = await auth.create_tenant("root-visible", "Root Visible")
+        user.is_root_admin = True
+        await session.flush()
+        root_context = await auth.get_context(user.id, tenant_id=third_tenant.id)
+        root_workspaces = await auth.list_active_tenant_memberships(user.id)
+
+        assert root_context.tenant_id == third_tenant.id
+        assert root_context.is_root_admin is True
+        assert root_context.platform_scopes == ("root_admin",)
+        assert root_context.permission_codes == ("*:*",)
+        assert {workspace.tenant_id for workspace in root_workspaces} == {
+            first_tenant.id,
+            second_tenant.id,
+        }
+
 
 @pytest.mark.asyncio
 async def test_personal_upload_and_message_relation_store_metadata_only(

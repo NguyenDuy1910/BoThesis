@@ -27,6 +27,8 @@ from bothesis.services import (
     AdminNotFoundError,
     AuthContext,
     normalize_required_text,
+    normalize_page,
+    require_platform_root,
     require_tenant_permission,
     timestamp,
 )
@@ -45,6 +47,20 @@ class TenantService:
         self._audit = audit or AuditService(session)
 
     async def list_tenants(self, actor: AuthContext) -> dict[str, Any]:
+        if actor.is_root_admin:
+            tenants = list(
+                await self._session.scalars(
+                    select(Tenant)
+                    .where(Tenant.status == ACTIVE_STATUS)
+                    .order_by(Tenant.created_at, Tenant.id)
+                )
+            )
+            return {
+                "items": [_tenant_payload(tenant) for tenant in tenants],
+                "total": len(tenants),
+                "page": 1,
+                "page_size": len(tenants),
+            }
         tenant = await self._tenant(actor)
         return {
             "items": [_tenant_payload(tenant)],
@@ -65,7 +81,7 @@ class TenantService:
                     TenantMembership.tenant_id == tenant_id,
                     TenantMembership.status == ACTIVE_STATUS,
                     TenantMembership.deleted_at.is_(None),
-                    User.status == ACTIVE_STATUS,
+                    User.status.is_(True),
                 )
             ),
             "active_roles": await self._count(
@@ -127,6 +143,77 @@ class TenantService:
             "generated_at": timestamp(await self._session.scalar(select(func.now()))),
         }
 
+    async def platform_overview(self, actor: AuthContext) -> dict[str, Any]:
+        """Summarize durable platform state for a root-scoped actor."""
+
+        require_platform_root(actor)
+        tenants = list(
+            await self._session.scalars(
+                select(Tenant).order_by(Tenant.created_at, Tenant.id).limit(6)
+            )
+        )
+        health = [await self._platform_workspace_payload(tenant) for tenant in tenants]
+        return {
+            "metrics": {
+                "workspaces": await self._count(select(func.count()).select_from(Tenant)),
+                "users": await self._count(
+                    select(func.count()).select_from(User).where(User.status.is_(True))
+                ),
+                "connections": await self._count(
+                    select(func.count())
+                    .select_from(IntegrationConnection)
+                    .where(IntegrationConnection.deleted_at.is_(None))
+                ),
+                "open_reviews": await self._count(
+                    select(func.count())
+                    .select_from(ApprovalRequest)
+                    .where(
+                        ApprovalRequest.status == "pending",
+                        ApprovalRequest.deleted_at.is_(None),
+                    )
+                ),
+            },
+            "workspace_health": health,
+        }
+
+    async def list_platform_workspaces(
+        self,
+        actor: AuthContext,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        """List workspace identity and lifecycle facts without impersonation."""
+
+        require_platform_root(actor)
+        page, page_size, offset = normalize_page(page, page_size)
+        statement = select(Tenant)
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            statement = statement.where(
+                (Tenant.name.ilike(term)) | (Tenant.code.ilike(term))
+            )
+        if status and status.strip():
+            statement = statement.where(Tenant.status == status.strip().casefold())
+        total = await self._count(select(func.count()).select_from(statement.subquery()))
+        tenants = list(
+            await self._session.scalars(
+                statement.order_by(Tenant.created_at.desc(), Tenant.id)
+                .limit(page_size)
+                .offset(offset)
+            )
+        )
+        return {
+            "items": [
+                await self._platform_workspace_payload(tenant) for tenant in tenants
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+
     async def get_tenant(self, actor: AuthContext, tenant_id: UUID) -> dict[str, Any]:
         trusted_tenant_id = require_tenant_permission(actor)
         if tenant_id != trusted_tenant_id:
@@ -173,6 +260,50 @@ class TenantService:
 
     async def _count(self, statement: Any) -> int:
         return int(await self._session.scalar(statement) or 0)
+
+    async def _platform_workspace_payload(self, tenant: Tenant) -> dict[str, Any]:
+        owner = await self._session.execute(
+            select(User.email, User.display_name)
+            .join(TenantMembership, TenantMembership.user_id == User.id)
+            .join(Role, Role.id == TenantMembership.role_id)
+            .where(
+                TenantMembership.tenant_id == tenant.id,
+                TenantMembership.status == ACTIVE_STATUS,
+                TenantMembership.deleted_at.is_(None),
+                Role.code == "owner",
+            )
+            .order_by(User.created_at, User.id)
+            .limit(1)
+        )
+        owner_row = owner.one_or_none()
+        return {
+            **_tenant_payload(tenant),
+            "owner": (
+                {
+                    "display_name": owner_row.display_name,
+                    "email": owner_row.email,
+                }
+                if owner_row is not None
+                else None
+            ),
+            "member_count": await self._count(
+                select(func.count())
+                .select_from(TenantMembership)
+                .where(
+                    TenantMembership.tenant_id == tenant.id,
+                    TenantMembership.status == ACTIVE_STATUS,
+                    TenantMembership.deleted_at.is_(None),
+                )
+            ),
+            "connection_count": await self._count(
+                select(func.count())
+                .select_from(IntegrationConnection)
+                .where(
+                    IntegrationConnection.tenant_id == tenant.id,
+                    IntegrationConnection.deleted_at.is_(None),
+                )
+            ),
+        }
 
 
 def _tenant_payload(tenant: Tenant) -> dict[str, Any]:

@@ -1,0 +1,388 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   BoThesis — semantic design tokens
+   ---------------------------------------------------------------------------
+   The single source of colour, shape, density, motion and layout for every
+   surface in the product: chat, knowledge, apps, workspace settings, platform
+   admin. Nothing else in the codebase may declare a token or a raw hex.
+
+   Mirrors the "Enterprise Agent / Semantic" collection in Figma
+   (file xJDiDHNP0QK0uwvX0xGysL), which aliases the pearl / ink / lilac /
+   aurora / night primitives. Where this file departs from Figma the reason is
+   written next to the value — every departure is an accessibility or
+   consistency fix, never a restyle.
+
+   Layers, in order:
+     1. Palette       raw ramps. Never referenced outside this file.
+     2. Semantics     what a colour means. This is what components use.
+     3. Scale         radius, control height, spacing, type, motion, layout.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── 1. Palette ────────────────────────────────────────────────────────────
+     Figma primitives. Two ramps carry the product: a violet-leaning neutral
+     (pearl → ink for light, night for dark) and the accent pair lilac/aurora.
+     The legacy warm gray/* and indigo/* ramps in Figma are retired; every
+     semantic below resolves into these. */
+
+  /* Neutral — light */
+  --palette-pearl-0: #ffffff;
+  --palette-pearl-25: #fdfdff;
+  --palette-pearl-50: #f8f7fc;
+  --palette-pearl-100: #f1eff8;
+  --palette-pearl-200: #e5e1f0;
+  --palette-pearl-300: #d3cddf;
+
+  /* Neutral — ink (light-mode text) */
+  --palette-ink-500: #776f85;
+  --palette-ink-600: #5a5367;
+  --palette-ink-700: #403b4c;
+  --palette-ink-800: #292633;
+  --palette-ink-900: #1a1824;
+  --palette-ink-950: #12111a;
+
+  /* Neutral — night (dark-mode surfaces) */
+  --palette-night-600: #47415c;
+  --palette-night-700: #302c40;
+  --palette-night-800: #211e2d;
+  --palette-night-850: #1a1725;
+  --palette-night-900: #14121d;
+  --palette-night-950: #0d0c13;
+  /* Added: Figma has no dark neutral light enough for tertiary text.
+     night-600 on night-900 is 1.94:1 — invisible. This is 6.5:1. */
+  --palette-night-300: #9c94ad;
+
+  /* Accent */
+  --palette-lilac-25: #fbfaff;
+  --palette-lilac-50: #f5f2ff;
+  --palette-lilac-100: #ece7ff;
+  --palette-lilac-200: #ddd4ff;
+  --palette-lilac-300: #c7b8ff;
+  --palette-lilac-500: #8b6ff7;
+  --palette-lilac-600: #7457e8;
+  --palette-aurora-400: #7b8cff;
+  --palette-aurora-500: #6676f4;
+  --palette-aurora-600: #5867df;
+  --palette-aurora-700: #4854c4;
+
+  /* Status — light */
+  --palette-green-50: #ecfdf3;
+  --palette-green-200: #a9e5c3;
+  --palette-green-600: #067647;
+  --palette-green-700: #027a48;
+  --palette-amber-50: #fffaeb;
+  --palette-amber-200: #f5d9a8;
+  --palette-amber-700: #b54708;
+  --palette-red-50: #fef3f2;
+  --palette-red-200: #f7c9c5;
+  --palette-red-600: #d92d20;
+  --palette-red-700: #b42318;
+  --palette-blue-50: #eff6ff;
+  --palette-blue-200: #c2d8fb;
+  --palette-blue-600: #2563eb;
+  --palette-blue-700: #1d4ed8;
+
+  /* Status — dark. Figma reuses the light values on a dark surface, which
+     lands between 2.4:1 and 3.5:1. These are the same hues lifted to ≥ 5:1. */
+  --palette-green-300: #5fd39b;
+  --palette-amber-300: #f5c26b;
+  --palette-red-300: #ff9e96;
+  --palette-blue-300: #93b4ff;
+
+  color-scheme: light;
+
+  /* ── 2. Semantics ─────────────────────────────────────────────────────────
+     Surfaces stack canvas < nav < subtle < base < raised. Depth comes from
+     this ramp plus one hairline — never from stacking borders or shadows. */
+
+  --surface-canvas: var(--palette-pearl-50);
+  --surface-nav: var(--palette-lilac-25);
+  --surface-subtle: var(--palette-pearl-100);
+  --surface-inset: var(--palette-pearl-25);
+  --surface-base: var(--palette-pearl-0);
+  --surface-raised: var(--palette-pearl-0);
+  --surface-hover: var(--palette-lilac-50);
+  --surface-selected: var(--palette-lilac-100);
+  --surface-inverse: var(--palette-ink-800);
+  --surface-header: rgb(253 253 255 / 88%);
+
+  --text-primary: var(--palette-ink-800);
+  --text-secondary: var(--palette-ink-600);
+  --text-tertiary: var(--palette-ink-500);
+  --text-inverse: var(--palette-pearl-0);
+  --text-accent: var(--palette-lilac-600);
+  --text-on-accent: #ffffff;
+
+  --border-subtle: var(--palette-pearl-200);
+  --border-default: var(--palette-pearl-300);
+  --border-strong: var(--palette-ink-500);
+  --border-focus: var(--palette-aurora-500);
+
+  /* Solid accent fills carry white text, so they resolve to aurora-600
+     (4.75:1). Figma's aurora-500 is 3.84:1 and fails AA; it is kept for the
+     focus ring and other non-text uses where contrast is not a text concern. */
+  --accent-primary: var(--palette-aurora-600);
+  --accent-hover: var(--palette-aurora-700);
+  --accent-pressed: #3f4ab0;
+  --accent-soft: var(--palette-lilac-100);
+  --accent-soft-hover: var(--palette-lilac-200);
+  --accent-soft-pressed: var(--palette-lilac-300);
+  --accent-secondary: var(--palette-lilac-600);
+
+  /* Status. `solid` is the dot or fill, `text` reads on `bg`, `border`
+     outlines `bg`. A status colour never drives an action's default look. */
+  --status-info-solid: var(--palette-blue-600);
+  --status-info-text: var(--palette-blue-700);
+  --status-info-bg: var(--palette-blue-50);
+  --status-info-border: var(--palette-blue-200);
+
+  --status-success-solid: var(--palette-green-600);
+  --status-success-text: var(--palette-green-700);
+  --status-success-bg: var(--palette-green-50);
+  --status-success-border: var(--palette-green-200);
+
+  --status-warning-solid: var(--palette-amber-700);
+  --status-warning-text: var(--palette-amber-700);
+  --status-warning-bg: var(--palette-amber-50);
+  --status-warning-border: var(--palette-amber-200);
+
+  --status-danger-solid: var(--palette-red-600);
+  --status-danger-text: var(--palette-red-700);
+  --status-danger-bg: var(--palette-red-50);
+  --status-danger-border: var(--palette-red-200);
+
+  --status-neutral-solid: var(--palette-ink-500);
+  --status-neutral-text: var(--palette-ink-600);
+  --status-neutral-bg: var(--palette-pearl-100);
+  --status-neutral-border: var(--palette-pearl-300);
+
+  --focus-ring: var(--palette-aurora-500);
+  --focus-ring-soft: rgb(102 118 244 / 28%);
+  --overlay-scrim: rgb(26 24 36 / 40%);
+
+  --code-surface: var(--palette-ink-950);
+  --code-text: var(--palette-pearl-200);
+  --code-muted: var(--palette-ink-500);
+  --highlight-surface: #fff3c4;
+  --highlight-border: #e5b94f;
+
+  --elevation-1: 0 1px 2px rgb(26 24 36 / 5%), 0 0 0 1px rgb(26 24 36 / 5%);
+  --elevation-2: 0 2px 4px rgb(26 24 36 / 4%), 0 8px 16px -6px rgb(26 24 36 / 8%),
+    0 0 0 1px rgb(26 24 36 / 6%);
+  --elevation-3: 0 12px 32px -8px rgb(26 24 36 / 14%),
+    0 4px 8px -4px rgb(26 24 36 / 8%), 0 0 0 1px rgb(26 24 36 / 7%);
+
+  /* ── 3. Scale ─────────────────────────────────────────────────────────────
+     Shape. Values are unchanged from the shipping product; only the names are
+     unified, so the two former radius scales stop competing. */
+  --radius-xs: 0.375rem; /*  6px  badges, dots, chips            */
+  --radius-sm: 0.5rem; /*  8px  controls, buttons, inputs      */
+  --radius-md: 0.625rem; /* 10px  cards, popovers, table shells  */
+  --radius-lg: 0.75rem; /* 12px  panels, inspectors             */
+  --radius-xl: 1rem; /* 16px  sheets, dialogs                */
+  --radius-2xl: 1.375rem; /* 22px  composer and message bubbles   */
+  --radius-full: 999px;
+
+  /* Control height. Every interactive control resolves to one of these, so a
+     toolbar never mixes a 32px select with a 36px button. */
+  --control-h-sm: 1.875rem; /* 30px */
+  --control-h-md: 2.25rem; /* 36px */
+  --control-h-lg: 2.625rem; /* 42px */
+
+  /* Spacing. Figma's space/* ramp; use for gaps and padding, not for layout
+     widths, which are named below. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+
+  /* Type. Mirrors the Figma text styles. `--text-size-meta` (12px) has no
+     Figma equivalent: the ramp jumps 13 → 11, and 11px is an uppercase eyebrow
+     size, too small for the supporting line under a row title. */
+  --font-sans: var(--font-ui), -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), "SF Mono", Monaco, "Cascadia Code",
+    "Roboto Mono", Consolas, monospace;
+
+  --text-size-display: 2.5rem;
+  --text-lh-display: 3rem;
+  --text-size-h1: 1.75rem;
+  --text-lh-h1: 2.25rem;
+  --text-size-h2: 1.375rem;
+  --text-lh-h2: 1.875rem;
+  --text-size-h3: 1.125rem;
+  --text-lh-h3: 1.625rem;
+  --text-size-body: 0.9375rem; /* 15px */
+  --text-lh-body: 1.375rem;
+  --text-size-ui: 0.8125rem; /* 13px — controls, table cells */
+  --text-lh-ui: 1.125rem;
+  --text-size-meta: 0.75rem; /* 12px — supporting row detail */
+  --text-lh-meta: 1rem;
+  --text-size-caption: 0.6875rem; /* 11px — uppercase section labels */
+  --text-lh-caption: 1rem;
+  --text-tracking-caption: 0.06em;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+  --duration-fast: 120ms;
+  --duration-base: 170ms;
+  --duration-slow: 240ms;
+
+  /* Layout. One nav width and one header height for all three shells. */
+  --nav-w: 248px;
+  --nav-w-collapsed: 60px;
+  --header-h: 3.25rem;
+  --page-gutter: clamp(1.25rem, 2.2vw, 2rem);
+  --page-max: 84rem;
+  --page-max-narrow: 56rem;
+  --inspector-w: 25rem;
+  --chat-max: 864px;
+  --chat-min-width: 42rem;
+
+  /* Breakpoints, named once. `--bp-inspector` is where the contextual
+     inspector stops fitting beside a collection and becomes an overlay;
+     `--bp-nav` is where the sidebar stops being permanent. */
+  --bp-nav: 900px;
+  --bp-inspector: 1180px;
+
+  --z-topbar: 10;
+  --z-composer: 12;
+  --z-activity: 30;
+  --z-overlay: 35;
+  --z-sidebar: 40;
+  --z-popover: 50;
+}
+
+/* ── Dark ──────────────────────────────────────────────────────────────────
+   Only semantics are redeclared; the palette and every scale token above are
+   mode-independent. A component that needs a dark rule of its own is a bug in
+   this block, not a reason for an `html.dark .thing { … }` override. */
+html[data-theme="dark"],
+html.dark {
+  color-scheme: dark;
+
+  --surface-canvas: var(--palette-night-950);
+  --surface-nav: var(--palette-night-950);
+  --surface-subtle: var(--palette-night-850);
+  --surface-inset: var(--palette-night-850);
+  --surface-base: var(--palette-night-900);
+  --surface-raised: var(--palette-night-800);
+  --surface-hover: rgb(255 255 255 / 5%);
+  --surface-selected: var(--palette-night-700);
+  --surface-inverse: var(--palette-pearl-0);
+  --surface-header: rgb(20 18 29 / 84%);
+
+  --text-primary: var(--palette-pearl-25);
+  --text-secondary: var(--palette-pearl-300);
+  --text-tertiary: var(--palette-night-300);
+  --text-inverse: var(--palette-ink-800);
+  --text-accent: var(--palette-lilac-300);
+  --text-on-accent: #ffffff;
+
+  --border-subtle: rgb(255 255 255 / 9%);
+  --border-default: rgb(255 255 255 / 16%);
+  --border-strong: var(--palette-night-300);
+  --border-focus: var(--palette-aurora-400);
+
+  /* aurora-500 on a near-black surface clears AA for white text (5.4:1) and
+     reads brighter than aurora-600, which goes muddy against night. */
+  --accent-primary: var(--palette-aurora-500);
+  --accent-hover: var(--palette-aurora-400);
+  --accent-pressed: var(--palette-aurora-600);
+  --accent-soft: rgb(123 140 255 / 18%);
+  --accent-soft-hover: rgb(123 140 255 / 26%);
+  --accent-soft-pressed: rgb(123 140 255 / 34%);
+  --accent-secondary: var(--palette-lilac-300);
+
+  /* Text lifts to the 300 step; the background is mixed from that same hue
+     into the real surface, so a status chip stays night-tinted instead of
+     falling back to the retired warm gray. */
+  --status-info-solid: var(--palette-blue-300);
+  --status-info-text: var(--palette-blue-300);
+  --status-info-bg: color-mix(in oklab, var(--palette-blue-300) 15%, var(--surface-base));
+  --status-info-border: color-mix(in oklab, var(--palette-blue-300) 30%, var(--surface-base));
+
+  --status-success-solid: var(--palette-green-300);
+  --status-success-text: var(--palette-green-300);
+  --status-success-bg: color-mix(in oklab, var(--palette-green-300) 15%, var(--surface-base));
+  --status-success-border: color-mix(in oklab, var(--palette-green-300) 30%, var(--surface-base));
+
+  --status-warning-solid: var(--palette-amber-300);
+  --status-warning-text: var(--palette-amber-300);
+  --status-warning-bg: color-mix(in oklab, var(--palette-amber-300) 15%, var(--surface-base));
+  --status-warning-border: color-mix(in oklab, var(--palette-amber-300) 30%, var(--surface-base));
+
+  --status-danger-solid: var(--palette-red-300);
+  --status-danger-text: var(--palette-red-300);
+  --status-danger-bg: color-mix(in oklab, var(--palette-red-300) 15%, var(--surface-base));
+  --status-danger-border: color-mix(in oklab, var(--palette-red-300) 30%, var(--surface-base));
+
+  --status-neutral-solid: var(--palette-night-300);
+  --status-neutral-text: var(--palette-pearl-300);
+  --status-neutral-bg: rgb(255 255 255 / 7%);
+  --status-neutral-border: rgb(255 255 255 / 14%);
+
+  --focus-ring: var(--palette-aurora-400);
+  --focus-ring-soft: rgb(123 140 255 / 34%);
+  --overlay-scrim: rgb(5 4 9 / 62%);
+
+  --code-surface: var(--palette-night-950);
+  --code-text: var(--palette-pearl-200);
+  --code-muted: var(--palette-night-300);
+  --highlight-surface: rgb(245 194 107 / 22%);
+  --highlight-border: rgb(245 194 107 / 45%);
+
+  --elevation-1: 0 1px 2px rgb(0 0 0 / 40%), 0 0 0 1px rgb(255 255 255 / 6%);
+  --elevation-2: 0 2px 6px rgb(0 0 0 / 36%), 0 10px 20px -8px rgb(0 0 0 / 46%),
+    0 0 0 1px rgb(255 255 255 / 7%);
+  --elevation-3: 0 16px 40px -10px rgb(0 0 0 / 62%),
+    0 6px 12px -6px rgb(0 0 0 / 44%), 0 0 0 1px rgb(255 255 255 / 9%);
+}
+
+/* Expose the semantics to Tailwind so `bg-surface-base`, `text-text-tertiary`
+   and `rounded-md` resolve to the same values as the CSS above, and a call
+   site can reach for a utility without an arbitrary-value escape hatch. */
+@theme inline {
+  --color-surface-canvas: var(--surface-canvas);
+  --color-surface-nav: var(--surface-nav);
+  --color-surface-subtle: var(--surface-subtle);
+  --color-surface-inset: var(--surface-inset);
+  --color-surface-base: var(--surface-base);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-selected: var(--surface-selected);
+  --color-surface-inverse: var(--surface-inverse);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-tertiary: var(--text-tertiary);
+  --color-text-inverse: var(--text-inverse);
+  --color-text-accent: var(--text-accent);
+  --color-text-on-accent: var(--text-on-accent);
+
+  --color-border-subtle: var(--border-subtle);
+  --color-border-default: var(--border-default);
+  --color-border-strong: var(--border-strong);
+  --color-border-focus: var(--border-focus);
+
+  --color-accent-primary: var(--accent-primary);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+
+  --color-status-info: var(--status-info-text);
+  --color-status-success: var(--status-success-text);
+  --color-status-warning: var(--status-warning-text);
+  --color-status-danger: var(--status-danger-text);
+
+  --radius-xs: var(--radius-xs);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+
+  --ease-out: var(--ease-out);
+}

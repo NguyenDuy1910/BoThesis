@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 const STORAGE_KEY = "bothesis-sidebar-collapsed";
 
@@ -48,5 +48,11 @@ export function useSidebarState(): SidebarState {
     return () => mql.removeEventListener("change", handler);
   }, []);
 
-  return { collapsed, mobileOpen, toggleCollapse, openMobile, closeMobile };
+  return useMemo(() => ({
+    collapsed,
+    mobileOpen,
+    toggleCollapse,
+    openMobile,
+    closeMobile,
+  }), [collapsed, mobileOpen, toggleCollapse, openMobile, closeMobile]);
 }

@@ -47,6 +47,7 @@ class JwtTokenService:
             "email": context.email,
             "active_tenant_id": str(context.tenant_id),
             "permissions": list(context.permission_codes),
+            "platform_scopes": list(context.platform_scopes),
             "iat": issued_at,
             "exp": expires_at,
             "jti": str(uuid4()),
@@ -128,6 +129,12 @@ def _claims_from_payload(
     ):
         raise AuthenticationError("access token permissions are invalid")
     permissions = tuple(sorted({value.strip().casefold() for value in permissions_value}))
+    scopes_value = payload.get("platform_scopes", [])
+    if not isinstance(scopes_value, list) or not all(
+        isinstance(value, str) and value.strip() for value in scopes_value
+    ):
+        raise AuthenticationError("access token platform scopes are invalid")
+    platform_scopes = tuple(sorted({value.strip().casefold() for value in scopes_value}))
     issued_at = _timestamp_claim(payload, "iat")
     expires_at = _timestamp_claim(payload, "exp")
     now = int(time.time())
@@ -140,6 +147,7 @@ def _claims_from_payload(
         email=_string_claim(payload, "email").casefold(),
         active_tenant_id=tenant_id,
         permissions=permissions,
+        platform_scopes=platform_scopes,
         issued_at=datetime.fromtimestamp(issued_at, UTC),
         expires_at=datetime.fromtimestamp(expires_at, UTC),
     )

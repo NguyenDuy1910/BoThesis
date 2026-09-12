@@ -108,7 +108,6 @@ export function AdminCommandPalette({
           id: `route:${route.id}`,
           group: "Go to",
           label: route.label,
-          hint: route.external ? "Opens the workspace" : undefined,
           href: route.path,
           icon: <Icon aria-hidden="true" className="h-4 w-4" />,
         };

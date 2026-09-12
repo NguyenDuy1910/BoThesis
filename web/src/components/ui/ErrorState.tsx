@@ -27,8 +27,8 @@ export function ErrorState({
     return (
       <div
         className={cn(
-          "flex gap-2.5 rounded-[var(--adm-r-sm)] bg-[var(--danger-soft)] px-3 py-2.5",
-          "text-[0.8125rem] text-[var(--danger-text)] shadow-[inset_0_0_0_1px_var(--danger-border)]",
+          "flex gap-2.5 rounded-[var(--radius-sm)] bg-[var(--status-danger-bg)] px-3 py-2.5",
+          "text-[0.8125rem] text-[var(--status-danger-text)] shadow-[inset_0_0_0_1px_var(--status-danger-border)]",
           className,
         )}
         role="alert"
@@ -44,7 +44,7 @@ export function ErrorState({
       <div className="adm-empty">
         <span
           aria-hidden="true"
-          className="adm-empty__icon bg-[var(--danger-soft)] text-[var(--danger)]"
+          className="adm-empty__icon bg-[var(--status-danger-bg)] text-[var(--status-danger-solid)]"
         >
           <AlertTriangle className="h-5 w-5" />
         </span>

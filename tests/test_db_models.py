@@ -44,6 +44,16 @@ def test_all_dbml_tables_compile_for_postgresql() -> None:
         assert f"CREATE TABLE {table.name}" in ddl
 
 
+def test_user_status_is_a_required_boolean() -> None:
+    columns = Base.metadata.tables["users"].c
+    column = columns.status
+
+    assert column.type.python_type is bool
+    assert column.nullable is False
+    assert columns.is_root_admin.type.python_type is bool
+    assert columns.is_root_admin.nullable is False
+
+
 def test_engine_normalizes_standard_postgres_url_and_is_cached() -> None:
     database_url = "postgresql://user:password@localhost/bothesis"
 

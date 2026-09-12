@@ -134,7 +134,7 @@ export function ConnectorsPage() {
         actions={
           returnTo && (
             <Link
-              className="inline-flex h-9 items-center gap-1.5 rounded-[var(--adm-r-sm)] bg-[var(--adm-surface)] px-3 text-[0.8125rem] font-medium text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--adm-hairline-strong)] transition-colors hover:bg-[var(--adm-inset)] hover:text-[var(--text)]"
+              className="inline-flex h-9 items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--surface-base)] px-3 text-[0.8125rem] font-medium text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] transition-colors hover:bg-[var(--surface-inset)] hover:text-[var(--text-primary)]"
               href={returnTo}
             >
               <ArrowLeft aria-hidden="true" className="h-4 w-4" />
@@ -154,10 +154,10 @@ export function ConnectorsPage() {
           title="Your connections"
         />
         {connections.loading ? (
-          <div className="divide-y divide-[var(--adm-hairline)]">
+          <div className="divide-y divide-[var(--border-subtle)]">
             {[0, 1].map((index) => (
               <div className="flex items-center gap-3 px-4 py-3" key={index}>
-                <Skeleton className="h-8 w-8 rounded-[var(--adm-r-sm)]" />
+                <Skeleton className="h-8 w-8 rounded-[var(--radius-sm)]" />
                 <div className="flex-1 space-y-2">
                   <Skeleton className="h-3 w-40" />
                   <Skeleton className="h-2.5 w-28" />
@@ -181,7 +181,7 @@ export function ConnectorsPage() {
             title="Nothing connected yet"
           />
         ) : (
-          <ul className="divide-y divide-[var(--adm-hairline)]">
+          <ul className="divide-y divide-[var(--border-subtle)]">
             {configured.map((connection) => (
               <ConnectionRow
                 connection={connection}
@@ -200,7 +200,7 @@ export function ConnectorsPage() {
       <section aria-labelledby="connector-catalogue">
         <div className="adm-toolbar">
           <h2
-            className="text-[0.9375rem] font-semibold text-[var(--text)]"
+            className="text-[0.9375rem] font-semibold text-[var(--text-primary)]"
             id="connector-catalogue"
           >
             Add a connector
@@ -389,10 +389,10 @@ function ConnectionRow({
         onClick={onManage}
         type="button"
       >
-        <span className="block truncate text-[0.8125rem] font-medium text-[var(--text)]">
+        <span className="block truncate text-[0.8125rem] font-medium text-[var(--text-primary)]">
           {connection.display_name}
         </span>
-        <span className="mt-0.5 block truncate text-[0.75rem] text-[var(--text-muted)]">
+        <span className="mt-0.5 block truncate text-[0.75rem] text-[var(--text-tertiary)]">
           {definition?.name ?? titleCase(connection.connector_key)} ·{" "}
           {scopeSummary(connection)} ·{" "}
           {pluralize(connection.source_count ?? 0, "collection")}
@@ -438,7 +438,7 @@ function ConnectionRow({
         confirmLabel="Remove connection"
         description={
           <>
-            <strong className="font-semibold text-[var(--text)]">
+            <strong className="font-semibold text-[var(--text-primary)]">
               {connection.display_name}
             </strong>{" "}
             will stop importing. Content already indexed stays searchable until you

@@ -123,6 +123,13 @@ class AuthContext:
     role_code: str | None
     permission_codes: tuple[str, ...]
     group_ids: tuple[UUID, ...]
+    is_root_admin: bool = False
+
+    @property
+    def platform_scopes(self) -> tuple[str, ...]:
+        """Durable platform scopes kept distinct from tenant membership roles."""
+
+        return ("root_admin",) if self.is_root_admin else ()
 
     @property
     def is_enterprise_user(self) -> bool:
@@ -130,7 +137,11 @@ class AuthContext:
 
     @property
     def is_admin(self) -> bool:
-        return ADMIN_PERMISSION in self.permission_codes or "*:*" in self.permission_codes
+        return (
+            self.is_root_admin
+            or ADMIN_PERMISSION in self.permission_codes
+            or "*:*" in self.permission_codes
+        )
 
     def has_permissions(self, *permission_codes: str) -> bool:
         required = {_permission_code(code) for code in permission_codes}
@@ -147,6 +158,7 @@ class JwtClaims:
     permissions: tuple[str, ...]
     issued_at: datetime
     expires_at: datetime
+    platform_scopes: tuple[str, ...] = ()
 
     def has_permission(self, permission_code: str) -> bool:
         return "*:*" in self.permissions or _permission_code(permission_code) in self.permissions
@@ -167,7 +179,7 @@ class TenantMembershipSummary:
     tenant_id: UUID
     tenant_code: str
     tenant_name: str
-    role_id: UUID
+    role_id: UUID | None
     role_code: str
     permissions: tuple[str, ...]
 
@@ -184,6 +196,7 @@ class AuthenticationSession:
     active_tenant_id: UUID
     permissions: tuple[str, ...]
     tenants: tuple[TenantMembershipSummary, ...]
+    platform_scopes: tuple[str, ...] = ()
 
 
 SandboxSessionStatus = Literal["active", "expired", "closed"]
@@ -467,6 +480,13 @@ def require_tenant_permission(
     return context.tenant_id
 
 
+def require_platform_root(context: AuthContext) -> None:
+    """Reject platform operations unless the current actor has root scope."""
+
+    if not context.is_root_admin:
+        raise AuthorizationError("platform root access is required")
+
+
 def normalize_required_text(value: str, field_name: str, max_length: int) -> str:
     normalized = value.strip()
     if not normalized:
@@ -579,5 +599,6 @@ __all__ = [
     "normalize_page",
     "normalize_required_text",
     "require_tenant_permission",
+    "require_platform_root",
     "timestamp",
 ]

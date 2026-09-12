@@ -78,7 +78,7 @@ export function AuditPage() {
         label: "What changed",
         minWidth: 240,
         render: (row) => (
-          <span className="text-[var(--text)]">{describeAuditAction(row.action)}</span>
+          <span className="text-[var(--text-primary)]">{describeAuditAction(row.action)}</span>
         ),
       },
       {

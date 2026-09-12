@@ -19,8 +19,8 @@ interface StatTileProps {
 
 const toneClasses = {
   default: "",
-  warning: "text-[var(--warning-text)]",
-  danger: "text-[var(--danger-text)]",
+  warning: "text-[var(--status-warning-text)]",
+  danger: "text-[var(--status-danger-text)]",
 } as const;
 
 export function StatTile({
@@ -55,7 +55,7 @@ export function StatTile({
     return (
       <Link
         className={cn(
-          "adm-stat focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--adm-canvas)]",
+          "adm-stat focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]",
           className,
         )}
         href={href}

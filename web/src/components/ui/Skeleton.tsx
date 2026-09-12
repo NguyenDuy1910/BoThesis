@@ -22,9 +22,9 @@ export function TableSkeleton({
   columns?: number;
 }) {
   return (
-    <div aria-busy="true" aria-live="polite" className="divide-y divide-[var(--adm-hairline)]">
+    <div aria-busy="true" aria-live="polite" className="divide-y divide-[var(--border-subtle)]">
       <span className="sr-only">Loading</span>
-      <div className="flex items-center gap-4 bg-[var(--adm-inset)] px-3.5 py-2.5">
+      <div className="flex items-center gap-4 bg-[var(--surface-inset)] px-3.5 py-2.5">
         {Array.from({ length: columns }).map((_, index) => (
           <Skeleton className="h-2.5 flex-1" key={index} />
         ))}
@@ -63,7 +63,7 @@ export function CardListSkeleton({ count = 3 }: { count?: number }) {
       {Array.from({ length: count }).map((_, index) => (
         <div className="adm-card p-4" key={index}>
           <div className="flex items-center gap-3">
-            <Skeleton className="h-9 w-9 rounded-[var(--adm-r-md)]" />
+            <Skeleton className="h-9 w-9 rounded-[var(--radius-md)]" />
             <div className="flex-1 space-y-2">
               <Skeleton className="h-3 w-2/3" />
               <Skeleton className="h-2.5 w-1/3" />

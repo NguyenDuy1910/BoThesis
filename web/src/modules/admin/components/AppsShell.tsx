@@ -1,56 +1,50 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { useState } from "react";
 
-import { getAuthSession, hasAnySessionPermission, type AuthSession } from "@/lib/auth/session";
+import { GlobalAssistantLauncher } from "@/components/ui/GlobalAssistantLauncher";
+import { ProductMark } from "@/components/ui/ProductMark";
+import { ProductSidebarGlobalNavigation } from "@/components/ui/ProductSidebarGlobalNavigation";
+import { ToastProvider } from "@/components/ui/Toast";
 import { appBrand } from "@/lib/brand";
 import { cn } from "@/lib/cn";
-import { isProductNavigationActive, productNavigationItems } from "@/lib/product-navigation";
 
-/** The Apps surface has its own product navigation in the canonical design. */
+/** The Apps directory is a product surface, not a Workspace settings section. */
 export function AppsShell({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
-  const [session, setSession] = useState<AuthSession | null>(null);
-
-  useEffect(() => setSession(getAuthSession()), []);
-  const destinations = productNavigationItems.filter(
-    (destination) => !destination.permissionCodes || hasAnySessionPermission(session, destination.permissionCodes),
-  );
+  const [collapsed, setCollapsed] = useState(false);
 
   return (
-    <div className="apps-shell">
-      <aside className="apps-sidebar">
-        <Link aria-label={`${appBrand.productName} home`} className="apps-sidebar__brand" href="/app">
-          {appBrand.productName}
-        </Link>
-        <nav aria-label="Product" className="apps-sidebar__nav">
-          {destinations.map(({ href, icon: Icon, label }) => {
-            const active = isProductNavigationActive(pathname, href);
-            return (
-              <Link
-                aria-current={active ? "page" : undefined}
-                className={cn("apps-sidebar__link", active && "apps-sidebar__link--active")}
-                href={href}
-                key={label}
-              >
-                <Icon aria-hidden="true" size={16} />
-                {label}
-              </Link>
-            );
-          })}
-        </nav>
-        <div className="apps-sidebar__your-apps">
-          <p>YOUR APPS</p>
-          <span><i className="apps-status-dot" />Connected apps appear here</span>
-        </div>
-        <div className="apps-sidebar__account">
-          <span aria-hidden="true">D</span>
-          <div><strong>Workspace</strong><small>Personal workspace</small></div>
-        </div>
-      </aside>
-      <main className="apps-shell__main" id="main-content">{children}</main>
-    </div>
+    <ToastProvider>
+      <div className="apps-shell">
+        <aside className={cn("apps-sidebar", collapsed && "apps-sidebar--collapsed")}>
+          <div className="apps-sidebar__header">
+            <Link aria-label={`${appBrand.productName} home`} className="apps-sidebar__brand" href="/app">
+              <ProductMark decorative size="md" />
+              {!collapsed && <span>{appBrand.productName}</span>}
+            </Link>
+            <button
+              aria-label={collapsed ? "Expand Apps navigation" : "Collapse Apps navigation"}
+              className="apps-sidebar__collapse"
+              onClick={() => setCollapsed((value) => !value)}
+              title={collapsed ? "Expand navigation" : "Collapse navigation"}
+              type="button"
+            >
+              {collapsed ? <PanelLeftOpen aria-hidden="true" size={16} /> : <PanelLeftClose aria-hidden="true" size={16} />}
+            </button>
+          </div>
+          <ProductSidebarGlobalNavigation collapsed={collapsed} />
+          {!collapsed && (
+            <div className="apps-sidebar__context">
+              <p>Apps</p>
+              <span>Integrations and governed actions</span>
+            </div>
+          )}
+        </aside>
+        <main className="apps-shell__main" id="main-content">{children}</main>
+        <GlobalAssistantLauncher />
+      </div>
+    </ToastProvider>
   );
 }

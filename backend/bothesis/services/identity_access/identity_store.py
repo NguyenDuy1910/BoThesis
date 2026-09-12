@@ -71,7 +71,7 @@ class IdentityStoreService:
 
     async def get_user(self, user_id: UUID, *, include_inactive: bool = False) -> User:
         user = await self._session.get(User, user_id)
-        if user is None or (not include_inactive and user.status != ACTIVE_STATUS):
+        if user is None or (not include_inactive and not user.status):
             raise IdentityNotFoundError(f"user not found: {user_id}")
         return user
 
@@ -84,7 +84,7 @@ class IdentityStoreService:
         user = await self._session.scalar(
             select(User).where(User.email == _normalize_email(email))
         )
-        if user is None or (not include_inactive and user.status != ACTIVE_STATUS):
+        if user is None or (not include_inactive and not user.status):
             raise IdentityNotFoundError("user not found")
         return user
 
@@ -103,9 +103,9 @@ class IdentityStoreService:
         await self._session.flush()
         return user
 
-    async def set_user_status(self, user_id: UUID, status: str) -> User:
+    async def set_user_status(self, user_id: UUID, status: bool) -> User:
         user = await self.get_user(user_id, include_inactive=True)
-        user.status = _required_text(status, "user status", 16).casefold()
+        user.status = status
         await self._session.flush()
         return user
 
@@ -312,8 +312,10 @@ class IdentityStoreService:
         )
         if user is None:
             raise IdentityNotFoundError(f"user not found: {user_id}")
-        if user.status != ACTIVE_STATUS:
+        if not user.status:
             raise IdentityInactiveError(f"user is not active: {user_id}")
+        if user.is_root_admin and tenant_id is not None:
+            return await self._root_context(user, tenant_id)
 
         memberships = [
             value
@@ -336,6 +338,7 @@ class IdentityStoreService:
                 role_code=None,
                 permission_codes=(),
                 group_ids=(),
+                is_root_admin=user.is_root_admin,
             )
 
         if membership.status != ACTIVE_STATUS:
@@ -372,12 +375,13 @@ class IdentityStoreService:
             role_code=membership.role.code,
             permission_codes=tuple(sorted(set(membership.role.permission_codes))),
             group_ids=group_ids,
+            is_root_admin=user.is_root_admin,
         )
 
     async def list_active_tenant_memberships(
         self, user_id: UUID
     ) -> tuple[TenantMembershipSummary, ...]:
-        """Return only memberships that may be selected as an active tenant."""
+        """Return workspaces the user may select as an active tenant."""
 
         await self.get_user(user_id)
         rows = (
@@ -409,6 +413,27 @@ class IdentityStoreService:
                 permissions=tuple(sorted(set(role.permission_codes))),
             )
             for _, tenant, role in rows
+        )
+
+    async def _root_context(self, user: User, tenant_id: UUID) -> AuthContext:
+        tenant = await self._session.scalar(
+            select(Tenant).where(
+                Tenant.id == tenant_id,
+                Tenant.status == ACTIVE_STATUS,
+            )
+        )
+        if tenant is None:
+            raise AuthorizationError("requested workspace is not active")
+        return AuthContext(
+            user_id=user.id,
+            email=user.email,
+            display_name=user.display_name,
+            tenant_id=tenant.id,
+            role_id=None,
+            role_code="root_admin",
+            permission_codes=("*:*",),
+            group_ids=(),
+            is_root_admin=True,
         )
 
     async def require_permissions(

@@ -28,7 +28,7 @@ export function FormField({
       <label className={cn("block", ui.label)} htmlFor={htmlFor}>
         {label}
         {!required && (
-          <span className="ml-1.5 font-normal text-[var(--text-muted)]">Optional</span>
+          <span className="ml-1.5 font-normal text-[var(--text-tertiary)]">Optional</span>
         )}
       </label>
       {children}

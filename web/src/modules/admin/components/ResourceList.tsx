@@ -85,7 +85,7 @@ export function ResourceList<T extends Record<string, unknown>>({
               action={
                 onClearFilters && (
                   <button
-                    className="text-[0.8125rem] font-medium text-[var(--brand-accent)] underline-offset-4 hover:underline"
+                    className="text-[0.8125rem] font-medium text-[var(--text-accent)] underline-offset-4 hover:underline"
                     onClick={onClearFilters}
                     type="button"
                   >

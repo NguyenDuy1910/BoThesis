@@ -14,7 +14,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { memo, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { appBrand } from "@/lib/brand";
@@ -89,12 +89,16 @@ function createDraftConversationId() {
 
 export default function ChatShell() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const sidebar = useSidebarState();
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draftId, setDraftId] = useState(createDraftConversationId);
   const [initialMessages, setInitialMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [searchRequested, setSearchRequested] = useState(false);
+  const handledProductActionRef = useRef<string | null>(null);
+  const requestedProductAction = searchParams.get("action");
 
   const refresh = useCallback(async (requestedId?: string | null) => {
     const list = await conversationAdapter.listConversations();
@@ -134,12 +138,36 @@ export default function ChatShell() {
     setActiveId(null);
     setInitialMessages([]);
     sidebar.closeMobile();
-  }, [sidebar]);
+  }, [sidebar.closeMobile]);
+
+  // Product-level actions can originate from any surface. Consume the URL
+  // intent once, then return Chat to its canonical address for reliable Back.
+  useEffect(() => {
+    if (!requestedProductAction) {
+      handledProductActionRef.current = null;
+      return;
+    }
+    if (handledProductActionRef.current === requestedProductAction) return;
+    handledProductActionRef.current = requestedProductAction;
+
+    if (requestedProductAction === "new") {
+      startNewChat();
+      router.replace("/app", { scroll: false });
+    }
+    if (requestedProductAction === "search") {
+      setSearchRequested(true);
+      router.replace("/app", { scroll: false });
+    }
+  }, [requestedProductAction, router, startNewChat]);
+
+  const handleSearchRequestHandled = useCallback(() => {
+    setSearchRequested((requested) => requested ? false : requested);
+  }, []);
 
   const selectConversation = useCallback(async (id: string) => {
     sidebar.closeMobile();
     await refresh(id);
-  }, [refresh, sidebar]);
+  }, [refresh, sidebar.closeMobile]);
 
   const deleteConversation = useCallback(async (id: string) => {
     const storedMessages = await conversationAdapter.getConversationMessages(id);
@@ -205,8 +233,10 @@ export default function ChatShell() {
         onDeleteConversation={deleteConversation}
         onNewChat={startNewChat}
         onRenameConversation={renameConversation}
+        onSearchRequestHandled={handleSearchRequestHandled}
         onSelectConversation={(id) => void selectConversation(id)}
         onToggleCollapse={sidebar.toggleCollapse}
+        searchRequested={searchRequested}
       />}
     >
       {sidebar.mobileOpen && (
@@ -780,7 +810,7 @@ function latestMessageId(messages: ChatMessage[], role: ChatMessage["role"]) {
 
 function reserveActiveTurnSpace(scroller: HTMLDivElement, stack: HTMLDivElement) {
   const reservedHeight = Math.max(240, scroller.clientHeight - 96);
-  stack.style.setProperty("--chat-active-fill", `${reservedHeight}px`);
+  stack.style.setProperty("--surface-selected", `${reservedHeight}px`);
 }
 
 function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {

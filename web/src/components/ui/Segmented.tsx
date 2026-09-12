@@ -41,7 +41,7 @@ export function Segmented<T extends string>({
           {option.icon}
           {option.label}
           {option.count !== undefined && (
-            <span className="tabular-nums text-[var(--text-muted)]">{option.count}</span>
+            <span className="tabular-nums text-[var(--text-tertiary)]">{option.count}</span>
           )}
         </button>
       ))}

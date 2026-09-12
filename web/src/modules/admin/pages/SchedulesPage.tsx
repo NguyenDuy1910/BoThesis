@@ -202,7 +202,7 @@ export function SchedulesPage() {
               {formatRelative(row.schedule.next_run_at, "Not scheduled")}
             </span>
           ) : (
-            <span className="text-[var(--text-muted)]">Paused</span>
+            <span className="text-[var(--text-tertiary)]">Paused</span>
           ),
       },
       {
@@ -446,7 +446,7 @@ function ScheduleDialog({
       title={existing ? "Change frequency" : "Create schedule"}
     >
       <form className="space-y-4" id="schedule-form" onSubmit={save}>
-        <p className="text-[0.8125rem] leading-5 text-[var(--text-muted)]">
+        <p className="text-[0.8125rem] leading-5 text-[var(--text-tertiary)]">
           A schedule re-imports a connected source so its collection stays current.
         </p>
         {error && <ErrorState description={error} layout="inline" />}

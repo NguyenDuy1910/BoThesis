@@ -270,7 +270,7 @@ class ApprovalRequestService:
             .join(TenantMembership, TenantMembership.user_id == User.id)
             .where(
                 User.id == user_id,
-                User.status == ACTIVE_STATUS,
+                User.status.is_(True),
                 TenantMembership.tenant_id == tenant_id,
                 TenantMembership.status == ACTIVE_STATUS,
                 TenantMembership.deleted_at.is_(None),

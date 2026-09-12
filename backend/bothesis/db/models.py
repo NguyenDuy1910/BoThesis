@@ -91,8 +91,11 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     display_name: Mapped[str | None] = mapped_column(String(255))
-    status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="active", server_default="active"
+    status: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    is_root_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
     )
     preferences: Mapped[JsonObject] = _json_object_column()
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -10,12 +10,17 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { resolveSection } from "@/modules/admin/navigation";
 import { AccessPage } from "@/modules/admin/pages/AccessPage";
-import { ActivityPage } from "@/modules/admin/pages/ActivityPage";
+import { AgentsPoliciesPage } from "@/modules/admin/pages/AgentsPoliciesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
-import { AppsPage } from "@/modules/admin/pages/AppsPage";
-import { DashboardPage } from "@/modules/admin/pages/DashboardPage";
-import { SchedulesPage } from "@/modules/admin/pages/SchedulesPage";
+import { KnowledgeGovernancePage } from "@/modules/admin/pages/KnowledgeGovernancePage";
+import { PlatformOverviewPage } from "@/modules/admin/pages/PlatformOverviewPage";
+import { PlatformAuditPage } from "@/modules/admin/pages/PlatformAuditPage";
+import { PlatformPoliciesPage } from "@/modules/admin/pages/PlatformPoliciesPage";
+import { PlatformUsersPage } from "@/modules/admin/pages/PlatformUsersPage";
+import { PlatformWorkspacesPage } from "@/modules/admin/pages/PlatformWorkspacesPage";
+import { SystemHealthPage } from "@/modules/admin/pages/SystemHealthPage";
 import { SettingsPage } from "@/modules/admin/pages/SettingsPage";
+import { WorkspaceOverviewPage } from "@/modules/admin/pages/WorkspaceOverviewPage";
 
 /**
  * The single entry point for every Admin address. It resolves the incoming
@@ -31,20 +36,32 @@ export function AdminPage({ section: rawSection }: { section: string }) {
   }, [canonicalPath, redirect, router]);
 
   switch (section) {
-    case "dashboard":
-      return <DashboardPage />;
-    case "connectors":
-      return <AppsPage />;
-    case "schedules":
-      return <SchedulesPage />;
-    case "activity":
-      return <ActivityPage />;
-    case "access":
-      return <AccessPage />;
+    case "overview":
+      return <WorkspaceOverviewPage />;
+    case "members":
+      return <AccessPage initialTab="people" title="Members & access" />;
+    case "roles":
+      return <AccessPage initialTab="roles" title="Roles & access" />;
+    case "knowledge-governance":
+      return <KnowledgeGovernancePage />;
+    case "agents-policies":
+      return <AgentsPoliciesPage />;
     case "audit":
       return <AuditPage />;
     case "settings":
       return <SettingsPage />;
+    case "platform-overview":
+      return <PlatformOverviewPage />;
+    case "platform-workspaces":
+      return <PlatformWorkspacesPage />;
+    case "platform-users":
+      return <PlatformUsersPage />;
+    case "platform-policies":
+      return <PlatformPoliciesPage />;
+    case "platform-health":
+      return <SystemHealthPage />;
+    case "platform-audit":
+      return <PlatformAuditPage />;
     default:
       return (
         <>

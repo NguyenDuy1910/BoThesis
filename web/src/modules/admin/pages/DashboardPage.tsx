@@ -118,7 +118,7 @@ export function DashboardPage() {
               Refresh
             </Button>
             <Link
-              className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[var(--adm-r-sm)] bg-[var(--primary)] px-3 text-[0.8125rem] font-medium leading-none text-[var(--text-on-brand)] shadow-[var(--adm-e1)] transition-[background-color,color,box-shadow,opacity] duration-[var(--adm-fast)] ease-[var(--adm-ease)] hover:bg-[var(--primary-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--adm-canvas)]"
+              className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--accent-primary)] px-3 text-[0.8125rem] font-medium leading-none text-[var(--text-on-accent)] shadow-[var(--elevation-1)] transition-[background-color,color,box-shadow,opacity] duration-[var(--duration-fast)] ease-[var(--ease-out)] hover:bg-[var(--accent-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]"
               href="/knowledge"
             >
               <Boxes aria-hidden="true" className="h-4 w-4" />
@@ -139,16 +139,16 @@ export function DashboardPage() {
           <div className="mb-4 grid gap-2">
             {attention.map((entry) => (
               <Link
-                className="group flex items-center gap-3 rounded-[var(--adm-r-md)] bg-[var(--warning-soft)] px-3.5 py-3 shadow-[inset_0_0_0_1px_var(--warning-border)] transition-colors hover:bg-[var(--warning-soft)]/80"
+                className="group flex items-center gap-3 rounded-[var(--radius-md)] bg-[var(--status-warning-bg)] px-3.5 py-3 shadow-[inset_0_0_0_1px_var(--status-warning-border)] transition-colors hover:bg-[var(--status-warning-bg)]/80"
                 href={entry.href}
                 key={entry.key}
               >
                 <Badge tone="warning">{entry.count}</Badge>
-                <span className="min-w-0 flex-1 text-[0.8125rem] font-medium text-[var(--warning-text)]">
+                <span className="min-w-0 flex-1 text-[0.8125rem] font-medium text-[var(--status-warning-text)]">
                   {pluralize(entry.count, entry.label)} need
                   {entry.count === 1 ? "s" : ""} your attention
                 </span>
-                <span className="flex shrink-0 items-center gap-1 text-[0.8125rem] font-semibold text-[var(--warning-text)]">
+                <span className="flex shrink-0 items-center gap-1 text-[0.8125rem] font-semibold text-[var(--status-warning-text)]">
                   {entry.fix}
                   <ArrowRight
                     aria-hidden="true"
@@ -159,12 +159,12 @@ export function DashboardPage() {
             ))}
           </div>
         ) : (
-          <div className="mb-4 flex items-center gap-2.5 rounded-[var(--adm-r-md)] bg-[var(--success-soft)] px-3.5 py-2.5 shadow-[inset_0_0_0_1px_var(--success-border)]">
+          <div className="mb-4 flex items-center gap-2.5 rounded-[var(--radius-md)] bg-[var(--status-success-bg)] px-3.5 py-2.5 shadow-[inset_0_0_0_1px_var(--status-success-border)]">
             <CheckCircle2
               aria-hidden="true"
-              className="h-4 w-4 shrink-0 text-[var(--success)]"
+              className="h-4 w-4 shrink-0 text-[var(--status-success-solid)]"
             />
-            <p className="text-[0.8125rem] font-medium text-[var(--success-text)]">
+            <p className="text-[0.8125rem] font-medium text-[var(--status-success-text)]">
               Nothing needs attention — every document is indexed and no access
               requests are waiting.
             </p>
@@ -220,7 +220,7 @@ export function DashboardPage() {
           <CardHeader
             actions={
               <Link
-                className="group inline-flex items-center gap-1 rounded-[var(--adm-r-sm)] px-2 py-1 text-[0.8125rem] font-medium text-[var(--text-muted)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text)]"
+                className="group inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-1 text-[0.8125rem] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
                 href="/admin/audit"
               >
                 Full audit log
@@ -242,7 +242,7 @@ export function DashboardPage() {
               title="No activity yet"
             />
           ) : (
-            <ul className="divide-y divide-[var(--adm-hairline)]">
+            <ul className="divide-y divide-[var(--border-subtle)]">
               {activity.slice(0, 8).map((row) => {
                 const actor =
                   row.actor?.display_name || row.actor?.email || "System";
@@ -253,14 +253,14 @@ export function DashboardPage() {
                   >
                     <Avatar name={actor} size="sm" />
                     <span className="min-w-0 flex-1 truncate text-[var(--text-secondary)]">
-                      <span className="font-medium text-[var(--text)]">{actor}</span>{" "}
+                      <span className="font-medium text-[var(--text-primary)]">{actor}</span>{" "}
                       {describeAuditAction(row.action).toLowerCase()}
                     </span>
                     {row.outcome && row.outcome !== "success" && (
                       <StatusBadge status={row.outcome} />
                     )}
                     <time
-                      className="shrink-0 text-[0.75rem] tabular-nums text-[var(--text-muted)]"
+                      className="shrink-0 text-[0.75rem] tabular-nums text-[var(--text-tertiary)]"
                       dateTime={row.created_at}
                     >
                       {formatRelative(row.created_at)}
@@ -281,7 +281,7 @@ export function DashboardPage() {
             }
             title={hasContent ? "Quick actions" : "Get started"}
           />
-          <ol className="divide-y divide-[var(--adm-hairline)]">
+          <ol className="divide-y divide-[var(--border-subtle)]">
             <QuickAction
               description="Group related material so answers stay on topic."
               done={hasContent}
@@ -331,29 +331,29 @@ function QuickAction({
         aria-hidden="true"
         className={
           done
-            ? "mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--adm-r-sm)] bg-[var(--success-soft)] text-[var(--success)]"
-            : "mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--adm-r-sm)] bg-[var(--brand-accent-soft)] text-[var(--brand-accent)]"
+            ? "mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-sm)] bg-[var(--status-success-bg)] text-[var(--status-success-solid)]"
+            : "mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--radius-sm)] bg-[var(--accent-soft)] text-[var(--text-accent)]"
         }
       >
         {done ? <CheckCircle2 className="h-4 w-4" /> : icon}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block text-[0.8125rem] font-medium text-[var(--text)]">
+        <span className="block text-[0.8125rem] font-medium text-[var(--text-primary)]">
           {label}
         </span>
-        <span className="mt-0.5 block text-[0.75rem] leading-4 text-[var(--text-muted)]">
+        <span className="mt-0.5 block text-[0.75rem] leading-4 text-[var(--text-tertiary)]">
           {description}
         </span>
       </span>
       <ArrowRight
         aria-hidden="true"
-        className="mt-1 h-3.5 w-3.5 shrink-0 text-[var(--text-muted)] transition-transform group-hover:translate-x-0.5"
+        className="mt-1 h-3.5 w-3.5 shrink-0 text-[var(--text-tertiary)] transition-transform group-hover:translate-x-0.5"
       />
     </>
   );
 
   const className =
-    "group flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--adm-row-hover)]";
+    "group flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--surface-hover)]";
 
   return (
     <li>

@@ -54,22 +54,26 @@ class AuthenticationService:
             active_tenant_id=active_tenant_id,
             permissions=context.permission_codes,
             tenants=memberships,
+            platform_scopes=context.platform_scopes,
         )
 
     async def create_session(
         self, *, user_id: UUID, tenant_id: UUID
     ) -> AuthenticationSession:
-        """Issue a session token only for an active target tenant membership."""
+        """Issue a session token for an active workspace the user may select."""
 
-        await self._identities.get_user(user_id)
+        user = await self._identities.get_user(user_id)
         memberships = await self._identities.list_active_tenant_memberships(user_id)
-        if tenant_id not in {membership.tenant_id for membership in memberships}:
-            raise AuthorizationError("user has no active membership in the requested tenant")
+        if (
+            not user.is_root_admin
+            and tenant_id not in {membership.tenant_id for membership in memberships}
+        ):
+            raise AuthorizationError("user cannot select the requested workspace")
         try:
             context = await self._identities.get_context(user_id, tenant_id=tenant_id)
         except IdentityInactiveError as exc:
             raise AuthorizationError(
-                "user has no active membership in the requested tenant"
+                "user cannot select the requested workspace"
             ) from exc
         access_token, expires_at = self._tokens.issue(context)
         return AuthenticationSession(
@@ -81,6 +85,7 @@ class AuthenticationService:
             active_tenant_id=tenant_id,
             permissions=context.permission_codes,
             tenants=memberships,
+            platform_scopes=context.platform_scopes,
         )
 
     async def _find_or_provision_user(
@@ -92,7 +97,7 @@ class AuthenticationService:
             )
         except IdentityNotFoundError:
             return await self._provision_personal_workspace(identity)
-        if user.status != ACTIVE_STATUS:
+        if not user.status:
             raise IdentityInactiveError(f"user is not active: {user.id}")
         user.last_login_at = datetime.now(UTC)
         await self._session.flush()
@@ -128,7 +133,7 @@ class AuthenticationService:
             user = await self._identities.get_user_by_email(
                 identity.email, include_inactive=True
             )
-            if user.status != ACTIVE_STATUS:
+            if not user.status:
                 raise IdentityInactiveError(f"user is not active: {user.id}")
             user.last_login_at = datetime.now(UTC)
             await self._session.flush()

@@ -1,10 +1,14 @@
 "use client";
 
-import { ArrowUpRight, PanelLeftClose, X } from "lucide-react";
+import {
+  PanelLeftClose,
+  X,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { ProductMark } from "@/components/ui/ProductMark";
+import { ProductSidebarGlobalNavigation } from "@/components/ui/ProductSidebarGlobalNavigation";
 import { appBrand } from "@/lib/brand";
 import { cn } from "@/lib/cn";
 import { getAuthSession } from "@/lib/auth/session";
@@ -39,6 +43,8 @@ export function AdminSidebar({
   const isActive = (route: AdminRoute) =>
     route.path === "/admin"
       ? pathname === "/admin"
+      : route.id === "platform-overview"
+        ? pathname === route.path
       : pathname === route.path || pathname.startsWith(`${route.path}/`);
 
   return (
@@ -62,23 +68,23 @@ export function AdminSidebar({
       >
         <div className="adm-nav__brand">
           <Link
-            aria-label={`${appBrand.productName} Admin dashboard`}
-            className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--adm-r-sm)] px-1 py-1 transition-colors hover:bg-[var(--adm-row-hover)]"
+            aria-label={`${appBrand.productName} workspace`}
+            className="flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-sm)] px-1 py-1 transition-colors hover:bg-[var(--surface-hover)]"
             href="/admin"
             onClick={onMobileClose}
           >
             <ProductMark decorative size="md" />
             {!compact && (
               <span className="adm-nav__wordmark">
-                <strong>{tenant?.name ?? appBrand.productName}</strong>
-                <span>Admin</span>
+                <strong>{appBrand.productName}</strong>
+                <span>{tenant?.name ?? "Workspace"}</span>
               </span>
             )}
           </Link>
           {!compact && (
             <button
               aria-label="Collapse navigation"
-              className="hidden h-7 w-7 items-center justify-center rounded-[var(--adm-r-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--adm-row-hover)] hover:text-[var(--text)] md:inline-flex"
+              className="hidden h-7 w-7 items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] md:inline-flex"
               onClick={onToggle}
               type="button"
             >
@@ -87,7 +93,7 @@ export function AdminSidebar({
           )}
           <button
             aria-label="Close navigation"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--adm-r-sm)] text-[var(--text-muted)] transition-colors hover:bg-[var(--adm-row-hover)] hover:text-[var(--text)] md:hidden"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] md:hidden"
             onClick={onMobileClose}
             type="button"
           >
@@ -96,8 +102,11 @@ export function AdminSidebar({
         </div>
 
         <div className="adm-nav__scroll">
+          <ProductSidebarGlobalNavigation collapsed={compact} onNavigate={onMobileClose} />
           {navigationGroups.map((group) => {
-            const label = adminNavGroupLabels[group.id];
+            const label = group.id === "workspace"
+              ? `${adminNavGroupLabels[group.id]} · ${(tenant?.name ?? "Workspace").toUpperCase()}`
+              : adminNavGroupLabels[group.id];
             if (!group.routes.length) return null;
             return (
               <div className="adm-nav__group" key={group.id}>
@@ -107,7 +116,7 @@ export function AdminSidebar({
                     const Icon = route.icon;
                     const active = isActive(route);
                     const badge =
-                      route.id === "access" && attentionCount > 0
+                      route.id === "members" && attentionCount > 0
                         ? attentionCount
                         : undefined;
                     return (
@@ -126,13 +135,6 @@ export function AdminSidebar({
                         {!compact && <span>{route.label}</span>}
                         {!compact && badge !== undefined && (
                           <span className="adm-nav__count">{badge}</span>
-                        )}
-                        {!compact && route.external && (
-                          <ArrowUpRight
-                            aria-hidden="true"
-                            className="adm-nav__external"
-                            size={13}
-                          />
                         )}
                       </Link>
                     );

@@ -26,29 +26,29 @@ export type ButtonSize = "sm" | "md" | "lg";
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    "bg-[var(--primary)] text-[var(--text-on-brand)] shadow-[var(--adm-e1)] hover:bg-[var(--primary-hover)] active:bg-[var(--primary-pressed)]",
+    "bg-[var(--accent-primary)] text-[var(--text-on-accent)] shadow-[var(--elevation-1)] hover:bg-[var(--accent-hover)] active:bg-[var(--accent-pressed)]",
   secondary:
-    "bg-[var(--adm-surface)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--adm-hairline-strong)] hover:bg-[var(--adm-inset)] hover:text-[var(--text)] hover:shadow-[inset_0_0_0_1px_var(--border-strong)] active:bg-[var(--surface-hover)]",
+    "bg-[var(--surface-base)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] hover:bg-[var(--surface-inset)] hover:text-[var(--text-primary)] hover:shadow-[inset_0_0_0_1px_var(--border-default)] active:bg-[var(--surface-hover)]",
   tertiary:
-    "bg-[var(--adm-inset)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--adm-hairline)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
+    "bg-[var(--surface-inset)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-subtle)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
   ghost:
-    "text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)] active:bg-[var(--surface-selected)]",
+    "text-[var(--text-tertiary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] active:bg-[var(--surface-selected)]",
   destructive:
-    "bg-[var(--danger)] text-white shadow-[var(--adm-e1)] hover:brightness-95 active:brightness-90",
+    "bg-[var(--status-danger-solid)] text-white shadow-[var(--elevation-1)] hover:brightness-95 active:brightness-90",
   danger:
-    "bg-transparent text-[var(--danger-text)] shadow-[inset_0_0_0_1px_var(--danger-border)] hover:bg-[var(--danger-soft)]",
+    "bg-transparent text-[var(--status-danger-text)] shadow-[inset_0_0_0_1px_var(--status-danger-border)] hover:bg-[var(--status-danger-bg)]",
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
-  sm: "h-8 gap-1.5 rounded-[var(--adm-r-sm)] px-2.5 text-[0.8125rem]",
-  md: "h-9 gap-1.5 rounded-[var(--adm-r-sm)] px-3 text-[0.8125rem]",
-  lg: "h-10 gap-2 rounded-[var(--adm-r-md)] px-4 text-sm",
+  sm: "h-8 gap-1.5 rounded-[var(--radius-sm)] px-2.5 text-[0.8125rem]",
+  md: "h-9 gap-1.5 rounded-[var(--radius-sm)] px-3 text-[0.8125rem]",
+  lg: "h-10 gap-2 rounded-[var(--radius-md)] px-4 text-sm",
 };
 
 const iconOnlySizeClasses: Record<ButtonSize, string> = {
-  sm: "h-8 w-8 rounded-[var(--adm-r-sm)] px-0",
-  md: "h-9 w-9 rounded-[var(--adm-r-sm)] px-0",
-  lg: "h-10 w-10 rounded-[var(--adm-r-md)] px-0",
+  sm: "h-8 w-8 rounded-[var(--radius-sm)] px-0",
+  md: "h-9 w-9 rounded-[var(--radius-sm)] px-0",
+  lg: "h-10 w-10 rounded-[var(--radius-md)] px-0",
 };
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -85,14 +85,14 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       aria-busy={loading || undefined}
       className={cn(
         "inline-flex shrink-0 items-center justify-center font-medium leading-none",
-        "transition-[background-color,color,box-shadow,opacity] duration-[var(--adm-fast)] ease-[var(--adm-ease)]",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--adm-canvas)]",
+        "transition-[background-color,color,box-shadow,opacity] duration-[var(--duration-fast)] ease-[var(--ease-out)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]",
         "disabled:pointer-events-none disabled:opacity-45",
         variantClasses[variant],
         iconOnly ? iconOnlySizeClasses[size] : sizeClasses[size],
         selected &&
           variant !== "primary" &&
-          "bg-[var(--surface-selected)] text-[var(--brand-accent)]",
+          "bg-[var(--surface-selected)] text-[var(--text-accent)]",
         className,
       )}
       disabled={disabled || loading}

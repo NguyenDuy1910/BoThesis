@@ -17,17 +17,17 @@ export function LoadingState({
   return (
     <div
       className={cn(
-        "flex min-h-40 flex-col items-center justify-center border-y border-[var(--border)] bg-[var(--surface)] px-4 py-8 text-center",
+        "flex min-h-40 flex-col items-center justify-center border-y border-[var(--border-subtle)] bg-[var(--surface-base)] px-4 py-8 text-center",
         className
       )}
       aria-live="polite"
       aria-busy="true"
     >
-      <span className="mb-2 inline-flex h-8 w-8 items-center justify-center rounded-md bg-[var(--primary-soft)] text-[var(--brand-accent)] ring-1 ring-inset ring-[var(--border)]">
+      <span className="mb-2 inline-flex h-8 w-8 items-center justify-center rounded-md bg-[var(--accent-soft)] text-[var(--text-accent)] ring-1 ring-inset ring-[var(--border-subtle)]">
         <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
       </span>
-      <p className="text-sm font-semibold text-[var(--text)]">{title}</p>
-      {description && <p className="mt-1 max-w-sm text-sm leading-5 text-[var(--text-muted)]">{description}</p>}
+      <p className="text-sm font-semibold text-[var(--text-primary)]">{title}</p>
+      {description && <p className="mt-1 max-w-sm text-sm leading-5 text-[var(--text-tertiary)]">{description}</p>}
     </div>
   );
 }

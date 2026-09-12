@@ -42,7 +42,7 @@ class AuthTenant(BaseModel):
     id: UUID
     code: str
     name: str
-    role_id: UUID
+    role_id: UUID | None
     role_code: str
     permissions: list[str]
 
@@ -57,6 +57,7 @@ class AuthSessionResponse(BaseModel):
     active_tenant_id: UUID
     permissions: list[str]
     tenants: list[AuthTenant]
+    platform_scopes: list[str] = Field(default_factory=list)
 
 
 class RefreshRequest(BaseModel):
@@ -509,7 +510,7 @@ class UserCreate(AdminRequest):
 class UserUpdate(AdminRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     role_id: UUID | None = None
-    status: Literal["active", "inactive"] | None = None
+    status: bool | None = None
     group_ids: list[UUID] | None = None
 
 

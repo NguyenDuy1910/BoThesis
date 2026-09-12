@@ -175,7 +175,7 @@ export function AccessCreateDialog({
       title={text.title}
     >
       <form className="space-y-4" id={FORM_ID} onSubmit={submit}>
-        <p className="text-[0.8125rem] leading-5 text-[var(--text-muted)]">
+        <p className="text-[0.8125rem] leading-5 text-[var(--text-tertiary)]">
           {text.intro}
         </p>
         {error && <ErrorState description={error} layout="inline" />}

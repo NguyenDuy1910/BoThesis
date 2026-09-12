@@ -27,7 +27,7 @@ export function ProductMark({
       aria-hidden={decorative || undefined}
       aria-label={decorative ? undefined : label}
       className={cn(
-        "inline-flex shrink-0 items-center justify-center bg-[var(--primary)] text-[var(--text-on-brand)] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--primary)_78%,white)]",
+        "inline-flex shrink-0 items-center justify-center bg-[var(--accent-primary)] text-[var(--text-on-accent)] shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--accent-primary)_78%,white)]",
         sizeClasses[size],
         className,
       )}
