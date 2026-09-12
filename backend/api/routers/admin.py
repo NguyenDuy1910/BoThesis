@@ -9,9 +9,8 @@ from fastapi import APIRouter, Query, Response, status
 
 from api.deps import AdminConsole, Caller
 from api.routers import (
-    AccessRequestCreate,
-    AccessRequestDecision,
-    AppRequestCreate,
+    ApprovalRequestCreate,
+    ApprovalRequestUpdate,
     AdminRoleCreate,
     AdminRoleUpdate,
     CollectionAccessGrant,
@@ -280,28 +279,6 @@ async def admin_create_integration_connection(
     admin: AdminConsole,
 ) -> dict[str, Any]:
     return await admin.create_integration_connection(caller, body.model_dump())
-
-
-@router.get("/app-requests")
-async def admin_list_app_requests(
-    caller: Caller,
-    admin: AdminConsole,
-    page: Annotated[int, Query(ge=1)] = 1,
-    page_size: Annotated[int, Query(ge=1, le=100)] = 20,
-    status_filter: Annotated[str | None, Query(alias="status")] = None,
-) -> dict[str, Any]:
-    return await admin.list_app_requests(
-        caller, page=page, page_size=page_size, status=status_filter
-    )
-
-
-@router.post("/app-requests", status_code=status.HTTP_201_CREATED)
-async def admin_create_app_request(
-    body: AppRequestCreate,
-    caller: Caller,
-    admin: AdminConsole,
-) -> dict[str, Any]:
-    return await admin.create_app_request(caller, body.model_dump())
 
 
 @router.get("/integration-connections/{integration_connection_id}")
@@ -689,50 +666,52 @@ async def admin_delete_item(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/access-requests")
-async def admin_list_access_requests(
+@router.get("/approval-requests")
+async def admin_list_approval_requests(
     caller: Caller,
     admin: AdminConsole,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     search: str | None = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
+    request_type: Annotated[str | None, Query(alias="request_type")] = None,
 ) -> dict[str, Any]:
-    return await admin.list_access_requests(
+    return await admin.list_approval_requests(
         caller,
         page=page,
         page_size=page_size,
         search=search,
         status=status_filter,
+        request_type=request_type,
     )
 
 
-@router.post("/access-requests", status_code=status.HTTP_201_CREATED)
-async def admin_create_access_request(
-    body: AccessRequestCreate,
+@router.post("/approval-requests", status_code=status.HTTP_201_CREATED)
+async def admin_create_approval_request(
+    body: ApprovalRequestCreate,
     caller: Caller,
     admin: AdminConsole,
 ) -> dict[str, Any]:
-    return await admin.create_access_request(caller, body.model_dump())
+    return await admin.create_approval_request(caller, body.model_dump())
 
 
-@router.get("/access-requests/{request_id}")
-async def admin_get_access_request(
+@router.get("/approval-requests/{request_id}")
+async def admin_get_approval_request(
     request_id: UUID,
     caller: Caller,
     admin: AdminConsole,
 ) -> dict[str, Any]:
-    return await admin.get_access_request(caller, request_id)
+    return await admin.get_approval_request(caller, request_id)
 
 
-@router.post("/access-requests/{request_id}/decision")
-async def admin_decide_access_request(
+@router.patch("/approval-requests/{request_id}")
+async def admin_update_approval_request(
     request_id: UUID,
-    body: AccessRequestDecision,
+    body: ApprovalRequestUpdate,
     caller: Caller,
     admin: AdminConsole,
 ) -> dict[str, Any]:
-    return await admin.decide_access_request(
+    return await admin.update_approval_request(
         caller, request_id, body.model_dump()
     )
 

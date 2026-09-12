@@ -17,6 +17,7 @@ from bothesis.db.models import (
     AuditLog,
     Base,
     Citation,
+    CollectionAccess,
     Conversation,
     ExternalResource,
     IngestionSource,
@@ -27,6 +28,7 @@ from bothesis.db.models import (
     Message,
     MessageItem,
     SandboxSession,
+    User,
 )
 from bothesis.agent.models import AgentContext
 from bothesis.agent.protocol import ExtensionItem, Response
@@ -38,6 +40,7 @@ from bothesis.storage import (
 )
 from bothesis.services import (
     ArtifactValidationError,
+    AdminConflictError,
     AuthContext,
     AuthorizationError,
     DocumentNotFoundError,
@@ -47,7 +50,7 @@ from bothesis.services import (
     SandboxManifestResource,
     SandboxProviderFile,
 )
-from bothesis.services.identity_access.access_requests import AccessRequestService
+from bothesis.services.approval_request import ApprovalRequestService
 from bothesis.services.artifact import ArtifactService
 from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services.citation import CitationService
@@ -1032,15 +1035,55 @@ async def test_collection_upload_rejects_tenant_permission_and_collection_states
     assert outsider_content.read_count == 0
 
     async with session_factory.begin() as session:
-        request = await AccessRequestService(session).create_request(
+        request = await ApprovalRequestService(session).create_request(
             viewer,
             requester_user_id=viewer.user_id,
-            collection_item_id=collection_id,
-            requested_role="editor",
+            request_type="resource_access",
+            target_id=str(collection_id),
+            details={"role": "editor"},
             reason="Upload files to this knowledge base",
         )
     assert request["status"] == "pending"
-    assert request["requested_role"] == "editor"
+    assert request["details"] == {"role": "editor"}
+
+    async with session_factory.begin() as session:
+        collection = await session.get(Item, collection_id)
+        assert collection is not None and collection.created_by_user_id is not None
+        owner = await session.get(User, collection.created_by_user_id)
+        assert owner is not None
+        owner_context = AuthContext(
+            user_id=owner.id,
+            email=owner.email,
+            display_name=owner.display_name,
+            tenant_id=collection.tenant_id,
+            role_id=None,
+            role_code="admin",
+            permission_codes=("admin",),
+            group_ids=(),
+        )
+        with pytest.raises(AdminConflictError, match="equivalent approval request"):
+            await ApprovalRequestService(session).create_request(
+                viewer,
+                requester_user_id=viewer.user_id,
+                request_type="resource_access",
+                target_id=str(collection_id),
+                details={"role": "viewer"},
+            )
+        approved = await ApprovalRequestService(session).update_request(
+            owner_context,
+            UUID(request["id"]),
+            status="approved",
+        )
+        assert approved["status"] == "approved"
+        grant = await session.get(
+            CollectionAccess,
+            {
+                "item_id": collection_id,
+                "principal_type": "user",
+                "principal_id": viewer.user_id,
+            },
+        )
+        assert grant is not None and grant.role == "editor"
 
     async with session_factory.begin() as session:
         collection = await session.get(Item, collection_id)

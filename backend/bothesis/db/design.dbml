@@ -270,20 +270,26 @@ Table memories {
   updated_at timestamptz [not null]
 }
 
-Table access_requests {
+Table approval_requests {
   id uuid [pk]
   tenant_id uuid [not null]
   requester_user_id uuid [not null]
-  collection_item_id uuid [not null]
-  requested_role varchar(16) [not null, note: 'owner | editor | viewer']
+  request_type varchar(32) [not null, note: 'resource_access | plugin_installation']
+  target_id varchar(512) [not null, note: 'Item UUID for resource_access; connector key for plugin_installation']
+  details jsonb [not null, default: `{}`, note: 'Type-specific data only; resource_access uses { role: owner|editor|viewer }']
   reason text
-  status varchar(16) [not null, default: 'pending']
-  reviewed_by_user_id uuid
-  review_note text
-  reviewed_at timestamptz
-  deleted_at timestamptz
+  status varchar(16) [not null, default: 'pending', note: 'pending | approved | denied | cancelled']
+  decided_by_user_id uuid
+  decision_note text
+  decided_at timestamptz
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
+  indexes {
+    (tenant_id, status, created_at)
+    (requester_user_id, status)
+    (request_type, target_id)
+    (tenant_id, requester_user_id, request_type, target_id) [unique, note: 'Partial unique while status=pending and deleted_at is null']
+  }
 }
 
 Table audit_logs {
@@ -335,9 +341,8 @@ Ref: memories.user_id > users.id
 Ref: memories.conversation_id > conversations.id
 Ref: memories.source_message_id > messages.id
 
-Ref: access_requests.tenant_id > tenants.id
-Ref: access_requests.requester_user_id > users.id
-Ref: access_requests.collection_item_id > items.id
-Ref: access_requests.reviewed_by_user_id > users.id
+Ref: approval_requests.tenant_id > tenants.id
+Ref: approval_requests.requester_user_id > users.id
+Ref: approval_requests.decided_by_user_id > users.id
 Ref: audit_logs.tenant_id > tenants.id
 Ref: audit_logs.actor_user_id > users.id

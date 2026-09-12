@@ -120,7 +120,7 @@ export function AdminAccountMenu({ compact }: { compact: boolean }) {
         </>
       )}
       {hasSessionPermission(getAuthSession(), "knowledge.read") && (
-        <DropdownItem onClick={() => router.push("/app")}>
+        <DropdownItem onClick={() => router.push("/knowledge")}>
           <MessageSquareText aria-hidden="true" className="h-4 w-4" />
           Open knowledge workspace
         </DropdownItem>

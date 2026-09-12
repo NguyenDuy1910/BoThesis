@@ -1,0 +1,361 @@
+"""Governed approval requests with type-specific decision effects."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any, Mapping
+from uuid import UUID
+
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from bothesis.db.models import ApprovalRequest, Item, TenantMembership, User
+from bothesis.services import (
+    ACCESS_MANAGE_PERMISSION,
+    ACTIVE_STATUS,
+    SOURCE_MANAGE_PERMISSION,
+    AdminConflictError,
+    AdminNotFoundError,
+    AdminValidationError,
+    AuthContext,
+    normalize_page,
+    normalize_required_text,
+    require_tenant_permission,
+    timestamp,
+)
+from bothesis.services.audit import AuditService
+from bothesis.services.identity_access.collection_access import CollectionAccessService
+
+
+class ApprovalRequestService:
+    """Store a shared approval lifecycle and dispatch explicit type behavior."""
+
+    _TYPES = frozenset({"resource_access", "plugin_installation"})
+    _STATUSES = frozenset({"pending", "approved", "denied", "cancelled"})
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        audit: AuditService | None = None,
+    ) -> None:
+        self._session = session
+        self._audit = audit or AuditService(session)
+
+    async def list_requests(
+        self,
+        actor: AuthContext,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        status: str | None = None,
+        request_type: str | None = None,
+    ) -> dict[str, Any]:
+        tenant_id = require_tenant_permission(actor)
+        allowed_types = self._visible_types(actor, request_type)
+        page, page_size, offset = normalize_page(page, page_size)
+        filters = [
+            ApprovalRequest.tenant_id == tenant_id,
+            ApprovalRequest.deleted_at.is_(None),
+            ApprovalRequest.request_type.in_(allowed_types),
+        ]
+        if status is not None:
+            filters.append(ApprovalRequest.status == self._status(status))
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            filters.append(
+                or_(
+                    User.email.ilike(term),
+                    User.display_name.ilike(term),
+                    ApprovalRequest.target_id.ilike(term),
+                )
+            )
+        base = (
+            select(ApprovalRequest, User)
+            .join(User, User.id == ApprovalRequest.requester_user_id)
+            .where(*filters)
+        )
+        total = await self._session.scalar(select(func.count()).select_from(base.subquery()))
+        rows = (
+            await self._session.execute(
+                base.order_by(ApprovalRequest.created_at.desc(), ApprovalRequest.id.desc())
+                .limit(page_size)
+                .offset(offset)
+            )
+        ).all()
+        return {
+            "items": [self._payload(request, user) for request, user in rows],
+            "total": int(total or 0),
+            "page": page,
+            "page_size": page_size,
+        }
+
+    async def create_request(
+        self,
+        actor: AuthContext,
+        *,
+        request_type: str,
+        target_id: str,
+        details: Mapping[str, Any] | None = None,
+        reason: str | None = None,
+        requester_user_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        tenant_id = require_tenant_permission(actor)
+        normalized_type = self._request_type(request_type)
+        requester_id = requester_user_id or actor.user_id
+        if normalized_type == "resource_access":
+            if requester_id != actor.user_id:
+                require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
+            await self._tenant_user(tenant_id, requester_id)
+            normalized_target, normalized_details = await self._resource_access_target(
+                tenant_id, target_id, details
+            )
+        else:
+            require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
+            normalized_target, normalized_details = self._plugin_target(target_id, details)
+        normalized_reason = (
+            normalize_required_text(reason, "request reason", 4_000)
+            if reason is not None
+            else None
+        )
+        duplicate = await self._session.scalar(
+            select(ApprovalRequest.id).where(
+                ApprovalRequest.tenant_id == tenant_id,
+                ApprovalRequest.requester_user_id == requester_id,
+                ApprovalRequest.request_type == normalized_type,
+                ApprovalRequest.target_id == normalized_target,
+                ApprovalRequest.status == "pending",
+                ApprovalRequest.deleted_at.is_(None),
+            )
+        )
+        if duplicate is not None:
+            raise AdminConflictError("an equivalent approval request is pending")
+        request = ApprovalRequest(
+            tenant_id=tenant_id,
+            requester_user_id=requester_id,
+            request_type=normalized_type,
+            target_id=normalized_target,
+            details=normalized_details,
+            reason=normalized_reason,
+        )
+        self._session.add(request)
+        await self._session.flush()
+        user = await self._tenant_user(tenant_id, requester_id)
+        await self._audit.record(
+            actor,
+            action=f"approval_request.{normalized_type}.created",
+            resource_type="approval_request",
+            resource_id=str(request.id),
+            details={"target_id": normalized_target},
+        )
+        return self._payload(request, user)
+
+    async def get_request(self, actor: AuthContext, request_id: UUID) -> dict[str, Any]:
+        tenant_id = require_tenant_permission(actor)
+        row = (
+            await self._session.execute(
+                select(ApprovalRequest, User)
+                .join(User, User.id == ApprovalRequest.requester_user_id)
+                .where(
+                    ApprovalRequest.id == request_id,
+                    ApprovalRequest.tenant_id == tenant_id,
+                    ApprovalRequest.deleted_at.is_(None),
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            raise AdminNotFoundError(f"approval request not found: {request_id}")
+        request, user = row
+        self._require_reviewer(actor, request.request_type)
+        return self._payload(request, user)
+
+    async def update_request(
+        self,
+        actor: AuthContext,
+        request_id: UUID,
+        *,
+        status: str,
+        decision_note: str | None = None,
+    ) -> dict[str, Any]:
+        tenant_id = require_tenant_permission(actor)
+        request = await self._session.scalar(
+            select(ApprovalRequest)
+            .where(
+                ApprovalRequest.id == request_id,
+                ApprovalRequest.tenant_id == tenant_id,
+                ApprovalRequest.deleted_at.is_(None),
+            )
+            .with_for_update()
+        )
+        if request is None:
+            raise AdminNotFoundError(f"approval request not found: {request_id}")
+        if request.status != "pending":
+            raise AdminConflictError("only pending approval requests can change status")
+        next_status = self._status(status)
+        if next_status == "pending":
+            raise AdminValidationError("an approval request cannot be returned to pending")
+        if next_status == "cancelled":
+            if request.requester_user_id != actor.user_id:
+                self._require_reviewer(actor, request.request_type)
+        else:
+            self._require_reviewer(actor, request.request_type)
+            if next_status == "approved":
+                await self._apply_approval(actor, request)
+        request.status = next_status
+        request.decided_by_user_id = actor.user_id
+        request.decision_note = (
+            normalize_required_text(decision_note, "decision note", 4_000)
+            if decision_note is not None
+            else None
+        )
+        request.decided_at = datetime.now(UTC)
+        await self._session.flush()
+        user = await self._tenant_user(tenant_id, request.requester_user_id)
+        await self._audit.record(
+            actor,
+            action=f"approval_request.{request.request_type}.{next_status}",
+            resource_type="approval_request",
+            resource_id=str(request.id),
+            details={"target_id": request.target_id},
+        )
+        return self._payload(request, user)
+
+    async def _apply_approval(self, actor: AuthContext, request: ApprovalRequest) -> None:
+        if request.request_type == "resource_access":
+            collection = await self._collection(request.tenant_id, UUID(request.target_id))
+            await CollectionAccessService(self._session).grant(
+                collection.id,
+                principal_type="user",
+                principal_id=request.requester_user_id,
+                role=str(request.details["role"]),
+                actor=actor,
+            )
+            return
+        # Connector availability is deployment-owned. A plugin request records
+        # governance approval; connection creation later validates the target
+        # against the configured connector registry and obtains its credentials.
+        return
+
+    async def _resource_access_target(
+        self,
+        tenant_id: UUID,
+        target_id: str,
+        details: Mapping[str, Any] | None,
+    ) -> tuple[str, dict[str, Any]]:
+        try:
+            item_id = UUID(normalize_required_text(target_id, "target ID", 512))
+        except ValueError as exc:
+            raise AdminValidationError("resource access target ID must be a UUID") from exc
+        await self._collection(tenant_id, item_id)
+        values = dict(details or {})
+        if set(values) != {"role"} or not isinstance(values["role"], str):
+            raise AdminValidationError("resource access details must contain only role")
+        role = values["role"].strip().casefold()
+        if role not in {"owner", "editor", "viewer"}:
+            raise AdminValidationError("resource access role must be owner, editor, or viewer")
+        return str(item_id), {"role": role}
+
+    def _plugin_target(
+        self, target_id: str, details: Mapping[str, Any] | None
+    ) -> tuple[str, dict[str, Any]]:
+        if details:
+            raise AdminValidationError("plugin installation details must be empty")
+        key = normalize_required_text(target_id, "plugin target ID", 64).casefold()
+        return key, {}
+
+    async def _tenant_user(self, tenant_id: UUID, user_id: UUID) -> User:
+        user = await self._session.scalar(
+            select(User)
+            .join(TenantMembership, TenantMembership.user_id == User.id)
+            .where(
+                User.id == user_id,
+                User.status == ACTIVE_STATUS,
+                TenantMembership.tenant_id == tenant_id,
+                TenantMembership.status == ACTIVE_STATUS,
+                TenantMembership.deleted_at.is_(None),
+            )
+        )
+        if user is None:
+            raise AdminNotFoundError(f"tenant user not found: {user_id}")
+        return user
+
+    async def _collection(self, tenant_id: UUID, item_id: UUID) -> Item:
+        item = await self._session.scalar(
+            select(Item).where(
+                Item.id == item_id,
+                Item.tenant_id == tenant_id,
+                Item.item_type == "collection",
+                Item.status != "deleted",
+                Item.deleted_at.is_(None),
+            )
+        )
+        if item is None:
+            raise AdminNotFoundError(f"Collection not found: {item_id}")
+        return item
+
+    def _visible_types(self, actor: AuthContext, request_type: str | None) -> tuple[str, ...]:
+        if request_type is not None:
+            normalized = self._request_type(request_type)
+            self._require_reviewer(actor, normalized)
+            return (normalized,)
+        visible = tuple(
+            request_type
+            for request_type, permission in (
+                ("resource_access", ACCESS_MANAGE_PERMISSION),
+                ("plugin_installation", SOURCE_MANAGE_PERMISSION),
+            )
+            if actor.has_permissions(permission)
+        )
+        if not visible:
+            raise AdminValidationError("no approval request types are available to this actor")
+        return visible
+
+    @classmethod
+    def _request_type(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized not in cls._TYPES:
+            raise AdminValidationError("unsupported approval request type")
+        return normalized
+
+    @classmethod
+    def _status(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized not in cls._STATUSES:
+            raise AdminValidationError("unsupported approval request status")
+        return normalized
+
+    @staticmethod
+    def _require_reviewer(actor: AuthContext, request_type: str) -> None:
+        permission = (
+            ACCESS_MANAGE_PERMISSION
+            if request_type == "resource_access"
+            else SOURCE_MANAGE_PERMISSION
+        )
+        require_tenant_permission(actor, permission)
+
+    @staticmethod
+    def _payload(request: ApprovalRequest, user: User) -> dict[str, Any]:
+        return {
+            "id": str(request.id),
+            "request_type": request.request_type,
+            "target_id": request.target_id,
+            "details": dict(request.details),
+            "reason": request.reason,
+            "status": request.status,
+            "requester": {
+                "id": str(user.id),
+                "email": user.email,
+                "display_name": user.display_name,
+            },
+            "decided_by_user_id": (
+                str(request.decided_by_user_id) if request.decided_by_user_id else None
+            ),
+            "decision_note": request.decision_note,
+            "decided_at": timestamp(request.decided_at),
+            "created_at": timestamp(request.created_at),
+            "updated_at": timestamp(request.updated_at),
+        }
+
+
+__all__ = ["ApprovalRequestService"]

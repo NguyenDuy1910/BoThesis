@@ -16,18 +16,19 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
 import { ProductMark } from "@/components/ui/ProductMark";
 import { appBrand } from "@/lib/brand";
+import { isProductNavigationActive } from "@/lib/product-navigation";
 import {
   getAuthSession,
   hasAnySessionPermission,
   hasSessionPermission,
   type AuthSession,
 } from "@/lib/auth/session";
-import { firstAccessibleAdminRoute } from "@/modules/admin/navigation";
 import { switchWorkspace } from "@/modules/auth/api";
 import {
   sidebarNavigationItems,
@@ -68,9 +69,10 @@ export function AppSidebar({
   const isCollapsed = collapsed && !mobileOpen;
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const activateNavigationItem = (item: SidebarNavigationItem) => {
-    if (item.id === "chat") onCloseMobile();
-  };
+  const [session, setSession] = useState<AuthSession | null>(null);
+  const activateNavigationItem = (_item: SidebarNavigationItem) => onCloseMobile();
+
+  useEffect(() => setSession(getAuthSession()), []);
 
   useEffect(() => {
     if (!isCollapsed) return;
@@ -96,6 +98,7 @@ export function AppSidebar({
       <SidebarNavigation
         collapsed={isCollapsed}
         onActivate={activateNavigationItem}
+        session={session}
       />
 
       <SidebarDestinations collapsed={isCollapsed} onCloseMobile={onCloseMobile} />
@@ -166,23 +169,28 @@ function SidebarHeader({
 function SidebarNavigation({
   collapsed,
   onActivate,
+  session,
 }: {
   collapsed: boolean;
   onActivate: (item: SidebarNavigationItem) => void;
+  session: AuthSession | null;
 }) {
+  const pathname = usePathname();
   return (
     <nav aria-label="Workspace" className="sidebar-navigation">
-      {sidebarNavigationItems.map((item) => {
+      {sidebarNavigationItems
+        .filter((item) => !item.permissionCodes || hasAnySessionPermission(session, item.permissionCodes))
+        .map((item) => {
         return (
           <SidebarRow
-            active
+            active={isCurrentPath(pathname, item.href)}
             collapsed={collapsed}
             item={item}
             key={item.id}
             onClick={() => onActivate(item)}
           />
         );
-      })}
+        })}
     </nav>
   );
 }
@@ -257,17 +265,13 @@ function SidebarDestinations({
   collapsed: boolean;
   onCloseMobile: () => void;
 }) {
+  const pathname = usePathname();
   const [session, setSession] = useState<AuthSession | null>(null);
 
   useEffect(() => setSession(getAuthSession()), []);
 
   const destinations = sidebarSecondaryDestinations
-    .filter((destination) => hasAnySessionPermission(session, destination.permissionCodes))
-    .map((destination) => (
-      destination.id === "admin"
-        ? { ...destination, href: firstAccessibleAdminRoute(session)?.path ?? destination.href }
-        : destination
-    ));
+    .filter((destination) => !destination.permissionCodes || hasAnySessionPermission(session, destination.permissionCodes));
 
   if (!destinations.length) return null;
 
@@ -276,10 +280,13 @@ function SidebarDestinations({
       {!collapsed && <p className="sidebar-destinations__label">Product</p>}
       {destinations.map((destination) => {
         const Icon = destination.icon;
+        const active = isProductNavigationActive(pathname, destination.href);
         return (
           <Link
+            aria-current={active ? "page" : undefined}
             aria-label={collapsed ? destination.label : undefined}
             className="sidebar-row"
+            data-active={active}
             href={destination.href}
             key={destination.id}
             onClick={onCloseMobile}
@@ -308,18 +315,22 @@ function SidebarRow({
   const tooltip = item.label;
 
   return (
-    <button
+    <Link
       aria-current={active ? "page" : undefined}
       aria-label={collapsed ? tooltip : undefined}
       className="sidebar-row"
       data-active={active}
+      href={item.href}
       onClick={onClick}
       title={collapsed ? tooltip : undefined}
-      type="button"
     >
       <SidebarRowContent collapsed={collapsed} item={item} />
-    </button>
+    </Link>
   );
+}
+
+function isCurrentPath(pathname: string, href: string) {
+  return isProductNavigationActive(pathname, href);
 }
 
 function SidebarRowContent({

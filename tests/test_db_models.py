@@ -10,8 +10,7 @@ from bothesis.db.models import Base
 
 
 EXPECTED_TABLES = {
-    "access_requests",
-    "app_requests",
+    "approval_requests",
     "artifact_revisions",
     "audit_logs",
     "collection_access",

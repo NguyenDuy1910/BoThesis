@@ -22,6 +22,7 @@ import { AppShell } from "@/components/ui/AppShell";
 import { ProductMark } from "@/components/ui/ProductMark";
 import { getApiConfiguration } from "@/lib/api/config";
 import {
+  listCollections,
   releaseConversationDocument,
   uploadConversationDocument,
   type Collection,
@@ -253,6 +254,7 @@ function ChatConversation({
   const uploadControllersRef = useRef(new Map<string, AbortController>());
   const positionedTurnRef = useRef<string | null>(null);
   const didInitialScrollRef = useRef(false);
+  const appliedKnowledgeLaunchRef = useRef<string | null>(null);
   const {
     messages,
     sendMessage,
@@ -291,6 +293,29 @@ function ChatConversation({
   useEffect(() => () => {
     for (const controller of uploadControllersRef.current.values()) controller.abort();
     uploadControllersRef.current.clear();
+  }, []);
+
+  // A collection workspace can hand a person back to Chat with one explicit
+  // scope. The authoritative collection list is fetched again here, so a URL
+  // never grants access and a revoked Collection is simply not attached.
+  useEffect(() => {
+    const parameters = new URLSearchParams(window.location.search);
+    const collectionId = parameters.get("collection");
+    if (!collectionId || appliedKnowledgeLaunchRef.current === collectionId) return;
+    appliedKnowledgeLaunchRef.current = collectionId;
+    const controller = new AbortController();
+    void listCollections(controller.signal).then((collections) => {
+      if (controller.signal.aborted) return;
+      const collection = collections.find((candidate) => candidate.id === collectionId);
+      if (!collection) return;
+      setContextCollections([collection]);
+      const prompt = parameters.get("message")?.trim();
+      if (prompt) setInput(prompt);
+    }).catch(() => {
+      // The chat composer retains its normal no-scope behavior when the
+      // selected Collection can no longer be read.
+    });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {

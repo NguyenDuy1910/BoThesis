@@ -1,6 +1,6 @@
 "use client";
 
-import { Boxes, CornerDownLeft, FileText, Search } from "lucide-react";
+import { BookOpen, CornerDownLeft, FileText, Search } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -116,21 +116,21 @@ export function AdminCommandPalette({
 
     const content = items.map((item) => ({
       id: `item:${item.id}`,
-      group: item.item_type === "collection" ? "Collections" : "Documents",
+      group: "Knowledge",
       label: item.title || "Untitled",
       href:
         item.item_type === "collection"
-          ? `/admin/collections/${item.id}`
-          : `/admin/collections/${item.parent_item_id ?? ""}`,
+          ? `/knowledge/collections/${item.id}`
+          : `/knowledge/collections/${item.parent_item_id ?? ""}`,
       icon:
         item.item_type === "collection" ? (
-          <Boxes aria-hidden="true" className="h-4 w-4" />
+          <BookOpen aria-hidden="true" className="h-4 w-4" />
         ) : (
           <FileText aria-hidden="true" className="h-4 w-4" />
         ),
     }));
 
-    return [...sections, ...content.filter((entry) => entry.href !== "/admin/collections/")];
+    return [...sections, ...content.filter((entry) => entry.href !== "/knowledge/collections/")];
   }, [items, query]);
 
   useEffect(() => {

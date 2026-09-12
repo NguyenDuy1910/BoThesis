@@ -91,7 +91,7 @@ const tabConfig: Record<
   },
   requests: {
     label: "Requests",
-    endpoint: "/access-requests",
+    endpoint: "/approval-requests",
     emptyTitle: "No pending requests",
     emptyDescription:
       "When someone asks for access to a collection, their request lands here for you to approve or decline.",
@@ -135,12 +135,17 @@ export function AccessPage() {
   const config = tabConfig[tab];
   const list = useAdminQuery<Paginated<Row>>(
     availableTabs.length
-      ? `${config.endpoint}${queryString({ page, page_size: PAGE_SIZE, search })}`
+      ? `${config.endpoint}${queryString({
+        page,
+        page_size: PAGE_SIZE,
+        search,
+        request_type: tab === "requests" ? "resource_access" : undefined,
+      })}`
       : null,
   );
   const pendingRequests = useAdminQuery<Paginated<Row>>(
     hasSessionPermission(getAuthSession(), "access.manage")
-      ? "/access-requests?status=pending&page_size=1"
+      ? "/approval-requests?request_type=resource_access&status=pending&page_size=1"
       : null,
   );
 
@@ -341,15 +346,14 @@ export function AccessPage() {
           },
         },
         {
-          key: "resource_type",
+          key: "target_id",
           label: "Wants access to",
           minWidth: 200,
           render: (row) => (
             <span>
-              {titleCase(row.resource_type)}
-              {row.access_type && (
-                <span className="text-[var(--text-muted)]"> · {row.access_type}</span>
-              )}
+              {titleCase(row.request_type.replace(/_/g, " "))}
+              <span className="text-[var(--text-muted)]"> · {row.target_id}</span>
+              {row.details?.role && <span className="text-[var(--text-muted)]"> · {row.details.role}</span>}
             </span>
           ),
         },
@@ -429,9 +433,9 @@ export function AccessPage() {
                 mutate(
                   row.id,
                   "Access granted",
-                  `/access-requests/${row.id}/decision`,
-                  "POST",
-                  { decision: "approved" },
+                  `/approval-requests/${row.id}`,
+                  "PATCH",
+                  { status: "approved" },
                 )
               }
               size="sm"
@@ -449,9 +453,9 @@ export function AccessPage() {
                   mutate(
                     row.id,
                     "Request declined",
-                    `/access-requests/${row.id}/decision`,
-                    "POST",
-                    { decision: "denied" },
+                    `/approval-requests/${row.id}`,
+                    "PATCH",
+                    { status: "denied" },
                   )
                 }
                 size="sm"

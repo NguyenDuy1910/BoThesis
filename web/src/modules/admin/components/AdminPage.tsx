@@ -12,11 +12,8 @@ import { resolveSection } from "@/modules/admin/navigation";
 import { AccessPage } from "@/modules/admin/pages/AccessPage";
 import { ActivityPage } from "@/modules/admin/pages/ActivityPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
-import { CollectionDetailPage } from "@/modules/admin/pages/CollectionDetailPage";
-import { CollectionsPage } from "@/modules/admin/pages/CollectionsPage";
 import { AppsPage } from "@/modules/admin/pages/AppsPage";
 import { DashboardPage } from "@/modules/admin/pages/DashboardPage";
-import { DocumentsPage } from "@/modules/admin/pages/DocumentsPage";
 import { SchedulesPage } from "@/modules/admin/pages/SchedulesPage";
 import { SettingsPage } from "@/modules/admin/pages/SettingsPage";
 
@@ -27,7 +24,7 @@ import { SettingsPage } from "@/modules/admin/pages/SettingsPage";
  */
 export function AdminPage({ section: rawSection }: { section: string }) {
   const router = useRouter();
-  const { section, detailId, canonicalPath, redirect } = resolveSection(rawSection);
+  const { section, canonicalPath, redirect } = resolveSection(rawSection);
 
   useEffect(() => {
     if (redirect) router.replace(canonicalPath);
@@ -36,14 +33,6 @@ export function AdminPage({ section: rawSection }: { section: string }) {
   switch (section) {
     case "dashboard":
       return <DashboardPage />;
-    case "collections":
-      return detailId ? (
-        <CollectionDetailPage collectionId={detailId} />
-      ) : (
-        <CollectionsPage />
-      );
-    case "documents":
-      return <DocumentsPage />;
     case "connectors":
       return <AppsPage />;
     case "schedules":

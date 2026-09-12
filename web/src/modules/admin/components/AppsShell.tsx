@@ -1,23 +1,23 @@
 "use client";
 
-import { Bot, BookOpen, Grid2X2, MessageSquare, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
+import { getAuthSession, hasAnySessionPermission, type AuthSession } from "@/lib/auth/session";
 import { appBrand } from "@/lib/brand";
 import { cn } from "@/lib/cn";
-
-const destinations = [
-  { label: "Chat", href: "/app", icon: MessageSquare },
-  { label: "Knowledge", href: "/admin/collections", icon: BookOpen },
-  { label: "Apps", href: "/admin/connectors", icon: Grid2X2 },
-  { label: "Agents", href: "/workflows", icon: Bot },
-  { label: "Admin", href: "/admin", icon: ShieldCheck },
-] as const;
+import { isProductNavigationActive, productNavigationItems } from "@/lib/product-navigation";
 
 /** The Apps surface has its own product navigation in the canonical design. */
 export function AppsShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const [session, setSession] = useState<AuthSession | null>(null);
+
+  useEffect(() => setSession(getAuthSession()), []);
+  const destinations = productNavigationItems.filter(
+    (destination) => !destination.permissionCodes || hasAnySessionPermission(session, destination.permissionCodes),
+  );
 
   return (
     <div className="apps-shell">
@@ -27,9 +27,7 @@ export function AppsShell({ children }: { children: React.ReactNode }) {
         </Link>
         <nav aria-label="Product" className="apps-sidebar__nav">
           {destinations.map(({ href, icon: Icon, label }) => {
-            const active = href === "/admin/connectors"
-              ? pathname.startsWith(href)
-              : pathname === href;
+            const active = isProductNavigationActive(pathname, href);
             return (
               <Link
                 aria-current={active ? "page" : undefined}

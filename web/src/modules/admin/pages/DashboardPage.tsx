@@ -11,7 +11,6 @@ import {
   Users,
 } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
 
 import { Avatar } from "@/components/ui/Avatar";
 import { Badge } from "@/components/ui/Badge";
@@ -24,7 +23,6 @@ import { StatsSkeleton, TableSkeleton } from "@/components/ui/Skeleton";
 import { StatTile, StatGrid } from "@/components/ui/StatTile";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useAdminQuery } from "@/modules/admin/api";
-import { CollectionCreateDialog } from "@/modules/admin/components/CollectionCreateDialog";
 import { describeAuditAction, formatRelative, pluralize } from "@/modules/admin/format";
 import { useAdminWorkspace, viewerName } from "@/modules/admin/workspace";
 
@@ -43,15 +41,15 @@ interface ActivityRow {
 
 /** Each attention counter, with the page that resolves it. */
 const attentionRoutes: Record<string, { label: string; href: string; fix: string }> = {
-  pending_access_requests: {
+  pending_approval_requests: {
     label: "access request",
     href: "/admin/access?tab=requests",
     fix: "Review requests",
   },
   failed_items: {
     label: "document failed to index",
-    href: "/admin/documents?status=failed",
-    fix: "Retry indexing",
+    href: "/knowledge",
+    fix: "Open Knowledge",
   },
 };
 
@@ -71,7 +69,6 @@ export function DashboardPage() {
   const failed = useAdminQuery<CountResult>(
     "/items?item_type=document&status=failed&page_size=1",
   );
-  const [createOpen, setCreateOpen] = useState(false);
 
   if (error) {
     return (
@@ -120,12 +117,13 @@ export function DashboardPage() {
             >
               Refresh
             </Button>
-            <Button
-              icon={<Boxes aria-hidden="true" className="h-4 w-4" />}
-              onClick={() => setCreateOpen(true)}
+            <Link
+              className="inline-flex h-9 shrink-0 items-center justify-center gap-1.5 rounded-[var(--adm-r-sm)] bg-[var(--primary)] px-3 text-[0.8125rem] font-medium leading-none text-[var(--text-on-brand)] shadow-[var(--adm-e1)] transition-[background-color,color,box-shadow,opacity] duration-[var(--adm-fast)] ease-[var(--adm-ease)] hover:bg-[var(--primary-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--adm-canvas)]"
+              href="/knowledge"
             >
+              <Boxes aria-hidden="true" className="h-4 w-4" />
               Create collection
-            </Button>
+            </Link>
           </>
         }
         description={
@@ -178,14 +176,14 @@ export function DashboardPage() {
       ) : (
         <StatGrid>
           <StatTile
-            href="/admin/collections"
+            href="/knowledge"
             icon={<Boxes aria-hidden="true" className="h-3.5 w-3.5" />}
-            label="Collections"
-            note="Grouped knowledge for search"
+            label="Knowledge"
+            note="Open the shared knowledge workspace"
             value={collections.data?.total}
           />
           <StatTile
-            href="/admin/documents"
+            href="/knowledge"
             icon={<FileText aria-hidden="true" className="h-3.5 w-3.5" />}
             label="Documents"
             note={
@@ -289,12 +287,12 @@ export function DashboardPage() {
               done={hasContent}
               icon={<Boxes aria-hidden="true" className="h-4 w-4" />}
               label="Create a collection"
-              onClick={() => setCreateOpen(true)}
+              href="/knowledge"
             />
             <QuickAction
               description="Add PDFs, Word files and text straight from your machine."
               done={(documents.data?.total ?? 0) > 0}
-              href="/admin/collections"
+              href="/knowledge"
               icon={<Upload aria-hidden="true" className="h-4 w-4" />}
               label="Upload documents"
             />
@@ -308,15 +306,6 @@ export function DashboardPage() {
           </ol>
         </Card>
       </div>
-
-      <CollectionCreateDialog
-        onClose={() => setCreateOpen(false)}
-        onCreated={() => {
-          collections.reload();
-          reload();
-        }}
-        open={createOpen}
-      />
     </>
   );
 }

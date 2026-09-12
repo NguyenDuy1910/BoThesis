@@ -115,21 +115,13 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     created_collection_access: Mapped[list[CollectionAccess]] = relationship(
         back_populates="created_by_user"
     )
-    access_requests: Mapped[list[AccessRequest]] = relationship(
+    approval_requests: Mapped[list[ApprovalRequest]] = relationship(
         back_populates="requester_user",
-        foreign_keys="AccessRequest.requester_user_id",
+        foreign_keys="ApprovalRequest.requester_user_id",
     )
-    reviewed_access_requests: Mapped[list[AccessRequest]] = relationship(
-        back_populates="reviewed_by_user",
-        foreign_keys="AccessRequest.reviewed_by_user_id",
-    )
-    app_requests: Mapped[list[AppRequest]] = relationship(
-        back_populates="requester_user",
-        foreign_keys="AppRequest.requester_user_id",
-    )
-    reviewed_app_requests: Mapped[list[AppRequest]] = relationship(
-        back_populates="reviewed_by_user",
-        foreign_keys="AppRequest.reviewed_by_user_id",
+    decided_approval_requests: Mapped[list[ApprovalRequest]] = relationship(
+        back_populates="decided_by_user",
+        foreign_keys="ApprovalRequest.decided_by_user_id",
     )
     audit_events: Mapped[list[AuditLog]] = relationship(back_populates="actor_user")
 
@@ -153,8 +145,7 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="tenant"
     )
     items: Mapped[list[Item]] = relationship(back_populates="tenant")
-    access_requests: Mapped[list[AccessRequest]] = relationship(back_populates="tenant")
-    app_requests: Mapped[list[AppRequest]] = relationship(back_populates="tenant")
+    approval_requests: Mapped[list[ApprovalRequest]] = relationship(back_populates="tenant")
     audit_logs: Mapped[list[AuditLog]] = relationship(back_populates="tenant")
 
 
@@ -775,57 +766,34 @@ class MessageItem(CreatedAtMixin, Base):
     item: Mapped[Item] = relationship(back_populates="message_links")
 
 
-class AccessRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    __tablename__ = "access_requests"
+class ApprovalRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A tenant-scoped request requiring an explicit governed decision."""
+
+    __tablename__ = "approval_requests"
     __table_args__ = (
         Index(None, "tenant_id", "status", "created_at"),
         Index(None, "requester_user_id", "status"),
-        CheckConstraint(
-            "requested_role IN ('owner', 'editor', 'viewer')",
-            name="requested_role_is_valid",
+        Index(None, "request_type", "target_id"),
+        Index(
+            "uq_approval_requests_pending_logical_target",
+            "tenant_id",
+            "requester_user_id",
+            "request_type",
+            "target_id",
+            unique=True,
+            postgresql_where=text("status = 'pending' AND deleted_at IS NULL"),
         ),
-    )
-
-    tenant_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
-    )
-    requester_user_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
-    )
-    collection_item_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("items.id"), nullable=False
-    )
-    requested_role: Mapped[str] = mapped_column(String(16), nullable=False)
-    reason: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="pending", server_default="pending"
-    )
-    reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("users.id")
-    )
-    review_note: Mapped[str | None] = mapped_column(Text)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    tenant: Mapped[Tenant] = relationship(back_populates="access_requests")
-    requester_user: Mapped[User] = relationship(
-        back_populates="access_requests", foreign_keys=[requester_user_id]
-    )
-    reviewed_by_user: Mapped[User | None] = relationship(
-        back_populates="reviewed_access_requests", foreign_keys=[reviewed_by_user_id]
-    )
-
-
-class AppRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """A tenant-scoped request to enable an app before it can be connected."""
-
-    __tablename__ = "app_requests"
-    __table_args__ = (
-        Index(None, "tenant_id", "status", "created_at"),
-        Index(None, "requester_user_id", "status"),
+        CheckConstraint(
+            "request_type IN ('resource_access', 'plugin_installation')",
+            name="approval_request_type_is_valid",
+        ),
         CheckConstraint(
             "status IN ('pending', 'approved', 'denied', 'cancelled')",
-            name="app_request_status_is_valid",
+            name="approval_request_status_is_valid",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(details) = 'object'",
+            name="approval_request_details_is_object",
         ),
     )
 
@@ -835,24 +803,26 @@ class AppRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     requester_user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
-    connector_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    details: Mapped[JsonObject] = _json_object_column()
     reason: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending", server_default="pending"
     )
-    reviewed_by_user_id: Mapped[UUID | None] = mapped_column(
+    decided_by_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id")
     )
-    review_note: Mapped[str | None] = mapped_column(Text)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_note: Mapped[str | None] = mapped_column(Text)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    tenant: Mapped[Tenant] = relationship(back_populates="app_requests")
+    tenant: Mapped[Tenant] = relationship(back_populates="approval_requests")
     requester_user: Mapped[User] = relationship(
-        back_populates="app_requests", foreign_keys=[requester_user_id]
+        back_populates="approval_requests", foreign_keys=[requester_user_id]
     )
-    reviewed_by_user: Mapped[User | None] = relationship(
-        back_populates="reviewed_app_requests", foreign_keys=[reviewed_by_user_id]
+    decided_by_user: Mapped[User | None] = relationship(
+        back_populates="decided_approval_requests", foreign_keys=[decided_by_user_id]
     )
 
 
@@ -999,6 +969,43 @@ _EXTERNAL_RESOURCE_TRIGGER_CREATE = DDL(
     FOR EACH ROW EXECUTE FUNCTION bothesis_validate_external_resource()"""
 ).execute_if(dialect="postgresql")
 
+_APPROVAL_REQUEST_TRIGGER = DDL(
+    """
+    CREATE OR REPLACE FUNCTION bothesis_validate_approval_request() RETURNS trigger AS $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM tenant_memberships membership
+        WHERE membership.tenant_id = NEW.tenant_id
+          AND membership.user_id = NEW.requester_user_id
+          AND membership.deleted_at IS NULL
+      ) THEN RAISE EXCEPTION 'Approval Request requester must belong to its tenant';
+      END IF;
+      IF NEW.decided_by_user_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM tenant_memberships membership
+        WHERE membership.tenant_id = NEW.tenant_id
+          AND membership.user_id = NEW.decided_by_user_id
+          AND membership.deleted_at IS NULL
+      ) THEN RAISE EXCEPTION 'Approval Request decider must belong to its tenant';
+      END IF;
+      IF NEW.request_type = 'resource_access' AND NOT EXISTS (
+        SELECT 1 FROM items item
+        WHERE item.id = NEW.target_id::uuid
+          AND item.tenant_id = NEW.tenant_id
+          AND item.item_type = 'collection'
+          AND item.deleted_at IS NULL
+      ) THEN RAISE EXCEPTION 'Resource access Approval Request target must be a Collection in the requester tenant';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+).execute_if(dialect="postgresql")
+_APPROVAL_REQUEST_TRIGGER_CREATE = DDL(
+    """CREATE TRIGGER trg_approval_requests_validate
+    BEFORE INSERT OR UPDATE OF tenant_id, requester_user_id, request_type, target_id, decided_by_user_id ON approval_requests
+    FOR EACH ROW EXECUTE FUNCTION bothesis_validate_approval_request()"""
+).execute_if(dialect="postgresql")
+
 event.listen(Item.__table__, "after_create", _ITEM_PARENT_TRIGGER)
 event.listen(Item.__table__, "after_create", _ITEM_PARENT_TRIGGER_CREATE)
 event.listen(CollectionAccess.__table__, "after_create", _COLLECTION_ACCESS_TRIGGER)
@@ -1013,11 +1020,14 @@ event.listen(ExternalResource.__table__, "after_create", _EXTERNAL_RESOURCE_TRIG
 event.listen(
     ExternalResource.__table__, "after_create", _EXTERNAL_RESOURCE_TRIGGER_CREATE
 )
+event.listen(ApprovalRequest.__table__, "after_create", _APPROVAL_REQUEST_TRIGGER)
+event.listen(
+    ApprovalRequest.__table__, "after_create", _APPROVAL_REQUEST_TRIGGER_CREATE
+)
 
 
 __all__ = [
-    "AccessRequest",
-    "AppRequest",
+    "ApprovalRequest",
     "ArtifactRevision",
     "AuditLog",
     "Base",

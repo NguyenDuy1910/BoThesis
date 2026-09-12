@@ -25,8 +25,7 @@ from bothesis.services import (
     AuthContext,
     require_tenant_permission,
 )
-from bothesis.services.identity_access.access_requests import AccessRequestService
-from bothesis.services.app_request import AppRequestService
+from bothesis.services.approval_request import ApprovalRequestService
 from bothesis.services.audit import AuditService
 from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.confluence_environment import ConfluenceEnvironmentService
@@ -561,41 +560,31 @@ class AdminConsoleService:
                 },
             )
 
-    # -- Access requests and audit -----------------------------------------
+    # -- Approval requests and audit ---------------------------------------
 
-    async def list_app_requests(self, actor: AuthContext, **filters: Any) -> dict[str, Any]:
-        async with self._unit_of_work() as session:
-            return await AppRequestService(session).list_requests(actor, **filters)
-
-    async def create_app_request(
-        self, actor: AuthContext, values: dict[str, Any]
-    ) -> dict[str, Any]:
-        async with self._unit_of_work() as session:
-            return await AppRequestService(session).create_request(actor, **values)
-
-    async def list_access_requests(
+    async def list_approval_requests(
         self, actor: AuthContext, **filters: Any
     ) -> dict[str, Any]:
         async with self._unit_of_work() as session:
-            return await AccessRequestService(session).list_requests(actor, **filters)
+            return await ApprovalRequestService(session).list_requests(actor, **filters)
 
-    async def create_access_request(
+    async def create_approval_request(
         self, actor: AuthContext, values: dict[str, Any]
     ) -> dict[str, Any]:
         async with self._unit_of_work() as session:
-            return await AccessRequestService(session).create_request(actor, **values)
+            return await ApprovalRequestService(session).create_request(actor, **values)
 
-    async def get_access_request(
+    async def get_approval_request(
         self, actor: AuthContext, request_id: UUID
     ) -> dict[str, Any]:
         async with self._unit_of_work() as session:
-            return await AccessRequestService(session).get_request(actor, request_id)
+            return await ApprovalRequestService(session).get_request(actor, request_id)
 
-    async def decide_access_request(
+    async def update_approval_request(
         self, actor: AuthContext, request_id: UUID, values: dict[str, Any]
     ) -> dict[str, Any]:
         async with self._unit_of_work() as session:
-            return await AccessRequestService(session).decide_request(
+            return await ApprovalRequestService(session).update_request(
                 actor, request_id, **values
             )
 

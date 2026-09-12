@@ -340,6 +340,69 @@ class KnowledgeCitationResponse(BaseModel):
     citation: CitationInfo
 
 
+# --- Knowledge workspace ---
+
+
+class KnowledgeSourceSummary(BaseModel):
+    """The source lineage displayed beside a browsable knowledge Item."""
+
+    display_name: str
+    connector_key: str | None = None
+    source_url: str | None = None
+
+
+class KnowledgeDocumentSummary(BaseModel):
+    """A permission-filtered document row for the knowledge workspace."""
+
+    id: str
+    title: str
+    content_type: str | None = None
+    document_type: str | None = None
+    status: Literal["pending", "processing", "ready", "failed", "unsupported"]
+    updated_at: str
+    source: KnowledgeSourceSummary | None = None
+
+
+class KnowledgeCollectionSummary(BaseModel):
+    """A Collection the caller is allowed to browse."""
+
+    id: str
+    title: str
+    description: str | None = None
+    parent_item_id: str | None = None
+    document_count: int = Field(ge=0)
+    source_count: int = Field(ge=0)
+    updated_at: str
+
+
+class KnowledgeHomeResponse(BaseModel):
+    items: list[KnowledgeCollectionSummary]
+    total: int = Field(ge=0)
+    recent_documents: list[KnowledgeDocumentSummary]
+    personal_collection_id: str | None = None
+
+
+class KnowledgeCollectionWorkspaceResponse(BaseModel):
+    collection: KnowledgeCollectionSummary
+    child_collections: list[KnowledgeCollectionSummary]
+    documents: list[KnowledgeDocumentSummary]
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1)
+
+
+class KnowledgeCollectionCreate(BaseModel):
+    """The minimal collection input exposed by the knowledge workspace."""
+
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2_000)
+
+
+class KnowledgeCollectionCreated(BaseModel):
+    id: UUID
+    title: str
+
+
 # --- Scheduled jobs ---
 
 
@@ -495,9 +558,17 @@ class IntegrationConnectionUpdate(AdminRequest):
     status: Literal["draft", "active", "disabled", "error"] | None = None
 
 
-class AppRequestCreate(AdminRequest):
-    connector_key: str = Field(min_length=1, max_length=64)
-    reason: str | None = Field(default=None, max_length=2_000)
+class ApprovalRequestCreate(AdminRequest):
+    request_type: Literal["resource_access", "plugin_installation"]
+    target_id: str = Field(min_length=1, max_length=512)
+    details: dict[str, Any] = Field(default_factory=dict)
+    requester_user_id: UUID | None = None
+    reason: str | None = Field(default=None, min_length=1, max_length=4_000)
+
+
+class ApprovalRequestUpdate(AdminRequest):
+    status: Literal["approved", "denied", "cancelled"]
+    decision_note: str | None = Field(default=None, min_length=1, max_length=4_000)
 
 
 class ScheduleInput(AdminRequest):
@@ -539,18 +610,6 @@ class CollectionUpdate(AdminRequest):
     description: str | None = Field(default=None, max_length=2_000)
 
 
-class AccessRequestCreate(AdminRequest):
-    requester_user_id: UUID
-    collection_item_id: UUID
-    requested_role: Literal["owner", "editor", "viewer"] = "viewer"
-    reason: str | None = Field(default=None, min_length=1, max_length=4_000)
-
-
-class AccessRequestDecision(AdminRequest):
-    decision: Literal["approved", "denied"]
-    review_note: str | None = Field(default=None, min_length=1, max_length=4_000)
-
-
 class CollectionAccessGrant(AdminRequest):
     principal_type: Literal["user", "group"]
     principal_id: UUID
@@ -558,9 +617,8 @@ class CollectionAccessGrant(AdminRequest):
 
 
 __all__ = [
-    "AccessRequestCreate",
-    "AppRequestCreate",
-    "AccessRequestDecision",
+    "ApprovalRequestCreate",
+    "ApprovalRequestUpdate",
     "AdminRequest",
     "AdminRoleCreate",
     "AdminRoleUpdate",
@@ -597,7 +655,14 @@ __all__ = [
     "IntegrationConnectionUpdate",
     "ItemStatusUpdate",
     "KnowledgeCitationResponse",
+    "KnowledgeCollectionCreate",
+    "KnowledgeCollectionCreated",
+    "KnowledgeCollectionSummary",
+    "KnowledgeCollectionWorkspaceResponse",
+    "KnowledgeDocumentSummary",
+    "KnowledgeHomeResponse",
     "KnowledgeItemViewer",
+    "KnowledgeSourceSummary",
     "LoginRequest",
     "Message",
     "MessageSend",

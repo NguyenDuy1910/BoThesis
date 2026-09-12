@@ -58,7 +58,7 @@ export function AppsPage() {
   const sources = useAdminQuery<{ items: Row[]; total: number }>("/ingestion-sources?page_size=100");
   const capabilities = useAdminQuery<{ connectors: { connector_key: string }[] }>("/connectors/capabilities");
   const collections = useAdminQuery<{ items: Row[] }>("/collections?page_size=100");
-  const appRequests = useAdminQuery<{ items: Row[]; total: number }>("/app-requests?page_size=100&status=pending");
+  const appRequests = useAdminQuery<{ items: Row[]; total: number }>("/approval-requests?request_type=plugin_installation&page_size=100&status=pending");
   const [view, setView] = useState<View>("directory");
   const [provider, setProvider] = useState<ConnectorProvider>("notion");
   const [search, setSearch] = useState("");
@@ -187,9 +187,9 @@ export function AppsPage() {
   const requestApp = async (reason: string) => {
     setOperationPending(true);
     try {
-      await adminRequest("/app-requests", {
+      await adminRequest("/approval-requests", {
         method: "POST",
-        body: JSON.stringify({ connector_key: "jira", reason }),
+        body: JSON.stringify({ request_type: "plugin_installation", target_id: "jira", details: {}, reason }),
       });
       await appRequests.reload();
       setRequestOpen(false);
@@ -242,7 +242,7 @@ export function AppsPage() {
         apps={visibleApps} category={category} connections={connections.data?.items ?? []}
         loading={connections.loading || capabilities.loading} onCategory={setCategory} onOpen={openApp}
         onConnections={() => setView("connections")} onDiscover={() => setView("directory")}
-        onRequest={() => setRequestOpen(true)} onSearch={setSearch} pendingProviders={new Set(appRequests.data?.items.map((request) => request.connector_key) ?? [])} search={search} showingConnections={view === "connections"}
+        onRequest={() => setRequestOpen(true)} onSearch={setSearch} pendingProviders={new Set(appRequests.data?.items.map((request) => request.target_id) ?? [])} search={search} showingConnections={view === "connections"}
       />}
       {view === "detail" && <AppDetail app={definition} available={isDevelopment || available.has(provider)} onBack={() => setView("directory")} onConnect={() => setView("authorize")} />}
       {view === "authorize" && <Authorize app={definition} onBack={() => setView("detail")} onContinue={() => setView("content")} />}

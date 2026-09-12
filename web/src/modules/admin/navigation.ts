@@ -1,7 +1,5 @@
 import {
-  Boxes,
   CalendarClock,
-  FileText,
   LayoutDashboard,
   type LucideIcon,
   Plug,
@@ -60,28 +58,6 @@ export const adminRoutes: AdminRoute[] = [
     group: "root",
     keywords: ["home", "overview", "start"],
     permissionCodes: ["admin"],
-  },
-  {
-    id: "collections",
-    path: "/admin/collections",
-    label: "Collections",
-    description:
-      "Group trusted knowledge so teams and assistants search the right material.",
-    icon: Boxes,
-    group: "knowledge",
-    keywords: ["knowledge base", "kb", "corpus", "library"],
-    permissionCodes: ["item.manage"],
-  },
-  {
-    id: "documents",
-    path: "/admin/documents",
-    label: "Documents",
-    description:
-      "Every file across your collections, with what is searchable and what needs a retry.",
-    icon: FileText,
-    group: "knowledge",
-    keywords: ["files", "items", "content", "uploads"],
-    permissionCodes: ["item.manage"],
   },
   {
     id: "connectors",
@@ -211,9 +187,6 @@ export function firstAccessibleAdminRoute(session: AuthSession | null) {
 export const legacySectionAliases: Record<string, string> = {
   "": "dashboard",
   overview: "dashboard",
-  "knowledge-bases": "collections",
-  "all-items": "documents",
-  items: "documents",
   sources: "connectors",
   "sync-activity": "activity",
   "ingestion/jobs": "activity",
@@ -224,7 +197,7 @@ export const legacySectionAliases: Record<string, string> = {
   users: "access",
   groups: "access?tab=groups",
   roles: "access?tab=roles",
-  "access-requests": "access?tab=requests",
+  "approval-requests": "access?tab=requests",
   "access-policies": "access",
   acl: "access",
 };

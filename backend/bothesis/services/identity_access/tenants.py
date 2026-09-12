@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import (
-    AccessRequest,
+    ApprovalRequest,
     Group,
     IntegrationConnection,
     Item,
@@ -97,11 +97,11 @@ class TenantService:
             ),
         }
         attention = {
-            "pending_access_requests": await self._count(
-                select(func.count()).select_from(AccessRequest).where(
-                    AccessRequest.tenant_id == tenant_id,
-                    AccessRequest.status == "pending",
-                    AccessRequest.deleted_at.is_(None),
+            "pending_approval_requests": await self._count(
+                select(func.count()).select_from(ApprovalRequest).where(
+                    ApprovalRequest.tenant_id == tenant_id,
+                    ApprovalRequest.status == "pending",
+                    ApprovalRequest.deleted_at.is_(None),
                 )
             ),
             "failed_items": await self._count(
