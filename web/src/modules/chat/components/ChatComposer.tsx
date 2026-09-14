@@ -40,6 +40,7 @@ export interface ComposerAttachment {
 interface ChatComposerProps {
   attachments: ComposerAttachment[];
   contextCollections: Collection[];
+  enterToSend: boolean;
   input: string;
   isConfigured: boolean;
   isStreaming: boolean;
@@ -57,6 +58,7 @@ interface ChatComposerProps {
 export function ChatComposer({
   attachments,
   contextCollections,
+  enterToSend,
   input,
   isConfigured,
   isStreaming,
@@ -192,13 +194,13 @@ export function ChatComposer({
         />
         <textarea
           aria-describedby="composer-help"
-          aria-label="Message Enterprise Agent"
+          aria-label="Message BoThesis"
           autoComplete="off"
           disabled={!isConfigured}
           name="message"
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+            if (enterToSend && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               void onSubmit(input);
             }
@@ -322,9 +324,11 @@ export function ChatComposer({
             )}
           </span>
           <span className="composer-context-indicator composer-context-indicator--knowledge"><LibraryBig aria-hidden="true" size={14} />Knowledge: Company</span>
-          <span className="composer-context-indicator"><Bot aria-hidden="true" size={14} />Enterprise Agent</span>
+          <span className="composer-context-indicator"><Bot aria-hidden="true" size={14} />BoThesis</span>
           <span className="composer-context-indicator composer-context-indicator--model">Managed model <ChevronDown aria-hidden="true" size={13} /></span>
-          <span className="composer__shortcut">Enter to send · Shift + Enter for new line</span>
+          <span className="composer__shortcut">
+            {enterToSend ? "Enter to send · Shift + Enter for new line" : "Use the send button · Enter for new line"}
+          </span>
           <button
             aria-label={isStreaming ? "Stop generating" : "Send message"}
             className={clsx("composer-send", isStreaming && "composer-send--stop")}

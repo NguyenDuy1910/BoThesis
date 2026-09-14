@@ -1,3 +1,5 @@
+import { mockApi, previewMode } from "@/mocks/bothesis-api.mock";
+
 export interface AuthTenant {
   id: string;
   code: string;
@@ -53,6 +55,7 @@ export function hasPlatformScope(
 
 export function getAuthSession(): AuthSession | null {
   if (typeof window === "undefined") return null;
+  if (previewMode) return mockApi.session.current();
   const serialized = window.sessionStorage.getItem(storageKey);
   if (!serialized) return null;
   try {
@@ -76,6 +79,7 @@ export function storeAuthSession(session: AuthSession): void {
 }
 
 export function clearAuthSession(): void {
+  if (previewMode) { mockApi.session.signOut(); return; }
   if (typeof window !== "undefined") window.sessionStorage.removeItem(storageKey);
 }
 

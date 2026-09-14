@@ -33,6 +33,8 @@ interface ResourceListProps<T extends Record<string, unknown>> {
     onPageChange: (page: number) => void;
   };
   selectable?: boolean;
+  /** The row an open inspector is describing. */
+  activeRowId?: string | null;
   selectedRowIds?: string[];
   onSelectedRowIdsChange?: (ids: string[]) => void;
 }
@@ -57,6 +59,7 @@ export function ResourceList<T extends Record<string, unknown>>({
   toolbar,
   bulkBar,
   pagination,
+  activeRowId,
   selectable,
   selectedRowIds,
   onSelectedRowIdsChange,
@@ -85,7 +88,7 @@ export function ResourceList<T extends Record<string, unknown>>({
               action={
                 onClearFilters && (
                   <button
-                    className="text-[0.8125rem] font-medium text-[var(--text-accent)] underline-offset-4 hover:underline"
+                    className="text-[length:var(--text-size-ui)] font-medium text-[var(--text-accent)] underline-offset-4 hover:underline"
                     onClick={onClearFilters}
                     type="button"
                   >
@@ -103,6 +106,7 @@ export function ResourceList<T extends Record<string, unknown>>({
         ) : (
           <>
             <DataTable
+              activeRowId={activeRowId}
               ariaLabel={ariaLabel}
               columns={columns}
               data={rows}

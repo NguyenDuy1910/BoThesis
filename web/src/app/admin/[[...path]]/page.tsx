@@ -1,5 +1,15 @@
-import { AdminPage } from "@/modules/admin/components/AdminPage";
 import { redirect } from "next/navigation";
+
+import { AdminPage } from "@/modules/admin/components/AdminPage";
+
+/** Sections that were folded into Knowledge and no longer address a page. */
+const FOLDED_INTO_KNOWLEDGE = new Set([
+  "collections",
+  "knowledge-bases",
+  "documents",
+  "all-items",
+  "items",
+]);
 
 export default async function AdminRoute({
   params,
@@ -7,26 +17,10 @@ export default async function AdminRoute({
   params: Promise<{ path?: string[] }>;
 }) {
   const { path = [] } = await params;
-  const [section, collectionId] = path;
 
-  // Collection and document management now lives in the Figma-aligned
-  // Knowledge workspace. Keep published URLs usable without rendering the
-  // retired Admin pages (or their surrounding Admin shell) first.
-  if (section === "collections" || section === "knowledge-bases") {
-    redirect(
-      collectionId
-        ? `/knowledge/collections/${encodeURIComponent(collectionId)}`
-        : "/knowledge",
-    );
-  }
-  if (section === "documents" || section === "all-items" || section === "items") {
-    redirect("/knowledge");
-  }
-  // Apps became a product-level surface. Preserve historical Admin links and
-  // connector aliases without loading an extra Admin shell first.
-  if (section === "apps-permissions" || section === "connectors" || section === "sources") {
-    redirect("/apps");
-  }
+  // Collection and document management is one Knowledge section now. Redirect
+  // on the server so an old link never renders an Admin shell it will leave.
+  if (path[0] && FOLDED_INTO_KNOWLEDGE.has(path[0])) redirect("/admin/knowledge");
 
   return <AdminPage section={path.join("/")} />;
 }

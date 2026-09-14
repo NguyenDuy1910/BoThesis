@@ -1,105 +1,164 @@
-import {
-  Bot,
-  BookOpenCheck,
-  LayoutDashboard,
-  type LucideIcon,
-  Plug,
-  ScrollText,
-  Settings,
-  ShieldCheck,
-  SlidersHorizontal,
-  Users,
-  UsersRound,
-} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 
 import {
-  hasAnySessionPermission,
-  hasPlatformScope,
-  type AuthSession,
-} from "@/lib/auth/session";
+  modeForPath,
+  platformAdminRailItems,
+  workspaceAdminRailItems,
+  workspaceAdminRailTail,
+  type RailItem,
+} from "@/lib/navigation";
+import { hasAnySessionPermission, hasPlatformScope, type AuthSession } from "@/lib/auth/session";
+
+/**
+ * Admin addressing, derived from the rails.
+ *
+ * The rails in `@/lib/navigation` decide what exists and where it lives. This
+ * module only adds what the command palette and the breadcrumb need on top of
+ * that: a sentence per section, and the older addresses that must keep
+ * resolving so an existing link never dead-ends.
+ */
+export type AdminNavGroupId = "workspace" | "platform";
+
+export const adminNavGroupLabels: Record<AdminNavGroupId, string> = {
+  workspace: "Workspace admin",
+  platform: "Platform admin",
+};
 
 export interface AdminRoute {
   id: string;
   path: string;
   label: string;
   description: string;
+  /** Older names for this section, so searching the old word still finds it. */
+  keywords: string[];
   icon: LucideIcon;
   group: AdminNavGroupId;
-  keywords?: string[];
-  hidden?: boolean;
-  permissionCodes: readonly string[];
-  platformOnly?: boolean;
 }
 
-export type AdminNavGroupId = "workspace" | "platform";
-
-export const adminNavGroupLabels: Record<AdminNavGroupId, string> = {
-  workspace: "WORKSPACE",
-  platform: "PLATFORM ADMIN",
-};
-
-export const adminRoutes: AdminRoute[] = [
-  { id: "overview", path: "/admin", label: "Overview", description: "What is configured in this workspace and what needs attention.", icon: LayoutDashboard, group: "workspace", permissionCodes: ["admin"] },
-  { id: "members", path: "/admin/members", label: "Members", description: "Invite workspace members and review their access.", icon: Users, group: "workspace", permissionCodes: ["user.manage"] },
-  { id: "roles", path: "/admin/roles", label: "Roles & access", description: "Manage workspace roles, groups, and access requests.", icon: ShieldCheck, group: "workspace", permissionCodes: ["role.manage", "group.manage", "access.manage"] },
-  { id: "knowledge-governance", path: "/admin/knowledge-governance", label: "Knowledge governance", description: "Review collection access and governed knowledge.", icon: BookOpenCheck, group: "workspace", permissionCodes: ["access.manage", "knowledge.read"] },
-  // Apps has a dedicated product shell at /apps. Retain this address only as
-  // a compatible deep link for bookmarks and existing admin links.
-  { id: "apps-permissions", path: "/admin/apps-permissions", label: "Apps & permissions", description: "Manage connected apps and approved external actions.", icon: Plug, group: "workspace", hidden: true, permissionCodes: ["source.manage"] },
-  { id: "agents-policies", path: "/admin/agents-policies", label: "Agents & policies", description: "Govern shared agents, tools, and approval policy.", icon: Bot, group: "workspace", permissionCodes: ["admin"] },
-  { id: "audit", path: "/admin/audit", label: "Audit", description: "Review administrative events for this workspace.", icon: ScrollText, group: "workspace", permissionCodes: ["audit.read"] },
-  { id: "settings", path: "/admin/settings", label: "Settings", description: "Manage workspace identity, defaults, and lifecycle settings.", icon: Settings, group: "workspace", permissionCodes: ["tenant.manage"] },
-  { id: "platform-overview", path: "/admin/platform", label: "Platform overview", description: "Review platform-wide workspace health and open reviews.", icon: LayoutDashboard, group: "platform", permissionCodes: [], platformOnly: true },
-  { id: "platform-workspaces", path: "/admin/platform/workspaces", label: "Workspaces", description: "Review workspace ownership, members, connections, and status.", icon: UsersRound, group: "platform", permissionCodes: [], platformOnly: true },
-  { id: "platform-users", path: "/admin/platform/users", label: "Users", description: "Review people, memberships, workspace roles, and platform scopes.", icon: Users, group: "platform", permissionCodes: [], platformOnly: true },
-  { id: "platform-policies", path: "/admin/platform/policies", label: "Global policies", description: "Review platform defaults and their workspace inheritance.", icon: SlidersHorizontal, group: "platform", permissionCodes: [], platformOnly: true },
-  { id: "platform-health", path: "/admin/platform/health", label: "System health", description: "Review platform operational health.", icon: BookOpenCheck, group: "platform", permissionCodes: [], platformOnly: true },
-  { id: "platform-audit", path: "/admin/platform/audit", label: "Platform audit", description: "Review administrative events across workspaces.", icon: ScrollText, group: "platform", permissionCodes: [], platformOnly: true },
-];
-
-export const adminNavGroups: { id: AdminNavGroupId; routes: AdminRoute[] }[] = (
-  ["workspace", "platform"] as AdminNavGroupId[]
-).map((id) => ({ id, routes: adminRoutes.filter((route) => route.group === id && !route.hidden) }));
-
-export function canAccessAdminRoute(route: AdminRoute, session: AuthSession | null): boolean {
-  return route.platformOnly
-    ? hasPlatformScope(session, "root_admin")
-    : hasAnySessionPermission(session, route.permissionCodes);
-}
-
-export function visibleAdminNavGroups(session: AuthSession | null) {
-  return adminNavGroups
-    .map((group) => ({ ...group, routes: group.routes.filter((route) => canAccessAdminRoute(route, session)) }))
-    .filter((group) => group.routes.length > 0);
-}
-
-export function firstAccessibleAdminRoute(session: AuthSession | null) {
-  return adminRoutes.find((route) => canAccessAdminRoute(route, session));
-}
-
+/**
+ * Addresses that predate the Workspace Architecture.
+ *
+ * Members, roles and groups became tabs of one Access section; knowledge
+ * governance, connectors and apps all became Knowledge; the audit log became
+ * Activity. Each old address resolves to its successor and rewrites the bar.
+ */
 export const legacySectionAliases: Record<string, string> = {
   "": "overview",
   dashboard: "overview",
-  access: "members",
-  people: "members",
-  groups: "roles",
-  connectors: "apps-permissions",
-  sources: "apps-permissions",
+  members: "access",
+  people: "access",
+  roles: "access",
+  groups: "access",
+  "knowledge-governance": "knowledge",
+  connectors: "knowledge",
+  sources: "knowledge",
+  apps: "knowledge",
+  "apps-permissions": "knowledge",
+  "agents-policies": "agent",
+  audit: "activity",
+  "audit-logs": "activity",
   "workspace-settings": "settings",
-  "audit-logs": "audit",
+  "platform/overview": "platform-tenants",
+  "platform/workspaces": "platform-tenants",
+  "platform/policies": "platform-models",
+  "platform/health": "platform-system",
 };
+
+const DESCRIPTIONS: Record<string, string> = {
+  overview: "What is configured in this workspace, and what needs attention.",
+  knowledge: "The documents and sources this workspace's agent can read.",
+  agent: "Identity, instructions, model, capabilities and tools.",
+  access: "Who can use this workspace, and who administers it.",
+  experience: "Branding, welcome copy and starter prompts.",
+  activity: "What changed here, who changed it, and whether it worked.",
+  settings: "Workspace identity, data region, retention and lifecycle.",
+  "platform-tenants": "Every tenant on this deployment. Users see these as workspaces.",
+  "platform-users": "Everyone signed in, their memberships and platform authority.",
+  "platform-public-workspaces": "Tenants published to everyone, and where new users land.",
+  "platform-models": "Which models and capabilities tenants are allowed to use.",
+  "platform-integrations": "Connector availability, and every running connection.",
+  "platform-usage": "Volume and cost across tenants.",
+  "platform-audit": "The immutable record, for investigation.",
+  "platform-system": "Operational health and deployment configuration.",
+};
+
+/** Platform ids are prefixed so a workspace section can never collide with one. */
+function sectionId(item: RailItem, group: AdminNavGroupId) {
+  return group === "platform" ? `platform-${item.id}` : item.id;
+}
+
+const keywordsById = new Map<string, string[]>();
+for (const [legacy, target] of Object.entries(legacySectionAliases)) {
+  if (!legacy) continue;
+  keywordsById.set(target, [...(keywordsById.get(target) ?? []), legacy.replace(/[-/]/g, " ")]);
+}
+
+function toRoute(item: RailItem, group: AdminNavGroupId): AdminRoute {
+  const id = sectionId(item, group);
+  return {
+    id,
+    path: item.href,
+    label: item.label,
+    description: DESCRIPTIONS[id] ?? "",
+    keywords: keywordsById.get(id) ?? [],
+    icon: item.icon,
+    group,
+  };
+}
+
+export const adminRoutes: AdminRoute[] = [
+  ...workspaceAdminRailItems.map((item) => toRoute(item, "workspace")),
+  ...workspaceAdminRailTail.map((item) => toRoute(item, "workspace")),
+  ...platformAdminRailItems.map((item) => toRoute(item, "platform")),
+];
+
+const permissionsById = new Map<string, readonly string[] | undefined>(
+  [...workspaceAdminRailItems, ...workspaceAdminRailTail].map(
+    (item) => [sectionId(item, "workspace"), item.permissionCodes] as const,
+  ),
+);
+
+export function canAccessAdminRoute(route: AdminRoute, session: AuthSession | null): boolean {
+  if (route.group === "platform") return hasPlatformScope(session, "root_admin");
+  const codes = permissionsById.get(route.id);
+  return !codes || hasAnySessionPermission(session, codes);
+}
 
 export function findRoute(id: string): AdminRoute | undefined {
   return adminRoutes.find((route) => route.id === id);
 }
 
-export function resolveSection(rawSection: string): { section: string; canonicalPath: string; redirect: boolean } {
+/** The route whose section a given address belongs to, nested pages included. */
+export function routeForPath(pathname: string): AdminRoute | undefined {
+  const platform = modeForPath(pathname) === "platform-admin";
+  const candidates = adminRoutes.filter((route) => route.group === (platform ? "platform" : "workspace"));
+  return (
+    candidates.find((route) => route.path === pathname)
+    ?? candidates
+      .filter((route) => pathname.startsWith(`${route.path}/`))
+      .sort((a, b) => b.path.length - a.path.length)[0]
+  );
+}
+
+/** Path suffix — everything after `/admin/` — to the route that owns it. */
+const byPath = new Map<string, AdminRoute>(
+  adminRoutes.map((route) => [route.path.replace(/^\/admin\/?/, ""), route]),
+);
+
+export function resolveSection(rawSection: string): {
+  section: string;
+  canonicalPath: string;
+  redirect: boolean;
+} {
   const trimmed = rawSection.replace(/^\/+|\/+$/g, "");
   const alias = legacySectionAliases[trimmed];
   if (alias) {
-    const route = findRoute(alias);
-    return { section: alias, canonicalPath: route?.path ?? "/admin", redirect: true };
+    return { section: alias, canonicalPath: findRoute(alias)?.path ?? "/admin", redirect: true };
   }
-  const route = adminRoutes.find((entry) => entry.path.replace(/^\/admin\/?/, "") === trimmed);
-  return { section: route?.id ?? (trimmed || "overview"), canonicalPath: route?.path ?? "/admin", redirect: false };
+  const route = byPath.get(trimmed);
+  return {
+    section: route?.id ?? (trimmed || "overview"),
+    canonicalPath: route?.path ?? "/admin",
+    redirect: false,
+  };
 }

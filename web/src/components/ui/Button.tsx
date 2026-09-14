@@ -40,8 +40,8 @@ const variantClasses: Record<ButtonVariant, string> = {
 };
 
 const sizeClasses: Record<ButtonSize, string> = {
-  sm: "h-8 gap-1.5 rounded-[var(--radius-sm)] px-2.5 text-[0.8125rem]",
-  md: "h-9 gap-1.5 rounded-[var(--radius-sm)] px-3 text-[0.8125rem]",
+  sm: "h-8 gap-1.5 rounded-[var(--radius-sm)] px-2.5 text-[length:var(--text-size-ui)]",
+  md: "h-9 gap-1.5 rounded-[var(--radius-sm)] px-3 text-[length:var(--text-size-ui)]",
   lg: "h-10 gap-2 rounded-[var(--radius-md)] px-4 text-sm",
 };
 
@@ -97,6 +97,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       )}
       disabled={disabled || loading}
       type={type}
+      title={iconOnly ? props["aria-label"] : undefined}
       {...props}
     >
       {loading ? (

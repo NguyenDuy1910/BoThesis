@@ -39,12 +39,18 @@ interface DataTableProps<T> {
   selectable?: boolean;
   selectedRowIds?: string[];
   onSelectedRowIdsChange?: (ids: string[]) => void;
+  /**
+   * The row an open inspector is describing. Distinct from `selectedRowIds`,
+   * which is the checkbox selection a bulk action would apply to — a person
+   * can be reading one record while several are ticked.
+   */
+  activeRowId?: string | null;
   emptyState?: React.ReactNode;
   className?: string;
   ariaLabel?: string;
 }
 
-export function DataTable<T extends Record<string, unknown>>({
+export function DataTable<T extends object>({
   columns,
   data,
   keyField = "id",
@@ -54,6 +60,7 @@ export function DataTable<T extends Record<string, unknown>>({
   selectable = false,
   selectedRowIds,
   onSelectedRowIdsChange,
+  activeRowId,
   emptyState,
   className,
   ariaLabel,
@@ -65,7 +72,7 @@ export function DataTable<T extends Record<string, unknown>>({
   const selectedIds = selectedRowIds ?? internalSelected;
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const rowId = useCallback(
-    (row: T) => (getRowId ? getRowId(row) : String(row[keyField])),
+    (row: T) => (getRowId ? getRowId(row) : String(row[keyField as keyof T])),
     [getRowId, keyField],
   );
 
@@ -80,8 +87,8 @@ export function DataTable<T extends Record<string, unknown>>({
   const sorted = useMemo(() => {
     if (!sortKey) return data;
     return [...data].sort((a, b) => {
-      const left = a[sortKey];
-      const right = b[sortKey];
+      const left = a[sortKey as keyof T];
+      const right = b[sortKey as keyof T];
       if (left == null) return 1;
       if (right == null) return -1;
       const comparison = String(left).localeCompare(String(right), undefined, {
@@ -193,6 +200,8 @@ export function DataTable<T extends Record<string, unknown>>({
             const selected = selectedSet.has(id);
             return (
               <tr
+                aria-current={id === activeRowId ? "true" : undefined}
+                data-active={id === activeRowId ? "true" : undefined}
                 data-clickable={onRowClick ? "true" : undefined}
                 data-selected={selected ? "true" : undefined}
                 key={id}
@@ -238,7 +247,7 @@ export function DataTable<T extends Record<string, unknown>>({
                   >
                     {column.render
                       ? column.render(row)
-                      : String(row[column.key] ?? "—")}
+                      : String(row[column.key as keyof T] ?? "—")}
                   </td>
                 ))}
                 {rowActions && (
@@ -274,7 +283,7 @@ export function CellTitle({
       <span className="min-w-0">
         <span className="block truncate font-medium text-[var(--text-primary)]">{title}</span>
         {subtitle && (
-          <span className="block truncate text-[0.75rem] text-[var(--text-tertiary)]">
+          <span className="block truncate text-[length:var(--text-size-meta)] text-[var(--text-tertiary)]">
             {subtitle}
           </span>
         )}

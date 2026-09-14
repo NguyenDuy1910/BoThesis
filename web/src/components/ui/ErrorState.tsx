@@ -28,7 +28,7 @@ export function ErrorState({
       <div
         className={cn(
           "flex gap-2.5 rounded-[var(--radius-sm)] bg-[var(--status-danger-bg)] px-3 py-2.5",
-          "text-[0.8125rem] text-[var(--status-danger-text)] shadow-[inset_0_0_0_1px_var(--status-danger-border)]",
+          "text-[length:var(--text-size-ui)] text-[var(--status-danger-text)] shadow-[inset_0_0_0_1px_var(--status-danger-border)]",
           className,
         )}
         role="alert"

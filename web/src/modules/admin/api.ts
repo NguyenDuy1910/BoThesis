@@ -1,5 +1,6 @@
 "use client";
 
+import { describeRequestFailure } from "@/lib/api/errors";
 import { getApiConfiguration, requestIdentityHeaders } from "@/lib/api/config";
 import { appBrand } from "@/lib/brand";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -102,7 +103,7 @@ export function useAdminQuery<T>(path: string | null) {
       })
       .catch((caught) => {
         if (!controller.signal.aborted) {
-          setError(caught instanceof Error ? caught.message : "The Admin request could not be completed.");
+          setError(describeRequestFailure(caught, "This view"));
         }
       })
       .finally(() => {

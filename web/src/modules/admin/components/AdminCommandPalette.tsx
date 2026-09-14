@@ -113,14 +113,14 @@ export function AdminCommandPalette({
         };
       });
 
+    // Collections and documents are managed in one place now, so a content hit
+    // opens Knowledge rather than a per-item address that no longer exists.
     const content = items.map((item) => ({
       id: `item:${item.id}`,
       group: "Knowledge",
       label: item.title || "Untitled",
-      href:
-        item.item_type === "collection"
-          ? `/knowledge/collections/${item.id}`
-          : `/knowledge/collections/${item.parent_item_id ?? ""}`,
+      hint: item.item_type === "collection" ? "Collection" : "Document",
+      href: "/admin/knowledge",
       icon:
         item.item_type === "collection" ? (
           <BookOpen aria-hidden="true" className="h-4 w-4" />
@@ -129,7 +129,7 @@ export function AdminCommandPalette({
         ),
     }));
 
-    return [...sections, ...content.filter((entry) => entry.href !== "/knowledge/collections/")];
+    return [...sections, ...content];
   }, [items, query]);
 
   useEffect(() => {

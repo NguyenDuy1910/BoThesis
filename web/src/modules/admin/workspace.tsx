@@ -12,6 +12,8 @@ import {
 import { getApiConfiguration } from "@/lib/api/config";
 import { getAuthSession, hasSessionPermission } from "@/lib/auth/session";
 import { adminRequest } from "@/modules/admin/api";
+import { mockApi, previewMode } from "@/mocks/bothesis-api.mock";
+import { useAuthSession } from "@/lib/hooks/useAuthSession";
 
 export interface AdminTenant {
   id: string;
@@ -62,6 +64,7 @@ const AdminWorkspaceContext = createContext<AdminWorkspaceValue | null>(null);
  * looking at instead of each fetching it again.
  */
 export function AdminWorkspaceProvider({ children }: { children: React.ReactNode }) {
+  const currentSession = useAuthSession();
   const [overview, setOverview] = useState<AdminOverview | null>(null);
   const [viewer, setViewer] = useState<AdminViewer | null>(null);
   const [loading, setLoading] = useState(true);
@@ -71,6 +74,16 @@ export function AdminWorkspaceProvider({ children }: { children: React.ReactNode
 
   useEffect(() => {
     const controller = new AbortController();
+    if (previewMode) {
+      setLoading(true);
+      void mockApi.workspaces.get().then((workspace) => {
+        if (controller.signal.aborted) return;
+        setOverview({ tenant: { id: workspace.id, code: workspace.id, name: workspace.name, status: workspace.status, updated_at: "2026-09-14" } });
+        setViewer(currentSession ? { id: currentSession.user_id, display_name: currentSession.display_name, email: currentSession.email } : null);
+        setLoading(false);
+      });
+      return () => controller.abort();
+    }
     const configuration = getApiConfiguration();
     const session = getAuthSession();
     const userId = configuration?.userId;
@@ -114,7 +127,7 @@ export function AdminWorkspaceProvider({ children }: { children: React.ReactNode
       });
 
     return () => controller.abort();
-  }, [revision]);
+  }, [revision, currentSession]);
 
   const value = useMemo<AdminWorkspaceValue>(() => {
     const attention = overview?.attention ?? {};

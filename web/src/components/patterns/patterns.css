@@ -1,0 +1,45 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Pattern motion
+   ---------------------------------------------------------------------------
+   The only animations the BoThesis patterns own. Everything else is a colour
+   or opacity transition declared inline with its component.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* The pending treatment: a sweep travelling left to right across the BoThesis
+   wordmark. Text colour animates — nothing rotates, bounces or spins, because
+   a spinner says "waiting" where this says "working". */
+@keyframes bothesis-sweep {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -80% 0;
+  }
+}
+
+.bothesis-thinking {
+  background-image: linear-gradient(
+    100deg,
+    var(--text-tertiary) 0%,
+    var(--text-tertiary) 35%,
+    var(--text-primary) 50%,
+    var(--text-tertiary) 65%,
+    var(--text-tertiary) 100%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: bothesis-sweep 1.6s linear infinite;
+}
+
+/* Reduced motion holds the wordmark at a static, readable weight rather than
+   removing the indicator, which would leave no sign that anything is running. */
+@media (prefers-reduced-motion: reduce) {
+  .bothesis-thinking {
+    animation: none;
+    background-image: none;
+    -webkit-text-fill-color: currentColor;
+    color: var(--text-secondary);
+  }
+}

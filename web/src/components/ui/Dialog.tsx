@@ -2,8 +2,10 @@
 
 import { cn } from "@/lib/cn";
 import { X } from "lucide-react";
-import { type RefObject, useEffect, useId, useRef } from "react";
+import { type RefObject, useId, useRef } from "react";
 import { createPortal } from "react-dom";
+
+import { useModalLayer } from "@/lib/hooks/useModalLayer";
 
 interface DialogProps {
   open: boolean;
@@ -26,72 +28,8 @@ export function Dialog({
 }: DialogProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement | null>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
 
-  useEffect(() => {
-    if (open) {
-      document.body.style.overflow = "hidden";
-    } else {
-      document.body.style.overflow = "";
-    }
-    return () => { document.body.style.overflow = ""; };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    let backgroundElements: Array<{
-      element: HTMLElement;
-      ariaHidden: string | null;
-      inert: boolean;
-    }> = [];
-    const frame = window.requestAnimationFrame(() => {
-      const overlayRoot = dialogRef.current?.parentElement;
-      backgroundElements = Array.from(document.body.children)
-        .filter((element): element is HTMLElement => element instanceof HTMLElement && element !== overlayRoot)
-        .map((element) => ({
-          element,
-          ariaHidden: element.getAttribute("aria-hidden"),
-          inert: element.inert,
-        }));
-      for (const { element } of backgroundElements) {
-        element.inert = true;
-        element.setAttribute("aria-hidden", "true");
-      }
-      (initialFocusRef?.current ?? focusableElements(dialogRef.current)[0])?.focus();
-    });
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = focusableElements(dialogRef.current);
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first?.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", handleKeyDown);
-      for (const { element, ariaHidden, inert } of backgroundElements) {
-        element.inert = inert;
-        if (ariaHidden === null) element.removeAttribute("aria-hidden");
-        else element.setAttribute("aria-hidden", ariaHidden);
-      }
-      previouslyFocused?.focus();
-    };
-  }, [initialFocusRef, open]);
+  useModalLayer({ initialFocusRef, onClose, open, panelRef: dialogRef });
 
   if (!open) return null;
 
@@ -116,7 +54,7 @@ export function Dialog({
         )}
       >
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-4 py-3">
-          <h2 id={titleId} className="text-[0.9375rem] font-semibold text-[var(--text-primary)]">{title}</h2>
+          <h2 id={titleId} className="text-[length:var(--text-size-body)] font-semibold text-[var(--text-primary)]">{title}</h2>
           <button
             aria-label="Close dialog"
             onClick={onClose}

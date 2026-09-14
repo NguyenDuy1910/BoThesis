@@ -33,7 +33,10 @@
   --palette-pearl-300: #d3cddf;
 
   /* Neutral — ink (light-mode text) */
-  --palette-ink-500: #776f85;
+  /* Figma's ink-500 is #776f85. Against the tinted canvas the rail sits on
+     that measures 4.48:1 — a rounding error short of AA, and this ramp step
+     carries supporting text everywhere. Darkened one notch to 5.3:1. */
+  --palette-ink-500: #6b6479;
   --palette-ink-600: #5a5367;
   --palette-ink-700: #403b4c;
   --palette-ink-800: #292633;
@@ -58,7 +61,8 @@
   --palette-lilac-200: #ddd4ff;
   --palette-lilac-300: #c7b8ff;
   --palette-lilac-500: #8b6ff7;
-  --palette-lilac-600: #7457e8;
+  /* Likewise 4.08:1 for accent text on the tinted canvas; this is 5.5:1. */
+  --palette-lilac-600: #6a4cd4;
   --palette-aurora-400: #7b8cff;
   --palette-aurora-500: #6676f4;
   --palette-aurora-600: #5867df;
@@ -95,7 +99,9 @@
      this ramp plus one hairline — never from stacking borders or shadows. */
 
   --surface-canvas: var(--palette-pearl-50);
-  --surface-nav: var(--palette-lilac-25);
+  /* The rail sits on the tinted canvas and the working area on white.
+     That difference is what separates them — not a heavier divider. */
+  --surface-nav: var(--palette-pearl-50);
   --surface-subtle: var(--palette-pearl-100);
   --surface-inset: var(--palette-pearl-25);
   --surface-base: var(--palette-pearl-0);
@@ -203,8 +209,13 @@
   /* Type. Mirrors the Figma text styles. `--text-size-meta` (12px) has no
      Figma equivalent: the ramp jumps 13 → 11, and 11px is an uppercase eyebrow
      size, too small for the supporting line under a row title. */
-  --font-sans: var(--font-ui), -apple-system, BlinkMacSystemFont, "SF Pro Text",
+  /* Figma specifies SF Pro. Prefer its text cut, then retain the native
+     platform fallback so the interface remains stable off macOS. */
+  --font-ui: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont,
     "Segoe UI", sans-serif;
+  --font-geist-mono: "Geist Mono", "SF Mono", Monaco, "Cascadia Code",
+    "Roboto Mono", Consolas, monospace;
+  --font-sans: var(--font-ui);
   --font-mono: var(--font-geist-mono), "SF Mono", Monaco, "Cascadia Code",
     "Roboto Mono", Consolas, monospace;
 
@@ -216,10 +227,16 @@
   --text-lh-h2: 1.875rem;
   --text-size-h3: 1.125rem;
   --text-lh-h3: 1.625rem;
-  --text-size-body: 0.9375rem; /* 15px */
-  --text-lh-body: 1.375rem;
-  --text-size-ui: 0.8125rem; /* 13px — controls, table cells */
-  --text-lh-ui: 1.125rem;
+  --text-size-body: 1rem; /* 16px — readable prose and form values */
+  --text-lh-body: 1.5rem;
+  --text-size-ui: 0.875rem; /* 14px — controls, table cells */
+  --text-lh-ui: 1.25rem;
+  /* 14px Medium is the size the Figma NavItem component is drawn at. It sits
+     between Body/15 and Small/13 and has no Figma text style of its own, so it
+     is named here once and used by every navigating control — rail items and
+     page tabs — rather than being re-typed as a literal at each call site. */
+  --text-size-nav: 0.875rem;
+  --text-lh-nav: 1.25rem;
   --text-size-meta: 0.75rem; /* 12px — supporting row detail */
   --text-lh-meta: 1rem;
   --text-size-caption: 0.6875rem; /* 11px — uppercase section labels */
@@ -243,11 +260,14 @@
   --chat-max: 864px;
   --chat-min-width: 42rem;
 
-  /* Breakpoints, named once. `--bp-inspector` is where the contextual
-     inspector stops fitting beside a collection and becomes an overlay;
-     `--bp-nav` is where the sidebar stops being permanent. */
-  --bp-nav: 900px;
-  --bp-inspector: 1180px;
+  /* Breakpoints, named once, and deliberately equal to Tailwind's `lg`
+     and `xl`. The rail and the button that opens it must flip at the same
+     width, and half of that logic is written in utility classes — so the
+     two systems share a number rather than each picking their own.
+     --bp-nav        the rail stops being permanent and becomes an overlay
+     --bp-inspector  the inspector stops fitting beside a collection */
+  --bp-nav: 1024px;
+  --bp-inspector: 1280px;
 
   --z-topbar: 10;
   --z-composer: 12;
@@ -281,18 +301,22 @@ html.dark {
   --text-tertiary: var(--palette-night-300);
   --text-inverse: var(--palette-ink-800);
   --text-accent: var(--palette-lilac-300);
-  --text-on-accent: #ffffff;
+  --text-on-accent: var(--palette-ink-950);
 
   --border-subtle: rgb(255 255 255 / 9%);
   --border-default: rgb(255 255 255 / 16%);
   --border-strong: var(--palette-night-300);
   --border-focus: var(--palette-aurora-400);
 
-  /* aurora-500 on a near-black surface clears AA for white text (5.4:1) and
-     reads brighter than aurora-600, which goes muddy against night. */
-  --accent-primary: var(--palette-aurora-500);
-  --accent-hover: var(--palette-aurora-400);
-  --accent-pressed: var(--palette-aurora-600);
+  /* A solid accent carries its own label, so the contrast that matters is
+     fill-against-label, not fill-against-page. Darkening the fill on a dark
+     page therefore makes it worse: aurora-500 with white text is 3.84:1 and
+     fails. Dark mode inverts the pairing instead — a brighter fill with ink
+     on top, which reads at 6.3:1 and keeps the accent unmistakably the
+     accent. `--text-on-accent` below is the other half of this. */
+  --accent-primary: var(--palette-aurora-400);
+  --accent-hover: #93a2ff;
+  --accent-pressed: var(--palette-aurora-500);
   --accent-soft: rgb(123 140 255 / 18%);
   --accent-soft-hover: rgb(123 140 255 / 26%);
   --accent-soft-pressed: rgb(123 140 255 / 34%);
@@ -378,11 +402,8 @@ html.dark {
   --color-status-warning: var(--status-warning-text);
   --color-status-danger: var(--status-danger-text);
 
-  --radius-xs: var(--radius-xs);
-  --radius-sm: var(--radius-sm);
-  --radius-md: var(--radius-md);
-  --radius-lg: var(--radius-lg);
-  --radius-xl: var(--radius-xl);
+  /* Tailwind owns the `--radius-*` and `--ease-*` namespaces; re-exporting
+     the scale tokens under those names makes them self-referential and
+     voids them. Call sites reach the scale as `var(--radius-md)` instead. */
 
-  --ease-out: var(--ease-out);
 }

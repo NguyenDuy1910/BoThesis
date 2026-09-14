@@ -1,3 +1,5 @@
+import { describeRequestFailure } from "@/lib/api/errors";
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -65,8 +67,8 @@ export function pluralize(count: number, singular: string, plural = `${singular}
   return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
 }
 
-export function errorMessage(error: unknown, fallback = "The request could not be completed.") {
-  return error instanceof Error ? error.message : fallback;
+export function errorMessage(error: unknown, subject = "The request") {
+  return describeRequestFailure(error, subject);
 }
 
 /**

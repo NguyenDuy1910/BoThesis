@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getApiConfiguration } from "@/lib/api/config";
+import { previewMode } from "@/mocks/bothesis-api.mock";
 import { streamAgentResponse } from "../api";
 import { historyFromMessages, regenerationContext } from "../conversation-history";
 import {
@@ -45,7 +46,7 @@ export function useChat({
   const [isConfigured, setIsConfigured] = useState(false);
 
   useEffect(() => {
-    setIsConfigured(Boolean(getApiConfiguration()));
+    setIsConfigured(previewMode || Boolean(getApiConfiguration()));
   }, []);
 
   // Reset on a real conversation switch only. ``initialMessages`` gets a fresh

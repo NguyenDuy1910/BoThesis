@@ -51,9 +51,24 @@ const statuses: Record<string, StatusPresentation> = {
   unknown: { label: "Unknown", tone: "neutral" },
 };
 
-export function statusPresentation(status?: string | null): StatusPresentation {
+/**
+ * A domain's own reading of a status string.
+ *
+ * The dictionary above is the product-wide vocabulary, and one backend word
+ * can mean different things in different places: `pending` is "Queued" for a
+ * document waiting to be indexed, but "Review" for a workspace waiting on an
+ * administrator. A domain passes its own entries rather than forking the
+ * component or inventing a second badge.
+ */
+export type StatusVocabulary = Record<string, StatusPresentation>;
+
+export function statusPresentation(
+  status?: string | null,
+  vocabulary?: StatusVocabulary,
+): StatusPresentation {
   const key = String(status ?? "").toLowerCase().trim();
   return (
+    vocabulary?.[key] ??
     statuses[key] ?? {
       label: key
         ? key.replaceAll(/[._-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
@@ -67,13 +82,16 @@ export function StatusBadge({
   status,
   label,
   className,
+  vocabulary,
 }: {
   status?: string | null;
   /** Overrides the derived label while keeping the derived colour. */
   label?: string;
   className?: string;
+  /** This domain's reading of the status, checked before the shared one. */
+  vocabulary?: StatusVocabulary;
 }) {
-  const presentation = statusPresentation(status);
+  const presentation = statusPresentation(status, vocabulary);
   return (
     <Badge className={className} dot pulse={presentation.moving} tone={presentation.tone}>
       {label ?? presentation.label}

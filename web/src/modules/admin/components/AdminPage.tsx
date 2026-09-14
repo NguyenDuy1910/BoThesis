@@ -12,20 +12,26 @@ import { resolveSection } from "@/modules/admin/navigation";
 import { AccessPage } from "@/modules/admin/pages/AccessPage";
 import { AgentsPoliciesPage } from "@/modules/admin/pages/AgentsPoliciesPage";
 import { AuditPage } from "@/modules/admin/pages/AuditPage";
-import { KnowledgeGovernancePage } from "@/modules/admin/pages/KnowledgeGovernancePage";
-import { PlatformOverviewPage } from "@/modules/admin/pages/PlatformOverviewPage";
+import { ExperiencePage } from "@/modules/admin/pages/ExperiencePage";
 import { PlatformAuditPage } from "@/modules/admin/pages/PlatformAuditPage";
-import { PlatformPoliciesPage } from "@/modules/admin/pages/PlatformPoliciesPage";
+import { PlatformIntegrationsPage } from "@/modules/admin/pages/PlatformIntegrationsPage";
+import { PlatformModelsPage } from "@/modules/admin/pages/PlatformModelsPage";
+import { PlatformPublicWorkspacesPage } from "@/modules/admin/pages/PlatformPublicWorkspacesPage";
+import { PlatformTenantsPage } from "@/modules/admin/pages/PlatformTenantsPage";
+import { PlatformUsagePage } from "@/modules/admin/pages/PlatformUsagePage";
 import { PlatformUsersPage } from "@/modules/admin/pages/PlatformUsersPage";
-import { PlatformWorkspacesPage } from "@/modules/admin/pages/PlatformWorkspacesPage";
-import { SystemHealthPage } from "@/modules/admin/pages/SystemHealthPage";
 import { SettingsPage } from "@/modules/admin/pages/SettingsPage";
+import { SystemHealthPage } from "@/modules/admin/pages/SystemHealthPage";
 import { WorkspaceOverviewPage } from "@/modules/admin/pages/WorkspaceOverviewPage";
+import { WorkspaceKnowledgeScreen } from "@/modules/knowledge/components/WorkspaceKnowledgeScreen";
 
 /**
  * The single entry point for every Admin address. It resolves the incoming
  * path to a canonical section — rewriting the address bar when an older link
  * is used — and hands off to the page that owns that section.
+ *
+ * The section ids come from the rails in `@/lib/navigation`, so a rail item
+ * and the page it opens can never drift apart.
  */
 export function AdminPage({ section: rawSection }: { section: string }) {
   const router = useRouter();
@@ -36,32 +42,40 @@ export function AdminPage({ section: rawSection }: { section: string }) {
   }, [canonicalPath, redirect, router]);
 
   switch (section) {
+    // Workspace admin
     case "overview":
       return <WorkspaceOverviewPage />;
-    case "members":
-      return <AccessPage initialTab="people" title="Members & access" />;
-    case "roles":
-      return <AccessPage initialTab="roles" title="Roles & access" />;
-    case "knowledge-governance":
-      return <KnowledgeGovernancePage />;
-    case "agents-policies":
+    case "knowledge":
+      return <WorkspaceKnowledgeScreen />;
+    case "agent":
       return <AgentsPoliciesPage />;
-    case "audit":
+    case "access":
+      return <AccessPage />;
+    case "experience":
+      return <ExperiencePage />;
+    case "activity":
       return <AuditPage />;
     case "settings":
       return <SettingsPage />;
-    case "platform-overview":
-      return <PlatformOverviewPage />;
-    case "platform-workspaces":
-      return <PlatformWorkspacesPage />;
+
+    // Platform admin
+    case "platform-tenants":
+      return <PlatformTenantsPage />;
     case "platform-users":
       return <PlatformUsersPage />;
-    case "platform-policies":
-      return <PlatformPoliciesPage />;
-    case "platform-health":
-      return <SystemHealthPage />;
+    case "platform-public-workspaces":
+      return <PlatformPublicWorkspacesPage />;
+    case "platform-models":
+      return <PlatformModelsPage />;
+    case "platform-integrations":
+      return <PlatformIntegrationsPage />;
+    case "platform-usage":
+      return <PlatformUsagePage />;
     case "platform-audit":
       return <PlatformAuditPage />;
+    case "platform-system":
+      return <SystemHealthPage />;
+
     default:
       return (
         <>
@@ -71,11 +85,7 @@ export function AdminPage({ section: rawSection }: { section: string }) {
           />
           <Card>
             <EmptyState
-              action={
-                <Button onClick={() => router.push("/admin")}>
-                  Go to the dashboard
-                </Button>
-              }
+              action={<Button onClick={() => router.push("/admin")}>Go to the overview</Button>}
               description="Use the navigation, or press ⌘K to search for what you were looking for."
               icon={<Compass className="h-5 w-5" />}
               title="Nothing lives here"

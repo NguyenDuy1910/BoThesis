@@ -49,6 +49,7 @@ export function Dropdown({
   closeOnScroll = false,
 }: DropdownProps) {
   const [internalOpen, setInternalOpen] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [position, setPosition] = useState<MenuPosition | null>(null);
   const open = controlledOpen ?? internalOpen;
   const menuId = useId();
@@ -58,9 +59,17 @@ export function Dropdown({
   const initialFocusRef = useRef<"first" | "last">("first");
 
   const setOpen = useCallback((nextOpen: boolean) => {
+    if (!nextOpen) setClosing(true);
     if (controlledOpen === undefined) setInternalOpen(nextOpen);
     onOpenChange?.(nextOpen);
   }, [controlledOpen, onOpenChange]);
+
+  // Hold the node through the exit animation, then drop it.
+  useEffect(() => {
+    if (open || !closing) return;
+    const timer = window.setTimeout(() => setClosing(false), 110);
+    return () => window.clearTimeout(timer);
+  }, [closing, open]);
 
   // Anchor the menu to the trigger in viewport coordinates so a portal-rendered
   // menu can never be clipped by an ancestor's overflow (tables, scroll panes).
@@ -76,7 +85,7 @@ export function Dropdown({
     const available = (openUp ? spaceAbove : spaceBelow) - MENU_GAP - VIEWPORT_MARGIN;
     const preferredLeft = align === "right" ? rect.right - menuWidth : rect.left;
     const next: MenuPosition = {
-      top: openUp ? rect.top - MENU_GAP : rect.bottom + MENU_GAP,
+      top: openUp ? rect.top - MENU_GAP - menuHeight : rect.bottom + MENU_GAP,
       left: Math.min(
         Math.max(VIEWPORT_MARGIN, preferredLeft),
         Math.max(VIEWPORT_MARGIN, window.innerWidth - menuWidth - VIEWPORT_MARGIN),
@@ -146,7 +155,6 @@ export function Dropdown({
         top: position.top,
         left: position.left,
         maxHeight: position.maxHeight,
-        transform: position.openUp ? "translateY(-100%)" : undefined,
         visibility: "visible",
       }
     : { position: "fixed", top: -9999, left: -9999, visibility: "hidden" };
@@ -173,14 +181,14 @@ export function Dropdown({
           setOpen(true);
         }}
         className={cn(
-          "inline-flex h-9 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--surface-base)] px-3 text-[0.8125rem] font-medium text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] transition-[background-color,color,box-shadow] hover:bg-[var(--surface-inset)] hover:text-[var(--text-primary)] hover:shadow-[inset_0_0_0_1px_var(--border-default)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)] disabled:pointer-events-none disabled:opacity-45",
+          "inline-flex h-9 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--surface-base)] px-3 text-[length:var(--text-size-ui)] font-medium text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] transition-[background-color,color,box-shadow] hover:bg-[var(--surface-inset)] hover:text-[var(--text-primary)] hover:shadow-[inset_0_0_0_1px_var(--border-default)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)] disabled:pointer-events-none disabled:opacity-45",
           buttonClassName
         )}
       >
         {label}
         {showChevron && <ChevronDown aria-hidden="true" className={cn("h-4 w-4 transition-transform", open && "rotate-180")} />}
       </button>
-      {open &&
+      {(open || closing) &&
         typeof document !== "undefined" &&
         createPortal(
           <div
@@ -196,9 +204,12 @@ export function Dropdown({
               if (event.key === "Tab") setOpen(false);
               else handleMenuKeyDown(event, menuRef.current);
             }}
+            data-placement={position?.openUp ? "top" : "bottom"}
+            data-state={open ? "open" : "closed"}
             style={menuStyle}
             className={cn(
               "ui-popover z-[60] min-w-52 overflow-y-auto overscroll-contain rounded-[var(--radius-md)] bg-[var(--surface-raised)] p-1 shadow-[var(--elevation-3)]",
+              !open && "pointer-events-none",
               menuClassName
             )}
           >
@@ -254,7 +265,8 @@ export function DropdownItem({
       type={type}
       role="menuitem"
       className={cn(
-        "flex min-h-9 w-full items-center gap-2.5 rounded-[var(--radius-sm)] px-2.5 py-1.5 text-left text-[0.8125rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
+        "text-[length:var(--text-size-ui)]",
+        "flex min-h-9 w-full items-center gap-2.5 rounded-[var(--radius-sm)] px-2.5 py-1.5 text-left font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
         destructive
           ? "text-[var(--status-danger-text)] hover:bg-[var(--status-danger-bg)]"
           : selected
@@ -271,7 +283,7 @@ export function DropdownItem({
 /** Non-interactive grouping label inside a menu. */
 export function DropdownLabel({ children }: { children: React.ReactNode }) {
   return (
-    <p className="px-2.5 pb-1 pt-2 text-[0.6875rem] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
+    <p className="px-2.5 pb-1 pt-2 text-[length:var(--text-size-caption)] font-semibold uppercase tracking-[0.04em] text-[var(--text-tertiary)]">
       {children}
     </p>
   );

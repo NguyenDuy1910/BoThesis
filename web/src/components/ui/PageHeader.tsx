@@ -29,7 +29,7 @@ export function PageHeader({
         <h1 className="adm-head__title">
           <span className="min-w-0 text-balance">{title}</span>
           {metadata && (
-            <span className="flex min-w-0 flex-wrap items-center gap-2 text-[0.8125rem] font-normal text-[var(--text-tertiary)]">
+            <span className="flex min-w-0 flex-wrap items-center gap-2 text-[length:var(--text-size-ui)] font-normal text-[var(--text-tertiary)]">
               {metadata}
             </span>
           )}

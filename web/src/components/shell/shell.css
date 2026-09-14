@@ -1,0 +1,146 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Application shell
+   ---------------------------------------------------------------------------
+   The frame every product context shares: a navigation rail, a working area,
+   and an optional contextual inspector. Only the geometry lives here — colour,
+   shape and density come from tokens.css, and everything inside the rail is
+   composed from components/shell/SidebarShell.tsx.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.shell {
+  display: flex;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--surface-canvas);
+}
+
+.shell-nav {
+  width: var(--nav-w);
+}
+
+.shell-nav[data-collapsed] {
+  width: var(--nav-w-collapsed);
+}
+
+/* The working area is the primary white surface; the rail beside it stays on
+   the tinted canvas, which is what separates them — not a heavier border. */
+.shell__main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  background: var(--surface-base);
+}
+
+.shell__scroll {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.shell__page {
+  width: 100%;
+  max-width: var(--page-max);
+  margin-inline: auto;
+  padding: var(--space-5) var(--page-gutter) var(--space-12);
+}
+
+.shell__page--narrow {
+  max-width: var(--page-max-narrow);
+}
+
+/* The shell is stable across navigation. Only this route outlet is replaced,
+   so the transition never moves the rail, main surface, or global controls. */
+.shell__route-outlet {
+  animation: shell-route-enter 150ms var(--ease-out) both;
+}
+
+.shell__main > .shell__route-outlet {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+}
+
+.shell__scroll > .shell__route-outlet {
+  min-height: 100%;
+}
+
+.shell__route-boundary {
+  display: grid;
+  min-height: min(28rem, 100%);
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: var(--space-6) var(--page-gutter);
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.shell__route-boundary strong {
+  color: var(--text-primary);
+}
+
+.shell__route-boundary button {
+  margin-top: var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-base);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-accent);
+  font: inherit;
+  font-weight: 600;
+}
+
+.shell__route-boundary-indicator {
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--text-accent);
+  border-radius: var(--radius-full);
+  animation: shell-route-spin 700ms linear infinite;
+}
+
+@keyframes shell-route-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes shell-route-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Below --bp-nav the rail leaves the flow and becomes an overlay. The value
+   equals Tailwind's `lg`, which the shells use for the controls that open
+   and collapse it, so the rail and its controls always flip together. */
+@media (max-width: 1023.98px) {
+  .shell-nav {
+    position: fixed;
+    inset-block: 0;
+    inset-inline-start: 0;
+    width: var(--nav-w);
+    transform: translateX(-100%);
+    box-shadow: var(--elevation-3);
+    transition: transform var(--duration-base) var(--ease-out);
+  }
+
+  .shell-nav[data-collapsed] {
+    width: var(--nav-w);
+  }
+
+  .shell-nav[data-open] {
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell-nav {
+    transition: none;
+  }
+
+  .shell__route-outlet {
+    animation: none;
+  }
+
+  .shell__route-boundary-indicator {
+    animation: none;
+  }
+}

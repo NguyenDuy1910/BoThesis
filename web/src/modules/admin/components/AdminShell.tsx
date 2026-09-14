@@ -1,26 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 
 import { ToastProvider } from "@/components/ui/Toast";
 import { GlobalAssistantLauncher } from "@/components/ui/GlobalAssistantLauncher";
-import { useLocalStorage } from "@/lib/hooks/useLocalStorage";
+import { useShellNav } from "@/components/shell/useShellNav";
 import {
   AdminBreadcrumbProvider,
   useAdminBreadcrumb,
 } from "@/modules/admin/breadcrumb";
 import { AdminWorkspaceProvider } from "@/modules/admin/workspace";
+import { modeForPath } from "@/lib/navigation";
+import { PlatformAdminRail, WorkspaceAdminRail } from "@/components/rails";
 
 import { AdminCommandPalette } from "./AdminCommandPalette";
-import { AdminSidebar } from "./AdminSidebar";
 import { AdminTopbar } from "./AdminTopbar";
 
 export function AdminShell({ children }: { children: React.ReactNode }) {
-  const [collapsed, setCollapsed] = useLocalStorage("bothesis-admin-nav", false);
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const nav = useShellNav();
   const [searchOpen, setSearchOpen] = useState(false);
-
-  const closeMobile = useCallback(() => setMobileOpen(false), []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -38,14 +37,14 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
       <AdminBreadcrumbProvider>
         <ToastProvider>
           <AdminFrame
-            collapsed={collapsed}
-            mobileOpen={mobileOpen}
-            onCloseMobile={closeMobile}
-            onExpand={() => setCollapsed(false)}
-            onOpenMobile={() => setMobileOpen(true)}
+            collapsed={nav.collapsed}
+            mobileOpen={nav.mobileOpen}
+            onCloseMobile={nav.closeMobile}
+            onExpand={nav.expand}
+            onOpenMobile={nav.openMobile}
             onSearchClose={() => setSearchOpen(false)}
             onSearchOpen={() => setSearchOpen(true)}
-            onToggleCollapsed={() => setCollapsed(!collapsed)}
+            onToggleCollapsed={nav.toggleCollapsed}
             searchOpen={searchOpen}
           >
             {children}
@@ -82,16 +81,27 @@ function AdminFrame({
   searchOpen,
 }: AdminFrameProps) {
   const { detailTitle } = useAdminBreadcrumb();
+  const pathname = usePathname();
+  const isPlatform = modeForPath(pathname) === "platform-admin";
 
   return (
-    <div className="adm">
-      <AdminSidebar
-        collapsed={collapsed}
-        mobileOpen={mobileOpen}
-        onMobileClose={onCloseMobile}
-        onToggle={onToggleCollapsed}
-      />
-      <div className="adm__main">
+    <div className="shell">
+      {isPlatform ? (
+        <PlatformAdminRail
+          collapsed={collapsed}
+          mobileOpen={mobileOpen}
+          onMobileClose={onCloseMobile}
+          onToggleCollapse={onToggleCollapsed}
+        />
+      ) : (
+        <WorkspaceAdminRail
+          collapsed={collapsed}
+          mobileOpen={mobileOpen}
+          onMobileClose={onCloseMobile}
+          onToggleCollapse={onToggleCollapsed}
+        />
+      )}
+      <div className="shell__main">
         <AdminTopbar
           collapsed={collapsed}
           detailTitle={detailTitle}
@@ -99,8 +109,8 @@ function AdminFrame({
           onMobileMenuOpen={onOpenMobile}
           onSearchOpen={onSearchOpen}
         />
-        <main className="adm__scroll" id="main-content">
-          <div className="adm__page">{children}</div>
+        <main className="shell__scroll" id="main-content">
+          <div className="shell__page shell__route-outlet" key={pathname}>{children}</div>
         </main>
       </div>
       <AdminCommandPalette onClose={onSearchClose} open={searchOpen} />

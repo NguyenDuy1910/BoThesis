@@ -3,173 +3,65 @@
 import { ScrollText } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { CommandBar, FilterTrigger } from "@/components/layout/CommandBar";
 import { Avatar } from "@/components/ui/Avatar";
-import { CellTitle, type Column } from "@/components/ui/DataTable";
+import { CellTitle, DataTable, type Column } from "@/components/ui/DataTable";
+import { Dialog } from "@/components/ui/Dialog";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { SearchInput } from "@/components/ui/SearchInput";
-import { Select } from "@/components/ui/Select";
+import { ErrorState } from "@/components/ui/ErrorState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { queryString, useAdminQuery } from "@/modules/admin/api";
-import type { Paginated } from "@/modules/admin/collections";
-import { ResourceList } from "@/modules/admin/components/ResourceList";
-import {
-  describeAuditAction,
-  formatDateTime,
-  formatRelative,
-  pluralize,
-  titleCase,
-} from "@/modules/admin/format";
-
-const PAGE_SIZE = 25;
-
-interface AuditEvent extends Record<string, unknown> {
-  id: string;
-  action?: string;
-  resource_type?: string;
-  resource_id?: string;
-  outcome?: string;
-  created_at?: string;
-  actor?: { display_name?: string | null; email?: string | null } | null;
-  details?: Record<string, unknown> | null;
-}
-
-const resourceFilters = [
-  { value: "", label: "Everything" },
-  { value: "document", label: "Documents" },
-  { value: "collection", label: "Collections" },
-  { value: "user", label: "People" },
-  { value: "group", label: "Groups" },
-  { value: "role", label: "Roles" },
-];
+import { adminData, useAdminData } from "@/modules/admin/queries";
+import type { ActivityEvent } from "@/mocks/bothesis-api.mock";
 
 export function AuditPage() {
-  const [page, setPage] = useState(1);
+  return <ActivityTable platform={false} />;
+}
+
+export function ActivityTable({ platform }: { platform: boolean }) {
+  const events = useAdminData(() => adminData.activity.list(platform));
   const [search, setSearch] = useState("");
-  const [resource, setResource] = useState("");
+  const [outcome, setOutcome] = useState("");
+  const [workspace, setWorkspace] = useState("");
+  const [selected, setSelected] = useState<ActivityEvent | null>(null);
+  const rows = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    return (events.data ?? []).filter((row) =>
+      (!term || `${row.actor} ${row.action} ${row.resource}`.toLowerCase().includes(term))
+      && (!outcome || row.status === outcome)
+      && (!workspace || row.workspace === workspace),
+    );
+  }, [events.data, outcome, search, workspace]);
+  const workspaces = Array.from(new Set((events.data ?? []).map((row) => row.workspace)));
+  const columns: Column<ActivityEvent>[] = [
+    { key: "actor", label: "Actor", primary: true, sortable: true, render: (row) => <CellTitle icon={<Avatar name={row.actor} size="sm" />} title={row.actor} subtitle={row.resource} /> },
+    ...(platform ? [{ key: "workspace", label: "Workspace", priority: "medium" as const, width: 140 }] : []),
+    { key: "action", label: "Activity", minWidth: 220 },
+    { key: "status", label: "Outcome", width: 110, render: (row) => <StatusBadge status={row.status === "danger" ? "failed" : row.status} /> },
+    { key: "time", label: "When", width: 140, priority: "medium" },
+  ];
 
-  const events = useAdminQuery<Paginated<AuditEvent>>(
-    `/audit-logs${queryString({
-      page,
-      page_size: PAGE_SIZE,
-      search,
-      resource_type: resource,
-    })}`,
-  );
+  if (events.error) return <ErrorState description={events.error} onAction={events.reload} />;
 
-  const columns = useMemo<Column<AuditEvent>[]>(
-    () => [
-      {
-        key: "actor",
-        label: "Who",
-        render: (row) => {
-          const name = row.actor?.display_name || row.actor?.email || "System";
-          return (
-            <CellTitle
-              icon={<Avatar name={name} size="sm" />}
-              subtitle={row.actor?.email ?? "Automated"}
-              title={name}
-            />
-          );
-        },
-      },
-      {
-        key: "action",
-        label: "What changed",
-        minWidth: 240,
-        render: (row) => (
-          <span className="text-[var(--text-primary)]">{describeAuditAction(row.action)}</span>
-        ),
-      },
-      {
-        key: "resource_type",
-        label: "Area",
-        priority: "low",
-        width: 130,
-        render: (row) => titleCase(row.resource_type) || "—",
-      },
-      {
-        key: "outcome",
-        priority: "medium",
-        label: "Outcome",
-        width: 120,
-        render: (row) => <StatusBadge status={row.outcome} />,
-      },
-      {
-        key: "created_at",
-        priority: "medium",
-        label: "When",
-        width: 140,
-        render: (row) => (
-          <time dateTime={row.created_at} title={formatDateTime(row.created_at)}>
-            {formatRelative(row.created_at)}
-          </time>
-        ),
-      },
-    ],
-    [],
-  );
-
-  return (
-    <>
-      <PageHeader
-        description="An append-only record of every administrative change. Content and secrets are never stored here."
-        metadata={events.data ? pluralize(events.data.total, "event") : undefined}
-        title="Audit log"
-      />
-
-      <ResourceList
-        ariaLabel="Audit log"
-        columns={columns}
-        empty={
-          <EmptyState
-            description="Uploads, access decisions and workspace changes are recorded here as they happen."
-            icon={<ScrollText className="h-5 w-5" />}
-            title="No events recorded yet"
-          />
-        }
-        error={events.error}
-        filtersActive={Boolean(search || resource)}
-        loading={events.loading}
-        onClearFilters={() => {
-          setSearch("");
-          setResource("");
-          setPage(1);
-        }}
-        onRetry={events.reload}
-        pagination={{
-          page,
-          pageSize: PAGE_SIZE,
-          total: events.data?.total ?? 0,
-          onPageChange: setPage,
-        }}
-        rows={events.data?.items ?? []}
-        toolbar={
-          <>
-            <SearchInput
-              ariaLabel="Search the audit log"
-              className="w-full sm:w-72"
-              onChange={(value) => {
-                setSearch(value);
-                setPage(1);
-              }}
-              placeholder="Search by person or action…"
-              value={search}
-            />
-            <div className="adm-toolbar__spacer" />
-            <Select
-              aria-label="Filter by area"
-              className="w-full sm:w-48"
-              onChange={(event) => {
-                setResource(event.target.value);
-                setPage(1);
-              }}
-              options={resourceFilters}
-              value={resource}
-            />
-          </>
-        }
-      />
-    </>
-  );
+  return <>
+    <CommandBar
+      search={{ value: search, onChange: setSearch, placeholder: "Search activity…", label: "Search activity" }}
+      filters={<>
+        {platform && <FilterTrigger label="Filter by workspace" value={workspace} onChange={setWorkspace} options={[{ value: "", label: "All workspaces" }, ...workspaces.map((value) => ({ value, label: value.toUpperCase() }))]} />}
+        <FilterTrigger label="Filter by outcome" value={outcome} onChange={setOutcome} options={[{ value: "", label: "All outcomes" }, { value: "success", label: "Success" }, { value: "warning", label: "Warning" }, { value: "danger", label: "Failed" }]} />
+      </>}
+      count={`${rows.length} events`}
+    />
+    <DataTable ariaLabel={platform ? "Platform activity" : "Workspace activity"} columns={columns} data={rows} onRowClick={setSelected} emptyState={<EmptyState icon={<ScrollText size={20} />} title="No matching activity" description="Administrative changes and sync events appear here without private content." />} />
+    <Dialog open={Boolean(selected)} onClose={() => setSelected(null)} title="Activity details">
+      {selected && <dl className="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-3 text-sm">
+        <dt className="text-[var(--text-tertiary)]">Actor</dt><dd>{selected.actor}</dd>
+        <dt className="text-[var(--text-tertiary)]">Action</dt><dd>{selected.action}</dd>
+        <dt className="text-[var(--text-tertiary)]">Resource</dt><dd>{selected.resource}</dd>
+        <dt className="text-[var(--text-tertiary)]">Workspace</dt><dd>{selected.workspace}</dd>
+        <dt className="text-[var(--text-tertiary)]">Outcome</dt><dd><StatusBadge status={selected.status === "danger" ? "failed" : selected.status} /></dd>
+        <dt className="text-[var(--text-tertiary)]">Recorded</dt><dd>{selected.time}</dd>
+        <dt className="text-[var(--text-tertiary)]">Event ID</dt><dd className="font-mono text-xs">{selected.id}</dd>
+      </dl>}
+    </Dialog>
+  </>;
 }

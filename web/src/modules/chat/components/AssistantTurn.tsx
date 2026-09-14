@@ -19,6 +19,7 @@ export const AssistantTurn = memo(function AssistantTurn({
   isStreaming,
   onOpenSource,
   onRevealingChange,
+  showAgentActivity = true,
   sources,
   turn,
 }: {
@@ -27,6 +28,7 @@ export const AssistantTurn = memo(function AssistantTurn({
   onOpenSource?: (source: AnswerSource) => void;
   /** Report while the turn's newest text is still easing onto screen. */
   onRevealingChange?: (isRevealing: boolean) => void;
+  showAgentActivity?: boolean;
   /** The citations this answer produced, for the inline chips. */
   sources?: readonly AnswerSource[];
   turn?: TurnState;
@@ -64,6 +66,7 @@ export const AssistantTurn = memo(function AssistantTurn({
             );
           }
           if (item.kind === "activity_group") {
+            if (!showAgentActivity) return null;
             return (
               <ActivityGroup
                 activities={item.activities}
@@ -72,7 +75,7 @@ export const AssistantTurn = memo(function AssistantTurn({
               />
             );
           }
-          return <HostedExecutionActivity execution={item} key={item.id} />;
+          return showAgentActivity ? <HostedExecutionActivity execution={item} key={item.id} /> : null;
         })}
         {showPending && (
           <span aria-label={`${appBrand.productName} is starting`} className="assistant-turn__pending" role="status">Starting</span>

@@ -10,7 +10,7 @@ const focusRing =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]";
 
 const fieldBase = [
-  "w-full bg-[var(--surface-base)] text-[0.8125rem] text-[var(--text-primary)]",
+  "w-full bg-[var(--surface-base)] text-[length:var(--text-size-ui)] text-[var(--text-primary)]",
   "shadow-[inset_0_0_0_1px_var(--border-default)]",
   "transition-[box-shadow,background-color] duration-[var(--duration-fast)] ease-[var(--ease-out)]",
   "placeholder:text-[var(--text-tertiary)]",
@@ -30,15 +30,15 @@ export const ui = {
   /** Multi-line control. */
   textarea: `min-h-20 resize-y rounded-[var(--radius-sm)] px-2.5 py-2 leading-5 ${fieldBase}`,
 
-  label: "text-[0.8125rem] font-medium text-[var(--text-secondary)]",
-  helper: "text-[0.75rem] leading-4 text-[var(--text-tertiary)]",
-  errorText: "text-[0.75rem] leading-4 text-[var(--status-danger-text)]",
+  label: "text-[length:var(--text-size-ui)] font-medium text-[var(--text-secondary)]",
+  helper: "text-[length:var(--text-size-meta)] leading-4 text-[var(--text-tertiary)]",
+  errorText: "text-[length:var(--text-size-meta)] leading-4 text-[var(--status-danger-text)]",
 
-  sectionTitle: "text-[0.875rem] font-semibold text-[var(--text-primary)]",
-  sectionDescription: "mt-1 text-[0.8125rem] leading-5 text-[var(--text-tertiary)]",
+  sectionTitle: "text-[length:var(--text-size-nav)] font-semibold text-[var(--text-primary)]",
+  sectionDescription: "mt-1 text-[length:var(--text-size-ui)] leading-5 text-[var(--text-tertiary)]",
 
-  metaLabel: "text-[0.6875rem] font-medium uppercase tracking-[0.04em] text-[var(--text-tertiary)]",
-  metaValue: "text-[0.8125rem] text-[var(--text-primary)]",
+  metaLabel: "text-[length:var(--text-size-caption)] font-medium uppercase tracking-[0.04em] text-[var(--text-tertiary)]",
+  metaValue: "text-[length:var(--text-size-ui)] text-[var(--text-primary)]",
 
   panel: "adm-card",
   insetPanel:
@@ -49,7 +49,7 @@ export const ui = {
   switchTrack: "relative h-5 w-9 shrink-0 rounded-full transition-colors",
   switchThumb: "absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
 
-  toggle: `flex min-h-9 w-full items-center justify-between gap-3 rounded-[var(--radius-sm)] bg-[var(--surface-base)] px-2.5 py-1.5 text-left text-[0.8125rem] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] transition-colors hover:bg-[var(--surface-inset)] ${focusRing}`,
+  toggle: `flex min-h-9 w-full items-center justify-between gap-3 rounded-[var(--radius-sm)] bg-[var(--surface-base)] px-2.5 py-1.5 text-left text-[length:var(--text-size-ui)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] transition-colors hover:bg-[var(--surface-inset)] ${focusRing}`,
 
   /** Legacy aliases retained for surfaces outside the Admin console. */
   page: "w-full space-y-4",

@@ -1,12 +1,14 @@
 export type AppBrandKey = "bothesis";
 
 export const appBrandKey: AppBrandKey = "bothesis";
-export const PRODUCT_NAME = "Enterprise Agent";
+export const PRODUCT_NAME = "BoThesis";
+export const PLATFORM_NAME = "BoThesis";
 
 export const appBrand = {
   key: appBrandKey,
   shortName: PRODUCT_NAME,
   productName: PRODUCT_NAME,
+  platformName: PLATFORM_NAME,
   adminName: "Admin Console",
   adminSubtitle: "Control plane",
   workspaceSubtitle: "Enterprise knowledge workspace",

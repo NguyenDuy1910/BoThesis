@@ -123,7 +123,7 @@ export function KnowledgeDocumentPreview({
       <PreviewNotice
         icon="warning"
         title="Source temporarily unavailable"
-        detail="The grounded answer remains visible, but the original document could not be loaded. Enterprise Agent will not reconstruct missing source text."
+        detail="The grounded answer remains visible, but the original document could not be loaded. BoThesis will not reconstruct missing source text."
         onRetry={retry}
       />
     );

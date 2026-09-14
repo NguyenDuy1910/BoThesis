@@ -1,10 +1,13 @@
 import { getApiConfiguration, requestIdentityHeaders } from "@/lib/api/config";
+import { mockApi, previewMode } from "@/mocks/bothesis-api.mock";
 import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type {
   AgentHistoryMessage,
   ConversationDocument,
+  MessageItem,
   ResponseStreamEvent,
 } from "./types";
+import { DOCUMENT_CITATION_TYPE } from "./types";
 
 const uploadIdempotencyKeys = new WeakMap<File, string>();
 
@@ -27,6 +30,10 @@ export async function streamAgentResponse(
     onEvent: (event: ResponseStreamEvent) => void;
   }
 ): Promise<void> {
+  if (previewMode) {
+    await streamPreviewResponse(message, options);
+    return;
+  }
   const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
 
@@ -108,6 +115,23 @@ export async function uploadConversationDocument(
     onProgress?: (status: "starting" | "uploading" | "validating") => void;
   },
 ): Promise<ConversationDocument> {
+  if (previewMode) {
+    if (file.size > 25 * 1024 * 1024) throw new Error("Choose a file smaller than 25 MB.");
+    options.onProgress?.("starting");
+    await previewDelay(100, options.signal);
+    options.onProgress?.("uploading");
+    await previewDelay(180, options.signal);
+    options.onProgress?.("validating");
+    await previewDelay(120, options.signal);
+    return {
+      id: crypto.randomUUID(),
+      fileName: file.name,
+      contentType: file.type || "application/octet-stream",
+      sizeBytes: file.size,
+      mode: file.size <= 20 * 1024 * 1024 ? "direct" : "indexed",
+      status: "available",
+    };
+  }
   const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   options.onProgress?.("starting");
@@ -161,6 +185,7 @@ export async function uploadConversationDocument(
 }
 
 export async function releaseConversationDocument(documentId: string): Promise<void> {
+  if (previewMode) return;
   const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(
@@ -256,12 +281,104 @@ export async function getArtifactContent(
  * the caller can write to is a valid publish destination.
  */
 export async function listCollections(signal?: AbortSignal): Promise<Collection[]> {
+  if (previewMode) {
+    const collections = await mockApi.library.collections();
+    if (signal?.aborted) return [];
+    return collections.map((collection) => ({
+      id: collection.id,
+      title: collection.name,
+      parent_item_id: null,
+    }));
+  }
   const result = await artifactRequest<{ items: Collection[] }>(
     "/api/v1/agent/collections",
     { signal },
     "Could not load your collections.",
   );
   return result.items;
+}
+
+async function streamPreviewResponse(
+  message: string,
+  options: {
+    signal: AbortSignal;
+    onEvent: (event: ResponseStreamEvent) => void;
+    attachmentIds?: string[];
+    collectionItemIds?: string[];
+  },
+) {
+  const responseId = crypto.randomUUID();
+  const itemId = crypto.randomUUID();
+  const answer = previewAnswer(message, Boolean(options.attachmentIds?.length));
+  const citation = {
+    type: DOCUMENT_CITATION_TYPE,
+    start_index: Math.max(0, answer.length - 1),
+    end_index: answer.length,
+    citation: {
+      id: "travel-policy-citation",
+      reference: "workspace:travel-policy",
+      number: 1,
+      item_id: "travel-policy",
+      chunk_id: "travel-policy:section-3",
+      title: "Travel reimbursement policy.pdf",
+      section: "Section 3 — Reimbursement",
+      page_start: 4,
+      page_end: 5,
+      internal_url: "/admin/knowledge?document=travel-policy",
+      source: { provider: "Google Drive", external_id: "travel-policy" },
+    },
+  };
+  let sequence = 0;
+  const send = (event: ResponseStreamEvent) => {
+    if (!options.signal.aborted) options.onEvent({ ...event, sequence_number: sequence++ });
+  };
+  send({ type: "tool_started", call_id: "preview-search", tool_name: "Search workspace knowledge" });
+  await previewDelay(120, options.signal);
+  if (options.signal.aborted) return;
+  send({ type: "tool_progress", call_id: "preview-search", tool_name: "Search workspace knowledge", data: { status: "Searching permitted sources" } });
+  await previewDelay(140, options.signal);
+  send({ type: "tool_completed", call_id: "preview-search", tool_name: "Search workspace knowledge", status: "completed", result_count: 3, duration_ms: 260 });
+  send({ type: "response.created", response: { id: responseId, status: "in_progress", output: [] } });
+  const opening: MessageItem = { id: itemId, type: "message", role: "assistant", status: "in_progress", content: [] };
+  send({ type: "response.output_item.added", output_index: 0, item: opening });
+  send({ type: "response.content_part.added", item_id: itemId, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
+  for (const chunk of answer.match(/.{1,34}(?:\s|$)/g) ?? [answer]) {
+    await previewDelay(24, options.signal);
+    if (options.signal.aborted) return;
+    send({ type: "response.output_text.delta", item_id: itemId, output_index: 0, content_index: 0, delta: chunk });
+  }
+  send({ type: "response.output_text.annotation.added", item_id: itemId, output_index: 0, content_index: 0, annotation_index: 0, annotation: citation });
+  send({ type: "response.output_text.done", item_id: itemId, output_index: 0, content_index: 0, text: answer });
+  const finalPart = { type: "output_text" as const, text: answer, annotations: [citation] };
+  const finalItem: MessageItem = { ...opening, status: "completed", phase: "final_answer", content: [finalPart] };
+  send({ type: "response.content_part.done", item_id: itemId, output_index: 0, content_index: 0, part: finalPart });
+  send({ type: "response.output_item.done", output_index: 0, item: finalItem });
+  send({ type: "response.completed", response: { id: responseId, status: "completed", output: [finalItem] } });
+}
+
+function previewAnswer(message: string, hasAttachment: boolean) {
+  const prompt = message.toLowerCase();
+  if (hasAttachment) {
+    return "I reviewed the attached file in this preview. Its main points are organized clearly, but any policy decision should be checked against the authoritative workspace source. The workspace travel policy requires supporting receipts and manager review for late claims.";
+  }
+  if (prompt.includes("graduat") || prompt.includes("thesis")) {
+    return "The graduation workflow starts with confirming programme requirements, resolving outstanding credits, and submitting the signed thesis approval before the department deadline. I would verify the intake-specific date in the current academic calendar before you act.";
+  }
+  if (prompt.includes("travel") || prompt.includes("reimburse") || prompt.includes("receipt")) {
+    return "For approved university travel, reasonable transport, accommodation, and meal costs may be reimbursed. Submit the claim with supporting receipts within 30 calendar days after the trip; later claims require manager approval.";
+  }
+  return "I found relevant guidance in the permitted workspace knowledge. The safest next step is to confirm the applicable policy, owner, and effective date before acting. I can narrow this answer if you share the process or document you are working with.";
+}
+
+function previewDelay(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = window.setTimeout(resolve, ms);
+    signal.addEventListener("abort", () => {
+      window.clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
 }
 
 export async function publishArtifact(

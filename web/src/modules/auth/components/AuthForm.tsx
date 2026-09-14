@@ -1,6 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { Button } from "@/components/ui/Button";
+import { mockApi, previewMode } from "@/mocks/bothesis-api.mock";
 import { Blocks, BookOpen, Bot, Check, FileText, Info, Mail, MessageSquare, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -17,7 +20,7 @@ const capabilities = [
 ] as const;
 
 const accessCommitments = [
-  ["Permission-aware", "Enterprise Agent respects the permissions of connected sources."],
+  ["Permission-aware", "BoThesis respects the permissions of connected sources."],
   ["Source-grounded", "Answers can be traced back to the original evidence."],
   ["Workspace-scoped", "Your available collections and apps come from your workspace."],
 ] as const;
@@ -25,6 +28,7 @@ const accessCommitments = [
 const setupSteps = ["Workspace", "Knowledge", "Apps", "Start asking"];
 
 export default function AuthForm({ mode: _mode }: { mode: "login" | "signup" }) {
+  const router = useRouter();
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [signInError, setSignInError] = useState<string | null>(null);
   const googleButtonHost = useRef<HTMLDivElement>(null);
@@ -42,6 +46,7 @@ export default function AuthForm({ mode: _mode }: { mode: "login" | "signup" }) 
   }, []);
 
   useEffect(() => {
+    if (previewMode) return;
     const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID?.trim();
     const host = googleButtonHost.current;
     if (!clientId) {
@@ -74,7 +79,7 @@ export default function AuthForm({ mode: _mode }: { mode: "login" | "signup" }) 
           <h1 id="welcome-title">Company knowledge,<br />connected to action.</h1>
           <p className="auth-welcome__lead">Search trusted company knowledge, inspect original sources, work with files, and take governed actions — all from one conversation.</p>
 
-          <ul aria-label="Enterprise Agent capabilities" className="auth-welcome__capabilities">
+          <ul aria-label="BoThesis capabilities" className="auth-welcome__capabilities">
             {capabilities.map(([title, description, Icon, tone]) => (
               <li key={title}>
                 <span className={`auth-welcome__capability-icon auth-welcome__capability-icon--${tone}`}><Icon aria-hidden="true" size={20} strokeWidth={1.8} /></span>
@@ -91,21 +96,21 @@ export default function AuthForm({ mode: _mode }: { mode: "login" | "signup" }) 
 
         <section aria-labelledby="auth-title" className="auth-welcome__panel">
           <div className="auth-welcome__panel-mark"><ShieldCheck aria-hidden="true" size={24} strokeWidth={1.8} /></div>
-          <h2 id="auth-title">Welcome to Enterprise Agent</h2>
+          <h2 id="auth-title">Welcome to BoThesis</h2>
           <p className="auth-welcome__panel-intro">Sign in with your work account to access the knowledge and capabilities available to your workspace.</p>
-          <div aria-busy={isSigningIn || undefined} aria-label="Continue to Enterprise Agent with Google Workspace" className="auth-welcome__google-button" ref={googleButtonHost} />
+          {previewMode ? <Button loading={isSigningIn} onClick={async () => { setIsSigningIn(true); await mockApi.session.signIn(); router.replace("/app"); }}>Continue as Duy Nguyen</Button> : <div aria-busy={isSigningIn || undefined} aria-label="Continue to BoThesis with Google Workspace" className="auth-welcome__google-button" ref={googleButtonHost} />}
           {isSigningIn ? <p className="auth-welcome__google-progress" role="status">Signing in…</p> : null}
           {signInError ? <p className="auth-welcome__sign-in-error" role="alert">{signInError}</p> : null}
           <div className="auth-welcome__workspace-hint"><Info aria-hidden="true" size={18} strokeWidth={1.8} /><span><strong>Use your work Google account</strong><small>Workspace access and permissions are applied after sign-in.</small></span></div>
           <div aria-hidden="true" className="auth-welcome__divider"><span>or</span></div>
           <button aria-disabled="true" className="auth-welcome__email-action" disabled type="button"><Mail aria-hidden="true" size={18} strokeWidth={1.8} /><span>Email sign-in is not available yet</span></button>
           <section aria-labelledby="access-title" className="auth-welcome__access"><h3 id="access-title">Your access stays governed</h3><ul>{accessCommitments.map(([title, detail]) => <li key={title}><Check aria-hidden="true" size={16} strokeWidth={2.2} /><strong>{title}</strong><small>{detail}</small></li>)}</ul></section>
-          <p className="auth-welcome__terms">By continuing, you agree to your organization’s access policies and Enterprise Agent terms.</p>
+          <p className="auth-welcome__terms">By continuing, you agree to your organization’s access policies and BoThesis terms.</p>
         </section>
       </div>
 
       <span className="auth-welcome__workspace-status"><i />Google Workspace ready</span>
-      <Link aria-label="Open Enterprise Agent" className="auth-welcome__launcher" href="/app"><Bot aria-hidden="true" size={22} strokeWidth={1.8} /><i /></Link>
+      <Link aria-label="Open BoThesis" className="auth-welcome__launcher" href="/app"><Bot aria-hidden="true" size={22} strokeWidth={1.8} /><i /></Link>
     </main>
   );
 }

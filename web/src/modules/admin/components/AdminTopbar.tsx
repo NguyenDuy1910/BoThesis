@@ -7,7 +7,8 @@ import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { appBrand } from "@/lib/brand";
-import { adminRoutes } from "@/modules/admin/navigation";
+import { modeForPath } from "@/lib/navigation";
+import { adminNavGroupLabels, routeForPath } from "@/modules/admin/navigation";
 
 interface Crumb {
   label: string;
@@ -24,18 +25,23 @@ const uuidPattern =
 function buildCrumbs(pathname: string, detailTitle?: string): Crumb[] {
   const segments = pathname.split("/").filter(Boolean);
   if (segments[0] !== "admin") return [];
-  const rest = segments.slice(1);
-  if (!rest.length) return [{ label: "Workspace" }];
 
-  const route = adminRoutes.find((entry) => entry.path === `/admin/${rest[0]}`);
-  const crumbs: Crumb[] = [{ label: "Workspace", href: "/admin" }];
-  crumbs.push({
-    label: route?.label ?? rest[0].replace(/[-_]/g, " "),
-    href: rest.length > 1 ? (route?.path ?? `/admin/${rest[0]}`) : undefined,
-  });
+  // The trail must name the mode it is actually in. Labelling a platform
+  // address "Workspace" tells a root admin they are somewhere they are not.
+  const platform = modeForPath(pathname) === "platform-admin";
+  const root: Crumb = platform
+    ? { label: adminNavGroupLabels.platform, href: "/admin/platform" }
+    : { label: adminNavGroupLabels.workspace, href: "/admin" };
 
-  if (rest.length > 1) {
-    const tail = rest[rest.length - 1];
+  const route = routeForPath(pathname);
+  if (!route || route.path === root.href) return [{ label: root.label }];
+
+  const crumbs: Crumb[] = [root];
+  const isDetail = pathname !== route.path;
+  crumbs.push({ label: route.label, href: isDetail ? route.path : undefined });
+
+  if (isDetail) {
+    const tail = segments[segments.length - 1];
     crumbs.push({
       label: detailTitle ?? (uuidPattern.test(tail) ? "Details" : tail.replace(/[-_]/g, " ")),
     });
@@ -68,7 +74,7 @@ export function AdminTopbar({
     <header className="adm-top">
       <Button
         aria-label="Open navigation"
-        className="md:hidden"
+        className="lg:hidden"
         icon={<Menu aria-hidden="true" className="h-4 w-4" />}
         iconOnly
         onClick={onMobileMenuOpen}
@@ -79,7 +85,7 @@ export function AdminTopbar({
         <Tooltip label="Expand navigation">
           <Button
             aria-label="Expand navigation"
-            className="hidden md:inline-flex"
+            className="hidden lg:inline-flex"
             icon={<PanelLeftOpen aria-hidden="true" className="h-4 w-4" />}
             iconOnly
             onClick={onExpand}

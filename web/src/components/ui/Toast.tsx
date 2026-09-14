@@ -83,17 +83,17 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           >
             <span className="mt-px shrink-0">{variantIcon[entry.variant]}</span>
             <div className="min-w-0 flex-1">
-              <p className="text-[0.8125rem] font-semibold text-[var(--text-primary)]">
+              <p className="text-[length:var(--text-size-ui)] font-semibold text-[var(--text-primary)]">
                 {entry.title}
               </p>
               {entry.description && (
-                <p className="mt-0.5 text-[0.75rem] leading-4 text-[var(--text-tertiary)]">
+                <p className="mt-0.5 text-[length:var(--text-size-meta)] leading-4 text-[var(--text-tertiary)]">
                   {entry.description}
                 </p>
               )}
               {entry.action && (
                 <button
-                  className="mt-1.5 text-[0.75rem] font-semibold text-[var(--text-accent)] underline-offset-4 hover:underline"
+                  className="mt-1.5 text-[length:var(--text-size-meta)] font-semibold text-[var(--text-accent)] underline-offset-4 hover:underline"
                   onClick={() => {
                     entry.action?.onClick();
                     dismiss(entry.id);

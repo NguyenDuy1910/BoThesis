@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
 import { getApiConfiguration } from "@/lib/api/config";
+import { useAuthSession } from "@/lib/hooks/useAuthSession";
+import { mockApi, previewMode } from "@/mocks/bothesis-api.mock";
 
 const publicPathPrefix = "/auth/";
 
@@ -14,20 +16,20 @@ const publicPathPrefix = "/auth/";
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [authorizedPath, setAuthorizedPath] = useState<string | null>(null);
+  const session = useAuthSession();
+  const [isAuthorized, setIsAuthorized] = useState(false);
   const isPublicRoute = pathname.startsWith(publicPathPrefix);
-  const hasAccess = isPublicRoute || authorizedPath === pathname;
 
   useEffect(() => {
     if (isPublicRoute) return;
-    if (getApiConfiguration()) {
-      setAuthorizedPath(pathname);
+    if (previewMode ? mockApi.session.current() : getApiConfiguration()) {
+      setIsAuthorized(true);
       return;
     }
-    setAuthorizedPath(null);
+    setIsAuthorized(false);
     router.replace(`/auth/login?next=${encodeURIComponent(pathname)}`);
-  }, [isPublicRoute, pathname, router]);
+  }, [isPublicRoute, pathname, router, session]);
 
-  if (hasAccess) return <>{children}</>;
+  if (isPublicRoute || isAuthorized) return <>{children}</>;
   return <div aria-busy="true" aria-label="Checking access" className="auth-gate" role="status" />;
 }
