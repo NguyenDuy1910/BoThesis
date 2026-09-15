@@ -19,7 +19,6 @@ import {
   connectionsApi,
   sourcesApi,
   type Connection,
-  type Source,
 } from "@/modules/knowledge/integrations-api";
 import { knowledgeActions, useConnections, useConnectorCatalogue, useKnowledge } from "@/modules/knowledge/queries";
 import type { WorkspaceKnowledgeDocument } from "@/modules/knowledge/workspace-repository";
@@ -177,6 +176,11 @@ export function KnowledgeScreen() {
   const snapshot = query.data;
   const documents = useMemo(() => snapshot?.documents ?? [], [snapshot]);
   const collections = useMemo(() => snapshot?.collections ?? [], [snapshot]);
+  // Uploading needs the Collection's identity, not the label in the scope filter.
+  const scopeCollectionId = useMemo(
+    () => collections.find((collection) => collection.name === scope)?.id ?? null,
+    [collections, scope],
+  );
   const connections = useMemo(() => integrations.data?.connections ?? [], [integrations.data]);
   const sources = useMemo(() => integrations.data?.sources ?? [], [integrations.data]);
   const runs = useMemo(() => integrations.data?.runs ?? [], [integrations.data]);
@@ -241,12 +245,6 @@ export function KnowledgeScreen() {
       await Promise.all(ids.map((id) => knowledgeActions.reindex(id)));
       toast({ title: ids.length === 1 ? "Document re-indexed" : `${ids.length} documents re-indexed`, variant: "success" });
     }, "The document could not be re-indexed.");
-
-  const setAnswerAvailability = (ids: string[], included: boolean) =>
-    act(async () => {
-      await Promise.all(ids.map((id) => knowledgeActions.setAnswerAvailability(id, included)));
-      toast({ title: included ? "Included in answers" : "Excluded from answers", variant: "success" });
-    }, "The answer setting could not be changed.");
 
   const removeDocuments = async () => {
     const ids = removalIds ?? [];
@@ -411,7 +409,6 @@ export function KnowledgeScreen() {
           onExpand={() => setExpanded((value) => !value)}
           onReindex={() => void reindex([selected.id])}
           onRequestRemove={() => setRemovalIds([selected.id])}
-          onToggleAnswerAvailability={(included) => void setAnswerAvailability([selected.id], included)}
         />
       ) : null}
       list={(
@@ -424,7 +421,6 @@ export function KnowledgeScreen() {
           onClearFilters={clearFilters}
           onClearSelection={() => setSelection([])}
           onConnectSource={() => { setTab("sources"); setConnectionId(""); }}
-          onExcludeSelection={() => void setAnswerAvailability(selection, false)}
           onOpenCollection={browseCollection}
           onOpenDocument={openDocument}
           onReindexSelection={() => void reindex(selection)}
@@ -570,7 +566,11 @@ export function KnowledgeScreen() {
           if (!file) return;
           setBusy(true);
           await act(async () => {
-            await knowledgeActions.upload(file);
+            const target = scopeCollectionId ?? snapshot?.personalCollectionId;
+            if (!target) {
+              throw new Error("Choose a collection before uploading.");
+            }
+            await knowledgeActions.upload(file, target);
             toast({ title: "Document uploaded", variant: "success" });
           }, "Upload failed.");
           setBusy(false);

@@ -13,7 +13,7 @@ from api.routers import (
     AdminRoleUpdate,
     ApprovalRequestCreate,
     ApprovalRequestUpdate,
-    CollectionAccessGrant,
+    CollectionRoleGrant,
     CollectionCreate,
     CollectionUpdate,
     GroupCreate,
@@ -24,7 +24,10 @@ from api.routers import (
     UserCreate,
     UserUpdate,
 )
-from bothesis.services import require_platform_root
+from bothesis.services import (
+    PLATFORM_HEALTH_READ_PERMISSION,
+    require_platform_permission,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -86,7 +89,7 @@ async def platform_list_audit(
 
 @router.get("/platform/health")
 async def platform_health(caller: Caller, health: Health) -> dict[str, Any]:
-    require_platform_root(caller)
+    require_platform_permission(caller, PLATFORM_HEALTH_READ_PERMISSION)
     return (await health.check()).model_dump(mode="json")
 
 
@@ -464,7 +467,7 @@ async def admin_list_collection_access(
 @router.put("/collections/{item_id}/access")
 async def admin_grant_collection_access(
     item_id: UUID,
-    body: CollectionAccessGrant,
+    body: CollectionRoleGrant,
     caller: Caller,
     admin: AdminConsole,
 ) -> dict[str, Any]:

@@ -205,7 +205,11 @@ class AppRuntime:
     def authentication_service(self, session: AsyncSession) -> AuthenticationService:
         """Build a request-scoped authentication workflow from durable identity state."""
 
-        return AuthenticationService(session, tokens=self.jwt_token_service())
+        return AuthenticationService(
+            session,
+            tokens=self.jwt_token_service(),
+            platform_admin_emails=self._config.identity.platform_admin_emails,
+        )
 
     # -- Shared collaborators ----------------------------------------------
 

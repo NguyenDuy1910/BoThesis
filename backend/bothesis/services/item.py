@@ -7,13 +7,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from bothesis.db.models import (
-    CollectionAccess,
     Conversation,
     Item,
     ExternalResource,
@@ -21,9 +20,15 @@ from bothesis.db.models import (
     Message,
     MessageItem,
     IngestionSource,
+    Role,
+    RoleAssignment,
 )
 from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services import (
+    ACTIVE_STATUS,
+    COLLECTION_OWNER_ROLE,
+    COLLECTION_READ_PERMISSION,
+    COLLECTION_UPDATE_PERMISSION,
     CONNECTION_NEEDS_AUTHORIZATION,
     RUNNABLE_SOURCE_STATUSES,
     MESSAGE_ITEM_RELATIONS,
@@ -205,22 +210,34 @@ class ItemService:
             )
             .on_conflict_do_nothing(index_elements=[Item.id])
         )
+        owner_role_id = await self._session.scalar(
+            select(Role.id).where(
+                Role.code == COLLECTION_OWNER_ROLE,
+                Role.tenant_id.is_(None),
+                Role.status == ACTIVE_STATUS,
+            )
+        )
+        if owner_role_id is None:
+            raise InvalidDocumentStateError(
+                "system roles are missing; run the system role sync"
+            )
         await self._session.execute(
-            insert(CollectionAccess)
+            insert(RoleAssignment)
             .values(
+                user_id=owner_user_id,
+                role_id=owner_role_id,
                 item_id=collection_id,
-                principal_type="user",
-                principal_id=owner_user_id,
-                role="owner",
                 created_by_user_id=owner_user_id,
             )
-            .on_conflict_do_update(
+            .on_conflict_do_nothing(
                 index_elements=[
-                    CollectionAccess.item_id,
-                    CollectionAccess.principal_type,
-                    CollectionAccess.principal_id,
+                    RoleAssignment.user_id,
+                    RoleAssignment.group_id,
+                    RoleAssignment.tenant_id,
+                    RoleAssignment.item_id,
+                    RoleAssignment.role_id,
                 ],
-                set_={"role": "owner", "deleted_at": None},
+                index_where=text("deleted_at IS NULL"),
             )
         )
         return collection_id
@@ -483,9 +500,9 @@ class ItemService:
         return external_resource.item
 
     async def get_item(self, item_id: UUID, *, access: AuthContext) -> Item:
-        from bothesis.services.identity_access.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.authorization import AuthorizationService
 
-        return await CollectionAccessService(self._session).require_item_access(
+        return await AuthorizationService(self._session).require_item(
             item_id, access=access
         )
 
@@ -505,11 +522,11 @@ class ItemService:
         limit: int = 100,
         offset: int = 0,
     ) -> list[Item]:
-        from bothesis.services.identity_access.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.authorization import AuthorizationService
 
         if not 1 <= limit <= 1_000 or offset < 0:
             raise ValueError("invalid item pagination")
-        allowed = await CollectionAccessService(self._session).allowed_collection_ids(access)
+        allowed = await AuthorizationService(self._session).allowed_collection_ids(access)
         if not allowed:
             return []
         visible = (
@@ -573,16 +590,16 @@ class ItemService:
         item_id: UUID,
         access: AuthContext,
         *,
-        minimum_role: str = "viewer",
+        permission: str = COLLECTION_READ_PERMISSION,
     ) -> Item:
         """Load a native upload through its governing collection permission."""
 
-        from bothesis.services.identity_access.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.authorization import AuthorizationService
 
-        authorized = await CollectionAccessService(self._session).require_item_access(
+        authorized = await AuthorizationService(self._session).require_item(
             item_id,
             access=access,
-            minimum_role=minimum_role,
+            permission=permission,
         )
         if authorized.item_type != "document":
             raise DocumentNotFoundError(f"item not found: {item_id}")
@@ -702,10 +719,10 @@ class ItemService:
         return link
 
     async def soft_delete_item(self, item_id: UUID, *, actor: AuthContext) -> Item:
-        from bothesis.services.identity_access.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.authorization import AuthorizationService
 
-        item = await CollectionAccessService(self._session).require_item_access(
-            item_id, access=actor, minimum_role="editor"
+        item = await AuthorizationService(self._session).require_item(
+            item_id, access=actor, permission=COLLECTION_UPDATE_PERMISSION
         )
         item.status = "deleted"
         item.deleted_at = datetime.now(UTC)

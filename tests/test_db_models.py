@@ -13,7 +13,6 @@ EXPECTED_TABLES = {
     "approval_requests",
     "artifact_revisions",
     "audit_logs",
-    "collection_access",
     "conversations",
     "citations",
     "group_memberships",
@@ -23,10 +22,13 @@ EXPECTED_TABLES = {
     "items",
     "memories",
     "message_items",
+    "permissions",
     "messages",
     "ingestion_sources",
     "integration_connections",
     "integration_credentials",
+    "role_assignments",
+    "role_permissions",
     "roles",
     "sandbox_sessions",
     "tenant_memberships",
@@ -50,8 +52,16 @@ def test_user_status_is_a_required_boolean() -> None:
 
     assert column.type.python_type is bool
     assert column.nullable is False
-    assert columns.is_root_admin.type.python_type is bool
-    assert columns.is_root_admin.nullable is False
+
+
+def test_users_carry_no_administration_flag() -> None:
+    """Identity is not authorization: no admin boolean may return to users."""
+
+    forbidden = {"is_root_admin", "is_admin", "is_superuser", "role_id"}
+
+    assert forbidden.isdisjoint(Base.metadata.tables["users"].c.keys())
+    assert "role_id" not in Base.metadata.tables["tenant_memberships"].c.keys()
+    assert "permission_codes" not in Base.metadata.tables["roles"].c.keys()
 
 
 def test_engine_normalizes_standard_postgres_url_and_is_cached() -> None:

@@ -53,7 +53,7 @@ async def resolve_auth_context(
             context.email != token_claims.email
             or context.tenant_id != token_claims.active_tenant_id
             or tuple(sorted(set(context.permission_codes))) != token_claims.permissions
-            or context.platform_scopes != token_claims.platform_scopes
+            or context.platform_permissions != token_claims.platform_permissions
         ):
             raise AuthenticationError(
                 "access token no longer reflects the active tenant membership"

@@ -1,6 +1,6 @@
 "use client";
 
-import { Eye, EyeOff, RefreshCw, Trash2, X } from "lucide-react";
+import {RefreshCw, Trash2, X} from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { Button } from "@/components/ui/Button";
@@ -12,7 +12,6 @@ interface DocumentDetailsDrawerProps {
   open: boolean;
   onClose: () => void;
   onReindex?: () => void;
-  onToggleAnswerAvailability?: (included: boolean) => void;
   onRequestRemove?: () => void;
   showLifecycleActions?: boolean;
 }
@@ -30,7 +29,6 @@ export function DocumentDetailsDrawer({
   open,
   onClose,
   onReindex,
-  onToggleAnswerAvailability,
   onRequestRemove,
   showLifecycleActions = true,
 }: DocumentDetailsDrawerProps) {
@@ -56,7 +54,6 @@ export function DocumentDetailsDrawer({
   if (!open) return null;
 
   const facts = documentFacts(document);
-  const answerIncluded = document.answerIncluded !== false;
   const indexed = document.state === "indexed";
 
   return (
@@ -83,7 +80,7 @@ export function DocumentDetailsDrawer({
           <div><dt>File</dt><dd>{facts.fileTypeLabel} · {document.pagesLabel} · {document.size}</dd></div>
           <div>
             <dt>Search availability</dt>
-            <dd className={indexed && answerIncluded ? "knowledge-details__value--ok" : undefined}>
+            <dd className={indexed ? "knowledge-details__value--ok" : undefined}>
               {answerAvailability(document)}
             </dd>
           </div>
@@ -105,15 +102,6 @@ export function DocumentDetailsDrawer({
             type="button"
           >
             <RefreshCw aria-hidden="true" size={16} />Re-index document
-          </button>
-          <button
-            disabled={!indexed}
-            onClick={() => onToggleAnswerAvailability?.(!answerIncluded)}
-            type="button"
-          >
-            {answerIncluded
-              ? <><EyeOff aria-hidden="true" size={16} />Exclude from answers</>
-              : <><Eye aria-hidden="true" size={16} />Include in answers</>}
           </button>
           <button className="knowledge-details__danger" onClick={onRequestRemove} type="button">
             <Trash2 aria-hidden="true" size={16} />Remove from knowledge

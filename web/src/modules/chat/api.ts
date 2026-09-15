@@ -1,4 +1,4 @@
-import { getLiveApiConfiguration, requestIdentityHeaders } from "@/lib/api/config";
+import { getApiConfiguration, requestIdentityHeaders } from "@/lib/api/config";
 import { StreamEventDeduplicator } from "./stream-deduplicator";
 import type {
   AgentHistoryMessage,
@@ -27,7 +27,7 @@ export async function streamAgentResponse(
     onEvent: (event: ResponseStreamEvent) => void;
   }
 ): Promise<void> {
-  const configuration = getLiveApiConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
 
   const response = await fetch(`${configuration.apiUrl}/api/v1/agent/chat`, {
@@ -108,7 +108,7 @@ export async function uploadConversationDocument(
     onProgress?: (status: "starting" | "uploading" | "validating") => void;
   },
 ): Promise<ConversationDocument> {
-  const configuration = getLiveApiConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   options.onProgress?.("starting");
   const identityHeaders = requestIdentityHeaders(configuration);
@@ -161,7 +161,7 @@ export async function uploadConversationDocument(
 }
 
 export async function releaseConversationDocument(documentId: string): Promise<void> {
-  const configuration = getLiveApiConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(
     `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(documentId)}`,
@@ -284,7 +284,7 @@ async function artifactRequest<T>(
   init: RequestInit,
   fallback: string,
 ): Promise<T> {
-  const configuration = getLiveApiConfiguration();
+  const configuration = getApiConfiguration();
   if (!configuration) throw new ChatConfigurationError();
   const response = await fetch(`${configuration.apiUrl}${path}`, {
     ...init,

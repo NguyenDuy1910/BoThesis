@@ -5,14 +5,19 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.db.models import User
+from bothesis.db.models import Role, User
+from bothesis.services.audit import AuditService
 from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services.identity_access.jwt_tokens import JwtTokenService
+from bothesis.services.identity_access.role_assignments import RoleAssignmentService
 from bothesis.services import (
     ACTIVE_STATUS,
+    PLATFORM_ADMIN_ROLE,
+    TENANT_ADMIN_ROLE,
     AuthenticationSession,
     AuthorizationError,
     IdentityConflictError,
@@ -26,10 +31,18 @@ from bothesis.services import (
 class AuthenticationService:
     """Provision a personal tenant after verified sign-in and issue active-context JWTs."""
 
-    def __init__(self, session: AsyncSession, *, tokens: JwtTokenService) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        tokens: JwtTokenService,
+        platform_admin_emails: frozenset[str] = frozenset(),
+    ) -> None:
         self._session = session
         self._identities = IdentityStoreService(session)
+        self._assignments = RoleAssignmentService(session)
         self._tokens = tokens
+        self._platform_admin_emails = platform_admin_emails
 
     async def complete_google_login(
         self, identity: VerifiedGoogleIdentity
@@ -37,6 +50,7 @@ class AuthenticationService:
         """Persist a verified Google principal, provisioning its first workspace atomically."""
 
         user, personal_tenant_id = await self._find_or_provision_user(identity)
+        await self._grant_configured_platform_admin(user)
         memberships = await self._identities.list_active_tenant_memberships(user.id)
         if not memberships:
             raise AuthorizationError("user has no active tenant membership")
@@ -54,7 +68,7 @@ class AuthenticationService:
             active_tenant_id=active_tenant_id,
             permissions=context.permission_codes,
             tenants=memberships,
-            platform_scopes=context.platform_scopes,
+            platform_permissions=context.platform_permissions,
         )
 
     async def create_session(
@@ -62,12 +76,11 @@ class AuthenticationService:
     ) -> AuthenticationSession:
         """Issue a session token for an active workspace the user may select."""
 
-        user = await self._identities.get_user(user_id)
+        await self._identities.get_user(user_id)
         memberships = await self._identities.list_active_tenant_memberships(user_id)
-        if (
-            not user.is_root_admin
-            and tenant_id not in {membership.tenant_id for membership in memberships}
-        ):
+        # Platform administration is its own scope. It never admits an actor to
+        # a workspace they are not a member of.
+        if tenant_id not in {membership.tenant_id for membership in memberships}:
             raise AuthorizationError("user cannot select the requested workspace")
         try:
             context = await self._identities.get_context(user_id, tenant_id=tenant_id)
@@ -85,7 +98,7 @@ class AuthenticationService:
             active_tenant_id=tenant_id,
             permissions=context.permission_codes,
             tenants=memberships,
-            platform_scopes=context.platform_scopes,
+            platform_permissions=context.platform_permissions,
         )
 
     async def _find_or_provision_user(
@@ -119,13 +132,13 @@ class AuthenticationService:
                 tenant = await self._identities.create_tenant(
                     f"tenant-{user.id}", workspace_name
                 )
-                owner_role = await self._identities.create_role(
-                    tenant.id,
-                    "tenant_owner",
-                    "Tenant Owner",
-                    permission_codes=("*:*",),
+                await self._identities.assign_membership(user.id, tenant.id)
+                await self._assignments.replace_tenant_roles(
+                    user_id=user.id,
+                    tenant_id=tenant.id,
+                    role_ids=[await self._tenant_admin_role_id()],
+                    created_by_user_id=user.id,
                 )
-                await self._identities.assign_membership(user.id, tenant.id, owner_role.id)
                 return user, tenant.id
         except (IdentityConflictError, IntegrityError):
             # A concurrent request won the unique-email insert. Its workspace
@@ -138,6 +151,41 @@ class AuthenticationService:
             user.last_login_at = datetime.now(UTC)
             await self._session.flush()
             return user, None
+
+    async def _tenant_admin_role_id(self) -> UUID:
+        role = await self._session.scalar(
+            select(Role).where(
+                Role.code == TENANT_ADMIN_ROLE,
+                Role.tenant_id.is_(None),
+                Role.status == ACTIVE_STATUS,
+            )
+        )
+        if role is None:
+            raise IdentityNotFoundError(
+                "system roles are missing; run the system role sync"
+            )
+        return role.id
+
+    async def _grant_configured_platform_admin(self, user: User) -> None:
+        """Turn the configured bootstrap allowlist into a real role assignment.
+
+        Platform administration is a grant like any other, so it is recorded
+        where every other grant lives and can be revoked the same way.
+        """
+
+        if user.email not in self._platform_admin_emails:
+            return
+        granted = await self._assignments.ensure_platform_role(
+            user.id, PLATFORM_ADMIN_ROLE
+        )
+        if granted:
+            await AuditService(self._session).record_platform_event(
+                actor_user_id=user.id,
+                action="role_assignment.platform_admin.granted",
+                resource_type="user",
+                resource_id=str(user.id),
+                details={"source": "configured_platform_admin_emails"},
+            )
 
 
 def _default_tenant_id(

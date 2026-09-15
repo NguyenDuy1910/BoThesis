@@ -38,6 +38,7 @@ from bothesis.services import (
     ConnectionAuthorizationRequiredError,
 )
 from bothesis.services.identity_access.identity_store import IdentityStoreService
+from bothesis.services.identity_access.role_assignments import RoleAssignmentService
 from bothesis.services.ingestion_sources import IngestionSourceService
 from bothesis.services.integration_authorization import (
     IntegrationAuthorizationService,
@@ -73,8 +74,12 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory.begin() as session:
+        await IdentityStoreService(session).sync_system_roles()
+
     try:
-        yield async_sessionmaker(engine, expire_on_commit=False)
+        yield factory
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:
@@ -191,7 +196,10 @@ async def _workspace(
     role = await identities.create_role(
         tenant.id, "manager", "Manager", permission_codes=list(permissions)
     )
-    await identities.assign_membership(user.id, tenant.id, role.id)
+    await identities.assign_membership(user.id, tenant.id)
+    await RoleAssignmentService(session).replace_tenant_roles(
+        user_id=user.id, tenant_id=tenant.id, role_ids=[role.id]
+    )
     collection = Item(
         tenant_id=tenant.id,
         item_type="collection",
@@ -479,9 +487,13 @@ async def test_one_persons_connection_is_invisible_to_another(
         identities = IdentityStoreService(session)
         other = await identities.create_user(f"{uuid4().hex[:8]}@example.com")
         role = await identities.create_role(
-            owner.tenant_id, "admin", "Admin", permission_codes=["source.manage"]
+            owner.tenant_id, "source-admin", "Source Admin",
+            permission_codes=["source.manage"],
         )
-        await identities.assign_membership(other.id, owner.tenant_id, role.id)
+        await identities.assign_membership(other.id, owner.tenant_id)
+        await RoleAssignmentService(session).replace_tenant_roles(
+            user_id=other.id, tenant_id=owner.tenant_id, role_ids=[role.id]
+        )
         intruder = await identities.get_context(other.id, tenant_id=owner.tenant_id)
 
         # Even a source manager does not inherit someone else's personal account.

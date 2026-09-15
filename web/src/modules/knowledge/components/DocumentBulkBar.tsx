@@ -15,13 +15,11 @@ import { Button } from "@/components/ui/Button";
 export function DocumentBulkBar({
   count,
   onReindex,
-  onExclude,
   onRemove,
   onClear,
 }: {
   count: number;
   onReindex: () => void;
-  onExclude: () => void;
   onRemove: () => void;
   onClear: () => void;
 }) {
@@ -29,7 +27,6 @@ export function DocumentBulkBar({
     <div className="knowledge-bulk-bar" role="status">
       <span>{count} {count === 1 ? "document" : "documents"} selected</span>
       <Button onClick={onReindex} size="sm" variant="ghost">Re-index</Button>
-      <Button onClick={onExclude} size="sm" variant="ghost">Exclude from answers</Button>
       <Button className="text-[var(--status-danger-text)] hover:bg-[var(--status-danger-bg)]" onClick={onRemove} size="sm" variant="ghost">
         Remove
       </Button>

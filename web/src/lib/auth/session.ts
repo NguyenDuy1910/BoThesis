@@ -1,11 +1,10 @@
-import { mockApi, previewMode } from "@/mocks/bothesis-api.mock";
+import { invalidateApiData } from "@/lib/api/revision";
 
 export interface AuthTenant {
   id: string;
   code: string;
   name: string;
-  role_id: string | null;
-  role_code: string;
+  role_codes: string[];
   permissions: string[];
 }
 
@@ -19,23 +18,22 @@ export interface AuthSession {
   active_tenant_id: string;
   permissions: string[];
   tenants: AuthTenant[];
-  platform_scopes: string[];
+  platform_permissions: string[];
 }
 
 const storageKey = "bothesis.auth.session";
 
 /**
  * Keep the browser's navigation decisions aligned with the authorization
- * semantics enforced by the API. `admin` and `*:*` are tenant-wide grants.
+ * semantics enforced by the API. The token carries the caller's resolved
+ * permissions in full, so there is no wildcard to interpret here either.
  */
 export function hasSessionPermission(
   session: AuthSession | null,
   permission: string,
 ): boolean {
   if (!session) return false;
-  return session.permissions.includes("*:*") ||
-    session.permissions.includes("admin") ||
-    session.permissions.includes(permission);
+  return session.permissions.includes(permission);
 }
 
 /** A surface is available when any of its governing permissions is granted. */
@@ -46,20 +44,33 @@ export function hasAnySessionPermission(
   return permissions.some((permission) => hasSessionPermission(session, permission));
 }
 
-export function hasPlatformScope(
+/** Platform capability is its own scope, never implied by a workspace role. */
+export function hasPlatformPermission(
   session: AuthSession | null,
-  scope: string,
+  permission: string,
 ): boolean {
-  return Boolean(session?.platform_scopes.includes(scope));
+  return Boolean(session?.platform_permissions.includes(permission));
+}
+
+export const PLATFORM_ADMIN_PERMISSIONS = [
+  "platform.tenant.read",
+  "platform.user.read",
+  "platform.audit.read",
+  "platform.health.read",
+] as const;
+
+/** The platform console is available to anyone holding any platform grant. */
+export function canAccessPlatformAdmin(session: AuthSession | null): boolean {
+  return PLATFORM_ADMIN_PERMISSIONS.some((permission) =>
+    hasPlatformPermission(session, permission),
+  );
 }
 
 export function getAuthSession(): AuthSession | null {
-  if (typeof window === "undefined") return null;
-  if (previewMode) return mockApi.session.current();
   return getStoredAuthSession();
 }
 
-/** Read only an authenticated browser session; never substitute preview identity. */
+/** The authenticated browser session, or null when nobody is signed in. */
 export function getStoredAuthSession(): AuthSession | null {
   if (typeof window === "undefined") return null;
   const serialized = window.sessionStorage.getItem(storageKey);
@@ -82,11 +93,13 @@ export function storeAuthSession(session: AuthSession): void {
     throw new Error("The sign-in response did not contain a valid session.");
   }
   window.sessionStorage.setItem(storageKey, JSON.stringify(session));
+  // Views hold the previous workspace's rows until they are told to read again.
+  invalidateApiData();
 }
 
 export function clearAuthSession(): void {
-  if (previewMode) { mockApi.session.signOut(); return; }
   if (typeof window !== "undefined") window.sessionStorage.removeItem(storageKey);
+  invalidateApiData();
 }
 
 function isAuthSession(value: unknown): value is AuthSession {
@@ -103,6 +116,6 @@ function isAuthSession(value: unknown): value is AuthSession {
     typeof session.active_tenant_id === "string" &&
     Array.isArray(session.permissions) &&
     Array.isArray(session.tenants) &&
-    Array.isArray(session.platform_scopes)
+    Array.isArray(session.platform_permissions)
   );
 }

@@ -13,15 +13,18 @@ from bothesis.db.models import (
     Group,
     GroupMembership,
     Role,
+    RoleAssignment,
     Tenant,
     TenantMembership,
     User,
 )
 from bothesis.services.audit import AuditService
 from bothesis.services.identity_access.identity_store import IdentityStoreService
+from bothesis.services.identity_access.role_assignments import RoleAssignmentService
 from bothesis.services import (
     ACTIVE_STATUS,
     INACTIVE_STATUS,
+    PLATFORM_USER_READ_PERMISSION,
     USER_MANAGE_PERMISSION,
     AdminConflictError,
     AdminNotFoundError,
@@ -29,7 +32,7 @@ from bothesis.services import (
     AuthContext,
     IdentityConflictError,
     normalize_page,
-    require_platform_root,
+    require_platform_permission,
     require_tenant_permission,
     timestamp,
 )
@@ -47,6 +50,7 @@ class UserService:
     ) -> None:
         self._session = session
         self._auth = auth or IdentityStoreService(session)
+        self._assignments = RoleAssignmentService(session)
         self._audit = audit or AuditService(session)
 
     async def list_users(
@@ -75,12 +79,19 @@ class UserService:
         if status is not None:
             filters.append(User.status.is_(status))
         if role_id is not None:
-            filters.append(TenantMembership.role_id == role_id)
+            filters.append(
+                User.id.in_(
+                    select(RoleAssignment.user_id).where(
+                        RoleAssignment.role_id == role_id,
+                        RoleAssignment.tenant_id == tenant_id,
+                        RoleAssignment.deleted_at.is_(None),
+                    )
+                )
+            )
 
         base = (
-            select(User, TenantMembership, Role)
+            select(User, TenantMembership)
             .join(TenantMembership, TenantMembership.user_id == User.id)
-            .join(Role, Role.id == TenantMembership.role_id)
             .where(*filters)
         )
         total = await self._session.scalar(
@@ -104,13 +115,20 @@ class UserService:
                 base.order_by(order, User.id).limit(page_size).offset(offset)
             )
         ).all()
-        groups_by_user = await self._groups_for_users(
-            tenant_id, [user.id for user, _, _ in rows]
+        user_ids = [user.id for user, _ in rows]
+        groups_by_user = await self._groups_for_users(tenant_id, user_ids)
+        roles_by_user = await self._assignments.tenant_roles_for_users(
+            tenant_id, user_ids
         )
         return {
             "items": [
-                _user_payload(user, membership, role, groups_by_user.get(user.id, []))
-                for user, membership, role in rows
+                _user_payload(
+                    user,
+                    membership,
+                    roles_by_user.get(user.id, []),
+                    groups_by_user.get(user.id, []),
+                )
+                for user, membership in rows
             ],
             "total": int(total or 0),
             "page": page,
@@ -119,9 +137,15 @@ class UserService:
 
     async def get_user(self, actor: AuthContext, user_id: UUID) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, USER_MANAGE_PERMISSION)
-        user, membership, role = await self._membership_row(tenant_id, user_id)
-        groups = (await self._groups_for_users(tenant_id, [user_id])).get(user_id, [])
-        return _user_payload(user, membership, role, groups)
+        user, membership = await self._membership_row(tenant_id, user_id)
+        return _user_payload(
+            user,
+            membership,
+            (await self._assignments.tenant_roles_for_users(tenant_id, [user_id])).get(
+                user_id, []
+            ),
+            (await self._groups_for_users(tenant_id, [user_id])).get(user_id, []),
+        )
 
     async def list_platform_users(
         self,
@@ -134,7 +158,7 @@ class UserService:
     ) -> dict[str, Any]:
         """Return user identities with every active workspace membership."""
 
-        require_platform_root(actor)
+        require_platform_permission(actor, PLATFORM_USER_READ_PERMISSION)
         page, page_size, offset = normalize_page(page, page_size)
         statement = select(User)
         if search and search.strip():
@@ -157,7 +181,9 @@ class UserService:
                 .offset(offset)
             )
         )
-        memberships = await self._platform_memberships([user.id for user in users])
+        user_ids = [user.id for user in users]
+        memberships = await self._platform_memberships(user_ids)
+        platform_roles = await self._platform_roles(user_ids)
         return {
             "items": [
                 {
@@ -165,7 +191,7 @@ class UserService:
                     "email": user.email,
                     "display_name": user.display_name,
                     "status": user.status,
-                    "platform_scopes": ["root_admin"] if user.is_root_admin else [],
+                    "platform_roles": platform_roles.get(user.id, []),
                     "memberships": memberships.get(user.id, []),
                 }
                 for user in users
@@ -181,30 +207,35 @@ class UserService:
         *,
         email: str,
         display_name: str | None,
-        role_id: UUID,
+        role_ids: list[UUID],
         group_ids: list[UUID] | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, USER_MANAGE_PERMISSION)
-        await self._role(tenant_id, role_id)
         try:
             user = await self._auth.create_user(email, display_name=display_name)
         except IdentityConflictError as exc:
             raise AdminConflictError(str(exc)) from exc
         except ValueError as exc:
             raise AdminValidationError(str(exc)) from exc
-        membership = await self._auth.assign_membership(user.id, tenant_id, role_id)
-        groups = await self._replace_groups(
-            tenant_id, user.id, group_ids or []
+        membership = await self._auth.assign_membership(user.id, tenant_id)
+        roles = await self._assignments.replace_tenant_roles(
+            user_id=user.id,
+            tenant_id=tenant_id,
+            role_ids=role_ids,
+            created_by_user_id=actor.user_id,
         )
-        role = await self._role(tenant_id, role_id)
+        groups = await self._replace_groups(tenant_id, user.id, group_ids or [])
         await self._audit.record(
             actor,
             action="user.created",
             resource_type="user",
             resource_id=str(user.id),
-            details={"email": user.email, "role_id": str(role_id)},
+            details={
+                "email": user.email,
+                "role_ids": [str(role.id) for role in roles],
+            },
         )
-        return _user_payload(user, membership, role, groups)
+        return _user_payload(user, membership, roles, groups)
 
     async def update_user(
         self,
@@ -212,12 +243,12 @@ class UserService:
         user_id: UUID,
         *,
         display_name: str | None = None,
-        role_id: UUID | None = None,
+        role_ids: list[UUID] | None = None,
         status: bool | None = None,
         group_ids: list[UUID] | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, USER_MANAGE_PERMISSION)
-        user, membership, role = await self._membership_row(tenant_id, user_id)
+        user, membership = await self._membership_row(tenant_id, user_id)
         changed: list[str] = []
         if display_name is not None:
             try:
@@ -227,18 +258,26 @@ class UserService:
             except ValueError as exc:
                 raise AdminValidationError(str(exc)) from exc
             changed.append("display_name")
-        if role_id is not None and role_id != membership.role_id:
-            role = await self._role(tenant_id, role_id)
-            membership.role_id = role.id
-            changed.append("role_id")
         if status is not None:
             if user_id == actor.user_id and not status:
                 raise AdminConflictError("an administrator cannot disable their own user")
             user.status = status
-            membership.status = "active" if status else INACTIVE_STATUS
+            membership.status = ACTIVE_STATUS if status else INACTIVE_STATUS
             if status:
                 membership.deleted_at = None
             changed.append("status")
+        if role_ids is not None:
+            roles = await self._assignments.replace_tenant_roles(
+                user_id=user_id,
+                tenant_id=tenant_id,
+                role_ids=role_ids,
+                created_by_user_id=actor.user_id,
+            )
+            changed.append("roles")
+        else:
+            roles = (
+                await self._assignments.tenant_roles_for_users(tenant_id, [user_id])
+            ).get(user_id, [])
         groups = (
             await self._replace_groups(tenant_id, user_id, group_ids)
             if group_ids is not None
@@ -254,16 +293,15 @@ class UserService:
             resource_id=str(user.id),
             details={"changed_fields": changed},
         )
-        return _user_payload(user, membership, role, groups)
+        return _user_payload(user, membership, roles, groups)
 
     async def _membership_row(
         self, tenant_id: UUID, user_id: UUID
-    ) -> tuple[User, TenantMembership, Role]:
+    ) -> tuple[User, TenantMembership]:
         row = (
             await self._session.execute(
-                select(User, TenantMembership, Role)
+                select(User, TenantMembership)
                 .join(TenantMembership, TenantMembership.user_id == User.id)
-                .join(Role, Role.id == TenantMembership.role_id)
                 .where(
                     User.id == user_id,
                     TenantMembership.tenant_id == tenant_id,
@@ -274,18 +312,6 @@ class UserService:
         if row is None:
             raise AdminNotFoundError(f"user not found: {user_id}")
         return row
-
-    async def _role(self, tenant_id: UUID, role_id: UUID) -> Role:
-        role = await self._session.scalar(
-            select(Role).where(
-                Role.id == role_id,
-                Role.tenant_id == tenant_id,
-                Role.status == ACTIVE_STATUS,
-            )
-        )
-        if role is None:
-            raise AdminNotFoundError(f"role not found: {role_id}")
-        return role
 
     async def _groups_for_users(
         self, tenant_id: UUID, user_ids: list[UUID]
@@ -314,14 +340,20 @@ class UserService:
 
     async def _platform_memberships(
         self, user_ids: list[UUID]
-    ) -> dict[UUID, list[dict[str, str]]]:
+    ) -> dict[UUID, list[dict[str, Any]]]:
         if not user_ids:
             return {}
         rows = (
             await self._session.execute(
-                select(TenantMembership.user_id, TenantMembership, Role, Tenant)
-                .join(Role, Role.id == TenantMembership.role_id)
+                select(TenantMembership.user_id, Tenant, Role.display_name)
                 .join(Tenant, Tenant.id == TenantMembership.tenant_id)
+                .outerjoin(
+                    RoleAssignment,
+                    (RoleAssignment.user_id == TenantMembership.user_id)
+                    & (RoleAssignment.tenant_id == TenantMembership.tenant_id)
+                    & (RoleAssignment.deleted_at.is_(None)),
+                )
+                .outerjoin(Role, Role.id == RoleAssignment.role_id)
                 .where(
                     TenantMembership.user_id.in_(user_ids),
                     TenantMembership.status == ACTIVE_STATUS,
@@ -330,17 +362,48 @@ class UserService:
                 .order_by(Tenant.name, Tenant.id)
             )
         ).all()
-        result: dict[UUID, list[dict[str, str]]] = {user_id: [] for user_id in user_ids}
-        for user_id, _, role, tenant in rows:
-            result[user_id].append(
+        result: dict[UUID, dict[UUID, dict[str, Any]]] = {
+            user_id: {} for user_id in user_ids
+        }
+        for user_id, tenant, role_name in rows:
+            workspace = result[user_id].setdefault(
+                tenant.id,
                 {
                     "workspace_id": str(tenant.id),
                     "workspace_name": tenant.name,
-                    "role_code": role.code,
-                    "role_name": role.display_name,
-                }
+                    "role_names": [],
+                },
             )
-        return result
+            if role_name is not None:
+                workspace["role_names"].append(role_name)
+        return {
+            user_id: list(workspaces.values())
+            for user_id, workspaces in result.items()
+        }
+
+    async def _platform_roles(self, user_ids: list[UUID]) -> dict[UUID, list[str]]:
+        """Read the platform roles held by each listed identity."""
+
+        if not user_ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(RoleAssignment.user_id, Role.code)
+                .join(Role, Role.id == RoleAssignment.role_id)
+                .where(
+                    RoleAssignment.user_id.in_(user_ids),
+                    RoleAssignment.tenant_id.is_(None),
+                    RoleAssignment.item_id.is_(None),
+                    RoleAssignment.deleted_at.is_(None),
+                    Role.status == ACTIVE_STATUS,
+                )
+                .order_by(Role.code)
+            )
+        ).all()
+        held: dict[UUID, list[str]] = {}
+        for user_id, code in rows:
+            held.setdefault(user_id, []).append(code)
+        return held
 
     async def _replace_groups(
         self, tenant_id: UUID, user_id: UUID, group_ids: list[UUID]
@@ -399,10 +462,9 @@ class UserService:
 def _user_payload(
     user: User,
     membership: TenantMembership,
-    role: Role,
+    roles: list[Role],
     groups: list[Group],
 ) -> dict[str, Any]:
-    permissions = sorted(set(role.permission_codes))
     return {
         "id": str(user.id),
         "email": user.email,
@@ -414,11 +476,14 @@ def _user_payload(
         "membership": {
             "status": membership.status,
             "joined_at": timestamp(membership.joined_at),
-            "role": {
-                "id": str(role.id),
-                "code": role.code,
-                "display_name": role.display_name,
-            },
+            "roles": [
+                {
+                    "id": str(role.id),
+                    "code": role.code,
+                    "display_name": role.display_name,
+                }
+                for role in roles
+            ],
         },
         "groups": [
             {
@@ -428,7 +493,6 @@ def _user_payload(
             }
             for group in groups
         ],
-        "permission_codes": permissions,
     }
 
 

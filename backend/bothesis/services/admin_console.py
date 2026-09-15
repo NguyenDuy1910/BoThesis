@@ -13,12 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bothesis.db.engine import SessionFactory, session_scope
 from bothesis.document_index import ItemIndex
 from bothesis.services import (
+    COLLECTION_SHARE_PERMISSION,
     AdminConflictError,
     AuthContext,
 )
 from bothesis.services.approval_request import ApprovalRequestService
 from bothesis.services.audit import AuditService
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.dashboard.dashboard import DashboardService
+from bothesis.services.identity_access.authorization import AuthorizationService
+from bothesis.services.identity_access.role_assignments import RoleAssignmentService
 from bothesis.services.identity_access.groups import GroupService
 from bothesis.services.identity_access.roles import RoleService
 from bothesis.services.identity_access.tenants import TenantService
@@ -44,17 +47,17 @@ class AdminConsoleService:
 
     async def overview(self, actor: AuthContext) -> dict[str, Any]:
         async with self._unit_of_work() as session:
-            return await TenantService(session).overview(actor)
+            return await DashboardService(session).overview(actor)
 
     async def platform_overview(self, actor: AuthContext) -> dict[str, Any]:
         async with self._unit_of_work() as session:
-            return await TenantService(session).platform_overview(actor)
+            return await DashboardService(session).platform_overview(actor)
 
     async def list_platform_workspaces(
         self, actor: AuthContext, **filters: Any
     ) -> dict[str, Any]:
         async with self._unit_of_work() as session:
-            return await TenantService(session).list_platform_workspaces(
+            return await DashboardService(session).list_platform_workspaces(
                 actor, **filters
             )
 
@@ -219,20 +222,34 @@ class AdminConsoleService:
 
     # -- Collection access --------------------------------------------------
 
+    @staticmethod
+    async def _require_share(
+        session: AsyncSession, actor: AuthContext, item_id: UUID
+    ) -> None:
+        """Only someone who may share this Collection may read or change who can."""
+
+        await AuthorizationService(session).require_item(
+            item_id, access=actor, permission=COLLECTION_SHARE_PERMISSION
+        )
+
     async def list_collection_access(
         self, actor: AuthContext, item_id: UUID, **filters: Any
     ) -> dict[str, object]:
         async with self._unit_of_work() as session:
-            return await CollectionAccessService(session).list_grants(
-                item_id, actor=actor, **filters
+            await self._require_share(session, actor, item_id)
+            return await RoleAssignmentService(session).list_collection_grants(
+                item_id, **filters
             )
 
     async def grant_collection_access(
         self, actor: AuthContext, item_id: UUID, values: dict[str, Any]
     ) -> dict[str, object]:
         async with self._unit_of_work() as session:
-            access = CollectionAccessService(session)
-            grant = await access.grant(item_id, actor=actor, **values)
+            await self._require_share(session, actor, item_id)
+            assignments = RoleAssignmentService(session)
+            grant, role = await assignments.grant_collection_role(
+                item_id, created_by_user_id=actor.user_id, **values
+            )
             await AuditService(session).record(
                 actor,
                 action="collection.access.granted",
@@ -241,10 +258,10 @@ class AdminConsoleService:
                 details={
                     "principal_type": grant.principal_type,
                     "principal_id": str(grant.principal_id),
-                    "role": grant.role,
+                    "role_code": role.code,
                 },
             )
-            return access.grant_payload(grant)
+            return assignments.grant_payload(grant, role)
 
     async def revoke_collection_access(
         self,
@@ -255,11 +272,11 @@ class AdminConsoleService:
         principal_id: UUID,
     ) -> None:
         async with self._unit_of_work() as session:
-            await CollectionAccessService(session).revoke(
+            await self._require_share(session, actor, item_id)
+            await RoleAssignmentService(session).revoke_collection_role(
                 item_id,
                 principal_type=principal_type,
                 principal_id=principal_id,
-                actor=actor,
             )
             await AuditService(session).record(
                 actor,

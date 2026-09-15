@@ -21,7 +21,7 @@ import {
   useProductShellNavigation,
   useProductShellSidebar,
 } from "@/components/shell/ProductShell";
-import { getLiveApiConfiguration } from "@/lib/api/config";
+import { getApiConfiguration } from "@/lib/api/config";
 import { WorkspaceMark } from "@/components/patterns";
 import {
   listCollections,
@@ -117,7 +117,7 @@ export default function ChatShell() {
   }, []);
 
   useEffect(() => {
-    const configuration = getLiveApiConfiguration();
+    const configuration = getApiConfiguration();
     if (!configuration) {
       router.replace("/auth/login");
       return;

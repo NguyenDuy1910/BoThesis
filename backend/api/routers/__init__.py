@@ -42,8 +42,7 @@ class AuthTenant(BaseModel):
     id: UUID
     code: str
     name: str
-    role_id: UUID | None
-    role_code: str
+    role_codes: list[str]
     permissions: list[str]
 
 
@@ -57,7 +56,7 @@ class AuthSessionResponse(BaseModel):
     active_tenant_id: UUID
     permissions: list[str]
     tenants: list[AuthTenant]
-    platform_scopes: list[str] = Field(default_factory=list)
+    platform_permissions: list[str] = Field(default_factory=list)
 
 
 class RefreshRequest(BaseModel):
@@ -503,13 +502,13 @@ class SpaceUpdate(AdminRequest):
 class UserCreate(AdminRequest):
     email: EmailStr
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
-    role_id: UUID
+    role_ids: list[UUID] = Field(default_factory=list)
     group_ids: list[UUID] = Field(default_factory=list)
 
 
 class UserUpdate(AdminRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
-    role_id: UUID | None = None
+    role_ids: list[UUID] | None = None
     status: bool | None = None
     group_ids: list[UUID] | None = None
 
@@ -639,10 +638,10 @@ class CollectionUpdate(AdminRequest):
     description: str | None = Field(default=None, max_length=2_000)
 
 
-class CollectionAccessGrant(AdminRequest):
+class CollectionRoleGrant(AdminRequest):
     principal_type: Literal["user", "group"]
     principal_id: UUID
-    role: Literal["owner", "editor", "viewer"]
+    role_code: Literal["collection_owner", "collection_editor", "collection_viewer"]
 
 
 __all__ = [
@@ -660,7 +659,7 @@ __all__ = [
     "BIQueryResponse",
     "ChatHistoryMessage",
     "ChatRequest",
-    "CollectionAccessGrant",
+    "CollectionRoleGrant",
     "CollectionCreate",
     "CollectionDocumentUploadResponse",
     "CollectionUpdate",

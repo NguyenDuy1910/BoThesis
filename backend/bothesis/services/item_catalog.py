@@ -9,12 +9,13 @@ from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from bothesis.db.models import ExternalResource, IngestionSource, Item
+from bothesis.db.models import ExternalResource, IngestionSource, Item, RoleAssignment
 from bothesis.services.audit import AuditService
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.role_assignments import RoleAssignmentService
 from bothesis.services.item import ItemService
 from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (
+    COLLECTION_OWNER_ROLE,
     ITEM_MANAGE_PERMISSION,
     AdminConflictError,
     AdminNotFoundError,
@@ -61,12 +62,14 @@ class ItemCatalogService:
             inherit_access=inherit_access,
             metadata=metadata,
         )
-        await CollectionAccessService(self._session).grant(
+        _, owner_role = await RoleAssignmentService(
+            self._session
+        ).grant_collection_role(
             item.id,
             principal_type="user",
             principal_id=actor.user_id,
-            role="owner",
-            actor=actor,
+            role_code=COLLECTION_OWNER_ROLE,
+            created_by_user_id=actor.user_id,
         )
         await self._audit.record(
             actor,
@@ -75,7 +78,7 @@ class ItemCatalogService:
             resource_id=str(item.id),
             details={
                 "parent_item_id": str(parent_item_id) if parent_item_id else None,
-                "creator_role": "owner",
+                "creator_role": owner_role.code,
             },
         )
         return await self.get_item(actor, item.id)
@@ -229,7 +232,7 @@ class ItemCatalogService:
                 selectinload(Item.external_resources)
                 .selectinload(ExternalResource.ingestion_source)
                 .selectinload(IngestionSource.integration_connection),
-                selectinload(Item.access_grants),
+                selectinload(Item.role_assignments).joinedload(RoleAssignment.role),
             )
             .where(
                 Item.id == item_id,
@@ -244,13 +247,13 @@ class ItemCatalogService:
             **self._payload(item),
             "metadata": dict(item.metadata_),
             "inherit_access": item.inherit_access,
-            "collection_access": [
+            "role_assignments": [
                 {
                     "principal_type": grant.principal_type,
                     "principal_id": str(grant.principal_id),
-                    "role": grant.role,
+                    "role_code": grant.role.code,
                 }
-                for grant in item.access_grants
+                for grant in item.role_assignments
                 if grant.deleted_at is None
             ],
             "raw_content_available": bool(item.storage_key),

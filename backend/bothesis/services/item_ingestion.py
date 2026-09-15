@@ -23,6 +23,8 @@ from bothesis.document_index import IndexingContext, ItemIndex
 from bothesis.services.citation import CitationService
 from bothesis.services.item import ItemService
 from bothesis.services import (
+    COLLECTION_READ_PERMISSION,
+    COLLECTION_UPDATE_PERMISSION,
     CHUNKER_VERSION,
     PARSER_VERSION,
     AuthContext,
@@ -293,7 +295,7 @@ class ItemIngestionService:
         document = await self._load_upload(
             document_id,
             access=access,
-            minimum_role="editor",
+            permission=COLLECTION_UPDATE_PERMISSION,
         )
         if self._index_is_current(document):
             return document
@@ -328,7 +330,7 @@ class ItemIngestionService:
         document_id: UUID,
         *,
         access: AuthContext,
-        minimum_role: str = "viewer",
+        permission: str = COLLECTION_READ_PERMISSION,
     ) -> Item:
         if access.tenant_id is None:
             raise DocumentUnavailableError("an active tenant is required")
@@ -336,7 +338,7 @@ class ItemIngestionService:
             document = await ItemService(session).get_upload_for_access(
                 document_id,
                 access,
-                minimum_role=minimum_role,
+                permission=permission,
             )
             assert document.upload is not None
             if document.upload.status != "available":

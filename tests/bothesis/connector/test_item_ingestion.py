@@ -159,10 +159,9 @@ def _access(user_id: Any, tenant_id: Any | None = None) -> AuthContext:
         email="person@example.test",
         display_name="Person",
         tenant_id=tenant_id,
-        role_id=uuid4() if tenant_id else None,
-        role_code="analyst" if tenant_id else None,
         permission_codes=("knowledge.read",) if tenant_id else (),
         group_ids=(),
+        role_codes=("analyst",) if tenant_id else (),
     )
 
 

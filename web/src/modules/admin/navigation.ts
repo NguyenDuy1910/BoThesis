@@ -7,7 +7,7 @@ import {
   workspaceAdminRailTail,
   type RailItem,
 } from "@/lib/navigation";
-import { hasAnySessionPermission, hasPlatformScope, type AuthSession } from "@/lib/auth/session";
+import { canAccessPlatformAdmin, hasAnySessionPermission, type AuthSession } from "@/lib/auth/session";
 
 /**
  * Admin addressing, derived from the rails.
@@ -119,7 +119,7 @@ const permissionsById = new Map<string, readonly string[] | undefined>(
 );
 
 export function canAccessAdminRoute(route: AdminRoute, session: AuthSession | null): boolean {
-  if (route.group === "platform") return hasPlatformScope(session, "root_admin");
+  if (route.group === "platform") return canAccessPlatformAdmin(session);
   const codes = permissionsById.get(route.id);
   return !codes || hasAnySessionPermission(session, codes);
 }

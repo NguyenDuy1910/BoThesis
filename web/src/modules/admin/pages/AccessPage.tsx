@@ -4,11 +4,9 @@ import { Plus, ShieldCheck, UserPlus, Users, UsersRound } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { FilterTrigger, CommandBar } from "@/components/layout/CommandBar";
-import { SettingRow, Toggle } from "@/components/patterns";
 import { Avatar } from "@/components/ui/Avatar";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
-import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { CellTitle, DataTable, type Column } from "@/components/ui/DataTable";
 import { Dialog } from "@/components/ui/Dialog";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -18,165 +16,436 @@ import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Tabs } from "@/components/ui/Tabs";
 import { useRouteState } from "@/lib/hooks/useRouteState";
-import { adminData, useAdminData } from "@/modules/admin/queries";
-import type { AccessGroup, AccessPolicy, AccessRole, Member } from "@/mocks/bothesis-api.mock";
+import {
+  directoryApi,
+  memberName,
+  memberStatus,
+  roleNames,
+  type Group,
+  type Member,
+  type Permission,
+  type Role,
+} from "@/modules/admin/directory";
+import { useAdminData } from "@/modules/admin/queries";
 
-type AccessTab = "policy" | "members" | "groups" | "roles";
+type AccessTab = "members" | "groups" | "roles";
 
 const tabs = [
-  { id: "policy", label: "Policy" },
   { id: "members", label: "Members" },
   { id: "groups", label: "Groups" },
   { id: "roles", label: "Roles" },
 ];
 
 export function AccessPage() {
-  const [routeTab, setRouteTab] = useRouteState("tab", "policy");
-  const tab = tabs.some((item) => item.id === routeTab) ? routeTab as AccessTab : "policy";
-  const policy = useAdminData(adminData.access.policy);
-  const members = useAdminData(adminData.access.members);
-  const groups = useAdminData(adminData.access.groups);
-  const roles = useAdminData(adminData.access.roles);
-  const error = policy.error || members.error || groups.error || roles.error;
+  const [routeTab, setRouteTab] = useRouteState("tab", "members");
+  const tab = tabs.some((item) => item.id === routeTab) ? (routeTab as AccessTab) : "members";
+  const members = useAdminData(() => directoryApi.members());
+  const groups = useAdminData(() => directoryApi.groups());
+  const roles = useAdminData(() => directoryApi.roles());
+  const error = members.error || groups.error || roles.error;
 
   if (error) {
-    return <ErrorState description={error} onAction={() => { policy.reload(); members.reload(); groups.reload(); roles.reload(); }} />;
+    return (
+      <ErrorState
+        description={error}
+        onAction={() => { members.reload(); groups.reload(); roles.reload(); }}
+      />
+    );
   }
 
   return <>
     <Tabs activeTab={tab} ariaLabel="Access sections" className="mb-4" onChange={setRouteTab} tabs={tabs} />
-    {tab === "policy" && policy.data && <PolicyPanel initial={policy.data} />}
-    {tab === "members" && <MembersPanel rows={members.data ?? []} roles={roles.data ?? []} />}
-    {tab === "groups" && <GroupsPanel rows={groups.data ?? []} roles={roles.data ?? []} />}
-    {tab === "roles" && <RolesPanel rows={roles.data ?? []} />}
+    {tab === "members" && <MembersPanel roles={roles.data?.items ?? []} rows={members.data?.items ?? []} />}
+    {tab === "groups" && <GroupsPanel rows={groups.data?.items ?? []} />}
+    {tab === "roles" && <RolesPanel rows={roles.data?.items ?? []} />}
   </>;
 }
 
-function PolicyPanel({ initial }: { initial: AccessPolicy }) {
-  const [value, setValue] = useState(initial);
-  const [saved, setSaved] = useState(initial);
-  const [busy, setBusy] = useState(false);
-  const dirty = JSON.stringify(value) !== JSON.stringify(saved);
-  const save = async () => {
-    setBusy(true);
-    const next = await adminData.access.savePolicy(value);
-    setSaved(next);
-    setBusy(false);
-  };
-
-  return <div className="mx-auto grid max-w-3xl gap-4">
-    <Card>
-      <CardHeader title="Workspace access" description="Choose who can open this workspace. Source-level permissions still decide which documents a person can retrieve." />
-      <CardBody className="grid gap-3">
-        <label className="configuration-field">Who can open this workspace
-          <Select aria-label="Who can open this workspace" value={value.workspaceAccess} onChange={(event) => setValue({ ...value, workspaceAccess: event.target.value as AccessPolicy["workspaceAccess"] })} options={[
-            { value: "members", label: "Members only" },
-            { value: "everyone", label: "Everyone using BoThesis" },
-          ]} />
-        </label>
-        <label className="configuration-field">Who can invite members
-          <Select aria-label="Who can invite members" value={value.invitations} onChange={(event) => setValue({ ...value, invitations: event.target.value as AccessPolicy["invitations"] })} options={[
-            { value: "admins", label: "Owners and admins" },
-            { value: "members", label: "All members" },
-          ]} />
-        </label>
-      </CardBody>
-    </Card>
-    <Card>
-      <CardHeader title="Discovery and entry" description="Being listed does not grant membership or document access. The platform default is managed separately by a platform administrator." />
-      <CardBody className="divide-y divide-[var(--border-subtle)]">
-        <SettingRow title="Discoverable" description="Show this workspace in Explore workspaces to people who can request or already have access." control={<Toggle checked={value.discoverable} label="Make workspace discoverable" onChange={(discoverable) => setValue({ ...value, discoverable })} />} />
-        <SettingRow disabled title="Platform default" description="Open this workspace for a signed-in user who has no membership yet." note="Managed in Platform Admin → Public Workspaces." control={<Toggle checked={value.platformDefault} disabled label="Platform default workspace" />} />
-      </CardBody>
-    </Card>
-    <Card>
-      <CardHeader title="Knowledge enforcement" description="These controls apply before results or citations reach the agent." />
-      <CardBody className="divide-y divide-[var(--border-subtle)]">
-        <SettingRow title="Respect source permissions" description="Only retrieve documents the current member can access at the source." control={<Toggle checked={value.sourcePermissions} label="Respect source permissions" onChange={(sourcePermissions) => setValue({ ...value, sourcePermissions })} />} />
-        <SettingRow title="Guest access" description="Allow invited guests to use knowledge explicitly shared with them." control={<Toggle checked={value.guestAccess} label="Allow guest access" onChange={(guestAccess) => setValue({ ...value, guestAccess })} />} />
-      </CardBody>
-    </Card>
-    <div className="flex items-center justify-end gap-2"><Button variant="ghost" disabled={!dirty} onClick={() => setValue(saved)}>Discard</Button><Button disabled={!dirty} loading={busy} onClick={save}>Save policy</Button></div>
-  </div>;
-}
-
-function MembersPanel({ rows, roles }: { rows: Member[]; roles: AccessRole[] }) {
+function MembersPanel({ rows, roles }: { rows: Member[]; roles: Role[] }) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<Member | null>(null);
   const matching = useMemo(() => rows.filter((row) => {
     const term = search.toLowerCase();
-    return (!term || `${row.name} ${row.email} ${row.role}`.toLowerCase().includes(term)) && (!status || row.status === status);
+    return (!term || `${memberName(row)} ${row.email} ${roleNames(row)}`.toLowerCase().includes(term))
+      && (!status || memberStatus(row) === status);
   }), [rows, search, status]);
+
   const columns: Column<Member>[] = [
-    { key: "name", label: "Member", primary: true, sortable: true, render: (row) => <CellTitle icon={<Avatar name={row.name} size="md" />} title={row.name} subtitle={row.email} /> },
-    { key: "role", label: "Workspace role", priority: "medium" },
-    { key: "groups", label: "Knowledge access", priority: "low", render: (row) => row.groups.join(", ") || "Direct access only" },
+    {
+      key: "email",
+      label: "Member",
+      primary: true,
+      sortable: true,
+      render: (row) => (
+        <CellTitle icon={<Avatar name={memberName(row)} size="md" />} subtitle={row.email} title={memberName(row)} />
+      ),
+    },
+    { key: "membership", label: "Workspace roles", priority: "medium", render: (row) => roleNames(row) || "No role" },
+    {
+      key: "groups",
+      label: "Groups",
+      priority: "low",
+      render: (row) => row.groups.map((group) => group.display_name).join(", ") || "Direct access only",
+    },
+    { key: "status", label: "Status", width: 110, render: (row) => <StatusBadge status={memberStatus(row)} /> },
+  ];
+
+  return <>
+    <CommandBar
+      action={<Button icon={<UserPlus size={16} />} onClick={() => setOpen(true)}>Add member</Button>}
+      count={`${matching.length} members`}
+      filters={
+        <FilterTrigger
+          label="Filter by status"
+          onChange={setStatus}
+          options={[
+            { value: "", label: "All statuses" },
+            { value: "active", label: "Active" },
+            { value: "suspended", label: "Suspended" },
+          ]}
+          value={status}
+        />
+      }
+      search={{ value: search, onChange: setSearch, placeholder: "Search members…", label: "Search members" }}
+    />
+    <DataTable
+      ariaLabel="Workspace members"
+      columns={columns}
+      data={matching}
+      emptyState={<EmptyState description="Clear the filters or add a member." icon={<Users size={20} />} title="No matching members" />}
+      onRowClick={setSelected}
+    />
+    <MemberDialog member={selected} onClose={() => setSelected(null)} roles={roles} />
+    <AddMemberDialog onClose={() => setOpen(false)} open={open} roles={roles} />
+  </>;
+}
+
+function MemberDialog({ member, roles, onClose }: { member: Member | null; roles: Role[]; onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!member) return null;
+  const active = memberStatus(member) === "active";
+
+  const save = async (patch: Parameters<typeof directoryApi.saveMember>[1]) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await directoryApi.saveMember(member.id, patch);
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not save this member.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      footer={<>
+        <Button onClick={onClose} variant="secondary">Close</Button>
+        <Button loading={busy} onClick={() => save({ status: !active })} variant={active ? "danger" : "secondary"}>
+          {active ? "Suspend access" : "Restore access"}
+        </Button>
+      </>}
+      onClose={onClose}
+      open
+      title={memberName(member)}
+    >
+      <div className="grid gap-4">
+        <div className="flex items-center gap-3">
+          <Avatar name={memberName(member)} size="lg" />
+          <div>
+            <p className="font-medium text-[var(--text-primary)]">{memberName(member)}</p>
+            <p className="text-sm text-[var(--text-secondary)]">{member.email}</p>
+          </div>
+        </div>
+        <label className="configuration-field">Workspace role
+          <Select
+            onChange={(event) => save({ role_ids: [event.target.value] })}
+            options={roles.map((role) => ({ value: role.id, label: role.display_name }))}
+            value={member.membership.roles[0]?.id ?? ""}
+          />
+        </label>
+        <div>
+          <p className="mb-2 text-sm font-medium">Groups</p>
+          <div className="flex flex-wrap gap-1">
+            {member.groups.length
+              ? member.groups.map((group) => <Badge key={group.id} tone="neutral">{group.display_name}</Badge>)
+              : <span className="text-sm text-[var(--text-tertiary)]">No group memberships</span>}
+          </div>
+        </div>
+        {error && <ErrorState description={error} layout="inline" />}
+      </div>
+    </Dialog>
+  );
+}
+
+function AddMemberDialog({ open, roles, onClose }: { open: boolean; roles: Role[]; onClose: () => void }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [roleId, setRoleId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const chosen = roleId || roles[0]?.id || "";
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await directoryApi.createMember({
+        email: email.trim(),
+        display_name: name.trim() || null,
+        role_ids: chosen ? [chosen] : [],
+      });
+      setName("");
+      setEmail("");
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not add this member.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      footer={<>
+        <Button onClick={onClose} variant="secondary">Cancel</Button>
+        <Button disabled={!email.includes("@") || !chosen} loading={busy} onClick={submit}>Add member</Button>
+      </>}
+      onClose={onClose}
+      open={open}
+      title="Add member"
+    >
+      <div className="grid gap-4">
+        <label className="configuration-field">Name
+          <Input onChange={(event) => setName(event.target.value)} value={name} />
+        </label>
+        <label className="configuration-field">Email
+          <Input onChange={(event) => setEmail(event.target.value)} required type="email" value={email} />
+        </label>
+        <label className="configuration-field">Role
+          <Select
+            onChange={(event) => setRoleId(event.target.value)}
+            options={roles.map((role) => ({ value: role.id, label: role.display_name }))}
+            value={chosen}
+          />
+        </label>
+        {error && <ErrorState description={error} layout="inline" />}
+      </div>
+    </Dialog>
+  );
+}
+
+function GroupsPanel({ rows }: { rows: Group[] }) {
+  const [search, setSearch] = useState("");
+  const [open, setOpen] = useState(false);
+  const matching = rows.filter((row) =>
+    `${row.display_name} ${row.description ?? ""}`.toLowerCase().includes(search.toLowerCase()),
+  );
+  const columns: Column<Group>[] = [
+    {
+      key: "display_name",
+      label: "Group",
+      primary: true,
+      sortable: true,
+      render: (row) => <CellTitle subtitle={row.description ?? row.code} title={row.display_name} />,
+    },
+    { key: "member_count", label: "Members", width: 100, align: "right" },
     { key: "status", label: "Status", width: 110, render: (row) => <StatusBadge status={row.status} /> },
   ];
 
   return <>
-    <CommandBar search={{ value: search, onChange: setSearch, placeholder: "Search members…", label: "Search members" }} filters={<FilterTrigger label="Filter by status" value={status} onChange={setStatus} options={[{ value: "", label: "All statuses" }, { value: "active", label: "Active" }, { value: "invited", label: "Invited" }, { value: "suspended", label: "Suspended" }]} />} count={`${matching.length} members`} action={<Button icon={<UserPlus size={16} />} onClick={() => setOpen(true)}>Invite member</Button>} />
-    <DataTable ariaLabel="Workspace members" columns={columns} data={matching} onRowClick={setSelected} emptyState={<EmptyState icon={<Users size={20} />} title="No matching members" description="Clear the filters or invite a new member." />} />
-    <MemberDialog member={selected} roles={roles} onClose={() => setSelected(null)} />
-    <InviteDialog open={open} roles={roles} onClose={() => setOpen(false)} />
+    <CommandBar
+      action={<Button icon={<Plus size={16} />} onClick={() => setOpen(true)}>Create group</Button>}
+      count={`${matching.length} groups`}
+      search={{ value: search, onChange: setSearch, placeholder: "Search groups…", label: "Search groups" }}
+    />
+    <DataTable
+      ariaLabel="Access groups"
+      columns={columns}
+      data={matching}
+      emptyState={<EmptyState description="Clear the search or create a group." icon={<UsersRound size={20} />} title="No matching groups" />}
+    />
+    <GroupDialog onClose={() => setOpen(false)} open={open} />
   </>;
 }
 
-function MemberDialog({ member, roles, onClose }: { member: Member | null; roles: AccessRole[]; onClose: () => void }) {
-  const [busy, setBusy] = useState(false);
-  if (!member) return null;
-  const save = async (patch: Partial<Member>) => { setBusy(true); await adminData.access.saveMember({ ...member, ...patch }); setBusy(false); onClose(); };
-  return <Dialog open title={member.name} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>Close</Button><Button variant={member.status === "suspended" ? "secondary" : "danger"} loading={busy} onClick={() => save({ status: member.status === "suspended" ? "active" : "suspended" })}>{member.status === "suspended" ? "Restore access" : "Suspend access"}</Button></>}>
-    <div className="grid gap-4"><div className="flex items-center gap-3"><Avatar name={member.name} size="lg" /><div><p className="font-medium text-[var(--text-primary)]">{member.name}</p><p className="text-sm text-[var(--text-secondary)]">{member.email}</p></div></div><label className="configuration-field">Workspace role<Select value={member.role} onChange={(event) => save({ role: event.target.value })} options={roles.map((role) => ({ value: role.name, label: role.name }))} /></label><div><p className="mb-2 text-sm font-medium">Knowledge groups</p><div className="flex flex-wrap gap-1">{member.groups.length ? member.groups.map((group) => <Badge key={group} tone="neutral">{group}</Badge>) : <span className="text-sm text-[var(--text-tertiary)]">No group memberships</span>}</div></div></div>
-  </Dialog>;
-}
-
-function InviteDialog({ open, roles, onClose }: { open: boolean; roles: AccessRole[]; onClose: () => void }) {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [role, setRole] = useState("Member");
-  const [busy, setBusy] = useState(false);
-  const submit = async () => { setBusy(true); await adminData.access.saveMember({ id: crypto.randomUUID(), name: name.trim() || email.split("@")[0], email: email.trim(), role, status: "invited", groups: [], workspaceId: adminData.session.current()?.active_tenant_id ?? "spkt" }); setBusy(false); setName(""); setEmail(""); onClose(); };
-  return <Dialog open={open} onClose={onClose} title="Invite member" footer={<><Button variant="secondary" onClick={onClose}>Cancel</Button><Button loading={busy} disabled={!email.includes("@")} onClick={submit}>Send invite</Button></>}><div className="grid gap-4"><label className="configuration-field">Name<Input value={name} onChange={(event) => setName(event.target.value)} /></label><label className="configuration-field">Email<Input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label><label className="configuration-field">Role<Select value={role} onChange={(event) => setRole(event.target.value)} options={roles.map((item) => ({ value: item.name, label: item.name }))} /></label></div></Dialog>;
-}
-
-function GroupsPanel({ rows, roles }: { rows: AccessGroup[]; roles: AccessRole[] }) {
-  const [search, setSearch] = useState("");
-  const [open, setOpen] = useState(false);
-  const matching = rows.filter((row) => `${row.name} ${row.description}`.toLowerCase().includes(search.toLowerCase()));
-  const columns: Column<AccessGroup>[] = [
-    { key: "name", label: "Group", primary: true, sortable: true, render: (row) => <CellTitle title={row.name} subtitle={row.description} /> },
-    { key: "members", label: "Members", width: 100, align: "right" },
-    { key: "role", label: "Default role", width: 140 },
-  ];
-  return <><CommandBar search={{ value: search, onChange: setSearch, placeholder: "Search groups…", label: "Search groups" }} count={`${matching.length} groups`} action={<Button icon={<Plus size={16} />} onClick={() => setOpen(true)}>Create group</Button>} /><DataTable ariaLabel="Access groups" columns={columns} data={matching} emptyState={<EmptyState icon={<UsersRound size={20} />} title="No matching groups" description="Clear the search or create a group." />} /><GroupDialog open={open} roles={roles} onClose={() => setOpen(false)} /></>;
-}
-
-function GroupDialog({ open, roles, onClose }: { open: boolean; roles: AccessRole[]; onClose: () => void }) {
+function GroupDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [role, setRole] = useState("Member");
-  const submit = async () => { await adminData.access.saveGroup({ id: crypto.randomUUID(), name: name.trim(), description: description.trim(), members: 0, role }); setName(""); setDescription(""); onClose(); };
-  return <Dialog open={open} onClose={onClose} title="Create group" footer={<><Button variant="secondary" onClick={onClose}>Cancel</Button><Button disabled={!name.trim()} onClick={submit}>Create group</Button></>}><div className="grid gap-4"><label className="configuration-field">Group name<Input value={name} onChange={(event) => setName(event.target.value)} /></label><label className="configuration-field">Description<Input value={description} onChange={(event) => setDescription(event.target.value)} /></label><label className="configuration-field">Default role<Select value={role} onChange={(event) => setRole(event.target.value)} options={roles.map((item) => ({ value: item.name, label: item.name }))} /></label></div></Dialog>;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await directoryApi.createGroup({
+        code: code.trim(),
+        display_name: name.trim(),
+        description: description.trim() || undefined,
+      });
+      setCode("");
+      setName("");
+      setDescription("");
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not create this group.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      footer={<>
+        <Button onClick={onClose} variant="secondary">Cancel</Button>
+        <Button disabled={!code.trim() || !name.trim()} loading={busy} onClick={submit}>Create group</Button>
+      </>}
+      onClose={onClose}
+      open={open}
+      title="Create group"
+    >
+      <div className="grid gap-4">
+        <label className="configuration-field">Group name
+          <Input onChange={(event) => setName(event.target.value)} value={name} />
+        </label>
+        <label className="configuration-field">Code
+          <Input onChange={(event) => setCode(event.target.value)} value={code} />
+          <span className="text-xs text-[var(--text-tertiary)]">Short identifier, unique in this workspace.</span>
+        </label>
+        <label className="configuration-field">Description
+          <Input onChange={(event) => setDescription(event.target.value)} value={description} />
+        </label>
+        {error && <ErrorState description={error} layout="inline" />}
+      </div>
+    </Dialog>
+  );
 }
 
-function RolesPanel({ rows }: { rows: AccessRole[] }) {
+function RolesPanel({ rows }: { rows: Role[] }) {
   const [open, setOpen] = useState(false);
-  const columns: Column<AccessRole>[] = [
-    { key: "name", label: "Role", primary: true, sortable: true, render: (row) => <CellTitle title={row.name} subtitle={row.description} /> },
-    { key: "permissions", label: "Permissions", priority: "medium", render: (row) => <span className="flex flex-wrap gap-1">{row.permissions.slice(0, 3).map((permission) => <Badge key={permission} tone="neutral">{permission}</Badge>)}</span> },
-    { key: "builtIn", label: "Type", width: 110, render: (row) => row.builtIn ? "Built-in" : "Custom" },
+  const columns: Column<Role>[] = [
+    {
+      key: "display_name",
+      label: "Role",
+      primary: true,
+      sortable: true,
+      render: (row) => <CellTitle subtitle={row.code} title={row.display_name} />,
+    },
+    {
+      key: "permission_codes",
+      label: "Permissions",
+      priority: "medium",
+      render: (row) => (
+        <span className="flex flex-wrap gap-1">
+          {row.permission_codes.slice(0, 3).map((permission) => (
+            <Badge key={permission} tone="neutral">{permission}</Badge>
+          ))}
+          {row.permission_codes.length > 3 && (
+            <span className="text-xs text-[var(--text-tertiary)]">
+              +{row.permission_codes.length - 3} more
+            </span>
+          )}
+        </span>
+      ),
+    },
+    { key: "member_count", label: "Members", width: 100, align: "right" },
+    { key: "is_system", label: "Type", width: 110, render: (row) => (row.is_system ? "Platform" : "Custom") },
   ];
-  return <><CommandBar count={`${rows.length} roles`} action={<Button icon={<Plus size={16} />} onClick={() => setOpen(true)}>Create role</Button>} /><DataTable ariaLabel="Workspace roles" columns={columns} data={rows} emptyState={<EmptyState icon={<ShieldCheck size={20} />} title="No roles" description="Create a role to assign permissions." />} /><RoleDialog open={open} onClose={() => setOpen(false)} /></>;
+
+  return <>
+    <CommandBar
+      action={<Button icon={<Plus size={16} />} onClick={() => setOpen(true)}>Create role</Button>}
+      count={`${rows.length} roles`}
+    />
+    <DataTable
+      ariaLabel="Workspace roles"
+      columns={columns}
+      data={rows}
+      emptyState={<EmptyState description="Create a role to assign permissions." icon={<ShieldCheck size={20} />} title="No roles" />}
+    />
+    <RoleDialog onClose={() => setOpen(false)} open={open} />
+  </>;
 }
 
 function RoleDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const catalogue = useAdminData(directoryApi.permissions);
+  const [code, setCode] = useState("");
   const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [permissions, setPermissions] = useState(["Use workspace"]);
-  const choices = ["Use workspace", "Manage knowledge", "Configure agent", "Manage access", "Manage workspace"];
-  const submit = async () => { await adminData.access.saveRole({ id: crypto.randomUUID(), name: name.trim(), description: description.trim(), permissions, builtIn: false }); setName(""); setDescription(""); setPermissions(["Use workspace"]); onClose(); };
-  return <Dialog open={open} onClose={onClose} title="Create role" footer={<><Button variant="secondary" onClick={onClose}>Cancel</Button><Button disabled={!name.trim() || !permissions.length} onClick={submit}>Create role</Button></>}><div className="grid gap-4"><label className="configuration-field">Role name<Input value={name} onChange={(event) => setName(event.target.value)} /></label><label className="configuration-field">Description<Input value={description} onChange={(event) => setDescription(event.target.value)} /></label><fieldset><legend className="mb-2 text-sm font-medium">Permissions</legend><div className="grid gap-2">{choices.map((permission) => <label className="flex items-center gap-2 text-sm" key={permission}><input type="checkbox" checked={permissions.includes(permission)} onChange={() => setPermissions((current) => current.includes(permission) ? current.filter((item) => item !== permission) : [...current, permission])} />{permission}</label>)}</div></fieldset></div></Dialog>;
+  const [permissions, setPermissions] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const choices: Permission[] = catalogue.data?.items ?? [];
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await directoryApi.createRole({
+        code: code.trim(),
+        display_name: name.trim(),
+        permission_codes: permissions,
+      });
+      setCode("");
+      setName("");
+      setPermissions([]);
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not create this role.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog
+      footer={<>
+        <Button onClick={onClose} variant="secondary">Cancel</Button>
+        <Button disabled={!code.trim() || !name.trim() || !permissions.length} loading={busy} onClick={submit}>
+          Create role
+        </Button>
+      </>}
+      onClose={onClose}
+      open={open}
+      title="Create role"
+    >
+      <div className="grid gap-4">
+        <label className="configuration-field">Role name
+          <Input onChange={(event) => setName(event.target.value)} value={name} />
+        </label>
+        <label className="configuration-field">Code
+          <Input onChange={(event) => setCode(event.target.value)} value={code} />
+        </label>
+        <fieldset>
+          <legend className="mb-2 text-sm font-medium">Permissions</legend>
+          <div className="grid gap-2">
+            {choices.map((permission) => (
+              <label className="flex items-start gap-2 text-sm" key={permission.code}>
+                <input
+                  checked={permissions.includes(permission.code)}
+                  className="mt-1"
+                  onChange={() => setPermissions((current) =>
+                    current.includes(permission.code)
+                      ? current.filter((item) => item !== permission.code)
+                      : [...current, permission.code],
+                  )}
+                  type="checkbox"
+                />
+                <span>
+                  <span className="font-medium">{permission.code}</span>
+                  <span className="block text-xs text-[var(--text-tertiary)]">{permission.description}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+        {error && <ErrorState description={error} layout="inline" />}
+      </div>
+    </Dialog>
+  );
 }

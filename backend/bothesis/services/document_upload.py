@@ -17,10 +17,12 @@ from bothesis.storage import (
     ObjectStorageError,
     StoredObject,
 )
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.item import ItemService
 from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (
+    COLLECTION_READ_PERMISSION,
+    COLLECTION_UPDATE_PERMISSION,
     DEFAULT_MAX_UPLOAD_BYTES,
     DEFAULT_UPLOAD_URL_SECONDS,
     AsyncUploadStream,
@@ -264,7 +266,7 @@ class DocumentUploadService:
         document = await self.get_document(
             access,
             document_id,
-            minimum_role="editor",
+            permission=COLLECTION_UPDATE_PERMISSION,
         )
         if document.upload is None or document.upload.status != "available":
             raise UploadConflictError(
@@ -284,7 +286,7 @@ class DocumentUploadService:
         access: AuthContext,
         document_id: UUID,
         *,
-        minimum_role: str = "viewer",
+        permission: str = COLLECTION_READ_PERMISSION,
     ) -> Item:
         if access.tenant_id is None:
             raise UploadValidationError("an active tenant is required")
@@ -292,7 +294,7 @@ class DocumentUploadService:
             return await ItemService(session).get_upload_for_access(
                 document_id,
                 access,
-                minimum_role=minimum_role,
+                permission=permission,
             )
 
     async def mark_failed(
@@ -361,10 +363,10 @@ class DocumentUploadService:
                     access, collection_id, session=owned_session
                 )
             return
-        collection = await CollectionAccessService(session).require_item_access(
+        collection = await AuthorizationService(session).require_item(
             collection_id,
             access=access,
-            minimum_role="editor",
+            permission=COLLECTION_UPDATE_PERMISSION,
         )
         if collection.item_type != "collection":
             raise DocumentNotFoundError(f"collection not found: {collection_id}")

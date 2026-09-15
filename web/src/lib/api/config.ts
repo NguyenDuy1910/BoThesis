@@ -1,4 +1,4 @@
-import { getAuthSession, getStoredAuthSession } from "@/lib/auth/session";
+import { getStoredAuthSession } from "@/lib/auth/session";
 
 export interface ApiConfiguration {
   apiUrl: string;
@@ -7,20 +7,18 @@ export interface ApiConfiguration {
   accessToken?: string;
 }
 
-export function getApiConfiguration(): ApiConfiguration | null {
-  return resolveApiConfiguration(getAuthSession());
-}
-
 /**
- * Use for surfaces that are already backed by production routes. Unlike the
- * broader preview configuration, it never turns mock session state into API
- * credentials.
+ * How to reach the API as the current caller.
+ *
+ * A signed-in browser session authorizes with its own token. Falling back to
+ * the configured development identity keeps local work possible before a
+ * sign-in provider is set up, and is the only path that uses header identity.
  */
-export function getLiveApiConfiguration(): ApiConfiguration | null {
+export function getApiConfiguration(): ApiConfiguration | null {
   return resolveApiConfiguration(getStoredAuthSession());
 }
 
-function resolveApiConfiguration(session: ReturnType<typeof getAuthSession>): ApiConfiguration | null {
+function resolveApiConfiguration(session: ReturnType<typeof getStoredAuthSession>): ApiConfiguration | null {
   const apiUrl = process.env.NEXT_PUBLIC_BOTHESIS_API_URL?.replace(/\/$/, "");
   if (!apiUrl) return null;
   if (session) {

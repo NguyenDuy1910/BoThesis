@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,10 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bothesis.db.models import AuditLog, Tenant, User
 from bothesis.services import (
     AUDIT_READ_PERMISSION,
+    PLATFORM_AUDIT_READ_PERMISSION,
     AuthContext,
     normalize_page,
     normalize_required_text,
-    require_platform_root,
+    require_platform_permission,
     require_tenant_permission,
     timestamp,
 )
@@ -44,6 +46,42 @@ class AuditService:
         event = AuditLog(
             tenant_id=tenant_id,
             actor_user_id=actor.user_id,
+            action=normalize_required_text(action, "audit action", 96).casefold(),
+            resource_type=normalize_required_text(
+                resource_type, "resource type", 32
+            ).casefold(),
+            resource_id=(
+                normalize_required_text(resource_id, "resource ID", 512)
+                if resource_id is not None
+                else None
+            ),
+            outcome=normalize_required_text(outcome, "audit outcome", 16).casefold(),
+            details=_safe_details(details or {}),
+        )
+        self._session.add(event)
+        await self._session.flush()
+        return event
+
+    async def record_platform_event(
+        self,
+        *,
+        actor_user_id: UUID | None,
+        action: str,
+        resource_type: str,
+        resource_id: str | None = None,
+        outcome: str = "success",
+        details: Mapping[str, Any] | None = None,
+    ) -> AuditLog:
+        """Record an action that belongs to the platform, not to one workspace.
+
+        Granting platform administration or changing platform configuration has
+        no tenant to be filed under; forcing one would either lose the event or
+        attribute it to an unrelated workspace.
+        """
+
+        event = AuditLog(
+            tenant_id=None,
+            actor_user_id=actor_user_id,
             action=normalize_required_text(action, "audit action", 96).casefold(),
             resource_type=normalize_required_text(
                 resource_type, "resource type", 32
@@ -138,9 +176,9 @@ class AuditService:
         page_size: int = 20,
         search: str | None = None,
     ) -> dict[str, Any]:
-        """Return safe audit metadata across workspaces to root-scoped actors."""
+        """Return safe audit metadata across workspaces and the platform itself."""
 
-        require_platform_root(actor)
+        require_platform_permission(actor, PLATFORM_AUDIT_READ_PERMISSION)
         page, page_size, offset = normalize_page(page, page_size)
         filters: list[Any] = []
         if search and search.strip():
@@ -155,8 +193,10 @@ class AuditService:
                 )
             )
         base = (
+            # Outer-joined: a platform action has no tenant, and must still
+            # appear in the platform audit trail.
             select(AuditLog, User.email, User.display_name, Tenant.name)
-            .join(Tenant, Tenant.id == AuditLog.tenant_id)
+            .outerjoin(Tenant, Tenant.id == AuditLog.tenant_id)
             .outerjoin(User, User.id == AuditLog.actor_user_id)
             .where(*filters)
         )
@@ -174,7 +214,11 @@ class AuditService:
             "items": [
                 {
                     "id": str(event.id),
-                    "workspace": {"id": str(event.tenant_id), "name": tenant_name},
+                    "workspace": (
+                        {"id": str(event.tenant_id), "name": tenant_name}
+                        if event.tenant_id is not None
+                        else None
+                    ),
                     "action": event.action,
                     "resource_type": event.resource_type,
                     "resource_id": event.resource_id,

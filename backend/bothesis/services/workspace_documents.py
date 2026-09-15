@@ -10,7 +10,7 @@ from bothesis.db.engine import SessionFactory, session_scope
 from bothesis.db.models import Item
 from bothesis.services import AsyncUploadStream, AuthContext
 from bothesis.services.audit import AuditService
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.document_presentation import DocumentPresenter
 from bothesis.services.document_upload import DocumentUploadService
 
@@ -35,7 +35,7 @@ class WorkspaceDocumentService:
         """List the Collections the caller may select for a chat turn."""
 
         async with session_scope(self._sessions) as session:
-            ids = await CollectionAccessService(session).allowed_collection_ids(access)
+            ids = await AuthorizationService(session).allowed_collection_ids(access)
             if not ids:
                 return {"items": [], "total": 0}
             collections = list(

@@ -1,7 +1,7 @@
 "use client";
 
 import { Monitor, Moon, Sun } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Avatar } from "@/components/ui/Avatar";
 import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
@@ -11,7 +11,6 @@ import { SettingRow, Toggle } from "@/components/patterns";
 import type { AuthSession } from "@/lib/auth/session";
 import { useAccountPreferences } from "@/lib/hooks/useAccountPreferences";
 import { useTheme } from "@/modules/chat/hooks/useTheme";
-import { mockApi } from "@/mocks/bothesis-api.mock";
 
 type AccountTab = "profile" | "preferences";
 
@@ -31,34 +30,29 @@ export function AccountDialog({ initialTab, onClose, open, session }: {
 }
 
 function ProfilePanel({ session, onClose }: { session: AuthSession | null; onClose: () => void }) {
-  const [name, setName] = useState(session?.display_name ?? "");
-  const [photo, setPhoto] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const upload = useRef<HTMLInputElement>(null);
-  useEffect(() => () => { if (photo) URL.revokeObjectURL(photo); }, [photo]);
+  // Name, email and photo all come from the sign-in identity, and there is no
+  // endpoint that writes them back. Showing an editable field with a Save
+  // button would promise a change this product cannot make.
   return (
-    <form className="grid gap-5" onSubmit={async (event) => {
-      event.preventDefault(); setSaving(true); setError(null);
-      try { await mockApi.session.updateProfile(name); onClose(); }
-      catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save your profile."); }
-      finally { setSaving(false); }
-    }}>
+    <div className="grid gap-5">
       <div className="flex items-center gap-3">
-        {photo ? <img alt="Your selected profile photo" className="h-12 w-12 rounded-full object-cover" src={photo} /> : <Avatar name={name} size="lg" />}
-        <div className="min-w-0 flex-1"><p className="truncate font-medium">{session?.display_name}</p><p className="text-sm text-[var(--text-secondary)]">{session?.email}</p></div>
-        <Button onClick={() => upload.current?.click()} size="sm" variant="ghost">Change photo</Button>
-        <input accept="image/*" aria-label="Profile photo" className="hidden" ref={upload} type="file" onChange={(event) => {
-          const file = event.target.files?.[0]; if (!file) return;
-          if (!file.type.startsWith("image/") || file.size > 5_000_000) { setError("Choose an image smaller than 5 MB."); return; }
-          setPhoto(URL.createObjectURL(file));
-        }} />
+        <Avatar name={session?.display_name ?? session?.email ?? ""} size="lg" />
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-medium">{session?.display_name ?? "—"}</p>
+          <p className="text-sm text-[var(--text-secondary)]">{session?.email}</p>
+        </div>
       </div>
-      <label className="grid gap-2 text-sm">Display name<Input required value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label className="grid gap-2 text-sm">Email<Input readOnly value={session?.email ?? ""} /><span className="text-xs text-[var(--text-tertiary)]">Managed by your sign-in identity.</span></label>
-      {error && <p role="alert" className="text-sm text-[var(--status-danger-text)]">{error}</p>}
-      <div className="flex justify-end gap-2"><Button onClick={onClose} variant="ghost">Cancel</Button><Button disabled={!name.trim()} loading={saving} type="submit">Save changes</Button></div>
-    </form>
+      <label className="grid gap-2 text-sm">Display name
+        <Input readOnly value={session?.display_name ?? ""} />
+      </label>
+      <label className="grid gap-2 text-sm">Email
+        <Input readOnly value={session?.email ?? ""} />
+      </label>
+      <p className="text-xs text-[var(--text-tertiary)]">
+        Your name, email and photo are managed by the account you sign in with.
+      </p>
+      <div className="flex justify-end"><Button onClick={onClose} variant="ghost">Close</Button></div>
+    </div>
   );
 }
 

@@ -8,7 +8,7 @@ import { Dropdown, DropdownItem, DropdownSeparator } from "@/components/ui/Dropd
 import {
   clearAuthSession,
   hasAnySessionPermission,
-  hasPlatformScope,
+  canAccessPlatformAdmin,
 } from "@/lib/auth/session";
 import { switchWorkspace } from "@/modules/auth/api";
 import { useAuthSession } from "@/lib/hooks/useAuthSession";
@@ -52,7 +52,7 @@ export function WorkspaceContextMenu({
   const userName = session?.display_name || session?.email || "Signed in";
   const otherWorkspaces = (session?.tenants ?? []).filter((tenant) => tenant.id !== current?.id);
   const canManageWorkspace = hasAnySessionPermission(session, workspaceAdminPermissions);
-  const canUsePlatformAdmin = hasPlatformScope(session, "root_admin");
+  const canUsePlatformAdmin = canAccessPlatformAdmin(session);
 
   const changeWorkspace = async (tenantId: string) => {
     if (!session || tenantId === session.active_tenant_id) return;

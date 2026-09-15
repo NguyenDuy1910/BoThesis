@@ -1,12 +1,17 @@
 "use client";
 
 import { useSyncExternalStore } from "react";
-import { useApiQuery } from "@/lib/hooks/useApiQuery";
-import { mockApi } from "@/mocks/bothesis-api.mock";
 
-/** Feature reads keep the temporary implementation out of page composition. */
+import { apiRevision, subscribeApiData } from "@/lib/api/revision";
+import { useApiQuery } from "@/lib/hooks/useApiQuery";
+
+/**
+ * An Admin read that refetches whenever an Admin write elsewhere invalidates.
+ *
+ * Pages pass the request function rather than a path so a screen can compose
+ * several endpoints into the one shape it renders.
+ */
 export function useAdminData<T>(read: () => Promise<T>) {
-  const revision = useSyncExternalStore(mockApi.subscribe, mockApi.revision, () => 0);
+  const revision = useSyncExternalStore(subscribeApiData, apiRevision, () => 0);
   return useApiQuery(read, revision);
 }
-export const adminData = mockApi;

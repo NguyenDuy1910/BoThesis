@@ -19,10 +19,9 @@ def _caller() -> AuthContext:
         email="reader@example.test",
         display_name="Reader",
         tenant_id=uuid4(),
-        role_id=uuid4(),
-        role_code="reader",
         permission_codes=("knowledge.read",),
         group_ids=(),
+        role_codes=("reader",),
     )
 
 

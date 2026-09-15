@@ -2,9 +2,21 @@
 
 import { useSyncExternalStore } from "react";
 
-import { getLiveApiConfiguration } from "@/lib/api/config";
+import { getApiConfiguration } from "@/lib/api/config";
+import { apiRequest } from "@/lib/api/request";
+import { apiRevision, invalidateApiData, subscribeApiData } from "@/lib/api/revision";
 import { useApiQuery } from "@/lib/hooks/useApiQuery";
-import { mockApi } from "@/mocks/bothesis-api.mock";
+import { retryCollectionDocument, uploadCollectionFile } from "@/modules/admin/api";
+import { knowledgeApi } from "@/modules/knowledge/knowledge-api";
+import {
+  lastActivityLabel,
+  toWorkspaceCollection,
+  toWorkspaceDocument,
+} from "@/modules/knowledge/view-model";
+import type {
+  WorkspaceKnowledgeCollection,
+  WorkspaceKnowledgeDocument,
+} from "@/modules/knowledge/workspace-repository";
 import {
   describeConnector,
   knowledgeConnectors,
@@ -22,23 +34,65 @@ import {
 /**
  * Everything the Knowledge shell reads.
  *
- * Documents still come from the preview data layer; connections, sources and
- * sync activity come from the API whenever a real session is present. They are
- * separate loads because they answer to separate things — connecting an
- * account must refresh the sources list without re-reading every document.
+ * The workspace home lists the Collections the caller may browse; each is then
+ * read for the Documents inside it. They are separate loads from connections
+ * and sync activity because connecting an account must refresh the sources
+ * list without re-reading every document.
  */
 export function useKnowledge() {
-  const revision = useSyncExternalStore(mockApi.subscribe, mockApi.revision, () => 0);
-  return useApiQuery(async () => {
-    const [overview, documents] = await Promise.all([
-      mockApi.knowledge.overview(),
-      mockApi.knowledge.documents(),
-    ]);
-    return { ...overview, documents };
+  const revision = useSyncExternalStore(subscribeApiData, apiRevision, () => 0);
+  return useApiQuery<KnowledgeSnapshot>(async () => {
+    const home = await knowledgeApi.home();
+    const collections = home.items;
+    // Documents live inside Collections, so the workspace view is the union of
+    // what each readable Collection holds.
+    const pages = await Promise.all(
+      collections.map((collection) =>
+        knowledgeApi
+          .collection(collection.id)
+          .then((page) => page.documents.map((document) => toWorkspaceDocument(document, collection.title)))
+          .catch(() => []),
+      ),
+    );
+    return {
+      documentCount: collections.reduce((total, collection) => total + collection.document_count, 0),
+      lastSyncLabel: lastActivityLabel(collections),
+      collections: collections.map(toWorkspaceCollection),
+      documents: pages.flat(),
+      personalCollectionId: home.personal_collection_id,
+    };
   }, revision);
 }
 
-export const knowledgeActions = mockApi.knowledge;
+export interface KnowledgeSnapshot {
+  documentCount: number;
+  lastSyncLabel: string;
+  collections: WorkspaceKnowledgeCollection[];
+  documents: WorkspaceKnowledgeDocument[];
+  personalCollectionId: string | null;
+}
+
+/**
+ * Writes the Knowledge screen performs.
+ *
+ * Each one goes to the endpoint that owns that lifecycle and then invalidates,
+ * so the list a person is looking at reflects what the server now holds rather
+ * than what the click optimistically assumed.
+ */
+export const knowledgeActions = {
+  async upload(file: File, collectionId: string) {
+    await uploadCollectionFile(collectionId, file, { idempotencyKey: crypto.randomUUID() });
+    invalidateApiData();
+  },
+  async reindex(documentId: string) {
+    await retryCollectionDocument(documentId);
+    invalidateApiData();
+  },
+  async remove(documentId: string) {
+    await apiRequest(`/documents/${documentId}`, { method: "DELETE" });
+    invalidateApiData();
+  },
+};
 
 /**
  * What this deployment can actually connect.
@@ -55,7 +109,7 @@ export interface ConnectorEntry {
 
 export function useConnectorCatalogue() {
   return useApiQuery<ConnectorEntry[]>(async () => {
-    if (!getLiveApiConfiguration()) {
+    if (!getApiConfiguration()) {
       return knowledgeConnectors.map((connector) => ({ connector }));
     }
     const { connectors } = await connectionsApi.providers();
@@ -90,7 +144,7 @@ export interface ConnectionsSnapshot {
  */
 export function useConnections() {
   return useApiQuery<ConnectionsSnapshot>(async () => {
-    if (!getLiveApiConfiguration()) {
+    if (!getApiConfiguration()) {
       return { connections: [], sources: [], runs: [], live: false };
     }
     const [connections, sources] = await Promise.all([

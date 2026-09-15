@@ -9,10 +9,12 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.db.models import ApprovalRequest, Item, TenantMembership, User
+from bothesis.db.models import ApprovalRequest, Item, Role, TenantMembership, User
 from bothesis.services import (
     ACCESS_MANAGE_PERMISSION,
     ACTIVE_STATUS,
+    COLLECTION_ROLE_CODES,
+    COLLECTION_SCOPE,
     SOURCE_MANAGE_PERMISSION,
     AdminConflictError,
     AdminNotFoundError,
@@ -24,7 +26,7 @@ from bothesis.services import (
     timestamp,
 )
 from bothesis.services.audit import AuditService
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.role_assignments import RoleAssignmentService
 
 
 class ApprovalRequestService:
@@ -72,8 +74,9 @@ class ApprovalRequestService:
                 )
             )
         base = (
-            select(ApprovalRequest, User)
+            select(ApprovalRequest, User, Role)
             .join(User, User.id == ApprovalRequest.requester_user_id)
+            .outerjoin(Role, Role.id == ApprovalRequest.requested_role_id)
             .where(*filters)
         )
         total = await self._session.scalar(select(func.count()).select_from(base.subquery()))
@@ -85,7 +88,9 @@ class ApprovalRequestService:
             )
         ).all()
         return {
-            "items": [self._payload(request, user) for request, user in rows],
+            "items": [
+                self._payload(request, user, role) for request, user, role in rows
+            ],
             "total": int(total or 0),
             "page": page,
             "page_size": page_size,
@@ -108,11 +113,13 @@ class ApprovalRequestService:
             if requester_id != actor.user_id:
                 require_tenant_permission(actor, ACCESS_MANAGE_PERMISSION)
             await self._tenant_user(tenant_id, requester_id)
-            normalized_target, normalized_details = await self._resource_access_target(
+            normalized_target, requested_role_id = await self._resource_access_target(
                 tenant_id, target_id, details
             )
+            normalized_details: dict[str, Any] = {}
         else:
             require_tenant_permission(actor, SOURCE_MANAGE_PERMISSION)
+            requested_role_id = None
             normalized_target, normalized_details = self._plugin_target(target_id, details)
         normalized_reason = (
             normalize_required_text(reason, "request reason", 4_000)
@@ -136,12 +143,14 @@ class ApprovalRequestService:
             requester_user_id=requester_id,
             request_type=normalized_type,
             target_id=normalized_target,
+            requested_role_id=requested_role_id,
             details=normalized_details,
             reason=normalized_reason,
         )
         self._session.add(request)
         await self._session.flush()
         user = await self._tenant_user(tenant_id, requester_id)
+        requested_role = await self._requested_role(request)
         await self._audit.record(
             actor,
             action=f"approval_request.{normalized_type}.created",
@@ -149,14 +158,15 @@ class ApprovalRequestService:
             resource_id=str(request.id),
             details={"target_id": normalized_target},
         )
-        return self._payload(request, user)
+        return self._payload(request, user, requested_role)
 
     async def get_request(self, actor: AuthContext, request_id: UUID) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor)
         row = (
             await self._session.execute(
-                select(ApprovalRequest, User)
+                select(ApprovalRequest, User, Role)
                 .join(User, User.id == ApprovalRequest.requester_user_id)
+                .outerjoin(Role, Role.id == ApprovalRequest.requested_role_id)
                 .where(
                     ApprovalRequest.id == request_id,
                     ApprovalRequest.tenant_id == tenant_id,
@@ -166,9 +176,9 @@ class ApprovalRequestService:
         ).one_or_none()
         if row is None:
             raise AdminNotFoundError(f"approval request not found: {request_id}")
-        request, user = row
+        request, user, role = row
         self._require_reviewer(actor, request.request_type)
-        return self._payload(request, user)
+        return self._payload(request, user, role)
 
     async def update_request(
         self,
@@ -211,7 +221,12 @@ class ApprovalRequestService:
         )
         request.decided_at = datetime.now(UTC)
         await self._session.flush()
+        # updated_at is set by the database on update, so it is expired after the
+        # flush. Reading it while building the payload would run lazy I/O from
+        # synchronous code; refreshing here keeps that load on the await chain.
+        await self._session.refresh(request)
         user = await self._tenant_user(tenant_id, request.requester_user_id)
+        requested_role = await self._requested_role(request)
         await self._audit.record(
             actor,
             action=f"approval_request.{request.request_type}.{next_status}",
@@ -219,17 +234,22 @@ class ApprovalRequestService:
             resource_id=str(request.id),
             details={"target_id": request.target_id},
         )
-        return self._payload(request, user)
+        return self._payload(request, user, requested_role)
 
     async def _apply_approval(self, actor: AuthContext, request: ApprovalRequest) -> None:
         if request.request_type == "resource_access":
             collection = await self._collection(request.tenant_id, UUID(request.target_id))
-            await CollectionAccessService(self._session).grant(
+            role = await self._session.get(Role, request.requested_role_id)
+            if role is None:
+                raise AdminValidationError("the requested role no longer exists")
+            # Approving is exactly the grant the request named, so an approved
+            # request and an administrator's grant produce the same row.
+            await RoleAssignmentService(self._session).grant_collection_role(
                 collection.id,
                 principal_type="user",
                 principal_id=request.requester_user_id,
-                role=str(request.details["role"]),
-                actor=actor,
+                role_code=role.code,
+                created_by_user_id=actor.user_id,
             )
             return
         # Connector availability is deployment-owned. A plugin request records
@@ -242,7 +262,9 @@ class ApprovalRequestService:
         tenant_id: UUID,
         target_id: str,
         details: Mapping[str, Any] | None,
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[str, UUID]:
+        """Resolve the Collection and the canonical role the request asks for."""
+
         try:
             item_id = UUID(normalize_required_text(target_id, "target ID", 512))
         except ValueError as exc:
@@ -251,10 +273,21 @@ class ApprovalRequestService:
         values = dict(details or {})
         if set(values) != {"role"} or not isinstance(values["role"], str):
             raise AdminValidationError("resource access details must contain only role")
-        role = values["role"].strip().casefold()
-        if role not in {"owner", "editor", "viewer"}:
-            raise AdminValidationError("resource access role must be owner, editor, or viewer")
-        return str(item_id), {"role": role}
+        role_code = values["role"].strip().casefold()
+        if role_code not in COLLECTION_ROLE_CODES:
+            raise AdminValidationError(
+                "resource access role must be one of: " + ", ".join(COLLECTION_ROLE_CODES)
+            )
+        role_id = await self._session.scalar(
+            select(Role.id).where(
+                Role.code == role_code,
+                Role.scope_type == COLLECTION_SCOPE,
+                Role.status == ACTIVE_STATUS,
+            )
+        )
+        if role_id is None:
+            raise AdminValidationError(f"collection role is unavailable: {role_code}")
+        return str(item_id), role_id
 
     def _plugin_target(
         self, target_id: str, details: Mapping[str, Any] | None
@@ -334,12 +367,28 @@ class ApprovalRequestService:
         )
         require_tenant_permission(actor, permission)
 
+    async def _requested_role(self, request: ApprovalRequest) -> Role | None:
+        if request.requested_role_id is None:
+            return None
+        return await self._session.get(Role, request.requested_role_id)
+
     @staticmethod
-    def _payload(request: ApprovalRequest, user: User) -> dict[str, Any]:
+    def _payload(
+        request: ApprovalRequest, user: User, requested_role: Role | None
+    ) -> dict[str, Any]:
         return {
             "id": str(request.id),
             "request_type": request.request_type,
             "target_id": request.target_id,
+            "requested_role": (
+                {
+                    "id": str(requested_role.id),
+                    "code": requested_role.code,
+                    "display_name": requested_role.display_name,
+                }
+                if requested_role is not None
+                else None
+            ),
             "details": dict(request.details),
             "reason": request.reason,
             "status": request.status,

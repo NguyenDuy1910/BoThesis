@@ -1,12 +1,10 @@
 import { getAuthSession, storeAuthSession, type AuthSession } from "@/lib/auth/session";
-import { mockApi, previewMode } from "@/mocks/bothesis-api.mock";
 
 export async function completeGoogleSignIn(credential: string): Promise<AuthSession> {
   return requestSession("/api/auth/google", { credential });
 }
 
 export async function switchWorkspace(tenantId: string): Promise<AuthSession> {
-  if (previewMode) return mockApi.session.switchWorkspace(tenantId);
   const current = getAuthSession();
   if (!current) throw new Error("Your session has expired. Please sign in again.");
   return requestSession("/api/auth/session", { tenant_id: tenantId }, current.access_token);

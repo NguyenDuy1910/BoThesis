@@ -32,7 +32,7 @@ from bothesis.services import (
     AuthContext,
     require_tenant_permission,
 )
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.conversation import ConversationService
 
 HistoryTurn = tuple[Literal["user", "assistant"], str]
@@ -97,7 +97,7 @@ class ChatService:
         context = AgentContext(
             user_id=str(access.user_id),
             tenant_id=str(access.tenant_id),
-            roles=[access.role_code] if access.role_code else [],
+            roles=list(access.role_codes),
             collection_item_ids=tuple(str(value) for value in selected_ids),
             conversation_id=str(resolved_conversation_id),
             request_id=uuid4().hex,
@@ -196,7 +196,7 @@ class ChatService:
         """Bind the turn to Collections the caller may actually read."""
 
         async with session_scope(self._sessions) as session:
-            allowed_ids = await CollectionAccessService(session).allowed_collection_ids(
+            allowed_ids = await AuthorizationService(session).allowed_collection_ids(
                 access
             )
         if not collection_item_ids:

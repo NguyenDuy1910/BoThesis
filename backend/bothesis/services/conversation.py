@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bothesis.agent import ResourceRef
 from bothesis.db.models import Conversation, Item, Message, MessageItem
 from bothesis.services import AuthContext, DocumentNotFoundError
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.item import ItemService
 
 
@@ -219,11 +219,11 @@ class ConversationService:
             # Access is re-checked at read time: a Collection permission
             # revoked after the turn that referenced a document must remove
             # it from context, not merely fail later tool calls.
-            collections = CollectionAccessService(session)
+            collections = AuthorizationService(session)
             allowed = set(await collections.allowed_collection_ids(access))
             references: list[ResourceRef] = []
             for item in candidates:
-                collection_id = await collections.authorization_collection_id(
+                collection_id = await collections.governing_collection_id(
                     item.id, tenant_id=access.tenant_id
                 )
                 if collection_id is None or collection_id not in allowed:

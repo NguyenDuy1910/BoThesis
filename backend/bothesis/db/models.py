@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     BigInteger,
+    and_,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -94,9 +95,6 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
-    is_root_admin: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, server_default=text("false")
-    )
     preferences: Mapped[JsonObject] = _json_object_column()
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -115,8 +113,8 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     created_items: Mapped[list[Item]] = relationship(
         back_populates="created_by_user", foreign_keys="Item.created_by_user_id"
     )
-    created_collection_access: Mapped[list[CollectionAccess]] = relationship(
-        back_populates="created_by_user"
+    role_assignments: Mapped[list[RoleAssignment]] = relationship(
+        back_populates="user", foreign_keys="RoleAssignment.user_id"
     )
     approval_requests: Mapped[list[ApprovalRequest]] = relationship(
         back_populates="requester_user",
@@ -150,38 +148,127 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     items: Mapped[list[Item]] = relationship(back_populates="tenant")
     approval_requests: Mapped[list[ApprovalRequest]] = relationship(back_populates="tenant")
     audit_logs: Mapped[list[AuditLog]] = relationship(back_populates="tenant")
+    role_assignments: Mapped[list[RoleAssignment]] = relationship(back_populates="tenant")
 
 
 class Role(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    __tablename__ = "roles"
-    __table_args__ = (UniqueConstraint("tenant_id", "code"),)
+    """A named permission bundle, owned by the platform or by one tenant.
 
-    tenant_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
+    ``tenant_id`` is null for the roles the platform defines, which is what
+    lets platform capability exist without inventing a second role table.
+    """
+
+    __tablename__ = "roles"
+    __table_args__ = (
+        # A tenant may reuse a code another tenant uses, but never a code the
+        # platform defines. NULLS NOT DISTINCT makes the system row collide.
+        Index(
+            "uq_roles_tenant_id_code",
+            "tenant_id",
+            "code",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+        ),
+        Index(None, "scope_type", "status"),
+        CheckConstraint(
+            "scope_type IN ('platform', 'tenant', 'collection')",
+            name="role_scope_type_is_valid",
+        ),
+        CheckConstraint(
+            "(is_system AND tenant_id IS NULL) OR (NOT is_system AND tenant_id IS NOT NULL)",
+            name="role_ownership_matches_system_flag",
+        ),
+        # A tenant defines member roles for its own workspace. Platform and
+        # Collection roles are the platform's, so a tenant cannot mint one.
+        CheckConstraint(
+            "is_system OR scope_type = 'tenant'",
+            name="tenant_defined_role_is_tenant_scoped",
+        ),
+    )
+
+    tenant_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tenants.id")
     )
     code: Mapped[str] = mapped_column(String(64), nullable=False)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    permission_codes: Mapped[list[str]] = _text_array_column()
+    scope_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    is_system: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
     )
 
-    tenant: Mapped[Tenant] = relationship(back_populates="roles")
-    memberships: Mapped[list[TenantMembership]] = relationship(back_populates="role")
+    tenant: Mapped[Tenant | None] = relationship(back_populates="roles")
+    grants: Mapped[list[RolePermission]] = relationship(
+        back_populates="role", cascade="all, delete-orphan"
+    )
+    assignments: Mapped[list[RoleAssignment]] = relationship(back_populates="role")
+
+
+class Permission(CreatedAtMixin, Base):
+    """One product action the authorization resolver can be asked about."""
+
+    __tablename__ = "permissions"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_types: Mapped[list[str]] = _text_array_column()
+
+    role_grants: Mapped[list[RolePermission]] = relationship(
+        back_populates="permission"
+    )
+
+
+class RolePermission(TimestampMixin, Base):
+    """One permission carried by one role.
+
+    Removing a permission from a role is a tombstone, like every other removal
+    here, so the history of what a role could do survives. Every read of this
+    table must therefore exclude tombstones: a forgotten filter would keep
+    granting a capability someone believes they revoked.
+    """
+
+    __tablename__ = "role_permissions"
+
+    role_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("roles.id"), primary_key=True
+    )
+    permission_code: Mapped[str] = mapped_column(
+        String(64), ForeignKey("permissions.code"), primary_key=True
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    role: Mapped[Role] = relationship(back_populates="grants")
+    permission: Mapped[Permission] = relationship(back_populates="role_grants")
+
+    @classmethod
+    def granted_by(cls, role_id: Any) -> Any:
+        """Join condition that only ever reaches live permission grants.
+
+        Readers join through this rather than writing the tombstone filter
+        themselves, so a revoked permission cannot come back through a query
+        that forgot it.
+        """
+
+        return and_(cls.role_id == role_id, cls.deleted_at.is_(None))
 
 
 class TenantMembership(TimestampMixin, Base):
+    """The fact that a user belongs to a tenant. Never an authorization grant.
+
+    What the member may do lives in :class:`RoleAssignment`, so one member can
+    hold several roles and losing a role never removes them from the workspace.
+    """
+
     __tablename__ = "tenant_memberships"
-    __table_args__ = (Index(None, "tenant_id", "status"), Index(None, "role_id"))
+    __table_args__ = (Index(None, "tenant_id", "status"),)
 
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id"), primary_key=True
     )
     tenant_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("tenants.id"), primary_key=True
-    )
-    role_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("roles.id"), nullable=False
     )
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
@@ -191,7 +278,6 @@ class TenantMembership(TimestampMixin, Base):
 
     user: Mapped[User] = relationship(back_populates="tenant_memberships")
     tenant: Mapped[Tenant] = relationship(back_populates="memberships")
-    role: Mapped[Role] = relationship(back_populates="memberships")
 
 
 class Group(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -214,6 +300,7 @@ class Group(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     tenant: Mapped[Tenant] = relationship(back_populates="groups")
     memberships: Mapped[list[GroupMembership]] = relationship(back_populates="group")
+    role_assignments: Mapped[list[RoleAssignment]] = relationship(back_populates="group")
 
 
 class GroupMembership(TimestampMixin, Base):
@@ -527,6 +614,13 @@ class Item(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="item_status_is_valid",
         ),
         CheckConstraint("size_bytes IS NULL OR size_bytes >= 0", name="item_size_is_valid"),
+        # Only a Collection can hold grants, so only a Collection can end
+        # inheritance. A Document that stopped inheriting would be reachable
+        # by nobody.
+        CheckConstraint(
+            "item_type = 'collection' OR inherit_access",
+            name="only_collections_end_inheritance",
+        ),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -570,7 +664,7 @@ class Item(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     child_items: Mapped[list[Item]] = relationship(
         back_populates="parent_item", foreign_keys=[parent_item_id]
     )
-    access_grants: Mapped[list[CollectionAccess]] = relationship(back_populates="item")
+    role_assignments: Mapped[list[RoleAssignment]] = relationship(back_populates="item")
     targeted_by_ingestion_sources: Mapped[list[IngestionSource]] = relationship(
         back_populates="target_item"
     )
@@ -664,32 +758,92 @@ class Citation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     item: Mapped[Item] = relationship(back_populates="citations")
 
 
-class CollectionAccess(TimestampMixin, Base):
-    __tablename__ = "collection_access"
+class RoleAssignment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """WHO holds WHICH ROLE at WHICH SCOPE. The only authorization grant.
+
+    Principal and scope are exclusive arcs of real foreign keys rather than a
+    ``principal_id``/``scope_id`` pair of loose UUIDs: every reference here is
+    checked by PostgreSQL, and a deleted group or Collection cannot leave a
+    grant pointing at nothing. A row with neither ``tenant_id`` nor ``item_id``
+    is a platform grant.
+    """
+
+    __tablename__ = "role_assignments"
     __table_args__ = (
-        Index(None, "principal_type", "principal_id"),
-        Index(None, "item_id", "deleted_at"),
-        CheckConstraint(
-            "principal_type IN ('user', 'group')", name="principal_type_is_valid"
+        # One grant of one role to one principal at one scope. NULLS NOT
+        # DISTINCT is what makes the unused arc columns compare equal.
+        Index(
+            "uq_role_assignments_principal_scope_role",
+            "user_id",
+            "group_id",
+            "tenant_id",
+            "item_id",
+            "role_id",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
+            postgresql_where=text("deleted_at IS NULL"),
         ),
-        CheckConstraint("role IN ('owner', 'editor', 'viewer')", name="role_is_valid"),
+        Index(None, "user_id", "tenant_id"),
+        Index(None, "group_id", "tenant_id"),
+        Index(None, "item_id"),
+        Index(None, "role_id"),
+        CheckConstraint(
+            "num_nonnulls(user_id, group_id) = 1",
+            name="role_assignment_has_one_principal",
+        ),
+        CheckConstraint(
+            "num_nonnulls(tenant_id, item_id) <= 1",
+            name="role_assignment_has_one_scope",
+        ),
     )
 
-    item_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("items.id"), primary_key=True
+    user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id")
     )
-    principal_type: Mapped[str] = mapped_column(String(16), primary_key=True)
-    principal_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
-    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    group_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("groups.id")
+    )
+    role_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("roles.id"), nullable=False
+    )
+    tenant_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tenants.id")
+    )
+    item_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("items.id")
+    )
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id")
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    item: Mapped[Item] = relationship(back_populates="access_grants")
-    created_by_user: Mapped[User | None] = relationship(
-        back_populates="created_collection_access"
+    user: Mapped[User | None] = relationship(
+        back_populates="role_assignments", foreign_keys=[user_id]
     )
+    group: Mapped[Group | None] = relationship(back_populates="role_assignments")
+    role: Mapped[Role] = relationship(back_populates="assignments")
+    tenant: Mapped[Tenant | None] = relationship(back_populates="role_assignments")
+    item: Mapped[Item | None] = relationship(back_populates="role_assignments")
+
+    @property
+    def principal_type(self) -> str:
+        return "user" if self.user_id is not None else "group"
+
+    @property
+    def principal_id(self) -> UUID:
+        principal = self.user_id if self.user_id is not None else self.group_id
+        assert principal is not None  # guaranteed by role_assignment_has_one_principal
+        return principal
+
+    @property
+    def scope_type(self) -> str:
+        if self.item_id is not None:
+            return "collection"
+        return "tenant" if self.tenant_id is not None else "platform"
+
+    @property
+    def scope_id(self) -> UUID | None:
+        return self.item_id if self.item_id is not None else self.tenant_id
 
 
 class IngestionSource(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -880,6 +1034,10 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "jsonb_typeof(details) = 'object'",
             name="approval_request_details_is_object",
         ),
+        CheckConstraint(
+            "(request_type = 'resource_access') = (requested_role_id IS NOT NULL)",
+            name="resource_access_names_a_role",
+        ),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
@@ -890,6 +1048,12 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     request_type: Mapped[str] = mapped_column(String(32), nullable=False)
     target_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    #: The Collection role a resource_access request asks for. Approving one
+    #: creates exactly this assignment, so a request can never name a role the
+    #: authorization model does not have.
+    requested_role_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("roles.id")
+    )
     details: Mapped[JsonObject] = _json_object_column()
     reason: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(
@@ -909,18 +1073,27 @@ class ApprovalRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     decided_by_user: Mapped[User | None] = relationship(
         back_populates="decided_approval_requests", foreign_keys=[decided_by_user_id]
     )
+    requested_role: Mapped[Role | None] = relationship()
 
 
 class AuditLog(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """One recorded action. A null ``tenant_id`` is a platform-scoped action.
+
+    Creating a tenant or granting platform administration belongs to no single
+    workspace, so forcing every event into one would either lose the event or
+    file it under an unrelated tenant.
+    """
+
     __tablename__ = "audit_logs"
     __table_args__ = (
         Index(None, "tenant_id", "created_at"),
         Index(None, "tenant_id", "action", "created_at"),
         Index(None, "actor_user_id", "created_at"),
+        Index(None, "created_at"),
     )
 
-    tenant_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
+    tenant_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tenants.id")
     )
     actor_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id")
@@ -933,7 +1106,7 @@ class AuditLog(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
     details: Mapped[JsonObject] = _json_object_column()
 
-    tenant: Mapped[Tenant] = relationship(back_populates="audit_logs")
+    tenant: Mapped[Tenant | None] = relationship(back_populates="audit_logs")
     actor_user: Mapped[User | None] = relationship(back_populates="audit_events")
 
 
@@ -983,32 +1156,97 @@ _ITEM_PARENT_TRIGGER_CREATE = DDL(
     FOR EACH ROW EXECUTE FUNCTION bothesis_validate_item_parent()"""
 ).execute_if(dialect="postgresql")
 
-_COLLECTION_ACCESS_TRIGGER = DDL(
+_ROLE_ASSIGNMENT_TRIGGER = DDL(
     """
-    CREATE OR REPLACE FUNCTION bothesis_validate_collection_access() RETURNS trigger AS $$
-    DECLARE collection_tenant uuid;
+    CREATE OR REPLACE FUNCTION bothesis_validate_role_assignment() RETURNS trigger AS $$
+    DECLARE
+      role_scope varchar(16);
+      role_tenant uuid;
+      role_status varchar(16);
+      assignment_scope varchar(16);
+      effective_tenant uuid;
     BEGIN
-      SELECT tenant_id INTO collection_tenant FROM items
-      WHERE id = NEW.item_id AND item_type = 'collection' AND deleted_at IS NULL;
-      IF NOT FOUND THEN RAISE EXCEPTION 'Collection access target must be a Collection'; END IF;
-      IF NEW.principal_type = 'group' AND NOT EXISTS (
-        SELECT 1 FROM groups WHERE id = NEW.principal_id
-        AND tenant_id = collection_tenant AND deleted_at IS NULL
-      ) THEN RAISE EXCEPTION 'Collection group principal must belong to target tenant';
-      ELSIF NEW.principal_type = 'user' AND NOT EXISTS (
-        SELECT 1 FROM tenant_memberships WHERE user_id = NEW.principal_id
-        AND tenant_id = collection_tenant AND deleted_at IS NULL
-      ) THEN RAISE EXCEPTION 'Collection user principal must belong to target tenant';
+      SELECT scope_type, tenant_id, status INTO role_scope, role_tenant, role_status
+      FROM roles WHERE id = NEW.role_id;
+      IF NOT FOUND OR role_status <> 'active' THEN
+        RAISE EXCEPTION 'Role Assignment must reference an active Role';
+      END IF;
+
+      IF NEW.item_id IS NOT NULL THEN
+        assignment_scope := 'collection';
+        SELECT tenant_id INTO effective_tenant FROM items
+        WHERE id = NEW.item_id AND item_type = 'collection' AND deleted_at IS NULL;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'Collection-scoped Role Assignment must target a Collection';
+        END IF;
+      ELSIF NEW.tenant_id IS NOT NULL THEN
+        assignment_scope := 'tenant';
+        effective_tenant := NEW.tenant_id;
+      ELSE
+        assignment_scope := 'platform';
+        effective_tenant := NULL;
+      END IF;
+
+      IF role_scope <> assignment_scope THEN
+        RAISE EXCEPTION 'Role scope does not match the Role Assignment scope';
+      END IF;
+      IF role_tenant IS NOT NULL AND role_tenant IS DISTINCT FROM effective_tenant THEN
+        RAISE EXCEPTION 'a tenant-defined Role cannot be assigned outside its tenant';
+      END IF;
+
+      IF NEW.group_id IS NOT NULL THEN
+        IF effective_tenant IS NULL THEN
+          RAISE EXCEPTION 'a platform Role cannot be assigned to a group';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM groups WHERE id = NEW.group_id
+          AND tenant_id = effective_tenant AND deleted_at IS NULL
+        ) THEN
+          RAISE EXCEPTION 'Role Assignment group must belong to the scope tenant';
+        END IF;
+      ELSIF effective_tenant IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM tenant_memberships
+        WHERE user_id = NEW.user_id AND tenant_id = effective_tenant
+        AND deleted_at IS NULL
+      ) THEN
+        RAISE EXCEPTION 'Role Assignment user must be a member of the scope tenant';
       END IF;
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
     """
 ).execute_if(dialect="postgresql")
-_COLLECTION_ACCESS_TRIGGER_CREATE = DDL(
-    """CREATE TRIGGER trg_collection_access_validate
-    BEFORE INSERT OR UPDATE OF item_id, principal_type, principal_id ON collection_access
-    FOR EACH ROW EXECUTE FUNCTION bothesis_validate_collection_access()"""
+_ROLE_ASSIGNMENT_TRIGGER_CREATE = DDL(
+    """CREATE TRIGGER trg_role_assignments_validate
+    BEFORE INSERT OR UPDATE OF user_id, group_id, role_id, tenant_id, item_id
+    ON role_assignments
+    FOR EACH ROW WHEN (NEW.deleted_at IS NULL)
+    EXECUTE FUNCTION bothesis_validate_role_assignment()"""
+).execute_if(dialect="postgresql")
+
+_GROUP_MEMBERSHIP_TRIGGER = DDL(
+    """
+    CREATE OR REPLACE FUNCTION bothesis_validate_group_membership() RETURNS trigger AS $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM groups g
+        JOIN tenant_memberships m
+          ON m.tenant_id = g.tenant_id AND m.deleted_at IS NULL
+        WHERE g.id = NEW.group_id AND g.deleted_at IS NULL
+          AND m.user_id = NEW.user_id
+      ) THEN
+        RAISE EXCEPTION 'a group member must belong to the group tenant';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+).execute_if(dialect="postgresql")
+_GROUP_MEMBERSHIP_TRIGGER_CREATE = DDL(
+    """CREATE TRIGGER trg_group_memberships_validate
+    BEFORE INSERT OR UPDATE OF group_id, user_id ON group_memberships
+    FOR EACH ROW WHEN (NEW.deleted_at IS NULL)
+    EXECUTE FUNCTION bothesis_validate_group_membership()"""
 ).execute_if(dialect="postgresql")
 
 _INGESTION_SOURCE_TRIGGER = DDL(
@@ -1072,13 +1310,23 @@ _APPROVAL_REQUEST_TRIGGER = DDL(
           AND membership.deleted_at IS NULL
       ) THEN RAISE EXCEPTION 'Approval Request decider must belong to its tenant';
       END IF;
-      IF NEW.request_type = 'resource_access' AND NOT EXISTS (
-        SELECT 1 FROM items item
-        WHERE item.id = NEW.target_id::uuid
-          AND item.tenant_id = NEW.tenant_id
-          AND item.item_type = 'collection'
-          AND item.deleted_at IS NULL
-      ) THEN RAISE EXCEPTION 'Resource access Approval Request target must be a Collection in the requester tenant';
+      IF NEW.request_type = 'resource_access' THEN
+        IF NOT EXISTS (
+          SELECT 1 FROM items item
+          WHERE item.id = NEW.target_id::uuid
+            AND item.tenant_id = NEW.tenant_id
+            AND item.item_type = 'collection'
+            AND item.deleted_at IS NULL
+        ) THEN RAISE EXCEPTION 'Resource access Approval Request target must be a Collection in the requester tenant';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM roles role
+          WHERE role.id = NEW.requested_role_id
+            AND role.scope_type = 'collection'
+            AND role.status = 'active'
+            AND (role.tenant_id IS NULL OR role.tenant_id = NEW.tenant_id)
+        ) THEN RAISE EXCEPTION 'Resource access Approval Request must name a Collection Role available to its tenant';
+        END IF;
       END IF;
       RETURN NEW;
     END;
@@ -1087,15 +1335,17 @@ _APPROVAL_REQUEST_TRIGGER = DDL(
 ).execute_if(dialect="postgresql")
 _APPROVAL_REQUEST_TRIGGER_CREATE = DDL(
     """CREATE TRIGGER trg_approval_requests_validate
-    BEFORE INSERT OR UPDATE OF tenant_id, requester_user_id, request_type, target_id, decided_by_user_id ON approval_requests
+    BEFORE INSERT OR UPDATE OF tenant_id, requester_user_id, request_type, target_id, requested_role_id, decided_by_user_id ON approval_requests
     FOR EACH ROW EXECUTE FUNCTION bothesis_validate_approval_request()"""
 ).execute_if(dialect="postgresql")
 
 event.listen(Item.__table__, "after_create", _ITEM_PARENT_TRIGGER)
 event.listen(Item.__table__, "after_create", _ITEM_PARENT_TRIGGER_CREATE)
-event.listen(CollectionAccess.__table__, "after_create", _COLLECTION_ACCESS_TRIGGER)
+event.listen(RoleAssignment.__table__, "after_create", _ROLE_ASSIGNMENT_TRIGGER)
+event.listen(RoleAssignment.__table__, "after_create", _ROLE_ASSIGNMENT_TRIGGER_CREATE)
+event.listen(GroupMembership.__table__, "after_create", _GROUP_MEMBERSHIP_TRIGGER)
 event.listen(
-    CollectionAccess.__table__, "after_create", _COLLECTION_ACCESS_TRIGGER_CREATE
+    GroupMembership.__table__, "after_create", _GROUP_MEMBERSHIP_TRIGGER_CREATE
 )
 event.listen(IngestionSource.__table__, "after_create", _INGESTION_SOURCE_TRIGGER)
 event.listen(
@@ -1117,7 +1367,6 @@ __all__ = [
     "AuditLog",
     "Base",
     "Citation",
-    "CollectionAccess",
     "Conversation",
     "Group",
     "GroupMembership",
@@ -1127,10 +1376,13 @@ __all__ = [
     "Memory",
     "Message",
     "MessageItem",
+    "Permission",
     "IngestionSource",
     "IntegrationConnection",
     "IntegrationCredential",
     "Role",
+    "RoleAssignment",
+    "RolePermission",
     "Tenant",
     "TenantMembership",
     "User",

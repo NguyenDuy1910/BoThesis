@@ -113,7 +113,7 @@ export function AccessCreateDialog({
       payload = {
         email: value("email"),
         display_name: value("display_name"),
-        role_id: value("role_id"),
+        role_ids: [value("role_id")],
         group_ids: [],
       };
     } else if (tab === "groups") {

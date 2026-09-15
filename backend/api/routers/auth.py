@@ -57,14 +57,13 @@ def _response(result: AuthenticationSession) -> AuthSessionResponse:
         display_name=result.display_name,
         active_tenant_id=result.active_tenant_id,
         permissions=list(result.permissions),
-        platform_scopes=list(result.platform_scopes),
+        platform_permissions=list(result.platform_permissions),
         tenants=[
             AuthTenant(
                 id=tenant.tenant_id,
                 code=tenant.tenant_code,
                 name=tenant.tenant_name,
-                role_id=tenant.role_id,
-                role_code=tenant.role_code,
+                role_codes=list(tenant.role_codes),
                 permissions=list(tenant.permissions),
             )
             for tenant in result.tenants

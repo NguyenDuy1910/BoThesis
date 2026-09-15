@@ -647,10 +647,9 @@ async def test_sandbox_workspace_materializes_reuses_and_exports_without_host_pa
         email="owner@example.com",
         display_name=None,
         tenant_id=uuid4(),
-        role_id=None,
-        role_code="member",
         permission_codes=("knowledge.read",),
         group_ids=(),
+        role_codes=("member",),
     )
     resource = ResourceRef(
         id=str(UUID(int=33)), name="revenue.csv", mime_type="text/csv", size_bytes=19

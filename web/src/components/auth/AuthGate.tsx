@@ -5,7 +5,6 @@ import { usePathname, useRouter } from "next/navigation";
 
 import { getApiConfiguration } from "@/lib/api/config";
 import { useAuthSession } from "@/lib/hooks/useAuthSession";
-import { mockApi, previewMode } from "@/mocks/bothesis-api.mock";
 
 const publicPathPrefix = "/auth/";
 
@@ -22,7 +21,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (isPublicRoute) return;
-    if (previewMode ? mockApi.session.current() : getApiConfiguration()) {
+    if (getApiConfiguration()) {
       setIsAuthorized(true);
       return;
     }

@@ -38,7 +38,6 @@ export function DocumentViewer({
   onClose,
   onReindex = () => undefined,
   onRequestRemove = () => undefined,
-  onToggleAnswerAvailability = () => undefined,
   expanded = false,
   showAgentView = true,
   showLifecycleActions = true,
@@ -71,8 +70,6 @@ export function DocumentViewer({
 
   const facts = documentFacts(document);
   const status = documentStatus(document);
-  const answerIncluded = document.answerIncluded !== false;
-  const indexed = document.state === "indexed";
 
   return (
     <article aria-label={document.title} className="knowledge-viewer">
@@ -100,10 +97,6 @@ export function DocumentViewer({
           >
             <DropdownItem disabled={document.state === "unsupported"} onClick={onReindex}>
               <RefreshCw aria-hidden="true" size={16} />Re-index document
-            </DropdownItem>
-            <DropdownItem disabled={!indexed} onClick={() => onToggleAnswerAvailability(!answerIncluded)}>
-              <PanelRight aria-hidden="true" size={16} />
-              {answerIncluded ? "Exclude from answers" : "Include in answers"}
             </DropdownItem>
             <DropdownSeparator />
             <DropdownItem destructive onClick={onRequestRemove}>
@@ -188,7 +181,6 @@ export function DocumentViewer({
         onClose={() => setDetailsOpen(false)}
         onReindex={onReindex}
         onRequestRemove={onRequestRemove}
-        onToggleAnswerAvailability={onToggleAnswerAvailability}
         open={detailsOpen}
         showLifecycleActions={showLifecycleActions}
       />

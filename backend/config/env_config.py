@@ -95,6 +95,18 @@ def optional_number(name: str) -> float | None:
         raise RuntimeError(f"{name} must be a number") from exc
 
 
+def email_set(name: str) -> frozenset[str]:
+    """Read a comma-separated, normalized email allowlist."""
+
+    raw_value = os.getenv(name) or ""
+    emails = frozenset(
+        value.strip().casefold() for value in raw_value.split(",") if value.strip()
+    )
+    if any("@" not in value for value in emails):
+        raise RuntimeError(f"{name} must contain comma-separated email addresses")
+    return emails
+
+
 def number(name: str, *, default: float) -> float:
     """Read one floating point setting."""
 
@@ -140,6 +152,7 @@ class IdentityConfig:
     jwt_expires_in_seconds: int = 900
     google_client_id: str | None = None
     google_jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
+    platform_admin_emails: frozenset[str] = frozenset()
 
     @classmethod
     def from_environment(cls) -> IdentityConfig:
@@ -158,6 +171,7 @@ class IdentityConfig:
                 "BOTHESIS_GOOGLE_JWKS_URL",
                 "https://www.googleapis.com/oauth2/v3/certs",
             ),
+            platform_admin_emails=email_set("BOTHESIS_PLATFORM_ADMIN_EMAILS"),
         )
 
 
@@ -723,6 +737,7 @@ __all__ = [
     "VectorIndexConfig",
     "WorkerConfig",
     "boolean",
+    "email_set",
     "get_config",
     "integer",
     "number",

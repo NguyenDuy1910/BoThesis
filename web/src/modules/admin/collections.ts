@@ -43,7 +43,7 @@ export interface KnowledgeItem {
   external_resources: ExternalResource[];
   metadata?: Record<string, unknown>;
   inherit_access?: boolean;
-  collection_access?: CollectionGrant[];
+  role_assignments?: CollectionGrant[];
 }
 
 export interface IntegrationConnection {
@@ -107,12 +107,14 @@ export interface IngestionRun {
 
 export interface CollectionGrant {
   [key: string]: unknown;
-  item_id: string;
+  item_id?: string | null;
   principal_type: "user" | "group";
   principal_id: string;
-  role: "owner" | "editor" | "viewer";
-  created_at: string;
-  updated_at: string;
+  role_id?: string;
+  role_code: "collection_owner" | "collection_editor" | "collection_viewer";
+  role_display_name?: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface DirectoryUser {

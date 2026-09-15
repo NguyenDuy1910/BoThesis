@@ -53,9 +53,9 @@ export const workspaceRailItems: readonly RailItem[] = [
 
 /** Mode 2 — Workspace Admin. Administration of the selected tenant. */
 export const workspaceAdminRailItems: readonly RailItem[] = [
-  { id: "overview", label: "Overview", href: "/admin", icon: LayoutGrid, kind: "destination", permissionCodes: ["admin"] },
+  { id: "overview", label: "Overview", href: "/admin", icon: LayoutGrid, kind: "destination", permissionCodes: ["tenant.read"] },
   { id: "knowledge", label: "Knowledge", href: "/admin/knowledge", icon: BookOpen, kind: "destination", permissionCodes: ["knowledge.read"] },
-  { id: "agent", label: "Agent", href: "/admin/agent", icon: Bot, kind: "destination", permissionCodes: ["admin"] },
+  { id: "agent", label: "Agent", href: "/admin/agent", icon: Bot, kind: "destination", permissionCodes: ["tenant.manage"] },
   { id: "access", label: "Access", href: "/admin/access", icon: ShieldCheck, kind: "destination", permissionCodes: ["user.manage", "role.manage", "group.manage", "access.manage"] },
   { id: "experience", label: "Experience", href: "/admin/experience", icon: Contrast, kind: "destination", permissionCodes: ["tenant.manage"] },
   { id: "activity", label: "Activity", href: "/admin/activity", icon: Activity, kind: "destination", permissionCodes: ["audit.read"] },

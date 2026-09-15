@@ -423,10 +423,9 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
             email="person@example.test",
             display_name="Person",
             tenant_id=tenant_id,
-            role_id=uuid4(),
-            role_code="analyst",
-            permission_codes=("admin", "knowledge.read"),
+            permission_codes=("collection.read", "collection.update", "knowledge.read"),
             group_ids=(),
+            role_codes=("analyst",),
         )
 
     _override_caller(monkeypatch, resolve_access)
@@ -464,7 +463,7 @@ def _install_access(monkeypatch: Any) -> tuple[UUID, UUID]:
         return (UUID(int=12), UUID(int=14))
 
     monkeypatch.setattr(
-        "bothesis.services.identity_access.collection_access.CollectionAccessService"
+        "bothesis.services.identity_access.authorization.AuthorizationService"
         ".allowed_collection_ids",
         allowed_collections,
     )
@@ -484,10 +483,9 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
         email="editor@example.test",
         display_name="Editor",
         tenant_id=tenant_id,
-        role_id=uuid4(),
-        role_code="editor",
-        permission_codes=("admin", "knowledge.read"),
+        permission_codes=("collection.read", "collection.update", "knowledge.read"),
         group_ids=(),
+        role_codes=("editor",),
     )
 
     async def resolve_access(*_: Any, **__: Any) -> AuthContext:
@@ -568,10 +566,9 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
         email="editor@example.test",
         display_name="Editor",
         tenant_id=tenant_id,
-        role_id=uuid4(),
-        role_code="editor",
         permission_codes=(),
         group_ids=(),
+        role_codes=("editor",),
     )
 
     class Uploads:
@@ -1249,10 +1246,9 @@ def test_artifact_routes_delegate_to_the_service_and_map_missing_documents(
         email="person@example.test",
         display_name="Person",
         tenant_id=uuid4(),
-        role_id=None,
-        role_code="analyst",
         permission_codes=("knowledge.read",),
         group_ids=(),
+        role_codes=("analyst",),
     )
     detail = {
         "id": str(artifact_id),

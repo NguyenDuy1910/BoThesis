@@ -43,7 +43,6 @@ interface DocumentsViewProps {
   onToggleDocument: (id: string, checked: boolean) => void;
   onClearSelection: () => void;
   onReindexSelection: () => void;
-  onExcludeSelection: () => void;
   onRemoveSelection: () => void;
   onClearFilters: () => void;
   onWidenScope: () => void;
@@ -67,7 +66,6 @@ export function DocumentsView({
   onToggleDocument,
   onClearSelection,
   onReindexSelection,
-  onExcludeSelection,
   onRemoveSelection,
   onClearFilters,
   onWidenScope,
@@ -157,7 +155,6 @@ export function DocumentsView({
           <DocumentBulkBar
             count={selection.length}
             onClear={onClearSelection}
-            onExclude={onExcludeSelection}
             onReindex={onReindexSelection}
             onRemove={onRemoveSelection}
           />

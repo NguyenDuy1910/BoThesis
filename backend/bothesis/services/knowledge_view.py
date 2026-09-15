@@ -21,7 +21,7 @@ from bothesis.services import (
     require_tenant_permission,
 )
 from bothesis.services.citation import CitationService
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.document_presentation import DocumentPresenter, viewer_elements
 from bothesis.services.item import ItemService
 
@@ -132,7 +132,7 @@ class KnowledgeViewService:
 
         tenant_id = require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         async with session_scope(self._sessions) as session:
-            access_service = CollectionAccessService(session)
+            access_service = AuthorizationService(session)
             collection_ids = await access_service.allowed_collection_ids(access)
             if not collection_ids:
                 return {
@@ -204,8 +204,8 @@ class KnowledgeViewService:
 
         tenant_id = require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         async with session_scope(self._sessions) as session:
-            access_service = CollectionAccessService(session)
-            collection = await access_service.require_item_access(
+            access_service = AuthorizationService(session)
+            collection = await access_service.require_item(
                 collection_id, access=access
             )
             if collection.item_type != "collection":
@@ -289,9 +289,9 @@ class KnowledgeViewService:
         )
         if access.tenant_id is None:
             raise DocumentNotFoundError(missing)
-        collection_id = await CollectionAccessService(
+        collection_id = await AuthorizationService(
             session
-        ).authorization_collection_id(item.id, tenant_id=access.tenant_id)
+        ).governing_collection_id(item.id, tenant_id=access.tenant_id)
         if collection_id is None:
             raise DocumentNotFoundError(missing)
         return item, collection_id

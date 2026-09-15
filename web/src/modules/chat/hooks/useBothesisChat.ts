@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getLiveApiConfiguration } from "@/lib/api/config";
+import { getApiConfiguration } from "@/lib/api/config";
 import { streamAgentResponse } from "../api";
 import { historyFromMessages, regenerationContext } from "../conversation-history";
 import {
@@ -45,7 +45,7 @@ export function useChat({
   const [isConfigured, setIsConfigured] = useState(false);
 
   useEffect(() => {
-    setIsConfigured(Boolean(getLiveApiConfiguration()));
+    setIsConfigured(Boolean(getApiConfiguration()));
   }, []);
 
   // Reset on a real conversation switch only. ``initialMessages`` gets a fresh
