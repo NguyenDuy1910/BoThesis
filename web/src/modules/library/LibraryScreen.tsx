@@ -1,5 +1,5 @@
 "use client";
-import { ArrowLeft, Bookmark, FileText, FileSpreadsheet, Plus, Upload } from "lucide-react";
+import { ArrowLeft, Bookmark, Plus, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CommandBar, FilterTrigger } from "@/components/layout/CommandBar";
@@ -14,7 +14,8 @@ import { Tabs } from "@/components/ui/Tabs";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { useRouteState } from "@/lib/hooks/useRouteState";
-import { WorkspaceDocumentViewer } from "@/modules/knowledge/components/WorkspaceDocumentViewer";
+import { DocumentViewer } from "@/modules/knowledge/components/DocumentViewer";
+import { FileTypeIcon } from "@/modules/knowledge/components/FileTypeIcon";
 import { useLibrary, libraryActions } from "./queries";
 
 export function LibraryScreen() {
@@ -51,7 +52,7 @@ export function LibraryScreen() {
     {tab !== "collections" || collection ? <>
       <h2 className="document-heading">{collection || (selected ? "All items" : "Recent items")}</h2>
       {!rows.length ? <EmptyState title={search || source || type ? "No results" : "Your library is empty"} description={search || source || type ? "Try a different search or clear the filters." : "Upload a document or create your first collection."} action={<Button onClick={() => upload.current?.click()} variant="ghost">Upload a file</Button>} /> :
-        rows.map((item) => <DocumentRow key={item.id} title={item.title} icon={item.kind === "spreadsheet" ? FileSpreadsheet : FileText} meta={item.source + (item.collection ? " · " + item.collection : "")} updated={item.updatedLabel} layout={selected ? "narrow" : "full"} selected={item.id === selectedId} status={item.state === "restricted" ? "Access lost" : item.saved ? "Saved" : "Personal"} statusTone={item.state === "restricted" ? "warning" : "neutral"} onSelect={() => { setSelectedId(item.id); setExpanded(false); }} />)}
+        rows.map((item) => <DocumentRow key={item.id} title={item.title} icon={<FileTypeIcon kind={item.kind} />} meta={item.source + (item.collection ? " · " + item.collection : "")} updated={item.updatedLabel} layout={selected ? "narrow" : "full"} selected={item.id === selectedId} status={item.state === "restricted" ? "Access lost" : item.saved ? "Saved" : "Personal"} statusTone={item.state === "restricted" ? "warning" : "neutral"} onSelect={() => { setSelectedId(item.id); setExpanded(false); }} />)}
     </> : null}
   </div>;
   return <section className="document-workspace" aria-label="Personal library">
@@ -64,16 +65,16 @@ export function LibraryScreen() {
           <FilterTrigger label="File type" value={type} onChange={setType} options={[{ value: "", label: "Type" }, { value: "pdf", label: "PDF" }, { value: "document", label: "Documents" }, { value: "spreadsheet", label: "Spreadsheets" }]} />
         </>} action={<>
           <FilterTrigger label="Sort library" value={sort} onChange={setSort} options={[{ value: "recent", label: "Recent" }, { value: "name", label: "Name" }]} />
-          <Dropdown ariaLabel="Add to library" label={<Plus size={17} />} showChevron={false} buttonClassName="h-9 w-9 border-0 shadow-none p-0" title="Add to library"><DropdownItem onClick={() => openCreate("collection")}>New collection</DropdownItem><DropdownItem onClick={() => openCreate("note")}>Add note</DropdownItem></Dropdown>
-          <Button aria-label="Upload to library" icon={<Upload size={17} />} iconOnly variant="ghost" loading={busy} onClick={() => upload.current?.click()} />
+          <Dropdown ariaLabel="Add to library" label={<Plus size={16} />} showChevron={false} buttonClassName="h-9 w-9 border-0 shadow-none p-0" title="Add to library"><DropdownItem onClick={() => openCreate("collection")}>New collection</DropdownItem><DropdownItem onClick={() => openCreate("note")}>Add note</DropdownItem></Dropdown>
+          <Button aria-label="Upload to library" icon={<Upload size={16} />} iconOnly variant="ghost" loading={busy} onClick={() => upload.current?.click()} />
         </>} />
-      {collection && <Button icon={<ArrowLeft size={15} />} variant="ghost" onClick={() => setCollection("")}>{collection}</Button>}
+      {collection && <Button icon={<ArrowLeft size={16} />} variant="ghost" onClick={() => setCollection("")}>{collection}</Button>}
       {error && <ErrorState title="Action could not be completed" description={error} onAction={() => setError(null)} />}
       {query.error && <ErrorState title="Library could not be loaded" description={query.error} onAction={query.reload} />}
     </div>
     {query.loading ? <p className="p-6" role="status">Loading your library…</p> : <SplitView mode={selected ? expanded ? "detail" : "split" : "list"} list={list}
-      detail={selected ? <WorkspaceDocumentViewer document={selected} showAgentView={false} expanded={expanded} onExpand={() => setExpanded(!expanded)} onClose={() => setSelectedId("")} actions={selected.state !== "restricted" ? <>
-        <Button size="sm" variant="ghost" aria-label={selected.saved ? "Unsave document" : "Save document"} icon={<Bookmark size={15} fill={selected.saved ? "currentColor" : "none"} />} iconOnly onClick={() => libraryActions.save(selected.id, { saved: !selected.saved })} />
+      detail={selected ? <DocumentViewer document={selected} showAgentView={false} showLifecycleActions={false} expanded={expanded} onExpand={() => setExpanded(!expanded)} onClose={() => setSelectedId("")} actions={selected.state !== "restricted" ? <>
+        <Button size="sm" variant="ghost" aria-label={selected.saved ? "Unsave document" : "Save document"} icon={<Bookmark size={16} fill={selected.saved ? "currentColor" : "none"} />} iconOnly onClick={() => libraryActions.save(selected.id, { saved: !selected.saved })} />
         <Button size="sm" onClick={() => router.push("/app?message=" + encodeURIComponent("Ask about " + selected.title))}>Ask BoThesis</Button>
       </> : null} /> : null} />}
     <input aria-label="Upload library file" type="file" className="hidden" ref={upload} onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; setBusy(true); setError(null); try { await libraryActions.upload(file, collection); } catch (cause) { setError(cause instanceof Error ? cause.message : "Upload failed."); } finally { setBusy(false); event.target.value = ""; } }} />

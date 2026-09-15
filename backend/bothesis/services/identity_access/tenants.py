@@ -22,6 +22,7 @@ from bothesis.db.models import (
 from bothesis.services.audit import AuditService
 from bothesis.services import (
     ACTIVE_STATUS,
+    CONNECTION_CONNECTED,
     ADMIN_PERMISSION,
     TENANT_MANAGE_PERMISSION,
     AdminNotFoundError,
@@ -100,7 +101,7 @@ class TenantService:
             "active_integration_connections": await self._count(
                 select(func.count()).select_from(IntegrationConnection).where(
                     IntegrationConnection.tenant_id == tenant_id,
-                    IntegrationConnection.status == ACTIVE_STATUS,
+                    IntegrationConnection.status == CONNECTION_CONNECTED,
                     IntegrationConnection.deleted_at.is_(None),
                 )
             ),

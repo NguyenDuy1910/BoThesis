@@ -55,7 +55,7 @@ export function StatTile({
     return (
       <Link
         className={cn(
-          "adm-stat focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]",
+          "adm-stat focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-canvas)]",
           className,
         )}
         href={href}

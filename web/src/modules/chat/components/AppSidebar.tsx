@@ -105,7 +105,7 @@ function SidebarChatSearch({
         }}
         type="button"
       >
-        <X aria-hidden="true" size={15} />
+        <X aria-hidden="true" size={16} />
       </button>
     </section>
   );

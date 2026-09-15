@@ -1,13 +1,43 @@
-import { File, FileSpreadsheet, FileText } from "lucide-react";
+import { FileSpreadsheet, FileText, FileType2, Files } from "lucide-react";
 
+import { cn } from "@/lib/cn";
 import type { KnowledgeDocumentKind } from "@/modules/knowledge/workspace-repository";
 
-export function FileTypeIcon({ kind }: { kind: KnowledgeDocumentKind }) {
-  const Icon = kind === "spreadsheet" ? FileSpreadsheet : kind === "document" ? FileText : File;
-  const color = kind === "spreadsheet"
-    ? "text-[var(--status-success-solid)] bg-[var(--status-success-bg)]"
-    : kind === "unsupported"
-      ? "text-[var(--status-warning-text)] bg-[var(--status-warning-bg)]"
-      : "text-[var(--text-accent)] bg-[var(--accent-soft)]";
-  return <span aria-hidden="true" className={`grid h-8 w-8 shrink-0 place-items-center rounded-[var(--radius-sm)] ${color}`}><Icon size={16} /></span>;
+/**
+ * A document's format, as a mark.
+ *
+ * It reuses the `.resource-icon` tones the conversation surface already uses
+ * for attachments, so a PDF looks the same wherever it is listed. The tinting
+ * is a format convention, not a status: the row's status signal sits on the
+ * opposite edge, where it cannot be confused with this.
+ */
+const presentation = {
+  pdf: { Icon: FileType2, tone: "pdf", label: "PDF" },
+  document: { Icon: FileText, tone: "document", label: "Document" },
+  spreadsheet: { Icon: FileSpreadsheet, tone: "sheet", label: "Spreadsheet" },
+  unsupported: { Icon: Files, tone: "text", label: "File" },
+} as const satisfies Record<KnowledgeDocumentKind, { Icon: typeof FileText; tone: string; label: string }>;
+
+export function FileTypeIcon({
+  kind,
+  /** The format in the reader's words — "PDF", "DOCX". Names the mark. */
+  label,
+  size = "md",
+  className,
+}: {
+  kind: KnowledgeDocumentKind;
+  label?: string;
+  size?: "sm" | "md";
+  className?: string;
+}) {
+  const { Icon, tone, label: fallbackLabel } = presentation[kind];
+  return (
+    <span
+      aria-label={label ?? fallbackLabel}
+      className={cn("resource-icon", `resource-icon--${tone}`, size === "md" && "resource-icon--lg", className)}
+      role="img"
+    >
+      <Icon aria-hidden="true" size={size === "md" ? 15 : 13} />
+    </span>
+  );
 }

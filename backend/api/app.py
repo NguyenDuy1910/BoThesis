@@ -15,9 +15,11 @@ from api.routers import (
     agent,
     auth,
     artifacts,
+    connections,
     documents,
     health,
     knowledge,
+    sources,
 )
 from api.routers.planned import PLANNED_ROUTERS
 
@@ -29,6 +31,9 @@ _ROUTERS = (
     documents.collections_router,
     documents.router,
     artifacts.router,
+    connections.router,
+    sources.router,
+    sources.ingestions_router,
     admin.router,
     *PLANNED_ROUTERS,
 )

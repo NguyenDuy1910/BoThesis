@@ -181,7 +181,7 @@ export function Dropdown({
           setOpen(true);
         }}
         className={cn(
-          "inline-flex h-9 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--surface-base)] px-3 text-[length:var(--text-size-ui)] font-medium text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] transition-[background-color,color,box-shadow] hover:bg-[var(--surface-inset)] hover:text-[var(--text-primary)] hover:shadow-[inset_0_0_0_1px_var(--border-default)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)] disabled:pointer-events-none disabled:opacity-45",
+          "inline-flex h-9 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--surface-base)] px-3 text-[length:var(--text-size-ui)] font-medium text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] transition-[background-color,color,box-shadow] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] hover:shadow-[inset_0_0_0_1px_var(--border-default)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-canvas)] disabled:pointer-events-none disabled:opacity-45",
           buttonClassName
         )}
       >

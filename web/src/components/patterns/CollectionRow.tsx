@@ -26,13 +26,15 @@ export function CollectionRow({
   restricted?: boolean;
   onOpen?: () => void;
 }) {
+  const Mark = restricted ? Lock : Icon;
   const body = (
     <>
-      {restricted ? (
-        <Lock aria-hidden="true" className="shrink-0 text-[var(--text-tertiary)]" size={20} />
-      ) : (
-        <Icon aria-hidden="true" className="shrink-0 text-[var(--text-tertiary)]" size={20} />
-      )}
+      {/* The mark sits in the same 28px column a document's file mark occupies,
+          so a collection row and the document rows under it start their names
+          on one edge. */}
+      <span aria-hidden="true" className="grid h-7 w-7 shrink-0 place-items-center text-[var(--text-tertiary)]">
+        <Mark size={20} />
+      </span>
       <span className="min-w-0 flex-1">
         <span
           className={cn(
@@ -60,7 +62,7 @@ export function CollectionRow({
   if (restricted) {
     return (
       <div
-        className="flex w-full min-w-0 items-center gap-3.5 rounded-[var(--radius-sm)] px-3 py-3.5"
+        className="flex w-full min-w-0 items-center gap-3 rounded-[var(--radius-sm)] px-3 py-3"
         title="You can see that this collection exists because its documents count toward the workspace total, but you cannot open it."
       >
         {body}
@@ -71,7 +73,7 @@ export function CollectionRow({
   return (
     <button
       className={cn(
-        "flex w-full min-w-0 items-center gap-3.5 rounded-[var(--radius-sm)] px-3 py-3.5 text-left",
+        "flex w-full min-w-0 items-center gap-3 rounded-[var(--radius-sm)] px-3 py-3 text-left",
         "transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)]",
         "hover:bg-[var(--surface-hover)]",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",

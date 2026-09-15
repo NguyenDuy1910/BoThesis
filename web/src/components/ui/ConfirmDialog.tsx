@@ -62,7 +62,7 @@ export function ConfirmDialog({
               setError(null);
               onClose();
             }}
-            variant="secondary"
+            variant="ghost"
           >
             {cancelLabel}
           </Button>

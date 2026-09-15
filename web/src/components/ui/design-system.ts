@@ -7,7 +7,7 @@
  */
 
 const focusRing =
-  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]";
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-canvas)]";
 
 const fieldBase = [
   "w-full bg-[var(--surface-base)] text-[length:var(--text-size-ui)] text-[var(--text-primary)]",
@@ -16,7 +16,10 @@ const fieldBase = [
   "placeholder:text-[var(--text-tertiary)]",
   "hover:shadow-[inset_0_0_0_1px_var(--border-default)]",
   "focus:outline-none focus-visible:outline-none",
-  "focus:shadow-[inset_0_0_0_1px_var(--text-accent),0_0_0_3px_var(--focus-ring-soft)]",
+  // One ring, not two: the border and the halo around it are the same hue, so
+  // they read as a single edge that softens outward. Pairing the lilac accent
+  // with the aurora halo drew two separate purples on top of each other.
+  "focus:shadow-[inset_0_0_0_1px_var(--border-focus),0_0_0_3px_var(--focus-ring-soft)]",
   "disabled:cursor-not-allowed disabled:bg-[var(--surface-inset)] disabled:text-[var(--text-tertiary)] disabled:opacity-60",
   "aria-[invalid=true]:shadow-[inset_0_0_0_1px_var(--status-danger-border)]",
 ].join(" ");
@@ -47,9 +50,9 @@ export const ui = {
   iconButton: `inline-flex shrink-0 items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] disabled:pointer-events-none disabled:opacity-45 ${focusRing}`,
 
   switchTrack: "relative h-5 w-9 shrink-0 rounded-full transition-colors",
-  switchThumb: "absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+  switchThumb: "absolute top-0.5 h-4 w-4 rounded-full bg-[var(--surface-base)] shadow-sm transition-transform",
 
-  toggle: `flex min-h-9 w-full items-center justify-between gap-3 rounded-[var(--radius-sm)] bg-[var(--surface-base)] px-2.5 py-1.5 text-left text-[length:var(--text-size-ui)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] transition-colors hover:bg-[var(--surface-inset)] ${focusRing}`,
+  toggle: `flex min-h-9 w-full items-center justify-between gap-3 rounded-[var(--radius-sm)] bg-[var(--surface-base)] px-2.5 py-1.5 text-left text-[length:var(--text-size-ui)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] transition-colors hover:bg-[var(--surface-hover)] ${focusRing}`,
 
   /** Legacy aliases retained for surfaces outside the Admin console. */
   page: "w-full space-y-4",

@@ -7,6 +7,10 @@ import { forwardRef } from "react";
 /**
  * One action hierarchy for the whole product.
  *
+ * A solid fill is already the strongest thing on the row, so the filled
+ * variants carry no shadow: the rim inside `--elevation-1` only darkens the
+ * edge of a saturated colour.
+ *
  * primary      one per screen — the action the page exists for
  * secondary    outlined; supporting actions of equal weight to each other
  * tertiary     soft fill; toolbar and inline actions that must not compete
@@ -26,15 +30,15 @@ export type ButtonSize = "sm" | "md" | "lg";
 
 const variantClasses: Record<ButtonVariant, string> = {
   primary:
-    "bg-[var(--accent-primary)] text-[var(--text-on-accent)] shadow-[var(--elevation-1)] hover:bg-[var(--accent-hover)] active:bg-[var(--accent-pressed)]",
+    "bg-[var(--action-primary-bg)] text-[var(--text-on-action)] hover:bg-[var(--action-primary-hover)] active:bg-[var(--action-primary-pressed)]",
   secondary:
-    "bg-[var(--surface-base)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] hover:bg-[var(--surface-inset)] hover:text-[var(--text-primary)] hover:shadow-[inset_0_0_0_1px_var(--border-default)] active:bg-[var(--surface-hover)]",
+    "bg-[var(--surface-base)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] hover:shadow-[inset_0_0_0_1px_var(--border-default)] active:bg-[var(--surface-selected)]",
   tertiary:
     "bg-[var(--surface-inset)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-subtle)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
   ghost:
     "text-[var(--text-tertiary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] active:bg-[var(--surface-selected)]",
   destructive:
-    "bg-[var(--status-danger-solid)] text-white shadow-[var(--elevation-1)] hover:brightness-95 active:brightness-90",
+    "bg-[var(--status-danger-solid)] text-[var(--text-on-accent)] hover:brightness-95 active:brightness-90",
   danger:
     "bg-transparent text-[var(--status-danger-text)] shadow-[inset_0_0_0_1px_var(--status-danger-border)] hover:bg-[var(--status-danger-bg)]",
 };
@@ -86,7 +90,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       className={cn(
         "inline-flex shrink-0 items-center justify-center font-medium leading-none",
         "transition-[background-color,color,box-shadow,opacity] duration-[var(--duration-fast)] ease-[var(--ease-out)]",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-canvas)]",
         "disabled:pointer-events-none disabled:opacity-45",
         variantClasses[variant],
         iconOnly ? iconOnlySizeClasses[size] : sizeClasses[size],

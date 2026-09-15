@@ -12,6 +12,7 @@ from bothesis.services import (
     AdminValidationError,
     ArtifactValidationError,
     AuthorizationError,
+    ConnectionAuthorizationRequiredError,
     DocumentNotFoundError,
     IdentityInactiveError,
     IdentityNotFoundError,
@@ -35,6 +36,9 @@ _STATUS_BY_ERROR: tuple[tuple[type[Exception], int], ...] = (
     (AdminNotFoundError, status.HTTP_404_NOT_FOUND),
     (IdentityNotFoundError, status.HTTP_404_NOT_FOUND),
     (DocumentNotFoundError, status.HTTP_404_NOT_FOUND),
+    # Nothing about the request is wrong; the grant behind it is gone, and the
+    # only thing that resolves it is a person authorizing the account again.
+    (ConnectionAuthorizationRequiredError, status.HTTP_409_CONFLICT),
     (AdminConflictError, status.HTTP_409_CONFLICT),
     (UploadConflictError, status.HTTP_409_CONFLICT),
     (AdminValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
@@ -52,6 +56,7 @@ HANDLED_ERRORS: tuple[type[Exception], ...] = (
     IdentityNotFoundError,
     DocumentNotFoundError,
     AdminConflictError,
+    ConnectionAuthorizationRequiredError,
     UploadConflictError,
     AdminValidationError,
     ArtifactValidationError,

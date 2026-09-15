@@ -18,9 +18,9 @@ export type ChatButtonTone =
 export type ChatButtonSize = "m" | "l";
 
 const toneClasses: Record<ChatButtonTone, string> = {
-  primary: "bg-[var(--accent-primary)] text-[var(--text-on-accent)] shadow-[var(--elevation-2)] hover:bg-[var(--accent-hover)] active:bg-[var(--accent-pressed)]",
+  primary: "bg-[var(--action-primary-bg)] text-[var(--text-on-action)] shadow-[var(--elevation-2)] hover:bg-[var(--action-primary-hover)] active:bg-[var(--action-primary-pressed)]",
   secondary: "bg-[var(--surface-base)] text-[var(--text-primary)] shadow-[inset_0_0_0_1px_var(--border-default)] hover:bg-[var(--surface-hover)] active:bg-[var(--surface-selected)]",
-  soft: "bg-[var(--accent-soft)] text-[var(--text-accent)] hover:bg-[var(--accent-soft-hover)] active:bg-[var(--accent-soft-pressed)]",
+  soft: "bg-[var(--surface-subtle)] text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] active:bg-[var(--surface-selected)]",
   ghost: "bg-transparent text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)] active:bg-[var(--surface-selected)]",
   success: "bg-[var(--status-success-solid)] text-[var(--text-on-accent)] hover:bg-[var(--status-success-text)] active:bg-[var(--status-success-text)]",
   warning: "bg-[var(--status-warning-bg)] text-[var(--status-warning-text)] hover:bg-[var(--status-warning-border)] active:bg-[var(--status-warning-border)]",
@@ -65,7 +65,7 @@ export const ChatButton = forwardRef<HTMLButtonElement, ChatButtonProps>(functio
       className={cn(
         "inline-flex shrink-0 items-center justify-center font-medium leading-none",
         "transition-[background-color,color,box-shadow,opacity] duration-[var(--duration-base)] ease-[var(--ease-out)]",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-canvas)]",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-canvas)]",
         "disabled:pointer-events-none disabled:opacity-45",
         toneClasses[tone],
         sizeClasses[size],

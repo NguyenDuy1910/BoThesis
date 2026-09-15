@@ -168,7 +168,7 @@ export function Composer({
               "transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)]",
               "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
               canSend
-                ? "bg-[var(--accent-primary)] text-[var(--text-on-accent)] hover:bg-[var(--accent-hover)]"
+                ? "bg-[var(--action-primary-bg)] text-[var(--text-on-action)] hover:bg-[var(--action-primary-hover)]"
                 : "bg-[var(--status-neutral-bg)] text-[var(--text-tertiary)]",
             )}
             disabled={!canSend}

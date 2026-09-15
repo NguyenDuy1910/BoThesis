@@ -214,7 +214,7 @@ function ActionButton({
     <ChatButton
       aria-pressed={pressed}
       className={clsx("artifact-card__action", `artifact-card__action--${tone}`, pressed && "artifact-card__action--active")}
-      icon={busy ? <LoaderCircle aria-hidden="true" className="artifact-card__spinner" size={13} /> : <Icon aria-hidden="true" size={13} />}
+      icon={busy ? <LoaderCircle aria-hidden="true" className="artifact-card__spinner" size={14} /> : <Icon aria-hidden="true" size={14} />}
       loading={busy}
       onClick={onClick}
       title={label}

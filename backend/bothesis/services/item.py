@@ -24,7 +24,8 @@ from bothesis.db.models import (
 )
 from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services import (
-    ACTIVE_STATUS,
+    CONNECTION_NEEDS_AUTHORIZATION,
+    RUNNABLE_SOURCE_STATUSES,
     MESSAGE_ITEM_RELATIONS,
     AuthContext,
     DocumentNotFoundError,
@@ -736,9 +737,11 @@ class ItemService:
         )
         unavailable = (
             source is None
-            or source.status != ACTIVE_STATUS
+            # A retry of a run that failed must still be able to write, so a
+            # failed source is writable; a paused or disabled one is not.
+            or source.status not in RUNNABLE_SOURCE_STATUSES
             or source.deleted_at is not None
-            or source.integration_connection.status != ACTIVE_STATUS
+            or source.integration_connection.status in CONNECTION_NEEDS_AUTHORIZATION
             or source.integration_connection.deleted_at is not None
             or source.target_item.item_type != "collection"
             or source.target_item.status == "deleted"
@@ -746,7 +749,9 @@ class ItemService:
             or source.target_item.tenant_id != source.integration_connection.tenant_id
         )
         if unavailable:
-            raise DocumentNotFoundError(f"active ingestion source not found: {source_id}")
+            raise DocumentNotFoundError(
+                f"runnable ingestion source not found: {source_id}"
+            )
         assert source is not None
         return source
 

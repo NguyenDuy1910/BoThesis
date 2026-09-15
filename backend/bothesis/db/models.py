@@ -381,15 +381,42 @@ class Memory(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class IntegrationConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One authorized external account, reusable by many Ingestion Sources.
+
+    A Connection answers "whose access is this, and is it still good"; an
+    Ingestion Source answers "which resource does it read". Authorizing the
+    same provider account twice must not create a second Connection, so the
+    provider's own account and resource identifiers are stored here and are
+    unique per tenant and connector.
+    """
+
     __tablename__ = "integration_connections"
     __table_args__ = (
         Index(None, "tenant_id", "connector_key", "status"),
         Index(None, "owner_user_id", "status"),
         UniqueConstraint("tenant_id", "display_name"),
+        Index(
+            "uq_integration_connections_provider_account",
+            "tenant_id",
+            "connector_key",
+            "owner_type",
+            "owner_user_id",
+            "provider_account_id",
+            "provider_resource_id",
+            unique=True,
+            postgresql_where=text(
+                "deleted_at IS NULL AND provider_account_id IS NOT NULL"
+            ),
+        ),
         CheckConstraint(
             "(owner_type = 'tenant' AND owner_user_id IS NULL) OR "
             "(owner_type = 'user' AND owner_user_id IS NOT NULL)",
             name="owner_matches_type",
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'connected', 'expired', 'reauth_required', "
+            "'revoked', 'error', 'disconnected')",
+            name="connection_status_is_valid",
         ),
     )
 
@@ -404,10 +431,27 @@ class IntegrationConnection(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         PG_UUID(as_uuid=True), ForeignKey("users.id")
     )
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: The provider's own identifier for the authorized account.
+    provider_account_id: Mapped[str | None] = mapped_column(String(255))
+    #: A human label for that account, safe to show (an email, a site host).
+    provider_account_label: Mapped[str | None] = mapped_column(String(255))
+    #: The provider resource the grant is bound to: an Atlassian cloud id, a
+    #: Shared Drive id. Null when one grant covers the whole account.
+    provider_resource_id: Mapped[str | None] = mapped_column(String(255))
+    provider_resource_label: Mapped[str | None] = mapped_column(String(255))
+    #: Scopes the provider actually granted, not the ones that were requested.
+    scopes: Mapped[list[str]] = _text_array_column()
     config: Mapped[JsonObject] = _json_object_column()
     status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="active", server_default="active"
+        String(32), nullable=False, default="draft", server_default="draft"
     )
+    #: Why the connection is not healthy, in words a person may be shown.
+    status_detail: Mapped[str | None] = mapped_column(Text)
+    #: Mirrors the credential expiry so listing does not decrypt secrets.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id")
     )
@@ -649,10 +693,37 @@ class CollectionAccess(TimestampMixin, Base):
 
 
 class IngestionSource(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One external resource synchronized into one destination Collection.
+
+    ``status`` is the source's own enablement and health, never the state of a
+    run: a run lives in its workflow execution and is read from there. A source
+    that is enabled and reachable is ``ready`` whether or not a sync happens to
+    be in flight.
+    """
+
     __tablename__ = "ingestion_sources"
     __table_args__ = (
         Index(None, "integration_connection_id", "status"),
         Index(None, "target_item_id", "status"),
+        Index(
+            "uq_ingestion_sources_connection_resource",
+            "integration_connection_id",
+            "resource_type",
+            "external_resource_id",
+            unique=True,
+            postgresql_where=text(
+                "deleted_at IS NULL AND external_resource_id IS NOT NULL"
+            ),
+        ),
+        CheckConstraint(
+            "status IN ('ready', 'paused', 'failed', 'connection_required', "
+            "'disabled')",
+            name="ingestion_source_status_is_valid",
+        ),
+        CheckConstraint(
+            "sync_mode IN ('manual', 'scheduled')",
+            name="ingestion_source_sync_mode_is_valid",
+        ),
     )
 
     integration_connection_id: Mapped[UUID] = mapped_column(
@@ -662,11 +733,22 @@ class IngestionSource(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         PG_UUID(as_uuid=True), ForeignKey("items.id"), nullable=False
     )
     display_name: Mapped[str | None] = mapped_column(String(255))
+    #: The provider resource kind this source reads: space, shared_drive, folder.
+    resource_type: Mapped[str | None] = mapped_column(String(64))
+    #: The provider's identifier for that resource, lifted out of ``config`` so
+    #: the same resource cannot be added to one connection twice.
+    external_resource_id: Mapped[str | None] = mapped_column(Text)
     config: Mapped[JsonObject] = _json_object_column()
     checkpoint: Mapped[JsonObject] = _json_object_column()
-    status: Mapped[str] = mapped_column(
-        String(16), nullable=False, default="active", server_default="active"
+    #: Whether this source runs on a schedule at all. Nothing syncs on its own
+    #: until someone configures it.
+    sync_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="manual", server_default="manual"
     )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="ready", server_default="ready"
+    )
+    status_detail: Mapped[str | None] = mapped_column(Text)
     last_ingested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by_user_id: Mapped[UUID | None] = mapped_column(

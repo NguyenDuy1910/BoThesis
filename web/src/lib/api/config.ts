@@ -1,4 +1,4 @@
-import { getAuthSession } from "@/lib/auth/session";
+import { getAuthSession, getStoredAuthSession } from "@/lib/auth/session";
 
 export interface ApiConfiguration {
   apiUrl: string;
@@ -8,9 +8,21 @@ export interface ApiConfiguration {
 }
 
 export function getApiConfiguration(): ApiConfiguration | null {
+  return resolveApiConfiguration(getAuthSession());
+}
+
+/**
+ * Use for surfaces that are already backed by production routes. Unlike the
+ * broader preview configuration, it never turns mock session state into API
+ * credentials.
+ */
+export function getLiveApiConfiguration(): ApiConfiguration | null {
+  return resolveApiConfiguration(getStoredAuthSession());
+}
+
+function resolveApiConfiguration(session: ReturnType<typeof getAuthSession>): ApiConfiguration | null {
   const apiUrl = process.env.NEXT_PUBLIC_BOTHESIS_API_URL?.replace(/\/$/, "");
   if (!apiUrl) return null;
-  const session = getAuthSession();
   if (session) {
     return {
       apiUrl,

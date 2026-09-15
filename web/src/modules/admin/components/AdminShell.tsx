@@ -43,7 +43,6 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             onExpand={nav.expand}
             onOpenMobile={nav.openMobile}
             onSearchClose={() => setSearchOpen(false)}
-            onSearchOpen={() => setSearchOpen(true)}
             onToggleCollapsed={nav.toggleCollapsed}
             searchOpen={searchOpen}
           >
@@ -63,7 +62,6 @@ interface AdminFrameProps {
   onExpand: () => void;
   onOpenMobile: () => void;
   onSearchClose: () => void;
-  onSearchOpen: () => void;
   onToggleCollapsed: () => void;
   searchOpen: boolean;
 }
@@ -76,7 +74,6 @@ function AdminFrame({
   onExpand,
   onOpenMobile,
   onSearchClose,
-  onSearchOpen,
   onToggleCollapsed,
   searchOpen,
 }: AdminFrameProps) {
@@ -107,7 +104,6 @@ function AdminFrame({
           detailTitle={detailTitle}
           onExpand={onExpand}
           onMobileMenuOpen={onOpenMobile}
-          onSearchOpen={onSearchOpen}
         />
         <main className="shell__scroll" id="main-content">
           <div className="shell__page shell__route-outlet" key={pathname}>{children}</div>

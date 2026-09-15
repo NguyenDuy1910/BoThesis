@@ -242,7 +242,7 @@ function SourceIdentity({
   return (
     <section className="source-preview__identity" aria-label="Source details">
       <div className="source-preview__identity-heading">
-        <span className="source-preview__identity-icon"><FileText aria-hidden="true" size={17} /></span>
+        <span className="source-preview__identity-icon"><FileText aria-hidden="true" size={16} /></span>
         <div>
           <h3 title={viewer.title}>{viewer.title}</h3>
           <p>{sourceType}</p>
@@ -256,7 +256,7 @@ function SourceIdentity({
       <div className="source-preview__actions">
         {originalUrl && (
           <a className="source-preview__action source-preview__action--contextual" href={originalUrl} rel="noopener noreferrer" target="_blank">
-            <ExternalLink aria-hidden="true" size={13} />Open original
+            <ExternalLink aria-hidden="true" size={14} />Open original
           </a>
         )}
         {onAskSource && (
@@ -266,7 +266,7 @@ function SourceIdentity({
         )}
         {viewer.focus?.chunk_text && (
           <button className="source-preview__action source-preview__action--ghost" onClick={() => void copy(viewer.focus!.chunk_text)} type="button">
-            {copied ? <Check aria-hidden="true" size={13} /> : <Copy aria-hidden="true" size={13} />}
+            {copied ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
             {copied ? "Copied" : "Copy quote"}
           </button>
         )}

@@ -17,6 +17,12 @@ interface TabsProps {
   onChange: (tabId: string) => void;
   className?: string;
   density?: "default" | "compact";
+  /**
+   * `pill` is the product default. `underline` is for a tab row that shares a
+   * line with other controls, where a filled pill would read as a button
+   * sitting among the search field and the toolbar icons beside it.
+   */
+  variant?: "pill" | "underline";
   ariaLabel?: string;
   idBase?: string;
 }
@@ -39,10 +45,12 @@ export function Tabs({
   onChange,
   className,
   density = "default",
+  variant = "pill",
   ariaLabel = "Tabs",
   idBase,
 }: TabsProps) {
   const compact = density === "compact";
+  const underline = variant === "underline";
   const tabsId = useId();
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -56,7 +64,7 @@ export function Tabs({
   return (
     <div
       aria-label={ariaLabel}
-      className={cn("flex gap-1 overflow-x-auto", className)}
+      className={cn("flex overflow-x-auto", underline ? "gap-5" : "gap-1", className)}
       ref={listRef}
       role="tablist"
     >
@@ -67,16 +75,24 @@ export function Tabs({
             aria-controls={idBase ? `${idBase}-${tab.id}-panel` : undefined}
             aria-selected={selected}
             className={cn(
-              "shrink-0 rounded-[var(--radius-sm)] font-medium",
+              "shrink-0 font-medium",
               "transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)]",
-              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-base)]",
-              compact
-                ? "h-8 px-2.5 text-[length:var(--text-size-ui)]"
-                : "h-9 px-3 text-[length:var(--text-size-nav)]",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-base)]",
+              underline
+                ? "ui-tab-underline rounded-[var(--radius-xs)] text-[length:var(--text-size-nav)]"
+                : "rounded-[var(--radius-sm)]",
+              !underline && compact && "h-8 px-2.5 text-[length:var(--text-size-ui)]",
+              !underline && !compact && "h-9 px-3 text-[length:var(--text-size-nav)]",
+              underline && (compact ? "h-8" : "h-9"),
               selected
-                ? "bg-[var(--surface-selected)] text-[var(--text-accent)]"
-                : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
+                ? underline
+                  ? "text-[var(--text-primary)]"
+                  : "bg-[var(--surface-selected)] text-[var(--text-accent)]"
+                : underline
+                  ? "text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
+                  : "text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
             )}
+            data-selected={selected || undefined}
             id={idBase ? `${idBase}-${tab.id}` : `${tabsId}-${tab.id}`}
             key={tab.id}
             onClick={() => onChange(tab.id)}

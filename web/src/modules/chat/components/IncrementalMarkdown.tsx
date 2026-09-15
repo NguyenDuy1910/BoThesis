@@ -435,7 +435,7 @@ function CopyCodeButton({ text }: { text: string }) {
       title={copied ? "Copied" : "Copy code"}
       type="button"
     >
-      {copied ? <Check aria-hidden="true" size={13} /> : <Copy aria-hidden="true" size={13} />}
+      {copied ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
       <span>{copied ? "Copied" : "Copy"}</span>
     </button>
   );

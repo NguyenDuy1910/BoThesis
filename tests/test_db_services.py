@@ -653,7 +653,7 @@ async def test_external_resource_mapping_preserves_canonical_item_identity(
             connector_key="confluence",
             owner_type="tenant",
             display_name="Company wiki",
-            status="active",
+            status="connected",
             created_by_user_id=owner.id,
         )
         session.add(connection)
@@ -662,7 +662,7 @@ async def test_external_resource_mapping_preserves_canonical_item_identity(
             integration_connection_id=connection.id,
             target_item_id=collection.id,
             checkpoint={},
-            status="active",
+            status="ready",
             created_by_user_id=owner.id,
         )
         session.add(source)

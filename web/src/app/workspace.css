@@ -1,35 +1,1947 @@
-.utility-bar { display:flex; align-items:center; gap:var(--space-2,8px); min-height:56px; padding-block:var(--space-3,12px); overflow-x:auto; flex-shrink:0; }
-.utility-bar__search { flex:0 1 320px; min-width:200px; }
-.utility-filter { position:relative; display:flex; align-items:center; flex-shrink:0; border-radius:var(--radius-sm); }
-.utility-filter select { appearance:none; padding:8px 28px 8px 10px; border:0; background:transparent; color:var(--text-secondary); font-size:var(--text-size-ui); cursor:pointer; }
-.utility-filter select:hover { background:var(--surface-hover); border-radius:var(--radius-sm); }
-.utility-filter svg { position:absolute; right:8px; pointer-events:none; color:var(--text-tertiary); }
-.utility-filter option { color:var(--text-primary); background:var(--surface-base); }
-.document-workspace { display:flex; flex-direction:column; min-height:calc(100dvh - 120px); height:100%; min-width:0; }
-.document-split { display:grid; grid-template-columns:1fr; flex:1; min-height:0; background:var(--surface-base); overflow:hidden; }
-.document-split[data-mode=split] { grid-template-columns:minmax(260px,.65fr) minmax(380px,1.35fr); }
-.document-split > section { min-width:0; }
-.document-paper { margin-inline:auto; max-width:640px; min-height:680px; background:var(--surface-base); padding:48px; box-shadow:var(--elevation-1); transform-origin:top center; }
-.document-paper p { margin-block:18px; font-size:var(--text-size-body); line-height:1.8; color:var(--text-secondary); }
-.document-paper h3 { font-size:var(--text-size-h3); line-height:1.5; margin-bottom:32px; }
-.document-heading { margin:16px 0 8px; font-size:var(--text-size-caption); font-weight:500; text-transform:uppercase; letter-spacing:var(--text-tracking-caption); color:var(--text-tertiary); }
-.configuration { width:100%; max-width:920px; margin-inline:auto; }
-.configuration-section { padding-block:24px; border-bottom:1px solid var(--border-subtle); }
-.configuration-section h2 { font-size:var(--text-size-nav); font-weight:600; margin-bottom:16px; }
-.configuration-field { display:grid; gap:8px; font-size:var(--text-size-ui); margin-bottom:16px; }
-.unsaved-bar { position:sticky; bottom:0; display:flex; align-items:center; gap:8px; padding:12px 0; background:var(--surface-base); border-top:1px solid var(--border-subtle); z-index:5; }
-.unsaved-bar > span:first-child { flex:1; font-size:var(--text-size-ui); color:var(--text-secondary); }
-.experience-layout { display:grid; grid-template-columns:minmax(320px,1fr) minmax(340px,1fr); gap:40px; }
-.experience-preview { position:sticky; top:0; align-self:start; min-height:580px; display:flex; flex-direction:column; justify-content:center; padding:32px; border:1px solid var(--border-subtle); border-radius:var(--radius-lg); background:var(--surface-base); }
-.experience-preview[data-background=soft] { background:var(--accent-soft); }
-.experience-preview[data-background=gradient] { background:linear-gradient(145deg,var(--surface-base),var(--accent-soft)); }
-.experience-preview[data-accent=teal] { --accent-primary:var(--status-success-solid); --accent-soft:var(--status-success-bg); }
-.experience-preview[data-accent=amber] { --accent-primary:var(--status-warning-solid); --accent-soft:var(--status-warning-bg); }
-.experience-preview[data-accent=rose] { --accent-primary:var(--status-danger-solid); --accent-soft:var(--status-danger-bg); }
-.experience-preview[data-appearance=dark] { background:var(--night-950,#14121c); color:var(--night-50,#faf8ff); }
-.experience-preview[data-appearance=light] { background:var(--ink-0,#fff); color:var(--ink-950,#12111a); }
-button:focus-visible, a:focus-visible, select:focus-visible { outline:2px solid var(--focus-ring); outline-offset:2px; }
-.chat-mobile-menu { display:none; position:absolute; top:12px; left:12px; z-index:10; }
-@media(max-width:1100px) { .experience-layout { gap:24px; grid-template-columns:1fr 1fr; } .document-split[data-mode=split] { grid-template-columns:260px minmax(0,1fr); } .document-paper { padding:28px; } }
-@media(max-width:800px) { .experience-layout { grid-template-columns:1fr; } .experience-preview { position:relative; min-height:420px; } .document-split[data-mode=split] { grid-template-columns:1fr; } .document-split[data-mode=split] > section:first-child { display:none; } .utility-bar__search { min-width:180px; } .chat-mobile-menu { display:grid; } .global-assistant-launcher { bottom:max(5rem,calc(env(safe-area-inset-bottom) + 4rem)); right:1rem; } }
-@media(prefers-reduced-motion:reduce) { .document-workspace *, .configuration * { animation:none!important; transition:none!important; scroll-behavior:auto!important; } }
+/* ═══════════════════════════════════════════════════════════════════════════
+   Document workspaces
+   ---------------------------------------------------------------------------
+   Knowledge (workspace admin) and Library (personal) are the same shape: a
+   utility line, a list, and a reader that opens beside it. Only geometry and
+   rhythm live here — every colour, size and duration resolves to tokens.css.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Legacy utility bar ────────────────────────────────────────────────────
+   Still the Library's toolbar. Knowledge uses `.knowledge-bar` below, which
+   folds the same controls onto the line the tabs already occupy. */
+.utility-bar {
+  display: flex;
+  min-height: 3.5rem;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-2);
+  overflow-x: auto;
+  padding-block: var(--space-3);
+}
+
+.utility-bar__search {
+  min-width: 12.5rem;
+  flex: 0 1 20rem;
+}
+
+.utility-filter {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  border-radius: var(--radius-sm);
+}
+
+.utility-filter select {
+  appearance: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  padding: 0.5rem 1.75rem 0.5rem 0.625rem;
+  color: var(--text-secondary);
+  font-size: var(--text-size-ui);
+  cursor: pointer;
+}
+
+.utility-filter select:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.utility-filter svg {
+  position: absolute;
+  right: 0.5rem;
+  pointer-events: none;
+  color: var(--text-tertiary);
+}
+
+.utility-filter option {
+  background: var(--surface-base);
+  color: var(--text-primary);
+}
+
+/* ── Frame ─────────────────────────────────────────────────────────────────
+   The workspace owns its own scrolling: the list and the reader each scroll
+   independently, so opening a document never moves the toolbar above it. */
+.document-workspace {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  background: var(--surface-base);
+}
+
+/* ── Health line ───────────────────────────────────────────────────────────
+   One sentence of workspace state, above the controls that change it. It is
+   quiet by default; the dot is the only thing that would turn colour. */
+.knowledge-health {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--page-gutter) 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+  line-height: var(--text-lh-meta);
+}
+
+.knowledge-health__dot {
+  width: 0.4375rem;
+  height: 0.4375rem;
+  border-radius: var(--radius-full);
+  background: var(--status-success-solid);
+}
+
+/* ── Utility line ──────────────────────────────────────────────────────────
+   Where you are, what you are looking at, how you narrow it and what you do
+   to it, on one line. The rule underneath it is the only divider between the
+   controls and the content they operate on. */
+.knowledge-bar {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: var(--space-3) var(--page-gutter);
+}
+
+.knowledge-bar__tabs {
+  flex-shrink: 0;
+}
+
+.knowledge-bar__utilities {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.knowledge-bar__search {
+  min-width: 9rem;
+  flex: 0 1 17.5rem;
+}
+
+.knowledge-bar__actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* Quiet toolbar control: an 18px glyph with a 36px target, and no chrome at
+   rest. It overrides the bordered dropdown trigger it is sometimes applied to
+   so a menu and a plain action never look like two different weights. */
+.knowledge-icon-button {
+  width: 2.25rem;
+  justify-content: center;
+  background: transparent;
+  padding-inline: 0;
+  color: var(--text-tertiary);
+}
+
+/* Scoped away from `:focus-visible`: Tailwind composes the focus ring into
+   `box-shadow`, so clearing that property outright would leave the control
+   with no focus indicator at all. */
+.knowledge-icon-button:not(:focus-visible) {
+  box-shadow: none;
+}
+
+.knowledge-icon-button:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.knowledge-icon-button--sm {
+  width: 2rem;
+  height: 2rem;
+}
+
+/* The scope control states where the reader is browsing. It is chromeless so
+   the place name reads as a heading rather than as a form field. */
+.knowledge-scope-trigger {
+  max-width: 12rem;
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.knowledge-scope-trigger:not(:focus-visible) {
+  box-shadow: none;
+}
+
+.knowledge-scope-trigger:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+/* ── Section labels ────────────────────────────────────────────────────────
+   Uppercase eyebrow left, the count it refers to right. A count is only ever
+   shown when it is the result of something. */
+.knowledge-eyebrow {
+  color: var(--text-tertiary);
+  font-size: var(--text-size-caption);
+  font-weight: 600;
+  letter-spacing: var(--text-tracking-caption);
+  text-transform: uppercase;
+}
+
+.document-heading {
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-caption);
+  font-weight: 600;
+  letter-spacing: var(--text-tracking-caption);
+  text-transform: uppercase;
+}
+
+.knowledge-list-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-3) var(--space-2);
+}
+
+.knowledge-list-heading > span {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+  line-height: var(--text-lh-meta);
+}
+
+.knowledge-muted {
+  color: var(--text-tertiary);
+  font-size: var(--text-size-ui);
+}
+
+/* ── Lists ─────────────────────────────────────────────────────────────────
+   Rows are separated by a hairline rather than boxed, so a long list reads as
+   one surface. The last rule is dropped so a section never ends in a line. */
+.knowledge-document-list {
+  padding: var(--space-2) var(--space-3) var(--space-10);
+}
+
+/* A border, not an inset shadow. Tailwind composes its focus ring into
+   `box-shadow`, and this rule is unlayered — so drawing the divider that way
+   silently erased the focus ring on every row whose root element is itself the
+   focusable control. */
+.knowledge-rows > * + * {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.knowledge-row-skeleton {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+
+.knowledge-bulk-bar {
+  display: flex;
+  min-height: 2.75rem;
+  align-items: center;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+}
+
+.knowledge-bulk-bar > span:first-child {
+  min-width: 0;
+  flex: 1;
+  color: var(--text-accent);
+  font-size: var(--text-size-ui);
+  font-weight: 500;
+}
+
+/* ── Split ─────────────────────────────────────────────────────────────────
+   The list keeps a stable measure beside the reader rather than sharing the
+   width proportionally, so opening a wider document never squeezes the names
+   in the list down to ellipses. */
+.document-split {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.document-split[data-mode="split"] {
+  grid-template-columns: minmax(18rem, 27rem) minmax(0, 1fr);
+}
+
+.document-split > section {
+  min-width: 0;
+}
+
+/* ── Reader ────────────────────────────────────────────────────────────────
+   Identity, facts, representation, stage. Each band is separated by rhythm
+   rather than by a rule; the stage's own tint is the only real boundary. */
+/* The reader fills its pane exactly, which makes the stage the only thing
+   that scrolls: the title, the facts and the representation tabs stay put
+   while the document moves under them. */
+.knowledge-viewer {
+  position: relative;
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--surface-base);
+}
+
+.knowledge-viewer__header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-4) 0;
+}
+
+.knowledge-viewer__header h2 {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: var(--text-size-h3);
+  font-weight: 600;
+  line-height: var(--text-lh-h3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-viewer__header p {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+  line-height: var(--text-lh-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-viewer__actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* Leaving for the file in its own source is a link, not a button — it opens
+   somewhere else, and a middle-click or a new tab should work the way the
+   reader expects it to. It is shaped like the quiet actions beside it. */
+.knowledge-open-original {
+  display: inline-flex;
+  height: 2rem;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-2);
+  border-radius: var(--radius-sm);
+  padding-inline: var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-ui);
+  font-weight: 500;
+  transition: background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+  white-space: nowrap;
+}
+
+.knowledge-open-original:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.knowledge-viewer__facts {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-4) 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+  line-height: var(--text-lh-meta);
+}
+
+.knowledge-viewer__status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  border-radius: var(--radius-full);
+  padding: 0.0625rem var(--space-2);
+  font-weight: 500;
+}
+
+.knowledge-viewer__status > span {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: var(--radius-full);
+  background: currentcolor;
+}
+
+.knowledge-viewer__status--success { background: var(--status-success-bg); color: var(--status-success-text); }
+.knowledge-viewer__status--warning { background: var(--status-warning-bg); color: var(--status-warning-text); }
+.knowledge-viewer__status--danger { background: var(--status-danger-bg); color: var(--status-danger-text); }
+.knowledge-viewer__status--info { background: var(--status-info-bg); color: var(--status-info-text); }
+.knowledge-viewer__status--neutral { background: var(--status-neutral-bg); color: var(--status-neutral-text); }
+.knowledge-viewer__status--accent { background: var(--accent-soft); color: var(--text-accent); }
+
+.knowledge-viewer__toolbar {
+  display: flex;
+  min-height: 3rem;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-2);
+}
+
+.knowledge-viewer__stage {
+  position: relative;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--surface-canvas);
+  margin-inline: var(--space-4);
+  padding: var(--space-5) var(--space-4) calc(var(--space-12) + var(--space-5));
+}
+
+/* ── Paper ─────────────────────────────────────────────────────────────────
+   A PDF page and a Word flow are the same reading column; only the PDF keeps
+   its sheet and its folio, because only the PDF's pagination is real. */
+.knowledge-paper {
+  max-width: 44rem;
+  margin-inline: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--surface-base);
+  padding: var(--space-8) var(--space-10);
+  box-shadow: var(--elevation-1);
+  transform-origin: top center;
+}
+
+.knowledge-paper--flow {
+  border: 0;
+  padding: var(--space-6) var(--space-8);
+  box-shadow: none;
+}
+
+.knowledge-paper h3 {
+  margin: var(--space-5) 0 var(--space-2);
+  color: var(--text-primary);
+  font-size: var(--text-size-h3);
+  font-weight: 600;
+  line-height: var(--text-lh-h3);
+}
+
+.knowledge-paper h3:first-child {
+  margin-top: 0;
+}
+
+.knowledge-paper p {
+  margin-block: var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--text-size-ui);
+  line-height: 1.7;
+}
+
+.knowledge-paper__running-head {
+  margin: 0 0 var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: var(--space-3);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-caption);
+  letter-spacing: var(--text-tracking-caption);
+  text-align: center;
+}
+
+.knowledge-paper__label {
+  margin: var(--space-5) 0 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-caption);
+  letter-spacing: var(--text-tracking-caption);
+}
+
+.knowledge-paper__folio {
+  margin-top: var(--space-8);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+  text-align: center;
+}
+
+.knowledge-paper__empty {
+  padding: var(--space-8) var(--space-4);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-ui);
+  text-align: center;
+}
+
+.knowledge-mark {
+  border-radius: 0.125rem;
+  background: var(--highlight-surface);
+  box-shadow: 0 0 0 1px var(--highlight-border);
+  color: inherit;
+}
+
+/* ── Sheet ─────────────────────────────────────────────────────────────────
+   A workbook shows cells as cells: what is readable here is exactly what the
+   agent indexed, so flattening it into prose would misrepresent it. */
+.knowledge-sheet {
+  display: flex;
+  max-width: 56rem;
+  flex-direction: column;
+  margin-inline: auto;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-base);
+}
+
+.knowledge-sheet__grid {
+  overflow-x: auto;
+}
+
+.knowledge-sheet table {
+  width: 100%;
+  min-width: 34rem;
+  border-collapse: collapse;
+  font-size: var(--text-size-ui);
+}
+
+.knowledge-sheet th,
+.knowledge-sheet td {
+  border-right: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.knowledge-sheet thead th {
+  background: var(--surface-inset);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.knowledge-sheet thead th span {
+  margin-right: var(--space-2);
+  color: var(--text-tertiary);
+  font-weight: 400;
+}
+
+.knowledge-sheet tbody th {
+  width: 2.25rem;
+  background: var(--surface-inset);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+  font-weight: 400;
+  text-align: center;
+}
+
+.knowledge-sheet td {
+  color: var(--text-secondary);
+}
+
+.knowledge-sheet__tabs {
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-inset);
+  padding: var(--space-1) var(--space-2);
+}
+
+/* ── Unsupported ───────────────────────────────────────────────────────────
+   A preview is impossible, but the file is not a dead end. */
+.knowledge-unsupported {
+  display: grid;
+  max-width: 30rem;
+  justify-items: center;
+  gap: var(--space-2);
+  margin-inline: auto;
+  padding-block: var(--space-12);
+  color: var(--text-tertiary);
+  text-align: center;
+}
+
+.knowledge-unsupported h3 {
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+  font-weight: 600;
+}
+
+.knowledge-unsupported p {
+  color: var(--text-tertiary);
+  font-size: var(--text-size-ui);
+  line-height: var(--text-lh-ui);
+  text-wrap: pretty;
+}
+
+.knowledge-unsupported__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+/* ── Agent view ────────────────────────────────────────────────────────────
+   The passages themselves, with the page they came from and how often answers
+   have used them. No card per passage — a rule is enough separation. */
+.knowledge-agent {
+  max-width: 48rem;
+  margin-inline: auto;
+}
+
+.knowledge-agent__label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+}
+
+.knowledge-agent__hint {
+  display: inline-flex;
+  border-radius: var(--radius-full);
+  color: var(--text-tertiary);
+}
+
+.knowledge-agent__sections {
+  display: grid;
+  padding: 0;
+  list-style: none;
+}
+
+.knowledge-agent__sections li {
+  border-bottom: 1px solid var(--border-subtle);
+  padding-block: var(--space-4);
+}
+
+.knowledge-agent__sections li:last-child {
+  border-bottom: 0;
+}
+
+.knowledge-agent__section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.knowledge-agent__section-head h3 {
+  min-width: 0;
+  flex: 1;
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+  font-weight: 600;
+}
+
+.knowledge-agent__cited {
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  padding: 0.0625rem var(--space-2);
+  color: var(--text-accent);
+  font-size: var(--text-size-meta);
+  font-weight: 500;
+}
+
+.knowledge-agent__page {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+}
+
+.knowledge-agent__sections p {
+  color: var(--text-secondary);
+  font-size: var(--text-size-ui);
+  line-height: 1.6;
+}
+
+.knowledge-agent__summary {
+  margin-top: var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--surface-base);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.knowledge-agent__summary summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--text-size-meta);
+  cursor: pointer;
+  list-style: none;
+}
+
+.knowledge-agent__summary summary::-webkit-details-marker {
+  display: none;
+}
+
+.knowledge-agent__summary > summary > svg {
+  flex-shrink: 0;
+  color: var(--status-success-solid);
+}
+
+.knowledge-agent__summary--failed > summary > svg,
+.knowledge-agent__summary--unsupported > summary > svg { color: var(--status-danger-solid); }
+.knowledge-agent__summary--indexing > summary > svg { color: var(--status-warning-solid); }
+.knowledge-agent__summary--restricted > summary > svg { color: var(--status-warning-solid); }
+
+.knowledge-agent__summary summary > span:first-of-type {
+  min-width: 0;
+  flex: 1;
+}
+
+.knowledge-agent__summary-toggle {
+  flex-shrink: 0;
+  color: var(--text-accent);
+  font-weight: 500;
+}
+
+.knowledge-agent__summary p {
+  border-top: 1px solid var(--border-subtle);
+  padding: var(--space-3);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+  line-height: var(--text-lh-ui);
+}
+
+/* ── Pager ─────────────────────────────────────────────────────────────────
+   Floats over the stage so the reader's eye stays on the page. It becomes the
+   find field when searching — one floating object, never two. */
+.knowledge-pager {
+  position: sticky;
+  z-index: 1;
+  bottom: var(--space-3);
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: var(--space-1);
+  margin: var(--space-6) auto 0;
+  border-radius: var(--radius-full);
+  background: var(--surface-raised);
+  padding: var(--space-1) var(--space-2);
+  box-shadow: var(--elevation-3);
+  color: var(--text-secondary);
+  font-size: var(--text-size-meta);
+}
+
+.knowledge-pager__group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.knowledge-pager__group + .knowledge-pager__group {
+  border-left: 1px solid var(--border-subtle);
+  padding-left: var(--space-2);
+  margin-left: var(--space-1);
+}
+
+.knowledge-pager__group > span {
+  min-width: 2.75rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.knowledge-pager--finding {
+  gap: var(--space-2);
+  padding-left: var(--space-3);
+  color: var(--text-tertiary);
+}
+
+.knowledge-pager--finding input {
+  width: 14rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+}
+
+.knowledge-pager--finding input:focus {
+  outline: none;
+}
+
+/* ── Details ───────────────────────────────────────────────────────────────
+   Docked beside the reader, not over it: the reason to open it is almost
+   always to check a fact against what is on the page. */
+.knowledge-details {
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  bottom: 0;
+  /* Starts under the representation tabs, so the document's identity and the
+     control that opened it both stay visible while it is read across. */
+  top: 7.75rem;
+  display: flex;
+  width: min(21rem, 100%);
+  flex-direction: column;
+  border-left: 1px solid var(--border-subtle);
+  border-top-left-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--elevation-3);
+  animation: knowledge-details-enter var(--duration-base) var(--ease-out) both;
+}
+
+.knowledge-details__header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: var(--space-3) var(--space-2) var(--space-3) var(--space-4);
+}
+
+.knowledge-details__header h3 {
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+  font-weight: 600;
+}
+
+.knowledge-details__body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-1) var(--space-4) var(--space-2);
+}
+
+.knowledge-details__facts > div {
+  border-bottom: 1px solid var(--border-subtle);
+  padding-block: var(--space-2);
+}
+
+.knowledge-details__facts dt {
+  color: var(--text-tertiary);
+  font-size: var(--text-size-caption);
+  font-weight: 600;
+  letter-spacing: var(--text-tracking-caption);
+  text-transform: uppercase;
+}
+
+.knowledge-details__facts dd {
+  margin-top: 0.125rem;
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+  line-height: var(--text-lh-ui);
+  overflow-wrap: anywhere;
+}
+
+.knowledge-details__value--ok {
+  color: var(--status-success-text);
+}
+
+.knowledge-details__disclosure {
+  padding-block: var(--space-3);
+  font-size: var(--text-size-meta);
+}
+
+.knowledge-details__disclosure summary {
+  color: var(--text-secondary);
+  font-size: var(--text-size-ui);
+  cursor: pointer;
+}
+
+.knowledge-details__disclosure p {
+  margin-top: var(--space-2);
+  color: var(--text-tertiary);
+  line-height: var(--text-lh-ui);
+  overflow-wrap: anywhere;
+}
+
+.knowledge-details__actions {
+  display: grid;
+  flex-shrink: 0;
+  gap: 0.125rem;
+  border-top: 1px solid var(--border-subtle);
+  padding: var(--space-2);
+}
+
+.knowledge-details__actions button {
+  display: flex;
+  min-height: 2.125rem;
+  align-items: center;
+  gap: var(--space-2);
+  border-radius: var(--radius-sm);
+  padding-inline: var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--text-size-ui);
+  text-align: left;
+  transition: background-color var(--duration-fast) var(--ease-out);
+}
+
+.knowledge-details__actions button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.knowledge-details__actions button:disabled {
+  color: var(--text-tertiary);
+  opacity: 0.5;
+}
+
+.knowledge-details__danger {
+  color: var(--status-danger-text) !important;
+}
+
+.knowledge-details__danger:hover {
+  background: var(--status-danger-bg) !important;
+  color: var(--status-danger-text) !important;
+}
+
+@keyframes knowledge-details-enter {
+  from { opacity: 0; transform: translateX(0.75rem); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* ── Notice ────────────────────────────────────────────────────────────────
+   Quiet until something needs attention, then unmistakable. It states what
+   failed, what it costs, and the single action that fixes it. */
+.knowledge-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--status-danger-bg);
+  padding: var(--space-3) var(--space-4);
+  box-shadow: inset 0 0 0 1px var(--status-danger-border);
+}
+
+.knowledge-notice > svg {
+  flex-shrink: 0;
+  margin-top: 0.125rem;
+  color: var(--status-danger-solid);
+}
+
+.knowledge-notice > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.knowledge-notice strong {
+  color: var(--status-danger-text);
+  font-size: var(--text-size-ui);
+  font-weight: 600;
+}
+
+.knowledge-notice p {
+  margin-top: 0.125rem;
+  color: var(--text-secondary);
+  font-size: var(--text-size-meta);
+  line-height: var(--text-lh-ui);
+  text-wrap: pretty;
+}
+
+.knowledge-notice > button {
+  flex-shrink: 0;
+}
+
+/* ── App icons ─────────────────────────────────────────────────────────────
+   One container for every integration mark, so a directory of fifteen logos
+   of different silhouettes still reads as one column. */
+.knowledge-app-icon {
+  display: grid;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--surface-base);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.knowledge-app-icon--sm {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-xs);
+}
+
+/* Several product marks are near-black by definition — Notion, GitHub, Slack.
+   On a dark surface they vanish, and a logo cannot be recoloured to fix that.
+   The plate inverts instead, which is what those products do themselves. */
+html[data-theme="dark"] .knowledge-app-icon,
+html.dark .knowledge-app-icon {
+  background: var(--surface-inverse);
+  box-shadow: none;
+}
+
+.knowledge-app-icon__mark {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.knowledge-app-icon--sm .knowledge-app-icon__mark {
+  width: 1rem;
+  height: 1rem;
+}
+
+.knowledge-app-icon__glyph {
+  width: 1.125rem;
+  height: 1.125rem;
+  color: var(--text-tertiary);
+}
+
+.knowledge-app-icon--sm .knowledge-app-icon__glyph {
+  width: 0.9375rem;
+  height: 0.9375rem;
+}
+
+/* ── Sources ───────────────────────────────────────────────────────────────
+   A connection manager. A healthy source says so by being listed here at all,
+   so it carries no badge — only trouble earns one. */
+.knowledge-sources,
+.knowledge-activity,
+.knowledge-source-detail {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-2) var(--page-gutter) var(--space-12);
+}
+
+.knowledge-sources > section + section {
+  margin-top: var(--space-6);
+}
+
+.knowledge-source-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.knowledge-source-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.knowledge-source-list li > button {
+  display: flex;
+  min-width: 0;
+  min-height: 3.5rem;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-3);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-primary);
+  font-size: var(--text-size-nav);
+  font-weight: 500;
+  text-align: left;
+  transition: background-color var(--duration-fast) var(--ease-out);
+}
+
+.knowledge-source-list li > button:hover {
+  background: var(--surface-hover);
+}
+
+.knowledge-source-list li > button > svg:last-child {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+/* A row is two lines: what it is, then what it is doing. The second line is
+   quieter because it is context for the first, never a second heading. */
+.knowledge-source-list li > button > span > strong,
+.knowledge-source-list li > .knowledge-source-list__static > span > strong {
+  font-weight: 500;
+}
+
+.knowledge-source-list li > button > span > small,
+.knowledge-source-list li > .knowledge-source-list__static > span > small {
+  color: var(--text-tertiary);
+  font-size: var(--text-size-caption);
+  font-weight: 400;
+}
+
+/* A row that is not itself a link still occupies the button's box, so the two
+   kinds of row line up in the same list. */
+.knowledge-source-list__static {
+  display: flex;
+  min-width: 0;
+  min-height: 3.5rem;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-primary);
+  font-size: var(--text-size-nav);
+}
+
+/* The row actions are contextual: they appear on hover or focus, so a resting
+   list of healthy accounts carries no controls at all. The static cell is the
+   row's content and is always visible. */
+.knowledge-source-list li > span:not(.knowledge-source-list__static) {
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.knowledge-source-list li:hover > span:not(.knowledge-source-list__static),
+.knowledge-source-list li:focus-within > span:not(.knowledge-source-list__static) {
+  opacity: 1;
+}
+
+/* ── Connector directory ───────────────────────────────────────────────────
+   An app browser, not a configuration table: no cards, no borders, two
+   columns of quiet rows. */
+/* Two columns on a desktop, one when the pane narrows. A third column would
+   turn a browsable directory into a grid of tiles. */
+.knowledge-connectors {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-1) var(--space-6);
+}
+
+.knowledge-connectors__skeleton {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+
+/* A directory row does two things: it opens the connector's page, and it
+   offers the shortcut for someone who already knows what they are adding. Two
+   controls, one hover surface, so the row still reads as a single object. */
+.knowledge-connectors__item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  border-radius: var(--radius-md);
+  color: var(--text-tertiary);
+  transition: background-color var(--duration-fast) var(--ease-out);
+}
+
+.knowledge-connectors__item:hover {
+  background: var(--surface-hover);
+}
+
+.knowledge-connectors__open {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-3);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  text-align: left;
+}
+
+.knowledge-connectors__add {
+  display: grid;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex-shrink: 0;
+  place-items: center;
+  margin-right: var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  transition: background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.knowledge-connectors__add:hover {
+  background: var(--accent-soft);
+  color: var(--text-accent);
+}
+
+.knowledge-connectors strong,
+.knowledge-connectors small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-connectors strong {
+  color: var(--text-primary);
+  font-size: var(--text-size-nav);
+  font-weight: 500;
+  line-height: var(--text-lh-nav);
+}
+
+.knowledge-connectors small {
+  margin-top: 0.0625rem;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+  line-height: var(--text-lh-meta);
+}
+
+/* ── Connector page ────────────────────────────────────────────────────────
+   What a connector is, before anyone commits to one. It is a state of the
+   Sources subview rather than a route of its own, so one stylesheet block
+   serves every connector the deployment will ever register. */
+.knowledge-connector-page {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-5);
+  overflow-y: auto;
+  padding: var(--space-2) var(--page-gutter) var(--space-12);
+}
+
+.knowledge-connector-page > * {
+  flex-shrink: 0;
+}
+
+.knowledge-connector-page__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.knowledge-connector-page__mark {
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: var(--radius-md);
+}
+
+.knowledge-connector-page__mark .knowledge-app-icon__mark {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.knowledge-connector-page__header h2 {
+  color: var(--text-primary);
+  font-size: var(--text-size-h2);
+  font-weight: 600;
+  line-height: var(--text-lh-h2);
+}
+
+.knowledge-connector-page__header p {
+  margin-top: 0.125rem;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-ui);
+}
+
+.knowledge-connector-page__summary,
+.knowledge-connector-page__unavailable {
+  max-width: 68ch;
+  color: var(--text-secondary);
+  font-size: var(--text-size-body);
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+
+.knowledge-connector-page__unavailable {
+  font-size: var(--text-size-ui);
+  color: var(--text-tertiary);
+}
+
+.knowledge-connector-page__columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: var(--space-4) var(--space-10);
+}
+
+.knowledge-connector-page__list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-3) 0 0;
+  list-style: none;
+}
+
+.knowledge-connector-page__list li {
+  position: relative;
+  padding-left: var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-size-ui);
+  line-height: var(--text-lh-ui);
+}
+
+.knowledge-connector-page__list li::before {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.25rem;
+  width: 0.25rem;
+  height: 0.25rem;
+  border-radius: var(--radius-full);
+  background: var(--border-default);
+  content: "";
+}
+
+/* Three promises about handling, kept as one quiet band rather than three
+   cards: they are read once and then trusted. */
+.knowledge-connector-page__assurances {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+  padding: var(--space-4);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  list-style: none;
+}
+
+.knowledge-connector-page__assurances li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-secondary);
+  font-size: var(--text-size-ui);
+  line-height: var(--text-lh-ui);
+}
+
+.knowledge-connector-page__assurances svg {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+/* ── Connector setup ───────────────────────────────────────────────────────
+   Connecting a source is three server steps, and the dialog says so: what the
+   reader is connecting, where they are in it, and one question per field. The
+   step list is a position indicator, not navigation — a verified credential
+   cannot be un-verified by clicking backwards. */
+/* The dialog already pads its body and pins its own footer region. */
+.knowledge-setup {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.knowledge-setup__identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.knowledge-setup__identity strong,
+.knowledge-setup__identity small {
+  display: block;
+}
+
+.knowledge-setup__identity strong {
+  color: var(--text-primary);
+  font-size: var(--text-size-nav);
+  font-weight: 600;
+}
+
+.knowledge-setup__identity small {
+  margin-top: 0.0625rem;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+}
+
+.knowledge-setup__steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  border-block: 1px solid var(--border-subtle);
+  padding-block: var(--space-2);
+  margin: 0;
+  padding-inline: 0;
+  list-style: none;
+}
+
+.knowledge-setup__step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+}
+
+.knowledge-setup__step > span {
+  display: grid;
+  width: 1.25rem;
+  height: 1.25rem;
+  place-items: center;
+  border-radius: var(--radius-full);
+  background: var(--surface-subtle);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-caption);
+  font-weight: 600;
+}
+
+.knowledge-setup__step--current {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.knowledge-setup__step--current > span {
+  background: var(--accent-primary);
+  color: var(--text-on-accent);
+}
+
+.knowledge-setup__step--done > span {
+  background: var(--status-success-bg);
+  color: var(--status-success-text);
+}
+
+.knowledge-setup__body {
+  display: grid;
+  gap: var(--space-4);
+}
+
+/* A setting that is on or off asks its question as a sentence, not a field. */
+.knowledge-setup__switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  padding: var(--space-3);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.knowledge-setup__switch strong,
+.knowledge-setup__switch small {
+  display: block;
+}
+
+.knowledge-setup__switch strong {
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+  font-weight: 500;
+}
+
+.knowledge-setup__switch small {
+  margin-top: 0.125rem;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+  line-height: var(--text-lh-meta);
+}
+
+.knowledge-setup__link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-accent);
+  font-size: var(--text-size-meta);
+  font-weight: 500;
+}
+
+.knowledge-setup__link:hover {
+  text-decoration: underline;
+}
+
+.knowledge-setup__confirmed {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--status-success-bg);
+  padding: var(--space-2) var(--space-3);
+  color: var(--status-success-text);
+  font-size: var(--text-size-meta);
+}
+
+.knowledge-setup__done {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  padding-block: var(--space-6);
+  text-align: center;
+}
+
+.knowledge-setup__done > svg {
+  color: var(--status-success-solid);
+}
+
+.knowledge-setup__done strong {
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+  font-weight: 600;
+}
+
+.knowledge-setup__done p {
+  max-width: 34ch;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-ui);
+  line-height: var(--text-lh-ui);
+  text-wrap: pretty;
+}
+
+/* ── Source detail ─────────────────────────────────────────────────────────
+   Operational facts as label/value, in two columns. Nothing is explained in
+   prose; each section carries its own action on the rule. */
+.knowledge-source-detail {
+  display: flex;
+  flex-direction: column;
+  padding-top: var(--space-3);
+}
+
+.knowledge-source-detail__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-block: var(--space-2) var(--space-4);
+}
+
+.knowledge-source-detail__header h2 {
+  color: var(--text-primary);
+  font-size: var(--text-size-h2);
+  font-weight: 600;
+  line-height: var(--text-lh-h2);
+}
+
+.knowledge-source-detail__columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+  gap: var(--space-4) var(--space-10);
+  margin-bottom: var(--space-6);
+}
+
+/* A fixed height rather than a minimum: a section whose rule carries an
+   action and one that does not have to start their key/value rows on the
+   same line, or the two columns read as two different tables. */
+.knowledge-section-rule {
+  display: flex;
+  height: 2.5rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.knowledge-section-rule h3 {
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+  font-weight: 600;
+}
+
+.knowledge-section-rule button {
+  margin-right: calc(var(--space-2) * -1);
+  color: var(--text-accent);
+}
+
+.knowledge-kv > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  padding-block: var(--space-3);
+  font-size: var(--text-size-ui);
+  line-height: var(--text-lh-ui);
+}
+
+.knowledge-kv dt {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.knowledge-kv dd {
+  min-width: 0;
+  color: var(--text-primary);
+  font-weight: 500;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.knowledge-kv__value--ok { color: var(--status-success-text); }
+.knowledge-kv__value--bad { color: var(--status-danger-text); }
+
+/* ── Sync runs ─────────────────────────────────────────────────────────────
+   A log reads as a log. A run that worked is one line; counts, duration and
+   the provider's own error code each sit one disclosure deeper. */
+.knowledge-run-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.knowledge-run {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.knowledge-run--open {
+  background: var(--surface-inset);
+}
+
+.knowledge-run__summary {
+  display: flex;
+  width: 100%;
+  min-height: 3.25rem;
+  align-items: center;
+  gap: var(--space-3);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+  transition: background-color var(--duration-fast) var(--ease-out);
+}
+
+.knowledge-run__summary:not(:disabled):hover {
+  background: var(--surface-hover);
+}
+
+/* A completed run has nothing to open, so it is not a button and does not
+   light up under the pointer. */
+.knowledge-run__summary--static:hover {
+  background: transparent;
+}
+
+.knowledge-run__mark { flex-shrink: 0; }
+.knowledge-run__mark--ok { color: var(--status-success-solid); }
+.knowledge-run__mark--warn { color: var(--status-warning-solid); }
+.knowledge-run__mark--bad { color: var(--status-danger-solid); }
+.knowledge-run__mark--busy { color: var(--status-info-solid); }
+
+.knowledge-run__title {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+}
+
+.knowledge-run__title strong {
+  font-weight: 600;
+}
+
+.knowledge-run__time {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+}
+
+.knowledge-run__chevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.knowledge-run--open .knowledge-run__chevron {
+  transform: rotate(180deg);
+}
+
+.knowledge-run__detail {
+  padding: 0 var(--space-3) var(--space-4) 3.25rem;
+}
+
+.knowledge-run__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-8);
+  margin-bottom: var(--space-3);
+}
+
+.knowledge-run__stats dt {
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+}
+
+.knowledge-run__stats dd {
+  margin-top: 0.125rem;
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+  font-variant-numeric: tabular-nums;
+}
+
+.knowledge-run__stat--bad {
+  color: var(--status-danger-text) !important;
+}
+
+.knowledge-run__detail > p {
+  max-width: 68ch;
+  color: var(--text-secondary);
+  font-size: var(--text-size-ui);
+  line-height: var(--text-lh-ui);
+  text-wrap: pretty;
+}
+
+.knowledge-run__technical {
+  margin-top: var(--space-3);
+  font-size: var(--text-size-meta);
+}
+
+.knowledge-run__technical summary {
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.knowledge-run__technical code {
+  display: inline-block;
+  margin-top: var(--space-2);
+  border-radius: var(--radius-xs);
+  background: var(--surface-subtle);
+  padding: 0.125rem var(--space-2);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+/* ── Configuration forms ───────────────────────────────────────────────── */
+.configuration {
+  width: 100%;
+  max-width: 57.5rem;
+  margin-inline: auto;
+}
+
+.configuration-section {
+  padding-block: 1.5rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.configuration-section h2 {
+  margin-bottom: 1rem;
+  font-size: var(--text-size-nav);
+  font-weight: 600;
+}
+
+.configuration-field {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: 1rem;
+  font-size: var(--text-size-ui);
+}
+
+.unsaved-bar {
+  position: sticky;
+  z-index: 5;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-base);
+  padding: var(--space-3) 0;
+}
+
+.unsaved-bar > span:first-child {
+  flex: 1;
+  color: var(--text-secondary);
+  font-size: var(--text-size-ui);
+}
+
+.experience-layout {
+  display: grid;
+  grid-template-columns: minmax(20rem, 1fr) minmax(21.25rem, 1fr);
+  gap: 2.5rem;
+}
+
+.experience-preview {
+  position: sticky;
+  top: 0;
+  display: flex;
+  min-height: 36.25rem;
+  align-self: start;
+  flex-direction: column;
+  justify-content: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-base);
+  padding: 2rem;
+}
+
+.experience-preview[data-background="soft"] { background: var(--accent-soft); }
+.experience-preview[data-background="gradient"] { background: linear-gradient(145deg, var(--surface-base), var(--accent-soft)); }
+.experience-preview[data-accent="teal"] { --accent-primary: var(--status-success-solid); --accent-soft: var(--status-success-bg); }
+.experience-preview[data-accent="amber"] { --accent-primary: var(--status-warning-solid); --accent-soft: var(--status-warning-bg); }
+.experience-preview[data-accent="rose"] { --accent-primary: var(--status-danger-solid); --accent-soft: var(--status-danger-bg); }
+.experience-preview[data-appearance="dark"] { background: var(--palette-night-950); color: var(--text-inverse); }
+.experience-preview[data-appearance="light"] { background: var(--surface-base); color: var(--text-primary); }
+
+.chat-mobile-menu { position: absolute; z-index: 10; top: 0.75rem; left: 0.75rem; display: none; }
+
+/* ── Responsive ────────────────────────────────────────────────────────────
+   The split collapses to the reader alone, the directory to one column, and
+   the details panel to the full width of the reader it belongs to. */
+@media (max-width: 68.75rem) {
+  .experience-layout { gap: 1.5rem; grid-template-columns: 1fr 1fr; }
+  .document-split[data-mode="split"] { grid-template-columns: minmax(16rem, 21rem) minmax(0, 1fr); }
+  .knowledge-paper { padding: var(--space-6); }
+}
+
+@media (max-width: 60rem) {
+  .knowledge-bar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .knowledge-bar__utilities {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .knowledge-bar__search { flex: 1 1 10rem; }
+  .knowledge-bar__actions { margin-left: auto; }
+}
+
+@media (max-width: 34rem) {
+  .document-row__updated { display: none; }
+}
+
+@media (max-width: 62rem) {
+  .knowledge-connectors { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 50rem) {
+  .experience-layout { grid-template-columns: 1fr; }
+  .experience-preview { position: relative; min-height: 26.25rem; }
+  .document-split[data-mode="split"] { grid-template-columns: 1fr; }
+  .document-split[data-mode="split"] > section:first-child { display: none; }
+  .utility-bar__search { min-width: 11.25rem; }
+  .knowledge-viewer__stage { margin-inline: 0; border-radius: 0; padding: var(--space-4) var(--space-3) var(--space-10); }
+  .knowledge-paper { min-height: 0; padding: var(--space-5); }
+  .knowledge-sheet table { min-width: 28rem; }
+  .knowledge-details { top: 0; width: 100%; border-left: 0; border-radius: 0; }
+  .chat-mobile-menu { display: grid; }
+  .global-assistant-launcher { right: 1rem; bottom: max(5rem, calc(env(safe-area-inset-bottom) + 4rem)); }
+}
+
+@media (max-width: 32rem) {
+  .knowledge-viewer__header { flex-wrap: wrap; padding-inline: var(--space-3); }
+  .knowledge-viewer__header > div:not(.knowledge-viewer__actions) { flex-basis: 60%; }
+  .knowledge-viewer__actions { margin-left: auto; }
+  .knowledge-viewer__facts,
+  .knowledge-viewer__toolbar { padding-inline: var(--space-3); }
+  .knowledge-notice { flex-wrap: wrap; }
+  .knowledge-run__detail { padding-left: var(--space-3); }
+  .knowledge-pager--finding input { width: 8rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .document-workspace *,
+  .configuration * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+/* ── Resource picker ───────────────────────────────────────────────────────
+   Choosing what to read from an account that is already connected. It is a
+   file browser, not a tree: a Shared Drive with hundreds of folders would
+   unfold past the bottom of the dialog and lose the reader. */
+.knowledge-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.knowledge-picker__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.knowledge-picker__trail {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-tertiary);
+  font-size: var(--text-size-caption);
+}
+
+.knowledge-picker__trail > span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.knowledge-picker__trail button {
+  color: var(--text-secondary);
+}
+
+.knowledge-picker__trail button:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
+.knowledge-picker__trail strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.knowledge-picker__search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-tertiary);
+}
+
+.knowledge-picker__search input {
+  width: 12rem;
+  max-width: 100%;
+}
+
+.knowledge-picker__list {
+  /* Tall enough to browse, short enough that the destination and the schedule
+     below it stay on screen while choosing. */
+  max-height: 15rem;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.knowledge-picker__list > li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  border-radius: var(--radius-sm);
+}
+
+.knowledge-picker__list > li:hover {
+  background: var(--surface-hover);
+}
+
+.knowledge-picker__list label {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  font-size: var(--text-size-nav);
+}
+
+.knowledge-picker__list label > svg {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.knowledge-picker__summary {
+  color: var(--text-tertiary);
+  font-size: var(--text-size-caption);
+}
+
+/* ── Waiting on a provider ─────────────────────────────────────────────────
+   A consent window is open somewhere else. This is the only thing on screen
+   while it is, because the reader has exactly one thing to do. */
+.knowledge-waiting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+}
+
+.knowledge-waiting__spinner {
+  color: var(--text-tertiary);
+}
+
+.knowledge-waiting strong {
+  color: var(--text-primary);
+  font-size: var(--text-size-body);
+  font-weight: 500;
+}
+
+.knowledge-waiting p {
+  max-width: 34ch;
+  color: var(--text-secondary);
+  font-size: var(--text-size-caption);
+}
+
+.knowledge-waiting__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}

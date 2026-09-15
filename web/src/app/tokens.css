@@ -68,6 +68,37 @@
   --palette-aurora-600: #5867df;
   --palette-aurora-700: #4854c4;
 
+  /* Warm neutral — the Aiverse Warm · Soft ground.
+     The warmth is carried by a narrow red-to-blue spread rather than a beige
+     cast: the mid tones sit around 5-8 points apart, roughly half what the
+     first pass used, so surfaces read as warm white rather than as paper.
+     Light mode resolves into this ramp; the pearl/ink ramps above are kept
+     because dark mode and the auth surfaces still alias them. */
+  --palette-ivory-0: #ffffff;
+  --palette-ivory-25: #fefdfc;
+  --palette-ivory-50: #fdfcfb;
+  --palette-ivory-75: #fbfaf7;
+  --palette-ivory-150: #f6f4f1;
+  --palette-ivory-200: #eeebe7;
+  --palette-ivory-300: #cfcbc7;
+  --palette-ivory-400: #b9b5b1;
+  --palette-warm-500: #736f6c;
+  --palette-warm-600: #5f5b56;
+  --palette-warm-700: #423f3c;
+  --palette-warm-900: #22211f;
+  --palette-warm-950: #1c1b19;
+
+  /* Accent — the soft lavender the warm theme pairs with the ivory ground. */
+  --palette-lavender-25: #faf8ff;
+  --palette-lavender-50: #f5f2ff;
+  --palette-lavender-75: #f7f4ff;
+  --palette-lavender-100: #ece7fb;
+  --palette-lavender-200: #e0d9f7;
+  --palette-lavender-500: #7666d5;
+  --palette-lavender-600: #6e5dcc;
+  --palette-lavender-700: #6a5ac9;
+  --palette-lavender-800: #5f50bd;
+
   /* Status — light */
   --palette-green-50: #ecfdf3;
   --palette-green-200: #a9e5c3;
@@ -98,84 +129,108 @@
      Surfaces stack canvas < nav < subtle < base < raised. Depth comes from
      this ramp plus one hairline — never from stacking borders or shadows. */
 
-  --surface-canvas: var(--palette-pearl-50);
+  --surface-canvas: var(--palette-ivory-50);
   /* The rail sits on the tinted canvas and the working area on white.
      That difference is what separates them — not a heavier divider. */
-  --surface-nav: var(--palette-pearl-50);
-  --surface-subtle: var(--palette-pearl-100);
-  --surface-inset: var(--palette-pearl-25);
-  --surface-base: var(--palette-pearl-0);
-  --surface-raised: var(--palette-pearl-0);
-  --surface-hover: var(--palette-lilac-50);
-  --surface-selected: var(--palette-lilac-100);
-  --surface-inverse: var(--palette-ink-800);
-  --surface-header: rgb(253 253 255 / 88%);
+  --surface-nav: var(--palette-ivory-75);
+  /* Figma's warm theme puts this a shade off white. In the product it carries
+     skeletons, sheet tabs and inset panels, which need a step that is actually
+     visible, so it resolves one stop further down the ramp. */
+  --surface-subtle: var(--palette-ivory-150);
+  --surface-inset: var(--palette-ivory-25);
+  --surface-base: var(--palette-ivory-0);
+  --surface-raised: var(--palette-ivory-0);
+  /* Interaction stays on one warm-neutral ramp: hover is quiet, selection is
+     one step firmer. Neither state competes with data/status colours. */
+  --surface-hover: var(--palette-ivory-150);
+  --surface-selected: var(--palette-ivory-200);
+  --surface-inverse: var(--palette-warm-900);
+  --surface-header: rgb(253 252 251 / 88%);
 
-  --text-primary: var(--palette-ink-800);
-  --text-secondary: var(--palette-ink-600);
-  --text-tertiary: var(--palette-ink-500);
-  --text-inverse: var(--palette-pearl-0);
-  --text-accent: var(--palette-lilac-600);
+  --text-primary: var(--palette-warm-900);
+  /* Warm theme value is #74706a. One stop darker keeps a readable step between
+     secondary and tertiary once tertiary is raised to meet AA below. */
+  --text-secondary: var(--palette-warm-600);
+  /* Warm theme value is #9a958e, which measures 2.87:1 on the canvas — far
+     under AA, and this step carries supporting text on every row. 4.6:1. */
+  --text-tertiary: var(--palette-warm-500);
+  /* Long-form reading. The interface ink is 15.5:1 on the chat ground, which
+     is right for a label and tiring for a paragraph — a transcript is read,
+     not scanned. This sits at ~10:1: still past AAA, without the glare. */
+  --text-reading: var(--palette-warm-700);
+  --text-inverse: var(--palette-ivory-0);
+  --text-accent: var(--palette-warm-700);
   --text-on-accent: #ffffff;
 
-  --border-subtle: var(--palette-pearl-200);
-  --border-default: var(--palette-pearl-300);
-  --border-strong: var(--palette-ink-500);
-  --border-focus: var(--palette-aurora-500);
+  --border-subtle: var(--palette-ivory-200);
+  /* The warm theme's #e7e1da measures 1.30:1 on white — lighter than the
+     border it replaces, on a system that already sits under 1.4.11. Held at
+     the outgoing ratio rather than regressed further. */
+  --border-default: var(--palette-ivory-300);
+  --border-strong: var(--palette-ivory-400);
+  --border-focus: var(--focus-ring);
 
-  /* Solid accent fills carry white text, so they resolve to aurora-600
-     (4.75:1). Figma's aurora-500 is 3.84:1 and fails AA; it is kept for the
-     focus ring and other non-text uses where contrast is not a text concern. */
-  --accent-primary: var(--palette-aurora-600);
-  --accent-hover: var(--palette-aurora-700);
-  --accent-pressed: #3f4ab0;
-  --accent-soft: var(--palette-lilac-100);
-  --accent-soft-hover: var(--palette-lilac-200);
-  --accent-soft-pressed: var(--palette-lilac-300);
-  --accent-secondary: var(--palette-lilac-600);
+  /* Accent is structural, not decorative: active rail marks, tab rules,
+     selection controls and brand glyphs use the same ink hierarchy as the
+     rest of the enterprise console. Primary actions have their own tokens. */
+  --accent-primary: var(--palette-warm-700);
+  --accent-hover: var(--palette-warm-900);
+  --accent-pressed: var(--palette-warm-950);
+  --accent-soft: var(--palette-ivory-150);
+  --accent-soft-hover: var(--palette-ivory-200);
+  --accent-soft-pressed: var(--palette-ivory-300);
+  --accent-secondary: var(--palette-warm-600);
+
+  /* Primary actions use the strongest ink step, keeping their hierarchy above
+     the warm-neutral selected and navigation treatment. */
+  --action-primary-bg: var(--palette-warm-900);
+  --action-primary-hover: var(--palette-warm-950);
+  --action-primary-pressed: var(--palette-warm-950);
+  --text-on-action: var(--palette-ivory-0);
 
   /* Status. `solid` is the dot or fill, `text` reads on `bg`, `border`
      outlines `bg`. A status colour never drives an action's default look. */
-  --status-info-solid: var(--palette-blue-600);
-  --status-info-text: var(--palette-blue-700);
-  --status-info-bg: var(--palette-blue-50);
-  --status-info-border: var(--palette-blue-200);
+  --status-info-solid: #3557b5;
+  --status-info-text: #3557b5;
+  --status-info-bg: #e8f0ff;
+  --status-info-border: #c6d6f5;
 
-  --status-success-solid: var(--palette-green-600);
-  --status-success-text: var(--palette-green-700);
-  --status-success-bg: var(--palette-green-50);
-  --status-success-border: var(--palette-green-200);
+  --status-success-solid: #2b6a45;
+  --status-success-text: #2b6a45;
+  --status-success-bg: #eaf6ef;
+  --status-success-border: #bfe0cd;
 
-  --status-warning-solid: var(--palette-amber-700);
-  --status-warning-text: var(--palette-amber-700);
-  --status-warning-bg: var(--palette-amber-50);
-  --status-warning-border: var(--palette-amber-200);
+  --status-warning-solid: #8a5a13;
+  --status-warning-text: #8a5a13;
+  --status-warning-bg: #fff2d8;
+  --status-warning-border: #f0dcae;
 
-  --status-danger-solid: var(--palette-red-600);
-  --status-danger-text: var(--palette-red-700);
-  --status-danger-bg: var(--palette-red-50);
-  --status-danger-border: var(--palette-red-200);
+  --status-danger-solid: #a34336;
+  --status-danger-text: #a34336;
+  --status-danger-bg: #fcebe7;
+  --status-danger-border: #f2cdc4;
 
-  --status-neutral-solid: var(--palette-ink-500);
-  --status-neutral-text: var(--palette-ink-600);
-  --status-neutral-bg: var(--palette-pearl-100);
-  --status-neutral-border: var(--palette-pearl-300);
+  --status-neutral-solid: var(--palette-warm-500);
+  --status-neutral-text: var(--palette-warm-600);
+  --status-neutral-bg: var(--palette-ivory-150);
+  --status-neutral-border: var(--palette-ivory-300);
 
-  --focus-ring: var(--palette-aurora-500);
-  --focus-ring-soft: rgb(102 118 244 / 28%);
-  --overlay-scrim: rgb(26 24 36 / 40%);
+  --focus-ring: var(--palette-warm-500);
+  /* The halo is a soft edge on the focus border, not a second ring. */
+  --focus-ring-soft: rgb(115 111 108 / 18%);
+  --overlay-scrim: rgb(34 33 31 / 40%);
 
-  --code-surface: var(--palette-ink-950);
+  --code-surface: var(--palette-warm-950);
   --code-text: var(--palette-pearl-200);
-  --code-muted: var(--palette-ink-500);
+  --code-muted: var(--palette-warm-500);
   --highlight-surface: #fff3c4;
   --highlight-border: #e5b94f;
 
-  --elevation-1: 0 1px 2px rgb(26 24 36 / 5%), 0 0 0 1px rgb(26 24 36 / 5%);
-  --elevation-2: 0 2px 4px rgb(26 24 36 / 4%), 0 8px 16px -6px rgb(26 24 36 / 8%),
-    0 0 0 1px rgb(26 24 36 / 6%);
-  --elevation-3: 0 12px 32px -8px rgb(26 24 36 / 14%),
-    0 4px 8px -4px rgb(26 24 36 / 8%), 0 0 0 1px rgb(26 24 36 / 7%);
+  --elevation-1: 0 1px 2px rgb(34 33 31 / 5%), 0 0 0 1px rgb(34 33 31 / 5%);
+  --elevation-2: 0 2px 4px rgb(34 33 31 / 4%), 0 8px 16px -6px rgb(34 33 31 / 8%),
+    0 0 0 1px rgb(34 33 31 / 6%);
+  --elevation-3: 0 12px 32px -8px rgb(34 33 31 / 14%),
+    0 4px 8px -4px rgb(34 33 31 / 8%), 0 0 0 1px rgb(34 33 31 / 7%);
 
   /* ── 3. Scale ─────────────────────────────────────────────────────────────
      Shape. Values are unchanged from the shipping product; only the names are
@@ -292,35 +347,39 @@ html.dark {
   --surface-base: var(--palette-night-900);
   --surface-raised: var(--palette-night-800);
   --surface-hover: rgb(255 255 255 / 5%);
-  --surface-selected: var(--palette-night-700);
+  --surface-selected: rgb(255 255 255 / 10%);
   --surface-inverse: var(--palette-pearl-0);
   --surface-header: rgb(20 18 29 / 84%);
 
   --text-primary: var(--palette-pearl-25);
   --text-secondary: var(--palette-pearl-300);
   --text-tertiary: var(--palette-night-300);
+  --text-reading: var(--palette-pearl-200);
   --text-inverse: var(--palette-ink-800);
-  --text-accent: var(--palette-lilac-300);
+  --text-accent: var(--palette-ivory-300);
   --text-on-accent: var(--palette-ink-950);
 
   --border-subtle: rgb(255 255 255 / 9%);
   --border-default: rgb(255 255 255 / 16%);
   --border-strong: var(--palette-night-300);
-  --border-focus: var(--palette-aurora-400);
+  --border-focus: var(--palette-ivory-300);
 
-  /* A solid accent carries its own label, so the contrast that matters is
-     fill-against-label, not fill-against-page. Darkening the fill on a dark
-     page therefore makes it worse: aurora-500 with white text is 3.84:1 and
-     fails. Dark mode inverts the pairing instead — a brighter fill with ink
-     on top, which reads at 6.3:1 and keeps the accent unmistakably the
-     accent. `--text-on-accent` below is the other half of this. */
-  --accent-primary: var(--palette-aurora-400);
-  --accent-hover: #93a2ff;
-  --accent-pressed: var(--palette-aurora-500);
-  --accent-soft: rgb(123 140 255 / 18%);
-  --accent-soft-hover: rgb(123 140 255 / 26%);
-  --accent-soft-pressed: rgb(123 140 255 / 34%);
-  --accent-secondary: var(--palette-lilac-300);
+  /* The selected/navigation treatment remains warm-neutral in dark mode as
+     well. The high-contrast action token below owns filled call-to-actions. */
+  --accent-primary: var(--palette-ivory-300);
+  --accent-hover: var(--palette-ivory-200);
+  --accent-pressed: var(--palette-ivory-150);
+  --accent-soft: rgb(255 255 255 / 10%);
+  --accent-soft-hover: rgb(255 255 255 / 16%);
+  --accent-soft-pressed: rgb(255 255 255 / 22%);
+  --accent-secondary: var(--palette-ivory-200);
+
+  /* Preserve the same action hierarchy in dark mode without reintroducing a
+     coloured hover. The warm light fill keeps its dark ink label legible. */
+  --action-primary-bg: var(--palette-ivory-0);
+  --action-primary-hover: var(--palette-ivory-150);
+  --action-primary-pressed: var(--palette-ivory-200);
+  --text-on-action: var(--palette-warm-900);
 
   /* Text lifts to the 300 step; the background is mixed from that same hue
      into the real surface, so a status chip stays night-tinted instead of
@@ -350,8 +409,8 @@ html.dark {
   --status-neutral-bg: rgb(255 255 255 / 7%);
   --status-neutral-border: rgb(255 255 255 / 14%);
 
-  --focus-ring: var(--palette-aurora-400);
-  --focus-ring-soft: rgb(123 140 255 / 34%);
+  --focus-ring: var(--palette-ivory-300);
+  --focus-ring-soft: rgb(207 203 199 / 24%);
   --overlay-scrim: rgb(5 4 9 / 62%);
 
   --code-surface: var(--palette-night-950);

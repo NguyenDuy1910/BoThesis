@@ -196,6 +196,7 @@ class ConfluenceConnector(
             config={
                 "username": creds.get("confluence_username"),
                 "api_token": creds.get("confluence_access_token"),
+                "access_token": creds.get("access_token"),
                 "is_cloud": self.is_cloud,
             },
             url=self.wiki_base,

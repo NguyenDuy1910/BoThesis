@@ -56,6 +56,12 @@ export function hasPlatformScope(
 export function getAuthSession(): AuthSession | null {
   if (typeof window === "undefined") return null;
   if (previewMode) return mockApi.session.current();
+  return getStoredAuthSession();
+}
+
+/** Read only an authenticated browser session; never substitute preview identity. */
+export function getStoredAuthSession(): AuthSession | null {
+  if (typeof window === "undefined") return null;
   const serialized = window.sessionStorage.getItem(storageKey);
   if (!serialized) return null;
   try {

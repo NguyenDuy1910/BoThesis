@@ -10,6 +10,7 @@ from bothesis.connector.adapter import CheckpointedSourceConnectorAdapter
 from bothesis.connector.base import StaticCredentialsProvider
 from bothesis.connector.confluence.connector import ConfluenceConnector
 from bothesis.connector.file.file_connector import FileConnector
+from bothesis.connector.google_drive import GoogleDriveConnector
 from bothesis.connector.protocol import ConnectorScope
 
 
@@ -58,6 +59,13 @@ class ConnectorRegistry:
                     authentication_type="none",
                     capabilities=("knowledge_ingestion", "file_upload"),
                     factory=cls._file_factory,
+                ),
+                ConnectorDefinition(
+                    key="google_drive",
+                    display_name="Google Drive",
+                    authentication_type="oauth",
+                    capabilities=("knowledge_ingestion",),
+                    factory=cls._google_drive_factory,
                 ),
             )
         )
@@ -115,6 +123,17 @@ class ConnectorRegistry:
                     display_name=space or page_id or "Confluence",
                 )
             ],
+        )
+
+    @staticmethod
+    def _google_drive_factory(
+        connection: Mapping[str, Any],
+        source: Mapping[str, Any],
+        credentials: Mapping[str, Any],
+    ) -> GoogleDriveConnector:
+        return GoogleDriveConnector(
+            {**dict(connection), **dict(source)},
+            dict(credentials),
         )
 
     @staticmethod

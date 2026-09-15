@@ -1,60 +1,32 @@
 "use client";
 
-import { describeRequestFailure } from "@/lib/api/errors";
 import { getApiConfiguration, requestIdentityHeaders } from "@/lib/api/config";
+import { describeRequestFailure } from "@/lib/api/errors";
+import { ApiError, apiRequest } from "@/lib/api/request";
 import { appBrand } from "@/lib/brand";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export class AdminApiError extends Error {
-  constructor(
-    message: string,
-    readonly status?: number,
-  ) {
-    super(message);
+/** Kept as the Admin control plane's own error name for existing catch sites. */
+export class AdminApiError extends ApiError {
+  constructor(message: string, status?: number) {
+    super(message, status);
     this.name = "AdminApiError";
   }
 }
 
+/** Every Admin route lives under one prefix; only that prefix is admin-specific. */
 export async function adminRequest<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const configuration = getApiConfiguration();
-  if (!configuration) {
-    throw new AdminApiError(
-      `Admin access is not configured. Set the ${appBrand.productName} API, tenant, and user environment values.`,
-    );
-  }
-  let response: Response;
   try {
-    response = await fetch(
-      `${configuration.apiUrl}/api/v1/admin${path.startsWith("/") ? path : `/${path}`}`,
-      {
-        ...init,
-        cache: "no-store",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          ...requestIdentityHeaders(configuration),
-          ...init.headers,
-        },
-      },
-    );
+    return await apiRequest<T>(`/admin${path.startsWith("/") ? path : `/${path}`}`, init);
   } catch (cause) {
-    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
-    throw new AdminApiError(
-      "The Admin API could not be reached. Check the API address and try again.",
-    );
+    if (cause instanceof ApiError && !(cause instanceof AdminApiError)) {
+      throw new AdminApiError(cause.message, cause.status);
+    }
+    throw cause;
   }
-  if (response.status === 204) return undefined as T;
-  const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
-  if (!response.ok) {
-    const detail = typeof payload?.detail === "string"
-      ? payload.detail
-      : `Admin request failed with status ${response.status}`;
-    throw new AdminApiError(detail, response.status);
-  }
-  return payload as T;
 }
 
 export function queryString(values: Record<string, string | number | null | undefined>) {

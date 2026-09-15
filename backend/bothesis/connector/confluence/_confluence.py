@@ -31,10 +31,16 @@ class FinxConfluence:
         self.config = config
         self.base_url = url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        # An OAuth grant authenticates with a bearer token against the Atlassian
+        # gateway; a site API token authenticates as the account that issued it.
+        # Only one of the two is ever present.
+        access_token = config.get("access_token")
         self.confluence_client = Confluence(
             url=self.base_url,
-            username=config.get("username"),
-            password=config.get("api_token"),
+            username=None if access_token else config.get("username"),
+            password=None if access_token else config.get("api_token"),
+            token=access_token or None,
+            cloud=bool(config.get("is_cloud", True)),
             timeout=timeout_seconds,
         )
 
@@ -64,8 +70,13 @@ class FinxConfluence:
         if next_path.startswith("http"):
             return next_path
         if next_path.startswith("/wiki/"):
-            parsed = urlsplit(self.base_url)
-            return f"{parsed.scheme}://{parsed.netloc}{next_path}"
+            # Confluence returns next links already prefixed with /wiki. The
+            # base ends in /wiki too, so the prefix is dropped from the base
+            # rather than from the link: on the Atlassian OAuth gateway the
+            # base also carries /ex/confluence/<cloud id>, and going to the
+            # host root would lose it.
+            root = self.base_url.removesuffix("/wiki")
+            return f"{root}{next_path}"
         return f"{self.base_url}/{next_path.lstrip('/')}"
 
     def _paginate_url(

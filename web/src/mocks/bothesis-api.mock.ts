@@ -5,7 +5,10 @@ import {
   type ExperienceSettings,
 } from "@/modules/admin/fixtures";
 import { knowledgeWorkspaceRepository } from "@/modules/knowledge/workspace-repository";
-import type { WorkspaceKnowledgeDocument } from "@/modules/knowledge/workspace-repository";
+import type {
+  KnowledgeWorkspaceSnapshot,
+  WorkspaceKnowledgeDocument,
+} from "@/modules/knowledge/workspace-repository";
 
 /** The design preview's only public data boundary. No HTTP or browser persistence. */
 export const previewMode = process.env.NEXT_PUBLIC_BOTHESIS_DATA_MODE !== "live";
@@ -33,8 +36,18 @@ export interface ActivityEvent { id: string; actor: string; action: string; reso
 export interface Source {
   id: string; name: string; provider: string; scope: string; documents: number;
   status: "healthy" | "syncing" | "failed" | "paused"; lastSync: string;
+  /** How knowledge arrives: an integration, direct uploads, or a crawl. */
+  kind: "connector" | "upload" | "web";
+  /** Connection facts. Absent for a source that has no account behind it. */
+  account?: string;
+  authentication?: string;
+  authenticationExpired?: boolean;
+  permission: string;
+  /** Scope facts, already worded for a key/value row. */
+  folders: string;
+  schedule: string;
+  fileTypes: string;
 }
-export interface SyncRun { id: string; source: string; time: string; status: "complete" | "running" | "failed"; added: number; updated: number; error?: string }
 export interface AgentSettings {
   name: string; description: string; instructions: string; model: string; temperature: number;
   citations: boolean; knowledgeOnly: boolean; askClarification: boolean; web: boolean;
@@ -60,16 +73,19 @@ let libraryDocuments: LibraryDocument[] = [
   { id: "review-notes", title: "Policy review notes.md", kind: "document", state: "indexed", collection: "Policies to review", source: "Uploaded by you", updatedLabel: "Sep 7", size: "12 KB", pagesLabel: "1 page", saved: false, uploaded: true, original: ["Policy review notes", "Compare the travel guide against the approved reimbursement policy.", "Questions for Finance: supporting documents, approval exceptions and submission deadlines."], agentView: [] },
   { id: "restricted-notes", title: "Internal budget planning.pdf", kind: "pdf", state: "restricted", collection: "Saved from workspace", source: "Vikki", updatedLabel: "Sep 6", size: "510 KB", pagesLabel: "8 pages", saved: true, uploaded: false, original: [], agentView: [] },
 ];
-const knowledgeDocuments = new Map<string, WorkspaceKnowledgeDocument[]>();
-async function documentsForWorkspace() {
+const knowledgeSnapshots = new Map<string, KnowledgeWorkspaceSnapshot>();
+async function knowledgeSnapshot() {
   const id = workspaceId();
-  if (!knowledgeDocuments.has(id)) knowledgeDocuments.set(id, (await knowledgeWorkspaceRepository.getSnapshot()).documents);
-  return knowledgeDocuments.get(id)!;
+  if (!knowledgeSnapshots.has(id)) knowledgeSnapshots.set(id, await knowledgeWorkspaceRepository.getSnapshot());
+  return knowledgeSnapshots.get(id)!;
+}
+async function documentsForWorkspace() {
+  return (await knowledgeSnapshot()).documents;
 }
 function uploadedDocument(file: File, collection: string): WorkspaceKnowledgeDocument {
   const extension = file.name.split(".").pop()?.toLowerCase();
   const kind = extension === "pdf" ? "pdf" : ["xlsx", "xls", "csv"].includes(extension ?? "") ? "spreadsheet" : ["docx", "txt", "md"].includes(extension ?? "") ? "document" : "unsupported";
-  return { id: crypto.randomUUID(), title: file.name, kind, state: kind === "unsupported" ? "failed" : "indexed", collection, source: "Uploaded by you", updatedLabel: "Just now", size: Math.max(1, Math.round(file.size / 1024)) + " KB", pagesLabel: "1 page", original: [file.name, "This uploaded file is available in your local preview session. Document parsing will be supplied by the file service."], agentView: ["Indexed content", "Preview content is simulated in this frontend phase."] };
+  return { id: crypto.randomUUID(), title: file.name, kind, state: kind === "unsupported" ? "unsupported" : "indexed", collection, source: "Uploaded by you", updatedLabel: "Just now", size: Math.max(1, Math.round(file.size / 1024)) + " KB", pagesLabel: "1 page", answerIncluded: kind !== "unsupported", original: [file.name, "This uploaded file is ready for the workspace knowledge service to process."], agentView: ["Indexed content", "Citations are available after indexing completes."] };
 }
 
 let workspaces: Workspace[] = [
@@ -139,17 +155,40 @@ let events: ActivityEvent[] = [
   { id: "e5", actor: "Mai Nguyen", action: "Invited a workspace member", resource: "Members", workspace: "vikki", time: "Yesterday, 11:25", status: "success" },
 ];
 const sourceStores = new Map<string, Source[]>();
-const runStores = new Map<string, SyncRun[]>();
 const workspaceId = () => session?.active_tenant_id ?? "spkt";
 function sourceData() {
   const id = workspaceId();
   if (!sourceStores.has(id)) sourceStores.set(id, [
-    { id: `${id}-drive`, name: "Academic policies", provider: "Google Drive", scope: "Policies / Shared drive", documents: 214, status: "healthy", lastSync: "12 minutes ago" },
-    { id: `${id}-wiki`, name: "Student services", provider: "Confluence", scope: "Student Services space", documents: 156, status: "healthy", lastSync: "1 hour ago" },
-    { id: `${id}-sharepoint`, name: "Research archive", provider: "SharePoint", scope: "Research / Documents", documents: 42, status: "failed", lastSync: "2 days ago" },
+    {
+      id: `${id}-drive`, name: "Google Drive", provider: "Google Drive", kind: "connector",
+      scope: "Policies, Handbooks and Course catalogues", documents: 8_204, status: "healthy",
+      lastSync: "Synced 8 min ago", account: "academic.office@hcmute.edu.vn",
+      authentication: "Valid · renews 11 Mar 2026", permission: "Read-only",
+      folders: "3 of 14 selected", schedule: "Every hour", fileTypes: "PDF, DOCX, XLSX, TXT",
+    },
+    {
+      id: `${id}-uploads`, name: "Uploaded files", provider: "Uploaded files", kind: "upload",
+      scope: "Files added by workspace members", documents: 3_116, status: "healthy",
+      lastSync: "Latest 2 days ago", permission: "Workspace members",
+      folders: "Uploaded files", schedule: "On upload", fileTypes: "PDF, DOCX, XLSX, TXT, MD",
+    },
+    {
+      id: `${id}-website`, name: "University website", provider: "Website", kind: "web",
+      scope: "hcmute.edu.vn", documents: 1_163, status: "healthy",
+      lastSync: "Crawled 6 h ago", account: "hcmute.edu.vn", authentication: "Public pages",
+      permission: "Public", folders: "4 sections selected", schedule: "Daily", fileTypes: "HTML, PDF",
+    },
+    {
+      id: `${id}-sharepoint`, name: "Research archive", provider: "SharePoint", kind: "connector",
+      scope: "Research / Documents", documents: 42, status: "failed",
+      lastSync: "Failed 2 days ago", account: "research.office@hcmute.edu.vn",
+      authentication: "Expired 12 Sep 2026", authenticationExpired: true, permission: "Read-only",
+      folders: "1 of 6 selected", schedule: "Every hour", fileTypes: "PDF, DOCX",
+    },
   ]);
   return sourceStores.get(id)!;
 }
+
 function record(action: string, resource: string) {
   events = [{ id: crypto.randomUUID(), actor: session?.display_name ?? "Duy Nguyen", action, resource, workspace: workspaceId(), time: "Just now", status: "success" }, ...events];
   changed();
@@ -212,11 +251,25 @@ export const mockApi = {
     async save(value: WorkspaceExperience) { experiences.set(workspaceId(), structuredClone(value)); record("Saved experience", "Experience"); return reply(value); },
   },
   knowledge: {
-    documents: async () => reply(await documentsForWorkspace()),
+    /** Workspace-level totals and the collections documents are browsed by. */
+    overview: async () => {
+      const snapshot = await knowledgeSnapshot();
+      return reply({
+        documentCount: snapshot.documentCount,
+        lastSyncLabel: snapshot.lastSyncLabel,
+        collections: snapshot.collections,
+      });
+    },
+    documents: async () => reply((await documentsForWorkspace()).filter((document) => !document.removedAt)),
     async upload(file: File) {
       if (file.size > 25_000_000) throw new Error("Upload failed. Choose a file smaller than 25 MB.");
       const document = uploadedDocument(file, "Uploaded files");
-      (await documentsForWorkspace()).unshift(document); record("Uploaded document", file.name); return reply(document);
+      const snapshot = await knowledgeSnapshot();
+      snapshot.documents.unshift(document);
+      snapshot.documentCount += 1;
+      const collection = snapshot.collections.find((item) => item.name === "Uploaded files");
+      if (collection) collection.documentCount += 1;
+      record("Uploaded document", file.name); return reply(document);
     },
     async reindex(id: string) {
       const document = (await documentsForWorkspace()).find((item) => item.id === id);
@@ -225,23 +278,25 @@ export const mockApi = {
       await new Promise((resolve) => setTimeout(resolve, 1200));
       document.state = document.kind === "unsupported" ? "failed" : "indexed"; changed();
     },
+    async setAnswerAvailability(id: string, answerIncluded: boolean) {
+      const document = (await documentsForWorkspace()).find((item) => item.id === id && !item.removedAt);
+      if (!document) throw new Error("Document not found.");
+      document.answerIncluded = answerIncluded;
+      record(answerIncluded ? "Included document in answers" : "Excluded document from answers", document.title);
+      return reply(document);
+    },
+    async remove(id: string) {
+      const document = (await documentsForWorkspace()).find((item) => item.id === id && !item.removedAt);
+      if (!document) throw new Error("Document not found.");
+      document.removedAt = new Date().toISOString();
+      const snapshot = await knowledgeSnapshot();
+      snapshot.documentCount = Math.max(0, snapshot.documentCount - 1);
+      const collection = snapshot.collections.find((item) => item.name === document.collection);
+      if (collection) collection.documentCount = Math.max(0, collection.documentCount - 1);
+      record("Removed document", document.title);
+      return reply(document);
+    },
     sources: () => reply(sourceData()),
-    runs: () => reply(runStores.get(workspaceId()) ?? [{ id: "run-initial", source: "Academic policies", time: "Today, 09:30", status: "complete" as const, added: 3, updated: 8 }]),
-    async addSource(provider: string, name: string) {
-      const source: Source = { id: crypto.randomUUID(), name, provider, scope: "Selected workspace content", documents: 0, status: "healthy", lastSync: "Not synced yet" };
-      sourceData().push(source); record("Added source", name); return reply(source);
-    },
-    async sync(id: string) {
-      const source = sourceData().find((item) => item.id === id);
-      if (!source) throw new Error("This source is no longer available.");
-      source.status = "syncing"; changed();
-      await new Promise((resolve) => setTimeout(resolve, 1600));
-      source.status = "healthy"; source.lastSync = "Just now";
-      const runs = runStores.get(workspaceId()) ?? [];
-      runStores.set(workspaceId(), [{ id: crypto.randomUUID(), source: source.name, time: "Just now", status: "complete", added: 2, updated: 4 }, ...runs]);
-      record("Sync completed", source.name); return reply(source);
-    },
-    async pause(id: string) { const source = sourceData().find((item) => item.id === id); if (source) source.status = "paused"; changed(); },
   },
   platform: {
     tenants: () => reply(workspaces), users: () => reply(members), audit: () => reply(events),

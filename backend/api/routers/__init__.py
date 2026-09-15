@@ -543,6 +543,8 @@ class GroupMembersUpdate(AdminRequest):
 
 
 class IntegrationConnectionCreate(AdminRequest):
+    """A connection configured with a secret. Authorized providers use OAuth."""
+
     connector_key: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=255)
     config: dict[str, Any] = Field(default_factory=dict)
@@ -556,7 +558,22 @@ class IntegrationConnectionUpdate(AdminRequest):
     config: dict[str, Any] | None = None
     credentials: dict[str, Any] | None = Field(default=None, repr=False)
     credential_type: str | None = Field(default=None, min_length=1, max_length=64)
-    status: Literal["draft", "active", "disabled", "error"] | None = None
+    #: The only status a caller may set. Everything else follows from the grant.
+    status: Literal["disconnected"] | None = None
+
+
+class ConnectionAuthorizationCreate(AdminRequest):
+    """Begin one provider authorization for one connector and one ownership."""
+
+    connector_key: str = Field(min_length=1, max_length=64)
+    owner_type: Literal["user", "tenant"] = "tenant"
+    #: Set to re-authorize an existing connection instead of adding another.
+    integration_connection_id: UUID | None = None
+
+
+class ConnectionAuthorizationStarted(BaseModel):
+    authorization_url: str
+    nonce: str
 
 
 class ApprovalRequestCreate(AdminRequest):
@@ -581,8 +598,17 @@ class ScheduleInput(AdminRequest):
 
 
 class IngestionSourceCreate(AdminRequest):
+    """One selected resource, landing in one destination Collection.
+
+    Naming the resource is enough: the provider knows how to turn a space key
+    or a drive id into the config its connector runs on. ``config`` stays for
+    connectors that have no provider and are configured by hand.
+    """
+
     target_item_id: UUID
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
+    resource_type: str | None = Field(default=None, min_length=1, max_length=64)
+    external_resource_id: str | None = Field(default=None, min_length=1, max_length=1_024)
     config: dict[str, Any] = Field(default_factory=dict)
     schedule: ScheduleInput | None = None
 
@@ -590,7 +616,9 @@ class IngestionSourceCreate(AdminRequest):
 class IngestionSourceUpdate(AdminRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     config: dict[str, Any] | None = None
-    status: Literal["active", "disabled", "error"] | None = None
+    #: Only an operator's own decision. ``connection_required`` and ``failed``
+    #: are consequences and are never assigned from a request.
+    status: Literal["ready", "paused", "disabled"] | None = None
     schedule: ScheduleInput | None = None
     clear_schedule: bool = False
 
@@ -618,11 +646,11 @@ class CollectionAccessGrant(AdminRequest):
 
 
 __all__ = [
-    "ApprovalRequestCreate",
-    "ApprovalRequestUpdate",
     "AdminRequest",
     "AdminRoleCreate",
     "AdminRoleUpdate",
+    "ApprovalRequestCreate",
+    "ApprovalRequestUpdate",
     "ArtifactContent",
     "ArtifactDetail",
     "ArtifactPublishRequest",
@@ -636,6 +664,8 @@ __all__ = [
     "CollectionCreate",
     "CollectionDocumentUploadResponse",
     "CollectionUpdate",
+    "ConnectionAuthorizationCreate",
+    "ConnectionAuthorizationStarted",
     "CronCreate",
     "CronJob",
     "CronRunResult",

@@ -33,7 +33,7 @@ export function ConversationActionsMenu({
       buttonClassName="h-7 w-7 bg-transparent px-0 shadow-none hover:bg-[var(--surface-hover)] hover:shadow-none"
       closeOnScroll
       label={deleting
-        ? <LoaderCircle aria-hidden="true" className="animate-spin" size={15} />
+        ? <LoaderCircle aria-hidden="true" className="animate-spin" size={16} />
         : <MoreHorizontal aria-hidden="true" size={16} />}
       menuClassName="min-w-44"
       onOpenChange={onOpenChange}

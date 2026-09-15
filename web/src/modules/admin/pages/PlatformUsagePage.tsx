@@ -86,9 +86,9 @@ export function PlatformUsagePage() {
                       }
                     >
                       {row.trend > 0 ? (
-                        <TrendingUp aria-hidden="true" size={13} />
+                        <TrendingUp aria-hidden="true" size={14} />
                       ) : (
-                        <TrendingDown aria-hidden="true" size={13} />
+                        <TrendingDown aria-hidden="true" size={14} />
                       )}
                       {Math.abs(row.trend)}%
                     </span>

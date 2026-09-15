@@ -55,7 +55,7 @@ export function ErrorState({
             <Button
               icon={<RotateCw aria-hidden="true" className="h-4 w-4" />}
               onClick={onAction}
-              variant="secondary"
+              variant="ghost"
             >
               {actionLabel}
             </Button>

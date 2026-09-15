@@ -48,6 +48,19 @@
   max-width: var(--page-max-narrow);
 }
 
+/* A surface that manages its own scrolling — the document workspaces — takes
+   the working area whole. The page wrapper would otherwise pad and centre it,
+   so its toolbar would sit inside a second gutter and its list and reader
+   would scroll the page instead of themselves. Opting in by what the surface
+   renders keeps the shell from having to know which routes those are. */
+.shell__page:has(> .document-workspace) {
+  display: flex;
+  height: 100%;
+  max-width: none;
+  overflow: hidden;
+  padding: 0;
+}
+
 /* The shell is stable across navigation. Only this route outlet is replaced,
    so the transition never moves the rail, main surface, or global controls. */
 .shell__route-outlet {

@@ -12,18 +12,16 @@ import {
   Menu,
   RefreshCw,
 } from "lucide-react";
-import { memo, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { memo, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
-import { useApiQuery } from "@/lib/hooks/useApiQuery";
 import { useAccountPreferences } from "@/lib/hooks/useAccountPreferences";
 import {
   useProductShellNavigation,
   useProductShellSidebar,
 } from "@/components/shell/ProductShell";
-import { getApiConfiguration } from "@/lib/api/config";
-import { mockApi, previewMode } from "@/mocks/bothesis-api.mock";
+import { getLiveApiConfiguration } from "@/lib/api/config";
 import { WorkspaceMark } from "@/components/patterns";
 import {
   listCollections,
@@ -119,13 +117,7 @@ export default function ChatShell() {
   }, []);
 
   useEffect(() => {
-    const configuration = getApiConfiguration();
-    if (previewMode) {
-      const session = mockApi.session.current();
-      setConversationUser(session?.user_id ?? "preview", session?.active_tenant_id ?? "spkt");
-      void refresh();
-      return;
-    }
+    const configuration = getLiveApiConfiguration();
     if (!configuration) {
       router.replace("/auth/login");
       return;
@@ -588,7 +580,7 @@ function ChatConversation({
                 title="Jump to latest"
                 type="button"
               >
-                <ArrowDown aria-hidden="true" size={15} />
+                <ArrowDown aria-hidden="true" size={16} />
               </button>
             )}
 
@@ -730,7 +722,7 @@ const MessageView = memo(function MessageView({
             <div className="message-attachments message-attachments--collections">
               {messageCollections.map((part) => (
                 <span className="message-attachment message-attachment--collection" key={part.data.id}>
-                  <LibraryBig aria-hidden="true" size={13} />
+                  <LibraryBig aria-hidden="true" size={14} />
                   <span title={part.data.title}>{part.data.title}</span>
                 </span>
               ))}
@@ -740,7 +732,7 @@ const MessageView = memo(function MessageView({
             <div className="message-attachments">
               {messageDocuments.map((part) => (
                 <span className="message-attachment" key={part.data.id}>
-                  <FileSearch aria-hidden="true" size={13} />
+                  <FileSearch aria-hidden="true" size={14} />
                   <span title={part.data.fileName}>{part.data.fileName}</span>
                 </span>
               ))}
@@ -821,11 +813,8 @@ function reserveActiveTurnSpace(scroller: HTMLDivElement, stack: HTMLDivElement)
 }
 
 function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
-  const revision = useSyncExternalStore(mockApi.subscribe, mockApi.revision, () => 0);
-  const experience = useApiQuery(mockApi.experience.get, revision);
-  const settings = experience.data;
-  const name = settings?.workspaceName ?? "SPKT Assistant";
-  const prompts = settings?.starterPrompts ?? suggestions.map((suggestion) => suggestion.prompt);
+  const name = "BoThesis";
+  const prompts = suggestions.map((suggestion) => suggestion.prompt);
   return (
     <div className="welcome">
       <div className="welcome__content">
@@ -835,9 +824,9 @@ function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
             {name}
           </div>
           <div className="welcome-heading">
-            <h2>{settings?.welcomeHeadline ?? "How can I help today?"}</h2>
+            <h2>How can I help today?</h2>
           </div>
-          <p className="welcome-copy">{settings?.welcomeBody ?? "Ask about policies, procedures and student services. Answers cite the documents they came from."}</p>
+          <p className="welcome-copy">Ask about policies, procedures and student services. Answers cite the documents they came from.</p>
         </div>
         <div className="suggestions">
           {prompts.slice(0, 3).map((prompt) => (

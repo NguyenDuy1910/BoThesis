@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from datetime import datetime, timezone
+from typing import Any
 
 from .base import BaseSourceConnector, CheckpointedConnector
 from bothesis.connector.protocol import (
@@ -56,6 +57,12 @@ class CheckpointedSourceConnectorAdapter(BaseSourceConnector):
 
     async def list_scopes(self) -> list[ConnectorScope]:
         return [scope.model_copy(deep=True) for scope in self.scopes]
+
+    @property
+    def refreshed_credentials(self) -> dict[str, Any] | None:
+        """Surface a wrapped connector's rotated credentials to ingestion."""
+
+        return getattr(self.connector, "refreshed_credentials", None)
 
     def set_storage(self, storage: RawObjectStore) -> None:
         """Forward object storage to crawlers that persist original content."""

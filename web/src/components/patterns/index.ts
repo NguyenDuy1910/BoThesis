@@ -25,6 +25,5 @@ export { StatusPill, type StatusTone } from "./StatusPill";
 export { TableCell, TableHeader, TableRow, type TableColumn } from "./Table";
 export { ThinkingIndicator } from "./ThinkingIndicator";
 export { Toggle } from "./Toggle";
-export { TreeNode } from "./TreeNode";
 export { initials, WorkspaceMark, type WorkspaceMarkSize, type WorkspaceMarkTone } from "./WorkspaceMark";
 export { WorkspaceRow } from "./WorkspaceRow";

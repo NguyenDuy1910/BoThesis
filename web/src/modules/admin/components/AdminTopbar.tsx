@@ -1,12 +1,12 @@
 "use client";
 
-import { ChevronRight, Menu, PanelLeftOpen, Search } from "lucide-react";
+import { ChevronRight, Menu, PanelLeftOpen } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { Button } from "@/components/ui/Button";
 import { Tooltip } from "@/components/ui/Tooltip";
-import { appBrand } from "@/lib/brand";
+import { cn } from "@/lib/cn";
 import { modeForPath } from "@/lib/navigation";
 import { adminNavGroupLabels, routeForPath } from "@/modules/admin/navigation";
 
@@ -21,10 +21,20 @@ const uuidPattern =
 /**
  * Breadcrumbs are built from the same route registry the sidebar uses, so the
  * trail always reads with the same words as the navigation item that led here.
+ *
+ * A trail only earns the strip when there is somewhere to walk back to. On a
+ * section's own page there is not: the rail states the mode in its context
+ * header and marks the destination as selected, so "Workspace admin ›
+ * Knowledge" above a page the rail already labels Knowledge spends the widest
+ * band of the window restating what the reader can see. Detail pages keep the
+ * trail, because the way back to the section is genuinely not on screen.
  */
 function buildCrumbs(pathname: string, detailTitle?: string): Crumb[] {
   const segments = pathname.split("/").filter(Boolean);
   if (segments[0] !== "admin") return [];
+
+  const route = routeForPath(pathname);
+  if (!route || pathname === route.path) return [];
 
   // The trail must name the mode it is actually in. Labelling a platform
   // address "Workspace" tells a root admin they are somewhere they are not.
@@ -33,25 +43,16 @@ function buildCrumbs(pathname: string, detailTitle?: string): Crumb[] {
     ? { label: adminNavGroupLabels.platform, href: "/admin/platform" }
     : { label: adminNavGroupLabels.workspace, href: "/admin" };
 
-  const route = routeForPath(pathname);
-  if (!route || route.path === root.href) return [{ label: root.label }];
-
-  const crumbs: Crumb[] = [root];
-  const isDetail = pathname !== route.path;
-  crumbs.push({ label: route.label, href: isDetail ? route.path : undefined });
-
-  if (isDetail) {
-    const tail = segments[segments.length - 1];
-    crumbs.push({
-      label: detailTitle ?? (uuidPattern.test(tail) ? "Details" : tail.replace(/[-_]/g, " ")),
-    });
-  }
-  return crumbs;
+  const tail = segments[segments.length - 1];
+  return [
+    root,
+    { label: route.label, href: route.path },
+    { label: detailTitle ?? (uuidPattern.test(tail) ? "Details" : tail.replace(/[-_]/g, " ")) },
+  ];
 }
 
 interface AdminTopbarProps {
   onMobileMenuOpen: () => void;
-  onSearchOpen: () => void;
   collapsed: boolean;
   onExpand: () => void;
   /** Name of the record on a detail page, so the trail ends in something real. */
@@ -59,9 +60,18 @@ interface AdminTopbarProps {
   actions?: React.ReactNode;
 }
 
+/**
+ * The strip above the working area.
+ *
+ * It carries only what the rail cannot: the control that opens the rail when
+ * it is an overlay, the one that expands it when it is collapsed, a trail on
+ * a detail page, and whatever the page itself puts there. When none of those
+ * apply — a section page on a wide window with the rail open — there is
+ * nothing left to carry, and the strip takes no height at all rather than
+ * spending a band of the window on a border.
+ */
 export function AdminTopbar({
   onMobileMenuOpen,
-  onSearchOpen,
   collapsed,
   onExpand,
   detailTitle,
@@ -69,9 +79,12 @@ export function AdminTopbar({
 }: AdminTopbarProps) {
   const pathname = usePathname();
   const crumbs = buildCrumbs(pathname, detailTitle);
+  // The mobile menu button is the one piece that appears by width alone, so
+  // "empty" is decided in CSS rather than here.
+  const bare = crumbs.length === 0 && !collapsed && !actions;
 
   return (
-    <header className="adm-top">
+    <header className={cn("adm-top", bare && "adm-top--bare")}>
       <Button
         aria-label="Open navigation"
         className="lg:hidden"
@@ -95,32 +108,22 @@ export function AdminTopbar({
         </Tooltip>
       )}
 
-      <nav aria-label="Breadcrumb" className="adm-top__crumbs">
-        {crumbs.map((crumb, index) => (
-          <span className="flex min-w-0 items-center gap-1" key={`${crumb.label}-${index}`}>
-            {index > 0 && <ChevronRight aria-hidden="true" size={13} />}
-            {crumb.href ? (
-              <Link href={crumb.href}>{crumb.label}</Link>
-            ) : (
-              <span aria-current="page">{crumb.label}</span>
-            )}
-          </span>
-        ))}
-      </nav>
+      {crumbs.length > 0 && (
+        <nav aria-label="Breadcrumb" className="adm-top__crumbs">
+          {crumbs.map((crumb, index) => (
+            <span className="flex min-w-0 items-center gap-1" key={`${crumb.label}-${index}`}>
+              {index > 0 && <ChevronRight aria-hidden="true" size={14} />}
+              {crumb.href ? (
+                <Link href={crumb.href}>{crumb.label}</Link>
+              ) : (
+                <span aria-current="page">{crumb.label}</span>
+              )}
+            </span>
+          ))}
+        </nav>
+      )}
 
-      <div className="adm-top__actions">
-        <button
-          aria-label={`Search ${appBrand.productName} Admin`}
-          className="adm-search"
-          onClick={onSearchOpen}
-          type="button"
-        >
-          <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-          <span>Search…</span>
-          <kbd className="adm-kbd">⌘K</kbd>
-        </button>
-        {actions}
-      </div>
+      {actions && <div className="adm-top__actions">{actions}</div>}
     </header>
   );
 }

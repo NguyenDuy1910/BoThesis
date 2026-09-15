@@ -142,7 +142,7 @@ export function ChatComposer({
           <div className="composer-attachments">
             {contextCollections.map((collection) => (
               <span className="composer-attachment composer-attachment--collection" key={collection.id}>
-                <LibraryBig aria-hidden="true" size={13} />
+                <LibraryBig aria-hidden="true" size={14} />
                 <span>{collection.title}</span>
                 <small>Collection</small>
                 <button
@@ -166,7 +166,7 @@ export function ChatComposer({
                 title={item.error ?? item.fileName}
               >
                 {item.progress !== "ready" && item.progress !== "failed"
-                  ? <LoaderCircle aria-hidden="true" className="composer-attachment__spin" size={13} />
+                  ? <LoaderCircle aria-hidden="true" className="composer-attachment__spin" size={14} />
                   : <FileTypeIcon name={item.fileName} />}
                 <span>{item.fileName}</span>
                 <small>{attachmentProgressLabel(item)}</small>
@@ -221,7 +221,7 @@ export function ChatComposer({
               ref={addButtonRef}
               type="button"
             >
-              <Plus aria-hidden="true" size={15} />
+              <Plus aria-hidden="true" size={16} />
               <span>Add</span>
             </button>
             {addOpen && (
@@ -254,7 +254,7 @@ export function ChatComposer({
                   >
                     <LibraryBig aria-hidden="true" size={16} />
                     <span>Choose from collection</span>
-                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={15} />
+                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={16} />
                   </button>
                   <button
                     aria-controls="chat-context-collections"
@@ -268,7 +268,7 @@ export function ChatComposer({
                   >
                     <LibraryBig aria-hidden="true" size={16} />
                     <span>Recent collections</span>
-                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={15} />
+                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={16} />
                   </button>
                   <button
                     aria-controls="chat-context-collections"
@@ -282,14 +282,14 @@ export function ChatComposer({
                   >
                     <LibraryBig aria-hidden="true" size={16} />
                     <span>Browse all collections</span>
-                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={15} />
+                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={16} />
                   </button>
                 </div>
                 {collectionsExpanded && (
                   <div className="composer-add-popover__collections" id="chat-context-collections">
                     <div className="composer-add-popover__section-title">
                       <span>{showAllCollections ? "All collections" : "Recent collections"}</span>
-                      {collectionsLoading && <LoaderCircle aria-label="Loading collections" className="composer-attachment__spin" size={13} />}
+                      {collectionsLoading && <LoaderCircle aria-label="Loading collections" className="composer-attachment__spin" size={14} />}
                     </div>
                     {collectionsError ? (
                       <div className="composer-add-popover__error" role="alert">
@@ -308,7 +308,7 @@ export function ChatComposer({
                                 onClick={() => toggleCollection(collection)}
                                 type="button"
                               >
-                                <LibraryBig aria-hidden="true" size={15} />
+                                <LibraryBig aria-hidden="true" size={16} />
                                 <span>{collection.title}</span>
                               </button>
                             </li>
@@ -325,7 +325,7 @@ export function ChatComposer({
           </span>
           <span className="composer-context-indicator composer-context-indicator--knowledge"><LibraryBig aria-hidden="true" size={14} />Knowledge: Company</span>
           <span className="composer-context-indicator"><Bot aria-hidden="true" size={14} />BoThesis</span>
-          <span className="composer-context-indicator composer-context-indicator--model">Managed model <ChevronDown aria-hidden="true" size={13} /></span>
+          <span className="composer-context-indicator composer-context-indicator--model">Managed model <ChevronDown aria-hidden="true" size={14} /></span>
           <span className="composer__shortcut">
             {enterToSend ? "Enter to send · Shift + Enter for new line" : "Use the send button · Enter for new line"}
           </span>
@@ -340,7 +340,7 @@ export function ChatComposer({
             onClick={isStreaming ? onStop : undefined}
             type={isStreaming ? "button" : "submit"}
           >
-            {isStreaming ? <Square aria-hidden="true" className="composer-send__stop-icon" size={11} strokeWidth={0} /> : <Send aria-hidden="true" className="composer-send__send-icon" size={17} />}
+            {isStreaming ? <Square aria-hidden="true" className="composer-send__stop-icon" size={12} strokeWidth={0} /> : <Send aria-hidden="true" className="composer-send__send-icon" size={16} />}
           </button>
         </div>
       </form>

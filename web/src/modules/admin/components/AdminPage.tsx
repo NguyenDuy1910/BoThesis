@@ -23,7 +23,7 @@ import { PlatformUsersPage } from "@/modules/admin/pages/PlatformUsersPage";
 import { SettingsPage } from "@/modules/admin/pages/SettingsPage";
 import { SystemHealthPage } from "@/modules/admin/pages/SystemHealthPage";
 import { WorkspaceOverviewPage } from "@/modules/admin/pages/WorkspaceOverviewPage";
-import { WorkspaceKnowledgeScreen } from "@/modules/knowledge/components/WorkspaceKnowledgeScreen";
+import { KnowledgeScreen } from "@/modules/knowledge/components/KnowledgeScreen";
 
 /**
  * The single entry point for every Admin address. It resolves the incoming
@@ -46,7 +46,7 @@ export function AdminPage({ section: rawSection }: { section: string }) {
     case "overview":
       return <WorkspaceOverviewPage />;
     case "knowledge":
-      return <WorkspaceKnowledgeScreen />;
+      return <KnowledgeScreen />;
     case "agent":
       return <AgentsPoliciesPage />;
     case "access":

@@ -33,7 +33,15 @@ from bothesis.document_index import ItemIndex, SemanticContextualizer
 from bothesis.health import HealthService, HealthSettings
 from bothesis.knowledge import ItemKnowledgeRetriever, SemanticReranker
 from bothesis.observability import create_tracer
+from bothesis.integrations.atlassian import AtlassianConnectionProvider
+from bothesis.integrations.google import GoogleConnectionProvider
+from bothesis.integrations.oauth_state import OAuthStateCodec
+from bothesis.integrations.registry import ConnectionProviderRegistry
 from bothesis.services.admin_console import AdminConsoleService
+from bothesis.services.integration_authorization import (
+    IntegrationAuthorizationService,
+)
+from bothesis.services.integration_console import IntegrationConsoleService
 from bothesis.services.identity_access.auth import AuthenticationService
 from bothesis.services.identity_access.google import GoogleIdentityVerifier
 from bothesis.services.artifact import ArtifactService
@@ -80,6 +88,7 @@ class AppRuntime:
         self._contextualization_transport: OpenRouterTransport | None = None
         self._jwt_tokens: JwtTokenService | None = None
         self._google_identity: GoogleIdentityVerifier | None = None
+        self._connection_providers: ConnectionProviderRegistry | None = None
 
     @property
     def config(self) -> AppConfig:
@@ -124,10 +133,53 @@ class AppRuntime:
     def admin_console_service(self) -> AdminConsoleService:
         return AdminConsoleService(
             self.sessions(),
-            workflows=self.workflow_service(),
-            integration=self._config.integration,
             vector_index=self._config.vector_index,
         )
+
+    def integration_console_service(self) -> IntegrationConsoleService:
+        return IntegrationConsoleService(
+            self.sessions(),
+            workflows=self.workflow_service(),
+            integration=self._config.integration,
+            providers=self.connection_providers(),
+            authorization=self.integration_authorization_service(),
+        )
+
+    def integration_authorization_service(self) -> IntegrationAuthorizationService:
+        oauth = self._config.integration.oauth
+        return IntegrationAuthorizationService(
+            self.connection_providers(),
+            state=OAuthStateCodec(oauth.state_secret),
+            client_origin=oauth.client_origin,
+        )
+
+    def connection_providers(self) -> ConnectionProviderRegistry:
+        """Register only the providers this deployment actually configured.
+
+        An unconfigured provider is still registered: the catalogue has to be
+        able to say a connector exists but cannot be connected here, which is a
+        different answer from the connector not existing at all.
+        """
+
+        if self._connection_providers is None:
+            oauth = self._config.integration.oauth
+            self._connection_providers = ConnectionProviderRegistry(
+                (
+                    GoogleConnectionProvider(
+                        client_id=oauth.google.client_id,
+                        client_secret=oauth.google.client_secret,
+                        redirect_uri=oauth.redirect_uri,
+                        timeout_seconds=oauth.timeout_seconds,
+                    ),
+                    AtlassianConnectionProvider(
+                        client_id=oauth.atlassian.client_id,
+                        client_secret=oauth.atlassian.client_secret,
+                        redirect_uri=oauth.redirect_uri,
+                        timeout_seconds=oauth.timeout_seconds,
+                    ),
+                )
+            )
+        return self._connection_providers
 
     def health_service(self) -> HealthService:
         model = self._config.model

@@ -42,12 +42,14 @@ export function ContextHeader({
     "flex h-[52px] w-full flex-col gap-px rounded-[var(--radius-sm)] px-2 pb-2 pt-[7px]",
     backHref && "transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)] hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
   );
+  // The mode label states context, it is not a link or a selection — the
+  // accent belongs to the rail item that is actually active below it.
   const content = (
     <>
       <span className="min-w-0 truncate text-left text-[length:var(--text-size-nav)] font-medium leading-[var(--text-lh-nav)] text-[var(--text-primary)]">
         {name}
       </span>
-      <span className="text-[length:var(--text-size-caption)] font-medium uppercase leading-[var(--text-lh-caption)] tracking-[var(--text-tracking-caption)] text-[var(--text-accent)]">
+      <span className="text-[length:var(--text-size-caption)] font-medium uppercase leading-[var(--text-lh-caption)] tracking-[var(--text-tracking-caption)] text-[var(--text-tertiary)]">
         {context}
       </span>
     </>

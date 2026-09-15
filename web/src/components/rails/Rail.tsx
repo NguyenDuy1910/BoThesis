@@ -117,7 +117,7 @@ function RailEdgeToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle:
       onClick={onToggle}
       type="button"
     >
-      <Icon aria-hidden="true" size={15} />
+      <Icon aria-hidden="true" size={16} />
     </button>
   );
 }

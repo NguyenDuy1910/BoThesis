@@ -275,7 +275,7 @@ export function InspectorRow({
         <ChevronRight
           aria-hidden="true"
           className="shrink-0 self-center text-[var(--text-tertiary)]"
-          size={15}
+          size={16}
         />
       )}
     </>

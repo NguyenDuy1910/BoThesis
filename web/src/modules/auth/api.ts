@@ -19,7 +19,7 @@ async function requestSession(
 ): Promise<AuthSession> {
   const apiUrl = process.env.NEXT_PUBLIC_BOTHESIS_API_URL?.replace(/\/$/, "");
   if (!apiUrl) {
-    throw new Error("Sign-in is unavailable because the Enterprise Agent API URL is not configured.");
+    throw new Error("Sign-in is unavailable because the BoThesis API URL is not configured.");
   }
   const response = await fetch(`${apiUrl}${path}`, {
     method: "POST",

@@ -14,12 +14,63 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from bothesis.integrations import PendingAuthorization
+
 from bothesis.connector.protocol import Chunk, DocumentItem
 from bothesis.db.models import Item, ItemUpload
 from bothesis.storage import PresignedRequest
 
 ACTIVE_STATUS = "active"
 INACTIVE_STATUS = "inactive"
+
+#: Connection lifecycle. These describe the *grant*, never a sync run.
+CONNECTION_DRAFT = "draft"
+CONNECTION_CONNECTED = "connected"
+CONNECTION_EXPIRED = "expired"
+CONNECTION_REAUTH_REQUIRED = "reauth_required"
+CONNECTION_REVOKED = "revoked"
+CONNECTION_ERROR = "error"
+CONNECTION_DISCONNECTED = "disconnected"
+CONNECTION_STATUSES = (
+    CONNECTION_DRAFT,
+    CONNECTION_CONNECTED,
+    CONNECTION_EXPIRED,
+    CONNECTION_REAUTH_REQUIRED,
+    CONNECTION_REVOKED,
+    CONNECTION_ERROR,
+    CONNECTION_DISCONNECTED,
+)
+#: A connection in any of these states cannot reach the provider until someone
+#: authorizes it again.
+CONNECTION_NEEDS_AUTHORIZATION = (
+    CONNECTION_EXPIRED,
+    CONNECTION_REAUTH_REQUIRED,
+    CONNECTION_REVOKED,
+    CONNECTION_DISCONNECTED,
+)
+
+#: Ingestion Source enablement and health. Run state lives in the workflow.
+SOURCE_READY = "ready"
+SOURCE_PAUSED = "paused"
+SOURCE_FAILED = "failed"
+SOURCE_CONNECTION_REQUIRED = "connection_required"
+SOURCE_DISABLED = "disabled"
+SOURCE_STATUSES = (
+    SOURCE_READY,
+    SOURCE_PAUSED,
+    SOURCE_FAILED,
+    SOURCE_CONNECTION_REQUIRED,
+    SOURCE_DISABLED,
+)
+#: A source the worker may run, and write Items for. A failed source is included
+#: because retrying one is exactly how it stops being failed.
+RUNNABLE_SOURCE_STATUSES = (SOURCE_READY, SOURCE_FAILED)
+
+#: Who a Connection acts as. A workspace connection is shared enterprise
+#: access; a personal connection acts as one member and is never shared.
+OWNER_TENANT = "tenant"
+OWNER_USER = "user"
+OWNER_TYPES = (OWNER_TENANT, OWNER_USER)
 ADMIN_PERMISSION = "admin"
 MESSAGE_ITEM_RELATIONS = frozenset({"attachment", "reference", "output"})
 KNOWLEDGE_READ_PERMISSION = "knowledge.read"
@@ -111,6 +162,30 @@ class AdminExternalUnavailableError(AdministrationError):
     """Raised when a configured external source cannot be reached."""
 
 
+class ConnectionAuthorizationRequiredError(AdministrationError):
+    """Raised when a Connection's grant is gone and someone must reconnect.
+
+    Distinct from a validation failure: nothing about the request is wrong, and
+    no retry helps until a person completes the provider's flow again.
+
+    It carries the state it implies, because raising this rolls back the
+    transaction that discovered it — the caller has to write the state down in
+    a transaction of its own, or the next request would rediscover the same
+    failure and the UI would never learn to offer a reconnect.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: str = CONNECTION_REAUTH_REQUIRED,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.detail = detail or message
+
+
 @dataclass(frozen=True, slots=True)
 class AuthContext:
     """Resolved identity used at service and retrieval permission boundaries."""
@@ -170,6 +245,25 @@ class VerifiedGoogleIdentity:
 
     email: str
     display_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationStart:
+    """Where to send the browser for consent, and the value it returns with."""
+
+    authorization_url: str
+    #: Echoed back to the opener so a page cannot be fooled by a stray message.
+    nonce: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedAuthorization:
+    """One verified provider callback, resolved to the identity that began it."""
+
+    pending: PendingAuthorization
+    tenant_id: UUID
+    user_id: UUID
+    connection_id: UUID | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,7 +494,7 @@ class PreviewManifest(BaseModel):
     truncated: bool = False
 
     @model_validator(mode="after")
-    def _validate_assets(self) -> "PreviewManifest":
+    def _validate_assets(self) -> PreviewManifest:
         pages = [asset.page for asset in self.assets if asset.page is not None]
         if len(pages) != len(set(pages)):
             raise ValueError("preview asset pages must be unique")
@@ -525,14 +619,39 @@ def timestamp(value: datetime | None) -> str | None:
 __all__ = [
     "ACCESS_MANAGE_PERMISSION",
     "ACTIVE_STATUS",
+    "AdminConflictError",
+    "AdminExternalUnavailableError",
+    "AdministrationError",
+    "AdminNotFoundError",
+    "AdminValidationError",
     "ADMIN_PERMISSION",
     "ADMIN_PERMISSION_CATALOG",
+    "ArtifactValidationError",
     "ARTIFACT_COLLECTION_KIND",
     "ARTIFACT_COLLECTION_TITLE",
     "ARTIFACT_DOCUMENT_TYPE",
     "ARTIFACT_MIME_TYPE",
+    "AsyncUploadStream",
     "AUDIT_READ_PERMISSION",
+    "AuthContext",
+    "AuthenticationError",
+    "AuthenticationSession",
+    "AuthorizationError",
+    "AuthorizationStart",
+    "CanonicalDocumentContent",
     "CHUNKER_VERSION",
+    "CollectionUpload",
+    "CompletedAuthorization",
+    "ConnectionAuthorizationRequiredError",
+    "CONNECTION_CONNECTED",
+    "CONNECTION_DISCONNECTED",
+    "CONNECTION_DRAFT",
+    "CONNECTION_ERROR",
+    "CONNECTION_EXPIRED",
+    "CONNECTION_NEEDS_AUTHORIZATION",
+    "CONNECTION_REAUTH_REQUIRED",
+    "CONNECTION_REVOKED",
+    "CONNECTION_STATUSES",
     "DEFAULT_MAX_UPLOAD_BYTES",
     "DEFAULT_PREVIEW_MAX_DIMENSION",
     "DEFAULT_PREVIEW_MAX_PAGES",
@@ -540,65 +659,62 @@ __all__ = [
     "DEFAULT_PREVIEW_WEBP_QUALITY",
     "DEFAULT_PROCESSING_MAX_BYTES",
     "DEFAULT_UPLOAD_URL_SECONDS",
-    "GROUP_MANAGE_PERMISSION",
-    "INACTIVE_STATUS",
-    "ITEM_MANAGE_PERMISSION",
-    "KNOWLEDGE_READ_PERMISSION",
-    "MESSAGE_ITEM_RELATIONS",
-    "PARSER_VERSION",
-    "PREVIEW_RENDERER_VERSION",
-    "PREVIEW_SCHEMA_VERSION",
-    "ROLE_MANAGE_PERMISSION",
-    "SOURCE_MANAGE_PERMISSION",
-    "TenantMembershipSummary",
-    "TENANT_MANAGE_PERMISSION",
-    "USER_MANAGE_PERMISSION",
-    "AdminConflictError",
-    "AdminExternalUnavailableError",
-    "AdminNotFoundError",
-    "AdministrationError",
-    "AdminValidationError",
-    "ArtifactValidationError",
-    "AuthenticationError",
-    "AuthenticationSession",
-    "AsyncUploadStream",
-    "AuthContext",
-    "IdentityServiceError",
-    "AuthorizationError",
-    "CanonicalDocumentContent",
-    "StoredFileContent",
-    "CollectionUpload",
     "DocumentNotFoundError",
     "DocumentProcessingError",
     "DocumentServiceError",
     "DocumentUnavailableError",
+    "GROUP_MANAGE_PERMISSION",
     "IdentityConflictError",
     "IdentityInactiveError",
     "IdentityNotFoundError",
     "IdentityProviderUnavailableError",
+    "IdentityServiceError",
+    "INACTIVE_STATUS",
     "InvalidDocumentStateError",
+    "ITEM_MANAGE_PERMISSION",
     "JwtClaims",
     "KnowledgePreviewView",
+    "KNOWLEDGE_READ_PERMISSION",
+    "MESSAGE_ITEM_RELATIONS",
+    "NativeUploadError",
+    "normalize_code",
+    "normalize_codes",
+    "normalize_page",
+    "normalize_required_text",
+    "OWNER_TENANT",
+    "OWNER_TYPES",
+    "OWNER_USER",
+    "PARSER_VERSION",
     "PreviewAsset",
     "PreviewGenerationError",
     "PreviewManifest",
     "PreviewOriginal",
     "PreviewRepresentation",
+    "PREVIEW_RENDERER_VERSION",
+    "PREVIEW_SCHEMA_VERSION",
     "RenderedPreview",
     "RenderedPreviewAsset",
+    "require_platform_root",
+    "require_tenant_permission",
     "ResolvedPreviewAsset",
+    "ROLE_MANAGE_PERMISSION",
+    "RUNNABLE_SOURCE_STATUSES",
+    "SOURCE_CONNECTION_REQUIRED",
+    "SOURCE_DISABLED",
+    "SOURCE_FAILED",
+    "SOURCE_MANAGE_PERMISSION",
+    "SOURCE_PAUSED",
+    "SOURCE_READY",
+    "SOURCE_STATUSES",
+    "StoredFileContent",
+    "TenantMembershipSummary",
+    "TENANT_MANAGE_PERMISSION",
+    "timestamp",
     "UploadConflictError",
-    "NativeUploadError",
     "UploadStart",
     "UploadTarget",
     "UploadTooLargeError",
     "UploadValidationError",
+    "USER_MANAGE_PERMISSION",
     "VerifiedGoogleIdentity",
-    "normalize_code",
-    "normalize_codes",
-    "normalize_page",
-    "normalize_required_text",
-    "require_tenant_permission",
-    "require_platform_root",
-    "timestamp",
 ]

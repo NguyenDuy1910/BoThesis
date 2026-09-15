@@ -43,3 +43,30 @@
     color: var(--text-secondary);
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Contextual row controls
+   ---------------------------------------------------------------------------
+   A document row's selection checkbox is quiet until it is wanted: on hover,
+   on keyboard focus, or once a selection exists. It is always in the DOM —
+   a control that only appears on hover cannot be reached by keyboard — so the
+   reveal is opacity, and the keyboard case is declared here rather than as a
+   utility so it cannot lose to the resting state it has to override.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.document-row__select {
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.document-row:hover .document-row__select,
+.document-row__select:checked,
+.document-row__select:focus-visible {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .document-row__select {
+    transition: none;
+  }
+}

@@ -9,7 +9,14 @@ from uuid import UUID
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.db.models import Group, GroupMembership, Role, TenantMembership, User
+from bothesis.db.models import (
+    Group,
+    GroupMembership,
+    Role,
+    Tenant,
+    TenantMembership,
+    User,
+)
 from bothesis.services.audit import AuditService
 from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services import (

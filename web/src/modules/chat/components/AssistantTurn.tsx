@@ -121,10 +121,10 @@ function HostedExecutionActivity({
     >
       <summary aria-label={label}>
         <Icon aria-hidden="true" className="assistant-turn__execution-status" size={14} />
-        <FileCog aria-hidden="true" className="assistant-turn__execution-terminal" size={15} />
+        <FileCog aria-hidden="true" className="assistant-turn__execution-terminal" size={16} />
         <span className="assistant-turn__execution-label">{label}</span>
         {execution.files.length > 0 && <span className="assistant-turn__execution-file-count">{execution.files.length} file{execution.files.length === 1 ? "" : "s"}</span>}
-        <ChevronRight aria-hidden="true" className="assistant-turn__execution-caret" size={15} />
+        <ChevronRight aria-hidden="true" className="assistant-turn__execution-caret" size={16} />
       </summary>
       <div className="assistant-turn__execution-body">
         {execution.files.length > 0 && (
@@ -184,7 +184,7 @@ function ActivityGroup({
       <summary aria-label={`${label}. Show activity details`}>
         <Icon aria-hidden="true" className="assistant-turn__activity-group-status" size={14} />
         <span>{label}</span>
-        <ChevronRight aria-hidden="true" className="assistant-turn__activity-group-caret" size={15} />
+        <ChevronRight aria-hidden="true" className="assistant-turn__activity-group-caret" size={16} />
       </summary>
       <div className="assistant-turn__activity-group-body">
         {activities.map((activity) => <ToolActivity activity={activity} key={activity.callId} />)}
@@ -211,7 +211,7 @@ function ToolActivity({ activity }: { activity: RuntimeActivity }) {
       role={active ? "status" : undefined}
       title={accessibleLabel}
     >
-      <Icon aria-hidden="true" className="assistant-turn__activity-icon" size={13} />
+      <Icon aria-hidden="true" className="assistant-turn__activity-icon" size={14} />
       <span className="assistant-turn__activity-label">{presentation.label}</span>
       {presentation.detail && <span className="assistant-turn__activity-detail">· {presentation.detail}</span>}
       {elapsedLabel && <time>· {elapsedLabel}</time>}
