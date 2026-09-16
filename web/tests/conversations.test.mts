@@ -3,6 +3,9 @@ import test from "node:test";
 
 import {
   conversationAdapter,
+  readSelectedConversation,
+  rememberSelectedConversation,
+  resolveSelectedConversation,
   setConversationUser,
   uiToCachedMessage,
 } from "../src/modules/chat/conversations.ts";
@@ -106,4 +109,31 @@ test("retains collection context on a persisted user turn", async () => {
 
   const restored = await conversationAdapter.getConversationMessages("chat-collections");
   assert.equal(restored[0]?.parts[1]?.type, "data-collection");
+});
+
+test("restores the selected chat or empty New chat draft within the same tab and workspace", () => {
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage() },
+  });
+  setConversationUser("chat-restore-test", "workspace-a");
+  assert.equal(readSelectedConversation(), undefined);
+
+  rememberSelectedConversation("conversation-1");
+  assert.equal(readSelectedConversation(), "conversation-1");
+  rememberSelectedConversation(null);
+  assert.equal(readSelectedConversation(), null);
+
+  setConversationUser("chat-restore-test", "workspace-b");
+  assert.equal(readSelectedConversation(), undefined);
+  setConversationUser("chat-restore-test", "workspace-a");
+  assert.equal(readSelectedConversation(), null);
+});
+
+test("an empty draft stays empty while a missing saved chat falls back to recents", () => {
+  const conversations = [{ id: "latest" }, { id: "older" }] as Awaited<ReturnType<typeof conversationAdapter.listConversations>>;
+  assert.equal(resolveSelectedConversation(conversations, null), null);
+  assert.equal(resolveSelectedConversation(conversations, "older"), "older");
+  assert.equal(resolveSelectedConversation(conversations, "missing"), "latest");
+  assert.equal(resolveSelectedConversation(conversations, undefined), "latest");
 });

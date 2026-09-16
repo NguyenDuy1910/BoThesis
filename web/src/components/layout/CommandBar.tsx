@@ -55,7 +55,7 @@ export function CommandBar({
 
       {filters && <div className="flex shrink-0 items-center gap-1">{filters}</div>}
 
-      <div className="ml-auto flex items-center gap-2">
+      <div className="utility-bar__actions ml-auto flex shrink-0 items-center gap-2">
         {count && (
           <span className="whitespace-nowrap text-[length:var(--text-size-meta)] text-[var(--text-tertiary)]">
             {count}

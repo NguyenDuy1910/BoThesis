@@ -25,6 +25,9 @@ const CAPABILITY_LABELS: Record<string, string> = {
 function authenticationSummary(connector: KnowledgeConnector, capability?: ConnectorCapability) {
   // Authorizing an account is the better path wherever a deployment has it, so
   // it is what the page names — even for a connector that also takes a token.
+  if (capability?.authorization_available && capability.accepts_credentials) {
+    return `Sign in with ${capability.provider_display_name ?? connector.name} or use a site URL and API token`;
+  }
   if (capability?.authorization_available) {
     return `Sign in with ${capability.provider_display_name ?? connector.name}`;
   }

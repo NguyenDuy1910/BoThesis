@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import (
@@ -25,6 +25,8 @@ from bothesis.services import (
     ACTIVE_STATUS,
     INACTIVE_STATUS,
     PLATFORM_USER_READ_PERMISSION,
+    TENANT_ADMIN_ROLE,
+    TENANT_SCOPE,
     USER_MANAGE_PERMISSION,
     AdminConflictError,
     AdminNotFoundError,
@@ -211,6 +213,7 @@ class UserService:
         group_ids: list[UUID] | None = None,
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, USER_MANAGE_PERMISSION)
+        await self._require_assignable_roles(actor, tenant_id, role_ids)
         try:
             user = await self._auth.create_user(email, display_name=display_name)
         except IdentityConflictError as exc:
@@ -249,6 +252,23 @@ class UserService:
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, USER_MANAGE_PERMISSION)
         user, membership = await self._membership_row(tenant_id, user_id)
+        current_roles = (
+            await self._assignments.tenant_roles_for_users(tenant_id, [user_id])
+        ).get(user_id, [])
+        if user_id == actor.user_id and any(
+            change is not None for change in (role_ids, status, group_ids)
+        ):
+            raise AdminConflictError(
+                "an administrator cannot change their own workspace access"
+            )
+        await self._ensure_tenant_retains_an_administrator(
+            tenant_id=tenant_id,
+            user=user,
+            membership=membership,
+            current_roles=current_roles,
+            role_ids=role_ids,
+            status=status,
+        )
         changed: list[str] = []
         if display_name is not None:
             try:
@@ -259,14 +279,13 @@ class UserService:
                 raise AdminValidationError(str(exc)) from exc
             changed.append("display_name")
         if status is not None:
-            if user_id == actor.user_id and not status:
-                raise AdminConflictError("an administrator cannot disable their own user")
             user.status = status
             membership.status = ACTIVE_STATUS if status else INACTIVE_STATUS
             if status:
                 membership.deleted_at = None
             changed.append("status")
         if role_ids is not None:
+            await self._require_assignable_roles(actor, tenant_id, role_ids)
             roles = await self._assignments.replace_tenant_roles(
                 user_id=user_id,
                 tenant_id=tenant_id,
@@ -275,9 +294,7 @@ class UserService:
             )
             changed.append("roles")
         else:
-            roles = (
-                await self._assignments.tenant_roles_for_users(tenant_id, [user_id])
-            ).get(user_id, [])
+            roles = current_roles
         groups = (
             await self._replace_groups(tenant_id, user_id, group_ids)
             if group_ids is not None
@@ -286,12 +303,18 @@ class UserService:
         if group_ids is not None:
             changed.append("groups")
         await self._session.flush()
+        details: dict[str, Any] = {"changed_fields": changed}
+        if role_ids is not None:
+            details["roles"] = {
+                "before": sorted(role.code for role in current_roles),
+                "after": sorted(role.code for role in roles),
+            }
         await self._audit.record(
             actor,
             action="user.updated",
             resource_type="user",
             resource_id=str(user.id),
-            details={"changed_fields": changed},
+            details=details,
         )
         return _user_payload(user, membership, roles, groups)
 
@@ -312,6 +335,98 @@ class UserService:
         if row is None:
             raise AdminNotFoundError(f"user not found: {user_id}")
         return row
+
+    async def _require_assignable_roles(
+        self, actor: AuthContext, tenant_id: UUID, role_ids: list[UUID]
+    ) -> None:
+        """Ensure an administrator cannot grant authority they do not hold."""
+
+        desired_ids = set(role_ids)
+        if not desired_ids or len(desired_ids) != len(role_ids):
+            return
+        roles = list(
+            await self._session.scalars(
+                select(Role).where(
+                    Role.id.in_(desired_ids),
+                    Role.scope_type == TENANT_SCOPE,
+                    Role.status == ACTIVE_STATUS,
+                    or_(Role.tenant_id == tenant_id, Role.tenant_id.is_(None)),
+                )
+            )
+        )
+        # RoleAssignmentService owns structural validation and returns its
+        # established not-found errors for invalid role IDs.
+        if {role.id for role in roles} != desired_ids:
+            return
+        permissions_by_role = await self._auth.permissions_for_roles(desired_ids)
+        requested = {
+            permission
+            for role in roles
+            for permission in permissions_by_role.get(role.id, ())
+        }
+        disallowed = sorted(requested - set(actor.permission_codes))
+        if disallowed:
+            raise AdminValidationError(
+                "cannot grant a role with permissions beyond the acting "
+                f"administrator's authority: {', '.join(disallowed)}"
+            )
+
+    async def _ensure_tenant_retains_an_administrator(
+        self,
+        *,
+        tenant_id: UUID,
+        user: User,
+        membership: TenantMembership,
+        current_roles: list[Role],
+        role_ids: list[UUID] | None,
+        status: bool | None,
+    ) -> None:
+        """Reject a mutation that would remove the workspace's final admin."""
+
+        current_admin_role = next(
+            (role for role in current_roles if role.code == TENANT_ADMIN_ROLE), None
+        )
+        removes_admin = status is False or (
+            role_ids is not None
+            and current_admin_role is not None
+            and current_admin_role.id not in set(role_ids)
+        )
+        if (
+            not removes_admin
+            or current_admin_role is None
+            or not user.status
+            or membership.status != ACTIVE_STATUS
+        ):
+            return
+
+        other_administrator = await self._session.scalar(
+            select(RoleAssignment.id)
+            .join(Role, Role.id == RoleAssignment.role_id)
+            .join(
+                TenantMembership,
+                and_(
+                    TenantMembership.user_id == RoleAssignment.user_id,
+                    TenantMembership.tenant_id == RoleAssignment.tenant_id,
+                ),
+            )
+            .join(User, User.id == RoleAssignment.user_id)
+            .where(
+                RoleAssignment.tenant_id == tenant_id,
+                RoleAssignment.user_id != user.id,
+                RoleAssignment.deleted_at.is_(None),
+                Role.code == TENANT_ADMIN_ROLE,
+                Role.status == ACTIVE_STATUS,
+                TenantMembership.status == ACTIVE_STATUS,
+                TenantMembership.deleted_at.is_(None),
+                User.status.is_(True),
+            )
+            .with_for_update()
+        )
+        if other_administrator is None:
+            raise AdminConflictError(
+                "the last active workspace administrator cannot be suspended or "
+                "have their administrator role removed"
+            )
 
     async def _groups_for_users(
         self, tenant_id: UUID, user_ids: list[UUID]

@@ -10,6 +10,7 @@ import { finalTurnText } from "./message-stream.ts";
 
 const CONVERSATIONS_KEY_BASE = "bothesis-conversations";
 const MESSAGE_PREFIX_BASE = "bothesis-messages:";
+const SELECTED_CONVERSATION_KEY_BASE = "bothesis-selected-conversation";
 const ANONYMOUS_USER_NAMESPACE = "anonymous";
 const DEFAULT_CONVERSATION_TITLE = "New conversation";
 let memoryConversations: ChatConversation[] = [];
@@ -41,6 +42,41 @@ function conversationsKey() {
 
 function messageKey(sessionId: string) {
   return `${MESSAGE_PREFIX_BASE}${activeUserNamespace}:${sessionId}`;
+}
+
+function selectedConversationKey() {
+  return `${SELECTED_CONVERSATION_KEY_BASE}:${activeUserNamespace}`;
+}
+
+/** A tab remembers whether it was showing a conversation or an empty draft. */
+export function readSelectedConversation(): string | null | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const stored = window.sessionStorage.getItem(selectedConversationKey());
+    return stored === null ? undefined : stored || null;
+  } catch {
+    return undefined;
+  }
+}
+
+export function rememberSelectedConversation(id: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(selectedConversationKey(), id ?? "");
+  } catch {
+    // Restricted storage should not prevent navigation within Chat.
+  }
+}
+
+/** An explicit empty draft must not silently reopen the newest conversation. */
+export function resolveSelectedConversation(
+  conversations: ChatConversation[],
+  requestedId: string | null | undefined,
+): string | null {
+  if (requestedId === null) return null;
+  return requestedId && conversations.some((item) => item.id === requestedId)
+    ? requestedId
+    : conversations[0]?.id ?? null;
 }
 
 export interface ConversationAdapter {

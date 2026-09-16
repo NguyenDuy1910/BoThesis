@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, Upload } from "lucide-react";
+import { ArrowLeft, FileUp, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
@@ -10,6 +10,7 @@ import { DocumentRow } from "@/components/patterns";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
+import { useToast } from "@/components/ui/Toast";
 import { useRouteState } from "@/lib/hooks/useRouteState";
 import { DocumentViewer } from "@/modules/knowledge/components/DocumentViewer";
 import { FileTypeIcon } from "@/modules/knowledge/components/FileTypeIcon";
@@ -24,6 +25,7 @@ import { libraryActions, useLibrary } from "./queries";
  */
 export function LibraryScreen() {
   const router = useRouter();
+  const { toast } = useToast();
   const query = useLibrary();
   const [selectedId, setSelectedId] = useRouteState("document");
   const [search, setSearch] = useState("");
@@ -39,25 +41,37 @@ export function LibraryScreen() {
   const rows = documents.filter((item) =>
     (!type || item.kind === type) && item.title.toLowerCase().includes(search.toLowerCase()),
   );
+  const hasFilters = Boolean(search || type);
+  const openUpload = () => upload.current?.click();
+  const clearFilters = () => {
+    setSearch("");
+    setType("");
+  };
 
   const list = (
-    <div className="px-[var(--page-gutter)] pb-5">
+    <div className="library-list px-[var(--page-gutter)] pb-5">
       <h2 className="document-heading">{query.data?.collectionTitle ?? "My documents"}</h2>
       {query.loading ? (
         <p role="status">Loading your documents…</p>
       ) : !rows.length ? (
         <EmptyState
           action={
-            <Button disabled={!collectionId} onClick={() => upload.current?.click()} variant="ghost">
-              Upload a file
-            </Button>
+            hasFilters ? (
+              <Button onClick={clearFilters} variant="secondary">Clear filters</Button>
+            ) : (
+              <Button icon={<Upload aria-hidden="true" size={16} />} loading={busy} onClick={openUpload}>
+                Upload a file
+              </Button>
+            )
           }
+          className="library-empty-state"
           description={
-            search || type
+            hasFilters
               ? "Try a different search or clear the filters."
               : "Upload a document, or save one from a conversation."
           }
-          title={search || type ? "No results" : "Your library is empty"}
+          icon={!hasFilters ? <FileUp size={20} /> : undefined}
+          title={hasFilters ? "No results" : "Your library is empty"}
         />
       ) : (
         rows.map((item) => (
@@ -79,22 +93,22 @@ export function LibraryScreen() {
   return (
     <section aria-label="Personal library" className="document-workspace">
       <div className="px-[var(--page-gutter)] pt-4">
-        <Button icon={<ArrowLeft size={16} />} onClick={() => router.push("/app")} variant="ghost">
+        <Button icon={<ArrowLeft aria-hidden="true" size={16} />} onClick={() => router.push("/app")} variant="ghost">
           Back to chat
         </Button>
       </div>
       <CommandBar
         action={
           <Button
-            disabled={!collectionId}
-            icon={<Upload size={16} />}
+            disabled={query.loading}
+            icon={<Upload aria-hidden="true" size={16} />}
             loading={busy}
-            onClick={() => upload.current?.click()}
+            onClick={openUpload}
           >
             Upload
           </Button>
         }
-        count={`${rows.length} documents`}
+        count={`${rows.length} ${rows.length === 1 ? "document" : "documents"}`}
         filters={
           <FilterTrigger
             label="Filter by type"
@@ -135,19 +149,23 @@ export function LibraryScreen() {
         className="hidden"
         onChange={async (event) => {
           const file = event.target.files?.[0];
-          if (!file || !collectionId) return;
+          if (!file) return;
           setBusy(true);
           setError(null);
           try {
             await libraryActions.upload(file, collectionId);
+            toast({ title: `${file.name} uploaded`, variant: "success" });
           } catch (cause) {
-            setError(cause instanceof Error ? cause.message : "Upload failed.");
+            const message = cause instanceof Error ? cause.message : "Upload failed.";
+            setError(message);
+            toast({ title: "Upload failed", description: message, variant: "error" });
           } finally {
             setBusy(false);
             event.target.value = "";
           }
         }}
         ref={upload}
+        accept=".avif,.bmp,.csv,.docx,.gif,.htm,.html,.jpeg,.jpg,.json,.jsonl,.log,.markdown,.md,.pdf,.png,.pptx,.rst,.sql,.tif,.tiff,.tsv,.txt,.webp,.xlsx,.xml,.yaml,.yml"
         type="file"
       />
     </section>

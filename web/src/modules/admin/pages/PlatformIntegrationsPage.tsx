@@ -3,20 +3,14 @@
 import { Plug } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import {
-  SearchField,
-  TableCell,
-  TableHeader,
-  TableRow,
-  type TableColumn,
-} from "@/components/patterns";
+import { SearchField } from "@/components/patterns";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { useConnectorCatalogue } from "@/modules/knowledge/queries";
 
-const COLUMNS: readonly TableColumn[] = [
+const COLUMNS = [
   { id: "connector", label: "Connector" },
   { id: "authentication", label: "Authorization", width: 180 },
   { id: "capabilities", label: "Capabilities" },
@@ -59,26 +53,51 @@ export function PlatformIntegrationsPage() {
         {loading ? (
           <p role="status">Loading connectors…</p>
         ) : rows.length ? (
-          <table className="w-full">
-            <TableHeader columns={COLUMNS} />
-            <tbody>
-              {rows.map((entry) => (
-                <TableRow key={entry.connector.key}>
-                  <TableCell>{entry.connector.name}</TableCell>
-                  <TableCell>
-                    {entry.capability?.authentication_type ?? "Not registered here"}
-                  </TableCell>
-                  <TableCell>
-                    <span className="flex flex-wrap gap-1">
-                      {(entry.capability?.capabilities ?? []).map((capability) => (
-                        <Badge key={capability} tone="neutral">{capability}</Badge>
-                      ))}
-                    </span>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </tbody>
-          </table>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[42rem] text-left">
+              <thead className="border-b border-[var(--border-subtle)]">
+                <tr>
+                  {COLUMNS.map((column) => (
+                    <th
+                      className="px-3.5 pb-2.5 text-[length:var(--text-size-caption)] font-medium uppercase tracking-[var(--text-tracking-caption)] text-[var(--text-tertiary)]"
+                      key={column.id}
+                      scope="col"
+                      style={column.width === undefined ? undefined : { width: column.width }}
+                    >
+                      {column.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((entry) => {
+                  const capabilities = entry.capability?.capabilities ?? [];
+                  return (
+                    <tr
+                      className="border-b border-[var(--border-subtle)] last:border-b-0 hover:bg-[var(--surface-hover)]"
+                      key={entry.connector.key}
+                    >
+                      <td className="px-3.5 py-2.5 font-medium text-[var(--text-primary)]">
+                        {entry.connector.name}
+                      </td>
+                      <td className="px-3.5 py-2.5 text-[var(--text-secondary)]">
+                        {entry.capability?.authentication_type ?? "Not registered here"}
+                      </td>
+                      <td className="px-3.5 py-2.5 text-[var(--text-secondary)]">
+                        {capabilities.length ? (
+                          <span className="flex flex-wrap gap-1">
+                            {capabilities.map((capability) => (
+                              <Badge key={capability} tone="neutral">{capability}</Badge>
+                            ))}
+                          </span>
+                        ) : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <EmptyState
             description="This deployment registers no connectors, or the search matched none."

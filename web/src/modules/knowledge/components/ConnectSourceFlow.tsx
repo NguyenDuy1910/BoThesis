@@ -38,6 +38,7 @@ interface DestinationCollection {
 }
 
 type Step = "account" | "content" | "done";
+type ConnectionMethod = "authorization" | "credentials";
 
 const STEPS: { id: Step; label: string }[] = [
   { id: "account", label: "Connect account" },
@@ -109,6 +110,8 @@ export function ConnectSourceFlow({
 
   const [displayName, setDisplayName] = useState("");
   const [ownerType, setOwnerType] = useState<"tenant" | "user">("tenant");
+  const [connectionMethod, setConnectionMethod] =
+    useState<ConnectionMethod>("authorization");
   const [waiting, setWaiting] = useState(false);
   const pending = useRef<PendingAuthorization | null>(null);
   const [connectionValues, setConnectionValues] = useState<Record<string, string | boolean>>({});
@@ -129,6 +132,8 @@ export function ConnectSourceFlow({
   const canAuthorize = capability?.authorization_available ?? false;
   const canUseCredentials =
     (capability?.accepts_credentials ?? true) && Boolean(setup?.credentials.length);
+  const usesAuthorization =
+    canAuthorize && (connectionMethod === "authorization" || !canUseCredentials);
   // Discovery needs an authorized account. A connector configured with a token
   // names its resource by hand, which is what its scope fields are for.
   const canDiscover = Boolean(connection?.account.id);
@@ -146,6 +151,7 @@ export function ConnectSourceFlow({
     setError(null);
     setConnection(existingConnection ?? null);
     setDisplayName(connector.name);
+    setConnectionMethod(canAuthorize ? "authorization" : "credentials");
     // Someone who cannot administer shared sources can still connect their own
     // account, so the flow starts where they are allowed to finish.
     setOwnerType(canManageWorkspace ? "tenant" : "user");
@@ -159,7 +165,7 @@ export function ConnectSourceFlow({
     setCollections(null);
     setCreatedCount(0);
     if (existingConnection) void loadCollections().catch(() => setCollections([]));
-  }, [canManageWorkspace, connector, existingConnection, loadCollections, open]);
+  }, [canAuthorize, canManageWorkspace, connector, existingConnection, loadCollections, open]);
 
   // A dialog that closes while consent is open would leave an orphan window.
   useEffect(() => {
@@ -347,7 +353,7 @@ export function ConnectSourceFlow({
           <Button disabled={busy} onClick={onClose} variant="ghost">
             Cancel
           </Button>
-          {canAuthorize ? (
+          {usesAuthorization ? (
             <Button loading={busy} onClick={() => void authorize()}>
               Continue with {capability?.provider_display_name ?? connector.name}
             </Button>
@@ -454,7 +460,39 @@ export function ConnectSourceFlow({
               />
             </div>
 
-            {canAuthorize ? (
+            {canAuthorize && canUseCredentials && (
+              <fieldset className="knowledge-setup__methods">
+                <legend>Authentication method</legend>
+                <label>
+                  <input
+                    checked={connectionMethod === "authorization"}
+                    name={`${fieldId}-method`}
+                    onChange={() => setConnectionMethod("authorization")}
+                    type="radio"
+                    value="authorization"
+                  />
+                  <span>
+                    <strong>Sign in with Atlassian</strong>
+                    <small>Best for Confluence Cloud. You will choose spaces after authorizing.</small>
+                  </span>
+                </label>
+                <label>
+                  <input
+                    checked={connectionMethod === "credentials"}
+                    name={`${fieldId}-method`}
+                    onChange={() => setConnectionMethod("credentials")}
+                    type="radio"
+                    value="credentials"
+                  />
+                  <span>
+                    <strong>Use site URL and API token</strong>
+                    <small>Use this for Confluence Server, Data Center, or a managed API token.</small>
+                  </span>
+                </label>
+              </fieldset>
+            )}
+
+            {usesAuthorization ? (
               <p className="knowledge-setup__confirmed">
                 You will sign in to {capability?.provider_display_name ?? connector.name} in a
                 new window. {connector.name} decides what BoThesis may read, and the sign-in

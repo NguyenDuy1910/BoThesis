@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, status
 
-from api.deps import AdminConsole, Caller, KnowledgeView
+from api.deps import AdminConsole, Caller, Documents, KnowledgeView
 from api.routers import (
     KnowledgeCitationResponse,
     KnowledgeCollectionCreate,
@@ -17,6 +17,22 @@ from api.routers import (
 )
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
+
+
+@router.put(
+    "/collections/personal",
+    response_model=KnowledgeCollectionCreated,
+    status_code=status.HTTP_200_OK,
+)
+async def ensure_personal_collection(
+    caller: Caller,
+    documents: Documents,
+) -> KnowledgeCollectionCreated:
+    """Provision the caller's private upload Collection idempotently."""
+
+    return KnowledgeCollectionCreated.model_validate(
+        await documents.ensure_personal_collection(caller)
+    )
 
 
 @router.post(

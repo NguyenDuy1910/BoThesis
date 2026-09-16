@@ -6,13 +6,20 @@ from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import select
+
 from bothesis.db.engine import SessionFactory, session_scope
 from bothesis.db.models import Item
-from bothesis.services import AsyncUploadStream, AuthContext
+from bothesis.services import (
+    KNOWLEDGE_READ_PERMISSION,
+    AsyncUploadStream,
+    AuthContext,
+    require_tenant_permission,
+)
 from bothesis.services.audit import AuditService
-from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.document_presentation import DocumentPresenter
 from bothesis.services.document_upload import DocumentUploadService
+from bothesis.services.identity_access.authorization import AuthorizationService
+from bothesis.services.item import ItemService
 
 IngestionStatus = Literal["ready", "failed"]
 
@@ -56,6 +63,25 @@ class WorkspaceDocumentService:
             ],
             "total": len(collections),
         }
+
+    async def ensure_personal_collection(self, access: AuthContext) -> dict[str, Any]:
+        """Return the caller's private upload Collection, creating it once."""
+
+        tenant_id = require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
+        collection_id = ItemService.upload_collection_id(tenant_id, access.user_id)
+        async with session_scope(self._sessions) as session:
+            items = ItemService(session)
+            await items.ensure_personal_collection(
+                access.user_id,
+                tenant_id,
+                collection_id=collection_id,
+                title="My uploads",
+                system_kind="personal_uploads",
+            )
+            collection = await session.get(Item, collection_id)
+            if collection is None:
+                raise RuntimeError("personal Collection could not be created")
+            return {"id": collection.id, "title": collection.title}
 
     async def start_upload(
         self,

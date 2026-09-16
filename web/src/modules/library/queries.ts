@@ -42,8 +42,12 @@ export function useLibrary() {
 }
 
 export const libraryActions = {
-  async upload(file: File, collectionId: string) {
-    await uploadCollectionFile(collectionId, file, { idempotencyKey: crypto.randomUUID() });
+  async upload(file: File, collectionId: string | null) {
+    const targetCollectionId = collectionId
+      ?? (await knowledgeApi.ensurePersonalCollection()).id;
+    await uploadCollectionFile(targetCollectionId, file, {
+      idempotencyKey: crypto.randomUUID(),
+    });
     invalidateApiData();
   },
 };

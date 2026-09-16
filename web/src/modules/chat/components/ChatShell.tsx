@@ -33,6 +33,9 @@ import {
   cachedToUIMessage,
   conversationAdapter,
   getMessageText,
+  readSelectedConversation,
+  rememberSelectedConversation,
+  resolveSelectedConversation,
   setConversationUser,
   titleFromMessage,
   uiToCachedMessage,
@@ -98,22 +101,35 @@ export default function ChatShell() {
   const [draftId, setDraftId] = useState(createDraftConversationId);
   const [initialMessages, setInitialMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchRequested, setSearchRequested] = useState(false);
+  const restoreRequestRef = useRef(0);
+  const visibleConversationRef = useRef(activeId ?? draftId);
   const handledProductActionRef = useRef<string | null>(null);
   const requestedProductAction = searchParams.get("action");
 
   const refresh = useCallback(async (requestedId?: string | null) => {
-    const list = await conversationAdapter.listConversations();
-    const selectedId = requestedId && list.some((item) => item.id === requestedId)
-      ? requestedId
-      : list[0]?.id ?? null;
-    const messages = selectedId
-      ? (await conversationAdapter.getConversationMessages(selectedId)).map(cachedToUIMessage)
-      : [];
-    setConversations(list);
-    setActiveId(selectedId);
-    setInitialMessages(messages);
-    setIsLoading(false);
+    const requestId = ++restoreRequestRef.current;
+    try {
+      const list = await conversationAdapter.listConversations();
+      if (requestId !== restoreRequestRef.current) return;
+      const selectedId = resolveSelectedConversation(list, requestedId);
+      const messages = selectedId
+        ? (await conversationAdapter.getConversationMessages(selectedId)).map(cachedToUIMessage)
+        : [];
+      if (requestId !== restoreRequestRef.current) return;
+      setConversations(list);
+      setActiveId(selectedId);
+      if (selectedId) visibleConversationRef.current = selectedId;
+      setInitialMessages(messages);
+      setLoadError(null);
+      setIsLoading(false);
+      rememberSelectedConversation(selectedId);
+    } catch {
+      if (requestId !== restoreRequestRef.current) return;
+      setLoadError("Could not restore your conversations. Please try again.");
+      setIsLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -123,7 +139,7 @@ export default function ChatShell() {
       return;
     }
     setConversationUser(configuration.userId, configuration.tenantId);
-    void refresh();
+    void refresh(readSelectedConversation());
   }, [refresh, router]);
 
   useEffect(() => {
@@ -136,11 +152,16 @@ export default function ChatShell() {
   }, [shellNavigation]);
 
   const startNewChat = useCallback(() => {
-    setDraftId(createDraftConversationId());
+    const nextDraftId = createDraftConversationId();
+    visibleConversationRef.current = nextDraftId;
+    setDraftId(nextDraftId);
     setActiveId(null);
     setInitialMessages([]);
+    setLoadError(null);
+    rememberSelectedConversation(null);
+    void refresh(null);
     shellNavigation.closeMobile();
-  }, [shellNavigation]);
+  }, [refresh, shellNavigation]);
 
   // Product-level actions can originate from any surface. Consume the URL
   // intent once, then return Chat to its canonical address for reliable Back.
@@ -167,6 +188,7 @@ export default function ChatShell() {
   }, []);
 
   const selectConversation = useCallback(async (id: string) => {
+    visibleConversationRef.current = id;
     shellNavigation.closeMobile();
     await refresh(id);
   }, [refresh, shellNavigation]);
@@ -220,7 +242,15 @@ export default function ChatShell() {
         titleSource: "generated",
       });
     }
-    await refresh(persistedId);
+    if (visibleConversationRef.current === conversationId) {
+      await refresh(persistedId);
+    } else {
+      // A completed response can finish saving after the reader starts a new
+      // draft or opens another chat. Update recents without stealing that view.
+      const requestId = restoreRequestRef.current;
+      const list = await conversationAdapter.listConversations();
+      if (requestId === restoreRequestRef.current) setConversations(list);
+    }
   }, [conversations, refresh]);
 
   useEffect(() => {
@@ -252,6 +282,31 @@ export default function ChatShell() {
   ]);
 
   useEffect(() => () => setSidebarContent(null), [setSidebarContent]);
+
+  if (isLoading || loadError) {
+    return (
+      <section aria-label="Chat" className="chat-main-pane relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--surface-base)]">
+        <button aria-label="Open conversation sidebar" className="chat-mobile-menu topbar__menu" onClick={shellNavigation.openMobile} type="button"><Menu aria-hidden="true" size={18} /></button>
+        <div className="shell__route-boundary flex-1" role={loadError ? "alert" : "status"}>
+          {loadError ? (
+            <>
+              <strong>{loadError}</strong>
+              <button onClick={() => {
+                setIsLoading(true);
+                setLoadError(null);
+                void refresh(readSelectedConversation());
+              }} type="button">Try again</button>
+            </>
+          ) : (
+            <>
+              <span aria-hidden="true" className="shell__route-boundary-indicator" />
+              <span>Opening your conversation…</span>
+            </>
+          )}
+        </div>
+      </section>
+    );
+  }
 
   return (
     <ChatConversation

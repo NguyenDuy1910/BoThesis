@@ -46,9 +46,12 @@ from bothesis.services import (
     COLLECTION_UPDATE_PERMISSION,
     COLLECTION_VIEWER_ROLE,
     PLATFORM_ADMIN_ROLE,
+    ROLE_MANAGE_PERMISSION,
     TENANT_ADMIN_ROLE,
+    USER_MANAGE_PERMISSION,
     ArtifactValidationError,
     AdminConflictError,
+    AdminValidationError,
     AuthContext,
     AuthorizationError,
     DocumentNotFoundError,
@@ -68,6 +71,8 @@ from bothesis.services.identity_access.jwt_tokens import JwtTokenService
 from bothesis.services.citation import CitationService
 from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.identity_access.role_assignments import RoleAssignmentService
+from bothesis.services.identity_access.roles import RoleService
+from bothesis.services.identity_access.users import UserService
 from bothesis.services.conversation import ConversationService
 from bothesis.services.integration_connections import IntegrationConnectionService
 from bothesis.services.integration_credential import IntegrationCredentialService
@@ -150,6 +155,82 @@ async def join_tenant(
     await RoleAssignmentService(session).replace_tenant_roles(
         user_id=user.id, tenant_id=tenant_id, role_ids=[role_id]
     )
+
+
+@pytest.mark.asyncio
+async def test_tenant_access_administration_cannot_escalate_or_lock_out_a_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Access managers cannot alter their own authority or remove the sole admin."""
+
+    async with session_factory.begin() as session:
+        identity = IdentityStoreService(session)
+        tenant = await identity.create_tenant("access-controls", "Access controls")
+        administrator = await identity.create_user("administrator@example.com")
+        operator = await identity.create_user("operator@example.com")
+        member = await identity.create_user("member@example.com")
+        await join_tenant(
+            session, administrator, tenant.id, system_role=TENANT_ADMIN_ROLE
+        )
+        await join_tenant(
+            session,
+            operator,
+            tenant.id,
+            role_code="access-operator",
+            permission_codes=(ROLE_MANAGE_PERMISSION, USER_MANAGE_PERMISSION),
+        )
+        await join_tenant(session, member, tenant.id)
+        operator_context = await identity.get_context(operator.id, tenant_id=tenant.id)
+        administrator_role_id = await session.scalar(
+            select(Role.id).where(
+                Role.code == TENANT_ADMIN_ROLE,
+                Role.is_system,
+            )
+        )
+        operator_role_id = await session.scalar(
+            select(Role.id).where(
+                Role.tenant_id == tenant.id,
+                Role.code == "access-operator",
+            )
+        )
+        assert administrator_role_id is not None
+        assert operator_role_id is not None
+
+        with pytest.raises(AdminValidationError, match="already held"):
+            await RoleService(session).create_role(
+                operator_context,
+                code="elevated",
+                display_name="Elevated",
+                permission_codes=["tenant.manage"],
+            )
+
+        with pytest.raises(AdminConflictError, match="own workspace access"):
+            await UserService(session).update_user(
+                operator_context,
+                operator.id,
+                role_ids=[administrator_role_id],
+            )
+
+        with pytest.raises(AdminConflictError, match="role they hold"):
+            await RoleService(session).update_role(
+                operator_context,
+                operator_role_id,
+                permission_codes=[USER_MANAGE_PERMISSION],
+            )
+
+        with pytest.raises(AdminValidationError, match="beyond the acting"):
+            await UserService(session).update_user(
+                operator_context,
+                member.id,
+                role_ids=[administrator_role_id],
+            )
+
+        with pytest.raises(AdminConflictError, match="last active workspace administrator"):
+            await UserService(session).update_user(
+                operator_context,
+                administrator.id,
+                status=False,
+            )
 
 
 async def grant_collection_role(

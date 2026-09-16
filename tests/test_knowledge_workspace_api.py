@@ -96,6 +96,13 @@ def test_knowledge_collection_routes_use_the_workspace_view_contract(
             calls.append(("create", values))
             return {"id": collection_id, "title": values["title"]}
 
+    class WorkspaceDocuments:
+        async def ensure_personal_collection(
+            self, caller: AuthContext
+        ) -> dict[str, object]:
+            calls.append(("ensure_personal", caller.user_id))
+            return {"id": collection_id, "title": "My uploads"}
+
     async def caller() -> AuthContext:
         return _caller()
 
@@ -110,12 +117,18 @@ def test_knowledge_collection_routes_use_the_workspace_view_contract(
         api_deps.get_admin_console_service,
         WorkspaceAdmin,
     )
+    monkeypatch.setitem(
+        api_app.app.dependency_overrides,
+        api_deps.get_workspace_document_service,
+        WorkspaceDocuments,
+    )
 
     with TestClient(api_app.app) as client:
         created = client.post(
             "/api/v1/knowledge/collections",
             json={"title": "Travel & Expense", "description": "Policies and receipts."},
         )
+        personal = client.put("/api/v1/knowledge/collections/personal")
         home = client.get("/api/v1/knowledge/collections")
         collection = client.get(
             f"/api/v1/knowledge/collections/{collection_id}",
@@ -132,9 +145,12 @@ def test_knowledge_collection_routes_use_the_workspace_view_contract(
             "metadata": {"description": "Policies and receipts."},
         },
     )
+    assert personal.status_code == 200, personal.text
+    assert personal.json() == {"id": str(collection_id), "title": "My uploads"}
+    assert calls[1][0] == "ensure_personal"
     assert home.status_code == 200, home.text
     assert home.json()["recent_documents"][0]["source"]["connector_key"] == "confluence"
     assert collection.status_code == 200, collection.text
     assert collection.json()["collection"]["id"] == str(collection_id)
-    assert calls[1][0] == "home"
-    assert calls[2] == ("collection", (collection_id, "travel", 2, 25))
+    assert calls[2][0] == "home"
+    assert calls[3] == ("collection", (collection_id, "travel", 2, 25))

@@ -7,6 +7,7 @@ import { FilterTrigger, CommandBar } from "@/components/layout/CommandBar";
 import { Avatar } from "@/components/ui/Avatar";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { CellTitle, DataTable, type Column } from "@/components/ui/DataTable";
 import { Dialog } from "@/components/ui/Dialog";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -16,6 +17,7 @@ import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Tabs } from "@/components/ui/Tabs";
 import { useRouteState } from "@/lib/hooks/useRouteState";
+import { useAuthSession } from "@/lib/hooks/useAuthSession";
 import {
   directoryApi,
   memberName,
@@ -38,6 +40,7 @@ const tabs = [
 
 export function AccessPage() {
   const [routeTab, setRouteTab] = useRouteState("tab", "members");
+  const session = useAuthSession();
   const tab = tabs.some((item) => item.id === routeTab) ? (routeTab as AccessTab) : "members";
   const members = useAdminData(() => directoryApi.members());
   const groups = useAdminData(() => directoryApi.groups());
@@ -55,13 +58,29 @@ export function AccessPage() {
 
   return <>
     <Tabs activeTab={tab} ariaLabel="Access sections" className="mb-4" onChange={setRouteTab} tabs={tabs} />
-    {tab === "members" && <MembersPanel roles={roles.data?.items ?? []} rows={members.data?.items ?? []} />}
+    {tab === "members" && (
+      <MembersPanel
+        actorUserId={session?.user_id ?? null}
+        roles={(roles.data?.items ?? []).filter((role) =>
+          role.permission_codes.every((permission) => session?.permissions.includes(permission)),
+        )}
+        rows={members.data?.items ?? []}
+      />
+    )}
     {tab === "groups" && <GroupsPanel rows={groups.data?.items ?? []} />}
     {tab === "roles" && <RolesPanel rows={roles.data?.items ?? []} />}
   </>;
 }
 
-function MembersPanel({ rows, roles }: { rows: Member[]; roles: Role[] }) {
+function MembersPanel({
+  actorUserId,
+  rows,
+  roles,
+}: {
+  actorUserId: string | null;
+  rows: Member[];
+  roles: Role[];
+}) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [open, setOpen] = useState(false);
@@ -117,16 +136,42 @@ function MembersPanel({ rows, roles }: { rows: Member[]; roles: Role[] }) {
       emptyState={<EmptyState description="Clear the filters or add a member." icon={<Users size={20} />} title="No matching members" />}
       onRowClick={setSelected}
     />
-    <MemberDialog member={selected} onClose={() => setSelected(null)} roles={roles} />
+    <MemberDialog
+      actorUserId={actorUserId}
+      member={selected}
+      onClose={() => setSelected(null)}
+      roles={roles}
+    />
     <AddMemberDialog onClose={() => setOpen(false)} open={open} roles={roles} />
   </>;
 }
 
-function MemberDialog({ member, roles, onClose }: { member: Member | null; roles: Role[]; onClose: () => void }) {
+function MemberDialog({
+  actorUserId,
+  member,
+  roles,
+  onClose,
+}: {
+  actorUserId: string | null;
+  member: Member | null;
+  roles: Role[];
+  onClose: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingRoleId, setPendingRoleId] = useState<string | null>(null);
+  const [confirmStatusChange, setConfirmStatusChange] = useState(false);
   if (!member) return null;
   const active = memberStatus(member) === "active";
+  const isCurrentUser = member.id === actorUserId;
+  const currentRoleId = member.membership.roles[0]?.id ?? "";
+  const pendingRole = roles.find((role) => role.id === pendingRoleId);
+  const roleOptions = [
+    ...(currentRoleId && !roles.some((role) => role.id === currentRoleId)
+      ? [{ value: currentRoleId, label: `${roleNames(member)} (current role)` }]
+      : []),
+    ...roles.map((role) => ({ value: role.id, label: role.display_name })),
+  ];
 
   const save = async (patch: Parameters<typeof directoryApi.saveMember>[1]) => {
     setBusy(true);
@@ -135,7 +180,9 @@ function MemberDialog({ member, roles, onClose }: { member: Member | null; roles
       await directoryApi.saveMember(member.id, patch);
       onClose();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save this member.");
+      const message = cause instanceof Error ? cause.message : "Could not save this member.";
+      setError(message);
+      throw new Error(message);
     } finally {
       setBusy(false);
     }
@@ -145,9 +192,11 @@ function MemberDialog({ member, roles, onClose }: { member: Member | null; roles
     <Dialog
       footer={<>
         <Button onClick={onClose} variant="secondary">Close</Button>
-        <Button loading={busy} onClick={() => save({ status: !active })} variant={active ? "danger" : "secondary"}>
-          {active ? "Suspend access" : "Restore access"}
-        </Button>
+        {!isCurrentUser && (
+          <Button loading={busy} onClick={() => setConfirmStatusChange(true)} variant={active ? "danger" : "secondary"}>
+            {active ? "Suspend access" : "Restore access"}
+          </Button>
+        )}
       </>}
       onClose={onClose}
       open
@@ -163,11 +212,20 @@ function MemberDialog({ member, roles, onClose }: { member: Member | null; roles
         </div>
         <label className="configuration-field">Workspace role
           <Select
-            onChange={(event) => save({ role_ids: [event.target.value] })}
-            options={roles.map((role) => ({ value: role.id, label: role.display_name }))}
-            value={member.membership.roles[0]?.id ?? ""}
+            aria-describedby={isCurrentUser ? "own-access-help" : undefined}
+            disabled={isCurrentUser}
+            onChange={(event) => {
+              if (event.target.value !== currentRoleId) setPendingRoleId(event.target.value);
+            }}
+            options={roleOptions}
+            value={currentRoleId}
           />
         </label>
+        {isCurrentUser && (
+          <p className="text-sm text-[var(--text-secondary)]" id="own-access-help">
+            Your workspace role and access can only be changed by another workspace administrator.
+          </p>
+        )}
         <div>
           <p className="mb-2 text-sm font-medium">Groups</p>
           <div className="flex flex-wrap gap-1">
@@ -178,6 +236,29 @@ function MemberDialog({ member, roles, onClose }: { member: Member | null; roles
         </div>
         {error && <ErrorState description={error} layout="inline" />}
       </div>
+      <ConfirmDialog
+        confirmLabel="Change role"
+        description={
+          <>This changes {memberName(member)}’s workspace role to <strong>{pendingRole?.display_name}</strong>.</>
+        }
+        onClose={() => setPendingRoleId(null)}
+        onConfirm={() => save({ role_ids: pendingRoleId ? [pendingRoleId] : [] })}
+        open={pendingRoleId !== null}
+        title="Change workspace role?"
+      />
+      <ConfirmDialog
+        confirmLabel={active ? "Suspend access" : "Restore access"}
+        description={
+          active
+            ? <>Suspending {memberName(member)} immediately removes their access to this workspace.</>
+            : <>Restoring {memberName(member)} lets them access this workspace again with their assigned role.</>
+        }
+        destructive={active}
+        onClose={() => setConfirmStatusChange(false)}
+        onConfirm={() => save({ status: !active })}
+        open={confirmStatusChange}
+        title={active ? "Suspend workspace access?" : "Restore workspace access?"}
+      />
     </Dialog>
   );
 }

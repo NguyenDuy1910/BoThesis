@@ -221,8 +221,13 @@ html[data-reduced-motion="true"] *::after {
 }
 
 .auth-gate {
+  display: grid;
   min-height: 100dvh;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-3);
   background: var(--surface-canvas);
+  color: var(--text-secondary);
 }
 
 .global-assistant-launcher {

@@ -30,5 +30,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }, [isPublicRoute, pathname, router, session]);
 
   if (isPublicRoute || isAuthorized) return <>{children}</>;
-  return <div aria-busy="true" aria-label="Checking access" className="auth-gate" role="status" />;
+  return (
+    <div aria-busy="true" className="auth-gate" role="status">
+      <span aria-hidden="true" className="shell__route-boundary-indicator" />
+      <span>Checking workspace access…</span>
+    </div>
+  );
 }

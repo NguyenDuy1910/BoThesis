@@ -24,6 +24,20 @@
   flex: 0 1 20rem;
 }
 
+/* Library owns the full route outlet. Keep its primary action inside the
+   viewport and let the controls form another row when the main pane narrows. */
+.document-workspace > .utility-bar {
+  min-width: 0;
+  flex-wrap: wrap;
+  overflow-x: visible;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: var(--space-3) var(--page-gutter);
+}
+
+.document-workspace > .utility-bar .utility-bar__actions {
+  max-width: 100%;
+}
+
 .utility-filter {
   position: relative;
   display: flex;
@@ -195,6 +209,18 @@
   font-weight: 600;
   letter-spacing: var(--text-tracking-caption);
   text-transform: uppercase;
+}
+
+.library-list {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+}
+
+.library-empty-state {
+  min-height: 18rem;
+  flex: 1;
+  justify-content: center;
 }
 
 .knowledge-list-heading {
@@ -1379,6 +1405,61 @@ html.dark .knowledge-app-icon {
   gap: var(--space-4);
 }
 
+/* A connector can offer a provider sign-in and a site-managed token. They are
+   alternatives, so a compact radio group is clearer than hiding one path. */
+.knowledge-setup__methods {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.knowledge-setup__methods legend {
+  margin-bottom: var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--text-size-ui);
+  font-weight: 500;
+}
+
+.knowledge-setup__methods label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  padding: var(--space-3);
+  box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.knowledge-setup__methods label:has(input:focus-visible) {
+  box-shadow: inset 0 0 0 1px var(--border-focus), 0 0 0 3px var(--focus-ring-soft);
+}
+
+.knowledge-setup__methods input {
+  margin-top: 0.1875rem;
+  accent-color: var(--accent-primary);
+}
+
+.knowledge-setup__methods strong,
+.knowledge-setup__methods small {
+  display: block;
+}
+
+.knowledge-setup__methods strong {
+  color: var(--text-primary);
+  font-size: var(--text-size-ui);
+  font-weight: 500;
+}
+
+.knowledge-setup__methods small {
+  margin-top: 0.125rem;
+  color: var(--text-tertiary);
+  font-size: var(--text-size-meta);
+  line-height: var(--text-lh-meta);
+}
+
 /* A setting that is on or off asks its question as a sentence, not a field. */
 .knowledge-setup__switch {
   display: flex;
@@ -1781,7 +1862,11 @@ html.dark .knowledge-app-icon {
   .experience-preview { position: relative; min-height: 26.25rem; }
   .document-split[data-mode="split"] { grid-template-columns: 1fr; }
   .document-split[data-mode="split"] > section:first-child { display: none; }
-  .utility-bar__search { min-width: 11.25rem; }
+  .document-workspace > .utility-bar .utility-bar__search {
+    min-width: min(100%, 11.25rem);
+    flex: 1 1 100%;
+  }
+  .document-workspace > .utility-bar .utility-bar__actions { margin-left: auto; }
   .knowledge-viewer__stage { margin-inline: 0; border-radius: 0; padding: var(--space-4) var(--space-3) var(--space-10); }
   .knowledge-paper { min-height: 0; padding: var(--space-5); }
   .knowledge-sheet table { min-width: 28rem; }

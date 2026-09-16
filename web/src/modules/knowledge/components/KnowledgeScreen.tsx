@@ -26,6 +26,7 @@ import type { WorkspaceKnowledgeDocument } from "@/modules/knowledge/workspace-r
 import { ConnectSourceFlow } from "./ConnectSourceFlow";
 import { ConnectionDetailView } from "./ConnectionDetailView";
 import { ConnectorDetail } from "./ConnectorDetail";
+import { CreateCollectionDialog } from "./CreateCollectionDialog";
 import { DocumentViewer } from "./DocumentViewer";
 import { DocumentsView } from "./DocumentsView";
 import { KnowledgeScopeSelect, KnowledgeToolbar, knowledgeTabs, type KnowledgeTab } from "./KnowledgeToolbar";
@@ -145,6 +146,7 @@ export function KnowledgeScreen() {
   // Shared accounts are administered; a personal one is the member's own. The
   // API enforces this — the interface only avoids offering what it will refuse.
   const canManageWorkspace = hasSessionPermission(session, "source.manage");
+  const canCreateCollection = hasSessionPermission(session, "item.manage");
   const { toast } = useToast();
 
   const [tabParam, setTab] = useRouteState("tab", "documents");
@@ -160,6 +162,7 @@ export function KnowledgeScreen() {
   const [expanded, setExpanded] = useState(false);
   const [selection, setSelection] = useState<string[]>([]);
   const [connecting, setConnecting] = useState<KnowledgeConnector | null>(null);
+  const [creatingCollection, setCreatingCollection] = useState(false);
   /** Set when adding knowledge to an account that is already authorized. */
   const [addingTo, setAddingTo] = useState<Connection | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
@@ -323,6 +326,11 @@ export function KnowledgeScreen() {
   /* The same four controls on every subview, so the strip keeps its shape. */
   const toolbarActions = (
     <>
+      {tab === "documents" && canCreateCollection && (
+        <Button icon={<Plus aria-hidden="true" size={16} />} onClick={() => setCreatingCollection(true)} size="sm">
+          New collection
+        </Button>
+      )}
       <Dropdown
         align="right"
         ariaLabel={`Filter ${tab === "activity" ? "activity" : tab}`}
@@ -588,6 +596,19 @@ export function KnowledgeScreen() {
         onClose={() => { setConnecting(null); setAddingTo(null); }}
         onConnected={() => { integrations.reload(); query.reload(); }}
         open={Boolean(connecting)}
+      />
+
+      <CreateCollectionDialog
+        onClose={() => setCreatingCollection(false)}
+        onCreate={async ({ title, description }) => {
+          const collection = await knowledgeActions.createCollection(title, description);
+          toast({
+            action: { label: "View collection", onClick: () => setScope(collection.title) },
+            title: `${collection.title} created`,
+            variant: "success",
+          });
+        }}
+        open={creatingCollection}
       />
 
       <ConfirmDialog

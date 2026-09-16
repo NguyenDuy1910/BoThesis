@@ -30,4 +30,8 @@ export const knowledgeApi = {
       method: "POST",
       body: JSON.stringify({ title, description }),
     }),
+  ensurePersonalCollection: () =>
+    apiRequest<{ id: string; title: string }>("/knowledge/collections/personal", {
+      method: "PUT",
+    }),
 };

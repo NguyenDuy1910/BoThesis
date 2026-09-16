@@ -80,6 +80,11 @@ export interface KnowledgeSnapshot {
  * than what the click optimistically assumed.
  */
 export const knowledgeActions = {
+  async createCollection(title: string, description?: string) {
+    const collection = await knowledgeApi.createCollection(title, description);
+    invalidateApiData();
+    return collection;
+  },
   async upload(file: File, collectionId: string) {
     await uploadCollectionFile(collectionId, file, { idempotencyKey: crypto.randomUUID() });
     invalidateApiData();

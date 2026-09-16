@@ -53,6 +53,7 @@ class RoleService:
             permission
             for permission in PERMISSION_CATALOG
             if TENANT_SCOPE in permission.scopes
+            and permission.code in actor.permission_codes
         ]
         return {
             "items": [
@@ -143,6 +144,7 @@ class RoleService:
         permission_codes: list[str],
     ) -> dict[str, Any]:
         tenant_id = require_tenant_permission(actor, ROLE_MANAGE_PERMISSION)
+        self._require_permission_ceiling(actor, permission_codes)
         try:
             role = await self._auth.create_role(
                 tenant_id,
@@ -177,7 +179,14 @@ class RoleService:
         role = await self._role(tenant_id, role_id)
         if role.is_system:
             raise AdminValidationError("a platform-defined role cannot be changed")
+        if permission_codes is not None and role.code in actor.role_codes:
+            raise AdminConflictError(
+                "an administrator cannot change permissions of a role they hold"
+            )
+        if permission_codes is not None:
+            self._require_permission_ceiling(actor, permission_codes)
         changed: list[str] = []
+        before_permissions = await self._auth.role_permissions(role.id)
         try:
             if display_name is not None:
                 role = await self._auth.update_role(
@@ -209,16 +218,23 @@ class RoleService:
             role.status = normalized_status
             changed.append("status")
         await self._session.flush()
+        current_permissions = await self._auth.role_permissions(role.id)
+        details: dict[str, Any] = {"changed_fields": changed}
+        if permission_codes is not None:
+            details["permission_codes"] = {
+                "before": list(before_permissions),
+                "after": list(current_permissions),
+            }
         await self._audit.record(
             actor,
             action="role.updated",
             resource_type="role",
             resource_id=str(role.id),
-            details={"changed_fields": changed},
+            details=details,
         )
         return _role_payload(
             role,
-            await self._auth.role_permissions(role.id),
+            current_permissions,
             await self._member_count(tenant_id, role.id),
         )
 
@@ -248,6 +264,17 @@ class RoleService:
             )
         )
         return int(count or 0)
+
+    @staticmethod
+    def _require_permission_ceiling(
+        actor: AuthContext, permission_codes: list[str]
+    ) -> None:
+        disallowed = sorted(set(permission_codes) - set(actor.permission_codes))
+        if disallowed:
+            raise AdminValidationError(
+                "roles may include only permissions already held by the acting "
+                f"administrator: {', '.join(disallowed)}"
+            )
 
 
 def _role_payload(
