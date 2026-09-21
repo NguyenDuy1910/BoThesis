@@ -101,3 +101,20 @@ requires removing public routes, DTOs, operation IDs, frontend methods, and
 tests for provider-shaped login endpoints. Internal authenticator strategy
 methods may remain only behind `SessionService`; they must not be exported as
 HTTP aliases.
+
+## Local full-access test accounts
+
+`backend/script/seed_account.py` is an idempotent local-development utility,
+not an HTTP API. It synchronizes platform-defined roles, creates the three
+`admin{1,2,3}@bothesis.local` accounts when absent, grants each
+`platform_admin`, and grants each active workspace membership plus
+`tenant_admin`. This combines platform administration with workspace data
+access without weakening the normal separation of those scopes.
+
+New accounts use `ChangeMe!123` unless `--password` is provided. Re-running
+the script preserves existing passwords; `--reset-password` is required to
+change them. If no active workspace exists, it creates `sample-workspace` so
+the accounts can establish an active authenticated workspace.
+
+The complete local reset command, `make reset-all`, runs this seeder after
+database initialization.

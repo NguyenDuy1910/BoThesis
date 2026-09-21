@@ -87,7 +87,7 @@ async def delete_current_session(claims: TokenClaims, runtime: Runtime) -> Respo
 
 def _session_response(result: AuthenticationSession) -> AuthSession:
     return AuthSession(
-        access_token=result.access_token, expires_at=result.expires_at,
+        access_token=result.access_token, token_type="bearer", expires_at=result.expires_at,
         session_id=result.session_id, user_id=result.user_id, email=result.email,
         display_name=result.display_name, active_workspace_id=result.active_tenant_id,
         permissions=list(result.permissions), platform_permissions=list(result.platform_permissions),

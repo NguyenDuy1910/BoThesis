@@ -22,7 +22,7 @@ DEV_TENANT_CODE ?= local
 DEV_USER_EMAIL ?= local-admin@bothesis.dev
 DEV_USER_IS_PLATFORM_ADMIN ?= true
 
-.PHONY: help init reset-all config services _temporal-reset db-init db-seed db-sample db-reset qdrant-init status
+.PHONY: help init reset-all config services _temporal-reset db-init db-seed db-seed-accounts db-reset qdrant-init status
 
 help: ## Show available local-development commands.
 	@echo "Enterprise Agent local development"
@@ -42,7 +42,7 @@ init: reset-all ## Initialize the complete local Enterprise Agent environment.
 	@echo "Start the API with: cd backend && uv run python main.py"
 	@echo "Start the worker with: cd backend && uv run python -m bothesis.services.workflow.worker"
 
-reset-all: _temporal-reset db-reset qdrant-init status ## Reset all databases and Qdrant, apply the current design, and seed the admin.
+reset-all: _temporal-reset db-reset db-seed-accounts qdrant-init status ## Reset all databases and Qdrant, apply the current design, and seed full-access test accounts.
 	@echo "PostgreSQL, Temporal, and Qdrant reset is complete."
 
 config: ## Create the local backend environment file and enforce local dependency endpoints.
@@ -138,13 +138,12 @@ db-seed: services ## Create or refresh the deterministic local admin identity.
 	fi; \
 	echo "Local admin identity is ready: $$user_id"
 
-db-sample: services ## Insert a realistic sample workspace for local testing.
-	@set -euo pipefail
-	@$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -q' < backend/script/sample_data.sql
-	@echo "Sample workspace data is loaded."
-
-db-reset: db-init db-seed db-sample ## Rebuild PostgreSQL from the current ORM, reseed identity, and load sample data.
+db-reset: db-init db-seed ## Rebuild PostgreSQL from the current ORM and reseed the local admin identity.
 	@echo "PostgreSQL reset is complete."
+
+db-seed-accounts: db-reset ## Seed three full-access local test accounts.
+	@set -euo pipefail
+	@cd backend && DATABASE_URL="$(LOCAL_DATABASE_URL)" uv run python script/seed_account.py
 
 qdrant-init: services ## Rebuild the derived contextual-hybrid Qdrant collection.
 	@set -euo pipefail
