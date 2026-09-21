@@ -605,6 +605,7 @@ async def test_a_document_cannot_become_its_own_authorization_boundary(
                 document_type="pdf",
                 title="Orphaned policy",
                 inherit_access=False,
+                index_status="pending",
             )
         )
         with pytest.raises(DBAPIError, match="only_collections_end_inheritance"):

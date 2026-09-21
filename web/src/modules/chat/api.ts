@@ -42,7 +42,7 @@ export async function streamAgentResponse(
       conversation_id: options.conversationId ?? null,
       history: options.history,
       attachment_ids: options.attachmentIds ?? [],
-      collection_item_ids: options.collectionItemIds ?? [],
+      collection_ids: options.collectionItemIds ?? [],
     }),
   });
   if (!response.ok || !response.body) {
@@ -78,10 +78,9 @@ export async function streamAgentResponse(
   }
 }
 
-interface DocumentUploadStartResponse {
-  upload_required: boolean;
-  target?: DocumentUploadTarget | null;
-  document: DocumentMetadataResponse;
+interface DocumentCreateResult {
+  upload?: DocumentUploadTarget | null;
+  document: DocumentResponse;
 }
 
 interface DocumentUploadTarget {
@@ -92,13 +91,12 @@ interface DocumentUploadTarget {
   expires_at: string;
 }
 
-interface DocumentMetadataResponse {
+interface DocumentResponse {
   id: string;
-  file_name: string;
+  name: string;
   content_type: string;
   size_bytes: number;
-  status: "pending" | "processing" | "ready" | "failed" | "unsupported";
-  upload_status: "pending" | "available" | "failed" | null;
+  status: "pending_content" | "available" | "failed";
 }
 
 export async function uploadConversationDocument(
@@ -112,7 +110,14 @@ export async function uploadConversationDocument(
   if (!configuration) throw new ChatConfigurationError();
   options.onProgress?.("starting");
   const identityHeaders = requestIdentityHeaders(configuration);
-  const startResponse = await fetch(`${configuration.apiUrl}/api/v1/documents/uploads`, {
+  const collectionResponse = await fetch(`${configuration.apiUrl}/api/v1/collections/personal`, {
+    method: "PUT",
+    headers: identityHeaders,
+    signal: options.signal,
+  });
+  if (!collectionResponse.ok) throw await responseError(collectionResponse, "Could not prepare document collection.");
+  const collection = await collectionResponse.json() as { id: string };
+  const startResponse = await fetch(`${configuration.apiUrl}/api/v1/collections/${encodeURIComponent(collection.id)}/documents`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -121,23 +126,21 @@ export async function uploadConversationDocument(
     },
     signal: options.signal,
     body: JSON.stringify({
-      file_name: file.name,
+      name: file.name,
       content_type: file.type || "application/octet-stream",
       size_bytes: file.size,
+      purpose: "conversation_attachment",
     }),
   });
   if (!startResponse.ok) {
     throw await responseError(startResponse, "Could not start document upload.");
   }
-  const started = await startResponse.json() as DocumentUploadStartResponse;
-  if (!started.upload_required) return documentFromResponse(started.document);
-  if (!started.target) {
-    throw new Error("Document upload did not return a storage destination.");
-  }
+  const started = await startResponse.json() as DocumentCreateResult;
+  if (!started.upload) return documentFromResponse(started.document);
 
   options.onProgress?.("uploading");
   const uploadResponse = await uploadToTarget(
-    started.target,
+    started.upload,
     file,
     options.signal,
   );
@@ -147,9 +150,9 @@ export async function uploadConversationDocument(
 
   options.onProgress?.("validating");
   const completeResponse = await fetch(
-    `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(started.document.id)}/complete`,
+    `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(started.document.id)}/content`,
     {
-      method: "POST",
+      method: "PUT",
       headers: identityHeaders,
       signal: options.signal,
     },
@@ -157,7 +160,8 @@ export async function uploadConversationDocument(
   if (!completeResponse.ok) {
     throw await responseError(completeResponse, "Could not validate the uploaded document.");
   }
-  return documentFromResponse(await completeResponse.json() as DocumentMetadataResponse);
+  const completed = await completeResponse.json() as { document: DocumentResponse };
+  return documentFromResponse(completed.document);
 }
 
 export async function releaseConversationDocument(documentId: string): Promise<void> {
@@ -316,7 +320,7 @@ function uploadIdempotencyKey(file: File): string {
   return created;
 }
 
-function documentFromResponse(value: DocumentMetadataResponse): ConversationDocument {
+function documentFromResponse(value: DocumentResponse): ConversationDocument {
   const directTypes = new Set([
     "application/pdf",
     "image/png",
@@ -329,11 +333,11 @@ function documentFromResponse(value: DocumentMetadataResponse): ConversationDocu
   );
   return {
     id: value.id,
-    fileName: value.file_name,
+    fileName: value.name,
     contentType: value.content_type,
     sizeBytes: value.size_bytes,
     mode: direct ? "direct" : "indexed",
-    status: value.upload_status === "available" ? "available" : "failed",
+    status: value.status === "available" ? "available" : "failed",
   };
 }
 

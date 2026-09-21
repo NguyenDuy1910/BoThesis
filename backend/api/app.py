@@ -11,31 +11,31 @@ from api.deps import get_runtime
 from api.errors import register_error_handlers
 from api.authentication import JwtAuthenticationMiddleware
 from api.routers import (
-    admin,
     agent,
     auth,
     artifacts,
-    connections,
+    canonical,
     documents,
     health,
-    knowledge,
-    sources,
 )
-from api.routers.planned import PLANNED_ROUTERS
 
 API_PREFIX = "/api/v1"
 
+
+def _operation_id(route) -> str:
+    """Use contract operation names instead of FastAPI's path-derived IDs."""
+    name = route.name.removesuffix("_contract")
+    if name == "health":
+        return "getHealth"
+    parts = name.split("_")
+    return parts[0] + "".join(part.title() for part in parts[1:])
+
 _ROUTERS = (
     agent.router,
-    knowledge.router,
+    canonical.router,
     documents.collections_router,
     documents.router,
     artifacts.router,
-    connections.router,
-    sources.router,
-    sources.ingestions_router,
-    admin.router,
-    *PLANNED_ROUTERS,
 )
 
 
@@ -57,6 +57,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         description="Enterprise knowledge and BI assistant.",
         lifespan=lifespan,
+        generate_unique_id_function=_operation_id,
     )
     app.state.allow_insecure_development_identity = (
         get_runtime().config.identity.allow_insecure_development_identity
@@ -75,7 +76,7 @@ def create_app() -> FastAPI:
     )
     for router in _ROUTERS:
         app.include_router(router, prefix=API_PREFIX)
-    app.include_router(auth.router, prefix="/api")
+    app.include_router(auth.router, prefix=API_PREFIX)
     app.include_router(health.router)
     return app
 

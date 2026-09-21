@@ -153,6 +153,8 @@ class IdentityConfig:
     google_client_id: str | None = None
     google_jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
     platform_admin_emails: frozenset[str] = frozenset()
+    public_tenant_code: str | None = None
+    guest_session_expires_in_seconds: int = 86_400
 
     @classmethod
     def from_environment(cls) -> IdentityConfig:
@@ -172,6 +174,10 @@ class IdentityConfig:
                 "https://www.googleapis.com/oauth2/v3/certs",
             ),
             platform_admin_emails=email_set("BOTHESIS_PLATFORM_ADMIN_EMAILS"),
+            public_tenant_code=optional_text("BOTHESIS_PUBLIC_TENANT_CODE"),
+            guest_session_expires_in_seconds=_positive_integer(
+                "BOTHESIS_GUEST_SESSION_EXPIRES_IN_SECONDS", default=86_400
+            ),
         )
 
 

@@ -13,12 +13,13 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.engine import SessionFactory
 from bothesis.db.models import (
+    AuthIdentity,
     Group,
     GroupMembership,
     Item,
@@ -57,10 +58,13 @@ class IdentityStoreService:
         self,
         email: str,
         *,
+        username: str | None = None,
+        password_hash: str | None = None,
         display_name: str | None = None,
         preferences: Mapping[str, Any] | None = None,
     ) -> User:
         normalized_email = _normalize_email(email)
+        normalized_username = _optional_username(username)
         existing = await self._session.scalar(
             select(User.id).where(User.email == normalized_email)
         )
@@ -68,15 +72,64 @@ class IdentityStoreService:
             raise IdentityConflictError(
                 f"user email already exists: {normalized_email}"
             )
+        if normalized_username is not None:
+            existing_username = await self._session.scalar(
+                select(User.id).where(func.lower(User.username) == normalized_username)
+            )
+            if existing_username is not None:
+                raise IdentityConflictError("username is already in use")
 
         user = User(
+            username=normalized_username,
             email=normalized_email,
+            password_hash=password_hash,
             display_name=_optional_text(display_name, "display name", 255),
             preferences=dict(preferences or {}),
         )
         self._session.add(user)
         await self._session.flush()
         return user
+
+    async def get_auth_identity(
+        self, issuer: str, subject: str, *, include_disabled: bool = False
+    ) -> AuthIdentity:
+        identity = await self._session.scalar(
+            select(AuthIdentity).where(
+                AuthIdentity.issuer == _required_text(issuer, "identity issuer", 2048),
+                AuthIdentity.subject == _required_text(subject, "identity subject", 2048),
+            )
+        )
+        if identity is None or (not include_disabled and identity.status != ACTIVE_STATUS):
+            raise IdentityNotFoundError("external identity not found")
+        return identity
+
+    async def create_auth_identity(
+        self,
+        user_id: UUID,
+        *,
+        protocol: str,
+        provider_key: str,
+        issuer: str,
+        subject: str,
+        email: str | None,
+        email_verified: bool | None,
+        profile: Mapping[str, Any] | None = None,
+    ) -> AuthIdentity:
+        await self.get_user(user_id)
+        identity = AuthIdentity(
+            user_id=user_id,
+            protocol=_required_text(protocol, "identity protocol", 24).casefold(),
+            provider_key=_required_text(provider_key, "identity provider", 64).casefold(),
+            issuer=_required_text(issuer, "identity issuer", 2048),
+            subject=_required_text(subject, "identity subject", 2048),
+            email=_normalize_email(email) if email is not None else None,
+            email_verified=email_verified,
+            profile=dict(profile or {}),
+            last_authenticated_at=datetime.now(UTC),
+        )
+        self._session.add(identity)
+        await self._session.flush()
+        return identity
 
     async def get_user(self, user_id: UUID, *, include_inactive: bool = False) -> User:
         user = await self._session.get(User, user_id)
@@ -92,6 +145,22 @@ class IdentityStoreService:
     ) -> User:
         user = await self._session.scalar(
             select(User).where(User.email == _normalize_email(email))
+        )
+        if user is None or (not include_inactive and not user.status):
+            raise IdentityNotFoundError("user not found")
+        return user
+
+    async def get_user_by_username(
+        self,
+        username: str,
+        *,
+        include_inactive: bool = False,
+    ) -> User:
+        normalized = _optional_username(username)
+        if normalized is None:
+            raise IdentityNotFoundError("user not found")
+        user = await self._session.scalar(
+            select(User).where(func.lower(User.username) == normalized)
         )
         if user is None or (not include_inactive and not user.status):
             raise IdentityNotFoundError("user not found")
@@ -124,6 +193,7 @@ class IdentityStoreService:
         name: str,
         *,
         settings: Mapping[str, Any] | None = None,
+        visibility: str = "private",
     ) -> Tenant:
         normalized_code = _normalize_code(code, "tenant code")
         existing = await self._session.scalar(
@@ -137,8 +207,11 @@ class IdentityStoreService:
         tenant = Tenant(
             code=normalized_code,
             name=_required_text(name, "tenant name", 255),
+            visibility=visibility,
             settings=dict(settings or {}),
         )
+        if visibility == "public":
+            tenant.public_access_role_id = await self._public_role_id()
         self._session.add(tenant)
         await self._session.flush()
         return tenant
@@ -222,6 +295,15 @@ class IdentityStoreService:
                 .returning(Role.id)
             )
             await self._replace_role_permissions(role_id, definition.permission_codes)
+            if definition.code == "guest":
+                await self._session.execute(
+                    Tenant.__table__.update()
+                    .where(
+                        Tenant.visibility == "public",
+                        Tenant.public_access_role_id.is_(None),
+                    )
+                    .values(public_access_role_id=role_id)
+                )
         await self._session.flush()
 
     async def create_role(
@@ -305,6 +387,40 @@ class IdentityStoreService:
             .order_by(RolePermission.permission_code)
         )
         return tuple(codes)
+
+    async def _public_role_id(self) -> UUID:
+        role_id = await self._session.scalar(
+            select(Role.id).where(
+                Role.code == "guest",
+                Role.scope_type == TENANT_SCOPE,
+                Role.status == ACTIVE_STATUS,
+                Role.tenant_id.is_(None),
+            )
+        )
+        if role_id is None:
+            raise IdentityNotFoundError(
+                "public access role is missing; run the system role sync"
+            )
+        return role_id
+
+    async def public_access(
+        self, tenant: Tenant
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Resolve baseline permissions without manufacturing a principal grant."""
+
+        if tenant.visibility != "public" or tenant.public_access_role_id is None:
+            raise AuthorizationError("tenant does not allow public access")
+        role = await self._session.scalar(
+            select(Role).where(
+                Role.id == tenant.public_access_role_id,
+                Role.scope_type == TENANT_SCOPE,
+                Role.status == ACTIVE_STATUS,
+                or_(Role.tenant_id.is_(None), Role.tenant_id == tenant.id),
+            )
+        )
+        if role is None:
+            raise AuthorizationError("tenant public access role is unavailable")
+        return (role.code,), await self.role_permissions(role.id)
 
     async def permissions_for_roles(
         self, role_ids: Iterable[UUID]
@@ -450,7 +566,6 @@ class IdentityStoreService:
             raise IdentityNotFoundError(f"user not found: {user_id}")
         if not user.status:
             raise IdentityInactiveError(f"user is not active: {user_id}")
-
         memberships = list(
             await self._session.scalars(
                 select(TenantMembership).where(
@@ -469,7 +584,25 @@ class IdentityStoreService:
         membership = memberships[0] if memberships else None
         if membership is None:
             if tenant_id is not None:
-                raise AuthorizationError("user is not a member of the requested tenant")
+                tenant = await self.get_tenant(tenant_id, include_inactive=True)
+                if tenant.status != ACTIVE_STATUS:
+                    raise IdentityInactiveError(f"tenant is not active: {tenant_id}")
+                if tenant.visibility != "public":
+                    raise AuthorizationError(
+                        f"user is not a member of tenant: {tenant_id}"
+                    )
+                role_codes, permission_codes = await self.public_access(tenant)
+                _, platform_permissions = await self._grants(user_id, None, ())
+                return AuthContext(
+                    user_id=user.id,
+                    email=user.email,
+                    display_name=user.display_name,
+                    tenant_id=tenant.id,
+                    permission_codes=permission_codes,
+                    group_ids=(),
+                    role_codes=role_codes,
+                    platform_permissions=platform_permissions,
+                )
             _, platform_permissions = await self._grants(user_id, None, ())
             return AuthContext(
                 user_id=user.id,
@@ -487,7 +620,6 @@ class IdentityStoreService:
         tenant = await self.get_tenant(membership.tenant_id, include_inactive=True)
         if tenant.status != ACTIVE_STATUS:
             raise IdentityInactiveError(f"tenant is not active: {membership.tenant_id}")
-
         group_ids = tuple(
             await self._session.scalars(
                 select(Group.id)
@@ -507,6 +639,12 @@ class IdentityStoreService:
             user_id, membership.tenant_id, group_ids
         )
         role_codes, permission_codes = tenant_grants
+        if tenant.visibility == "public":
+            public_roles, public_permissions = await self.public_access(tenant)
+            role_codes = tuple(sorted(set(role_codes) | set(public_roles)))
+            permission_codes = tuple(
+                sorted(set(permission_codes) | set(public_permissions))
+            )
         return AuthContext(
             user_id=user.id,
             email=user.email,
@@ -731,6 +869,17 @@ def _required_text(value: str, field_name: str, max_length: int) -> str:
         raise ValueError(f"{field_name} must not be blank")
     if len(normalized) > max_length:
         raise ValueError(f"{field_name} must be at most {max_length} characters")
+    return normalized
+
+
+def _optional_username(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().casefold()
+    if not 3 <= len(normalized) <= 64:
+        raise ValueError("username must be between 3 and 64 characters")
+    if not all(character.isalnum() or character in "._-" for character in normalized):
+        raise ValueError("username contains unsupported characters")
     return normalized
 
 

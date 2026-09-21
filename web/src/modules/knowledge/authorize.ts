@@ -1,6 +1,7 @@
 "use client";
 
 import { connectionsApi } from "@/modules/knowledge/integrations-api";
+import { getApiUrl } from "@/lib/api/config";
 
 /**
  * Authorizing an account, from the browser's side.
@@ -93,8 +94,8 @@ export function beginAuthorization(request: AuthorizationRequest): PendingAuthor
       try {
         started = await connectionsApi.startAuthorization({
           connector_key: request.connectorKey,
-          owner_type: request.ownerType,
-          integration_connection_id: request.connectionId,
+          owner_type: request.ownerType === "tenant" ? "workspace" : "user",
+          connection_id: request.connectionId,
         });
       } catch (cause) {
         popup.close();
@@ -131,9 +132,7 @@ function watch(
   resolve: (value: AuthorizationResult) => void,
   reject: (reason: Error) => void,
 ) {
-  const origin = new URL(
-    process.env.NEXT_PUBLIC_BOTHESIS_API_URL ?? window.location.origin,
-  ).origin;
+  const origin = new URL(getApiUrl() ?? window.location.origin).origin;
 
   const stop = () => {
     window.removeEventListener("message", onMessage);

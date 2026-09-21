@@ -2,16 +2,79 @@
 // PostgreSQL owns durable domain state. Raw bytes live in S3/R2. Retrieval
 // chunks, embeddings, and BM25 representation live in Qdrant.
 
-// Identity only. Everything a user may do lives in role_assignments.
+// Durable human identity only. Session lifecycle, anonymous access, device
+// state, token revocation, and expiry never live on this row.
 Table users {
   id uuid [pk]
+  username varchar(64) [note: 'Optional local-login identifier; normalized lowercase; unique by lower(username) when present']
   email varchar(255) [not null, unique]
+  password_hash varchar(256) [note: 'Scrypt password hash; plaintext is never stored']
   display_name varchar(255)
   status boolean [not null, default: true]
   preferences jsonb [not null, default: `{}`]
   last_login_at timestamptz
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
+  indexes {
+    username [unique, note: 'Implemented as partial unique lower(username) index; NULL usernames are allowed']
+  }
+}
+
+// Durable mapping from an external identity provider to one human User.
+// Provider email is profile data, never the stable login key.
+Table auth_identities {
+  id uuid [pk]
+  user_id uuid [not null]
+  protocol varchar(24) [not null, note: 'oidc | saml']
+  provider_key varchar(64) [not null, note: 'Configured provider, for example google or company-okta']
+  issuer text [not null]
+  subject text [not null]
+  email varchar(255)
+  email_verified boolean
+  status varchar(16) [not null, default: 'active', note: 'active | disabled']
+  profile jsonb [not null, default: `{}`, note: 'Non-secret normalized provider profile only']
+  last_authenticated_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (issuer, subject) [unique]
+    (user_id, status)
+    (provider_key, status)
+  }
+}
+
+// One logical access session for one tenant context. A guest has no User row.
+// Login, token rotation, or another identity transition creates a child session
+// instead of changing the session subject in place.
+Table access_sessions {
+  id uuid [pk]
+  tenant_id uuid [not null, note: 'Active tenant context; a guest must target a public tenant']
+  user_id uuid [note: 'Null for guest; required for a user session']
+  auth_identity_id uuid [note: 'External identity used to establish this user session; null for guest or legacy/internal authentication']
+  kind varchar(24) [not null, note: 'guest | user; add a typed subject FK before adding another kind']
+  authentication_method varchar(32) [not null, note: 'anonymous | oidc | saml | password | internal']
+  assurance_level varchar(16) [not null, default: 'aal0', note: 'aal0 | aal1 | aal2']
+  status varchar(16) [not null, default: 'active', note: 'active | superseded | revoked | expired']
+  token_version int [not null, default: 1, note: 'Increment to invalidate every token issued for this session']
+  parent_session_id uuid [note: 'Previous session when this row results from an identity upgrade or token rotation; multiple child sessions are allowed for concurrent renewal attempts']
+  transition_reason varchar(32) [note: 'identity_upgrade | token_rotation | tenant_switch; null for an initial session']
+  expires_at timestamptz [not null]
+  idle_expires_at timestamptz
+  last_seen_at timestamptz
+  ended_at timestamptz
+  end_reason varchar(64)
+  metadata jsonb [not null, default: `{}`, note: 'Non-secret client/device context only']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (user_id, status)
+    (auth_identity_id, status)
+    (tenant_id, kind, status)
+    parent_session_id
+    (status, expires_at)
+    (status, idle_expires_at)
+  }
+  Note: 'Checks enforce: guest means user_id and auth_identity_id are null, anonymous method, and aal0; user means user_id is set and method is not anonymous; when set, auth_identity_id must belong to user_id; parent_session_id and transition_reason are both null or both set; identity upgrades stay in the same tenant while tenant_switch may change it; non-active status requires ended_at; only active, unexpired sessions may authorize requests.'
 }
 
 Table tenants {
@@ -19,9 +82,12 @@ Table tenants {
   code varchar(64) [not null, unique]
   name varchar(255) [not null]
   status varchar(16) [not null, default: 'active']
+  visibility varchar(16) [not null, default: 'private', note: 'private | public']
+  public_access_role_id uuid [note: 'Tenant-scoped role resolved as baseline public access; required only when visibility is public']
   settings jsonb [not null, default: `{}`]
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
+  Note: 'A trigger enforces that public_access_role_id names an active tenant-scope Role available to this tenant. Private tenants cannot define public access.'
 }
 
 // A named permission bundle. tenant_id is null for platform-defined roles,
@@ -57,7 +123,7 @@ Table role_permissions {
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
   indexes { (role_id, permission_code) [pk] }
-  Note: 'Revoking a permission tombstones the row. Every read must exclude tombstones; RolePermission.granted_by is the join that does.'
+  Note: 'Revoking a permission tombstones the row. Every authorization read excludes deleted_at rows; re-adding the same permission reactivates its row.'
 }
 
 // WHO holds WHICH ROLE at WHICH SCOPE. The only authorization grant there is.
@@ -144,7 +210,8 @@ Table items {
   storage_key text [note: 'Durable object key only; no raw bytes']
   metadata jsonb [not null, default: `{}`]
   inherit_access boolean [not null, default: true, note: 'Only a Collection may end inheritance; a Document always inherits']
-  status varchar(16) [not null, default: 'pending', note: 'pending | processing | ready | failed | unsupported | deleted']
+  status varchar(16) [not null, default: 'pending', note: 'Raw resource lifecycle: pending | processing | ready | failed | unsupported | deleted']
+  index_status varchar(16) [note: 'Document-only derived search lifecycle: pending | processing | ready | failed | unsupported']
   created_by_user_id uuid
   deleted_at timestamptz
   created_at timestamptz [not null]
@@ -154,7 +221,7 @@ Table items {
     parent_item_id
     (tenant_id, status)
   }
-  Note: 'Only Collections may be roots. Parent and parent_relation are both null or both set; self-parenting is rejected. Collection children are allowed only under Collections. Document children may be Documents. Database constraints/triggers enforce same-tenant parentage, prevent cycles, and reject Document -> Collection. Only Collections carry role assignments, so only a Collection may set inherit_access to false.'
+  Note: 'Only Collections may be roots. Parent and parent_relation are both null or both set; self-parenting is rejected. Collection children are allowed only under Collections. Document children may be Documents. Database constraints/triggers enforce same-tenant parentage, prevent cycles, and reject Document -> Collection. Only Collections carry role assignments, so only a Collection may set inherit_access to false. Raw readiness and index readiness are independent.'
 }
 
 Table artifact_revisions {
@@ -208,6 +275,7 @@ Table item_uploads {
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
   indexes { (tenant_id, owner_user_id, idempotency_key) [unique] }
+  Note: 'Native uploads require an authenticated owner. Guest conversations can exist, but private upload ownership is never inferred from a guest session.'
 }
 
 Table message_items {
@@ -306,7 +374,7 @@ Table external_resources {
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
   indexes {
-    (ingestion_source_id, external_id) [unique]
+    (ingestion_source_id, external_id) [unique, note: 'Tombstoned rows are reactivated on rediscovery; this preserves stable provider identity without duplicate rows.']
     item_id
     (ingestion_source_id, last_seen_at)
   }
@@ -315,7 +383,8 @@ Table external_resources {
 Table conversations {
   id uuid [pk]
   tenant_id uuid [not null]
-  user_id uuid [not null]
+  owner_user_id uuid [note: 'Durable owner after authentication; null while conversation is guest-owned']
+  created_by_session_id uuid [not null, note: 'Immutable creation lineage and guest access boundary']
   title varchar(512)
   summary text
   summary_updated_at timestamptz
@@ -325,9 +394,11 @@ Table conversations {
   created_at timestamptz [not null]
   updated_at timestamptz [not null]
   indexes {
-    (tenant_id, user_id, updated_at)
+    (tenant_id, owner_user_id, updated_at)
+    (tenant_id, created_by_session_id, updated_at)
     (tenant_id, status)
   }
+  Note: 'Guest reads require created_by_session_id to equal the active guest session. User reads require owner_user_id to equal the active user. Identity upgrade sets owner_user_id once; created_by_session_id never changes. A trigger enforces creator-session tenant consistency.'
 }
 
 Table sandbox_sessions {
@@ -413,6 +484,7 @@ Table audit_logs {
   id uuid [pk]
   tenant_id uuid
   actor_user_id uuid
+  actor_session_id uuid [note: 'Execution session; set for guest and authenticated browser actions']
   action varchar(96) [not null]
   resource_type varchar(32) [not null]
   resource_id varchar(512)
@@ -423,11 +495,18 @@ Table audit_logs {
     (tenant_id, created_at)
     (tenant_id, action, created_at)
     (actor_user_id, created_at)
+    (actor_session_id, created_at)
     created_at
   }
 }
 
+Ref: access_sessions.tenant_id > tenants.id
+Ref: access_sessions.user_id > users.id
+Ref: access_sessions.auth_identity_id > auth_identities.id
+Ref: access_sessions.parent_session_id > access_sessions.id
+Ref: auth_identities.user_id > users.id
 Ref: roles.tenant_id > tenants.id
+Ref: tenants.public_access_role_id > roles.id
 Ref: role_permissions.role_id > roles.id
 Ref: role_permissions.permission_code > permissions.code
 Ref: role_assignments.user_id > users.id
@@ -465,7 +544,8 @@ Ref: ingestion_sources.created_by_user_id > users.id
 Ref: external_resources.item_id > items.id
 Ref: external_resources.ingestion_source_id > ingestion_sources.id
 Ref: conversations.tenant_id > tenants.id
-Ref: conversations.user_id > users.id
+Ref: conversations.owner_user_id > users.id
+Ref: conversations.created_by_session_id > access_sessions.id
 Ref: sandbox_sessions.tenant_id > tenants.id
 Ref: sandbox_sessions.conversation_id > conversations.id
 Ref: sandbox_sessions.user_id > users.id
@@ -481,3 +561,4 @@ Ref: approval_requests.decided_by_user_id > users.id
 Ref: approval_requests.requested_role_id > roles.id
 Ref: audit_logs.tenant_id > tenants.id
 Ref: audit_logs.actor_user_id > users.id
+Ref: audit_logs.actor_session_id > access_sessions.id

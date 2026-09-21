@@ -5,8 +5,8 @@ import { NotBackedYet } from "@/components/ui/NotBackedYet";
 export function PlatformPublicWorkspacesPage() {
   return (
     <NotBackedYet
-      description="Listing a workspace for discovery, and choosing the one a new signed-in person lands in, will be managed here. Workspace visibility is not part of the data model yet, so there is nothing to read or write."
-      title="Public workspaces are not stored yet"
+      description="Guest entry now uses the public workspace configured by the deployment. A platform endpoint for listing and changing public workspaces is not available yet."
+      title="Public workspace policy is deployment-managed"
     />
   );
 }

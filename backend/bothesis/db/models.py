@@ -89,19 +89,32 @@ def _text_array_column() -> Any:
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "users"
-
+    username: Mapped[str | None] = mapped_column(String(64))
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    password_hash: Mapped[str | None] = mapped_column(String(256))
     display_name: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
     preferences: Mapped[JsonObject] = _json_object_column()
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        # Local-login identifiers are compared case-insensitively, matching
+        # the migration and IdentityStore normalization rule.
+        Index(
+            "uq_users_username",
+            func.lower(username),
+            unique=True,
+            postgresql_where=username.is_not(None),
+        ),
+    )
 
     tenant_memberships: Mapped[list[TenantMembership]] = relationship(
         back_populates="user"
     )
-    conversations: Mapped[list[Conversation]] = relationship(back_populates="user")
+    auth_identities: Mapped[list[AuthIdentity]] = relationship(back_populates="user")
+    access_sessions: Mapped[list[AccessSession]] = relationship(back_populates="user")
+    conversations: Mapped[list[Conversation]] = relationship(back_populates="owner_user")
     memories: Mapped[list[Memory]] = relationship(back_populates="user")
     group_memberships: Mapped[list[GroupMembership]] = relationship(
         back_populates="user"
@@ -127,17 +140,167 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     audit_events: Mapped[list[AuditLog]] = relationship(back_populates="actor_user")
 
 
+class AuthIdentity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Stable external-provider subject linked to one durable human User."""
+
+    __tablename__ = "auth_identities"
+    __table_args__ = (
+        UniqueConstraint("issuer", "subject"),
+        Index(None, "user_id", "status"),
+        Index(None, "provider_key", "status"),
+        CheckConstraint("protocol IN ('oidc', 'saml')", name="auth_identity_protocol_is_valid"),
+        CheckConstraint("status IN ('active', 'disabled')", name="auth_identity_status_is_valid"),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    protocol: Mapped[str] = mapped_column(String(24), nullable=False)
+    provider_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    issuer: Mapped[str] = mapped_column(Text, nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(String(255))
+    email_verified: Mapped[bool | None] = mapped_column(Boolean)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+    profile: Mapped[JsonObject] = _json_object_column()
+    last_authenticated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped[User] = relationship(back_populates="auth_identities")
+    access_sessions: Mapped[list[AccessSession]] = relationship(
+        back_populates="auth_identity"
+    )
+
+
+class AccessSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One revocable guest or user security session in one tenant context."""
+
+    __tablename__ = "access_sessions"
+    __table_args__ = (
+        Index(None, "user_id", "status"),
+        Index(None, "auth_identity_id", "status"),
+        Index(None, "tenant_id", "kind", "status"),
+        Index(None, "parent_session_id"),
+        Index(None, "status", "expires_at"),
+        Index(None, "status", "idle_expires_at"),
+        CheckConstraint("kind IN ('guest', 'user')", name="access_session_kind_is_valid"),
+        CheckConstraint(
+            "authentication_method IN ('anonymous', 'oidc', 'saml', 'password', 'internal')",
+            name="access_session_auth_method_is_valid",
+        ),
+        CheckConstraint(
+            "assurance_level IN ('aal0', 'aal1', 'aal2')",
+            name="access_session_assurance_level_is_valid",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'superseded', 'revoked', 'expired')",
+            name="access_session_status_is_valid",
+        ),
+        CheckConstraint("token_version >= 1", name="access_session_token_version_is_valid"),
+        CheckConstraint(
+            "(kind = 'guest' AND user_id IS NULL AND auth_identity_id IS NULL "
+            "AND authentication_method = 'anonymous' AND assurance_level = 'aal0') OR "
+            "(kind = 'user' AND user_id IS NOT NULL "
+            "AND authentication_method <> 'anonymous')",
+            name="access_session_subject_is_complete",
+        ),
+        CheckConstraint(
+            "(parent_session_id IS NULL) = (transition_reason IS NULL)",
+            name="access_session_transition_is_complete",
+        ),
+        CheckConstraint(
+            "(status = 'active' AND ended_at IS NULL) OR "
+            "(status <> 'active' AND ended_at IS NOT NULL)",
+            name="access_session_end_is_complete",
+        ),
+    )
+
+    tenant_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
+    )
+    user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id")
+    )
+    auth_identity_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("auth_identities.id")
+    )
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    authentication_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    assurance_level: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="aal0", server_default="aal0"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+    token_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    parent_session_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("access_sessions.id")
+    )
+    transition_reason: Mapped[str | None] = mapped_column(String(32))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    idle_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    end_reason: Mapped[str | None] = mapped_column(String(64))
+    metadata_: Mapped[JsonObject] = mapped_column(
+        "metadata",
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+
+    tenant: Mapped[Tenant] = relationship(back_populates="access_sessions")
+    user: Mapped[User | None] = relationship(back_populates="access_sessions")
+    auth_identity: Mapped[AuthIdentity | None] = relationship(
+        back_populates="access_sessions"
+    )
+    parent_session: Mapped[AccessSession | None] = relationship(
+        remote_side="AccessSession.id", foreign_keys=[parent_session_id]
+    )
+    conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="created_by_session"
+    )
+    audit_events: Mapped[list[AuditLog]] = relationship(back_populates="actor_session")
+
+
 class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "tenants"
+    __table_args__ = (
+        CheckConstraint(
+            "visibility IN ('private', 'public')",
+            name="tenant_visibility_is_valid",
+        ),
+        CheckConstraint(
+            "(visibility = 'private' AND public_access_role_id IS NULL) OR "
+            "(visibility = 'public' AND public_access_role_id IS NOT NULL)",
+            name="tenant_public_access_is_complete",
+        ),
+    )
 
     code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="active", server_default="active"
     )
+    visibility: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="private", server_default="private"
+    )
+    public_access_role_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("roles.id", use_alter=True, name="fk_tenants_public_access_role_id_roles"),
+    )
     settings: Mapped[JsonObject] = _json_object_column()
 
-    roles: Mapped[list[Role]] = relationship(back_populates="tenant")
+    roles: Mapped[list[Role]] = relationship(
+        back_populates="tenant", foreign_keys="Role.tenant_id"
+    )
+    public_access_role: Mapped[Role | None] = relationship(
+        foreign_keys=[public_access_role_id], post_update=True
+    )
     memberships: Mapped[list[TenantMembership]] = relationship(back_populates="tenant")
     groups: Mapped[list[Group]] = relationship(back_populates="tenant")
     conversations: Mapped[list[Conversation]] = relationship(back_populates="tenant")
@@ -149,6 +312,7 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     approval_requests: Mapped[list[ApprovalRequest]] = relationship(back_populates="tenant")
     audit_logs: Mapped[list[AuditLog]] = relationship(back_populates="tenant")
     role_assignments: Mapped[list[RoleAssignment]] = relationship(back_populates="tenant")
+    access_sessions: Mapped[list[AccessSession]] = relationship(back_populates="tenant")
 
 
 class Role(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -199,7 +363,9 @@ class Role(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(16), nullable=False, default="active", server_default="active"
     )
 
-    tenant: Mapped[Tenant | None] = relationship(back_populates="roles")
+    tenant: Mapped[Tenant | None] = relationship(
+        back_populates="roles", foreign_keys=[tenant_id]
+    )
     grants: Mapped[list[RolePermission]] = relationship(
         back_populates="role", cascade="all, delete-orphan"
     )
@@ -329,15 +495,19 @@ class GroupMembership(TimestampMixin, Base):
 class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "conversations"
     __table_args__ = (
-        Index(None, "tenant_id", "user_id", "updated_at"),
+        Index(None, "tenant_id", "owner_user_id", "updated_at"),
+        Index(None, "tenant_id", "created_by_session_id", "updated_at"),
         Index(None, "tenant_id", "status"),
     )
 
     tenant_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False
     )
-    user_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    owner_user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id")
+    )
+    created_by_session_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("access_sessions.id"), nullable=False
     )
     title: Mapped[str | None] = mapped_column(String(512))
     summary: Mapped[str | None] = mapped_column(Text)
@@ -349,7 +519,10 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     tenant: Mapped[Tenant] = relationship(back_populates="conversations")
-    user: Mapped[User] = relationship(back_populates="conversations")
+    owner_user: Mapped[User | None] = relationship(back_populates="conversations")
+    created_by_session: Mapped[AccessSession] = relationship(
+        back_populates="conversations"
+    )
     messages: Mapped[list[Message]] = relationship(back_populates="conversation")
     memories: Mapped[list[Memory]] = relationship(back_populates="conversation")
 
@@ -613,6 +786,16 @@ class Item(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "'unsupported', 'deleted')",
             name="item_status_is_valid",
         ),
+        CheckConstraint(
+            "index_status IS NULL OR index_status IN "
+            "('pending', 'processing', 'ready', 'failed', 'unsupported')",
+            name="item_index_status_is_valid",
+        ),
+        CheckConstraint(
+            "(item_type = 'collection' AND index_status IS NULL) OR "
+            "(item_type = 'document' AND index_status IS NOT NULL)",
+            name="item_index_status_matches_type",
+        ),
         CheckConstraint("size_bytes IS NULL OR size_bytes >= 0", name="item_size_is_valid"),
         # Only a Collection can hold grants, so only a Collection can end
         # inheritance. A Document that stopped inheriting would be reachable
@@ -649,6 +832,9 @@ class Item(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending", server_default="pending"
     )
+    #: Derived-search lifecycle. A ready Item may still be waiting to be
+    #: parsed and indexed; the original resource remains independently usable.
+    index_status: Mapped[str | None] = mapped_column(String(16))
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id")
     )
@@ -1089,6 +1275,7 @@ class AuditLog(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         Index(None, "tenant_id", "created_at"),
         Index(None, "tenant_id", "action", "created_at"),
         Index(None, "actor_user_id", "created_at"),
+        Index(None, "actor_session_id", "created_at"),
         Index(None, "created_at"),
     )
 
@@ -1097,6 +1284,9 @@ class AuditLog(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
     actor_user_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id")
+    )
+    actor_session_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("access_sessions.id")
     )
     action: Mapped[str] = mapped_column(String(96), nullable=False)
     resource_type: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -1108,6 +1298,9 @@ class AuditLog(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
 
     tenant: Mapped[Tenant | None] = relationship(back_populates="audit_logs")
     actor_user: Mapped[User | None] = relationship(back_populates="audit_events")
+    actor_session: Mapped[AccessSession | None] = relationship(
+        back_populates="audit_events"
+    )
 
 
 # Cross-row hierarchy and tenant invariants cannot be represented by ordinary
@@ -1339,6 +1532,128 @@ _APPROVAL_REQUEST_TRIGGER_CREATE = DDL(
     FOR EACH ROW EXECUTE FUNCTION bothesis_validate_approval_request()"""
 ).execute_if(dialect="postgresql")
 
+_TENANT_PUBLIC_ACCESS_TRIGGER = DDL(
+    """
+    CREATE OR REPLACE FUNCTION bothesis_validate_tenant_public_access() RETURNS trigger AS $$
+    BEGIN
+      IF NEW.public_access_role_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM roles role
+        WHERE role.id = NEW.public_access_role_id
+          AND role.scope_type = 'tenant'
+          AND role.status = 'active'
+          AND (role.tenant_id IS NULL OR role.tenant_id = NEW.id)
+      ) THEN
+        RAISE EXCEPTION 'public access Role must be an active tenant-scope Role available to the tenant';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+).execute_if(dialect="postgresql")
+_TENANT_PUBLIC_ACCESS_TRIGGER_CREATE = DDL(
+    """CREATE TRIGGER trg_tenants_validate_public_access
+    BEFORE INSERT OR UPDATE OF visibility, public_access_role_id ON tenants
+    FOR EACH ROW EXECUTE FUNCTION bothesis_validate_tenant_public_access()"""
+).execute_if(dialect="postgresql")
+
+_ACCESS_SESSION_TRIGGER = DDL(
+    """
+    CREATE OR REPLACE FUNCTION bothesis_validate_access_session() RETURNS trigger AS $$
+    DECLARE
+      identity_user uuid;
+      parent_tenant uuid;
+      parent_user uuid;
+      parent_kind varchar(24);
+    BEGIN
+      IF NEW.kind = 'guest' AND NOT EXISTS (
+        SELECT 1 FROM tenants tenant
+        WHERE tenant.id = NEW.tenant_id
+          AND tenant.status = 'active'
+          AND tenant.visibility = 'public'
+          AND tenant.public_access_role_id IS NOT NULL
+      ) THEN
+        RAISE EXCEPTION 'Guest Access Session must target an active public tenant';
+      END IF;
+      IF NEW.auth_identity_id IS NOT NULL THEN
+        SELECT user_id INTO identity_user FROM auth_identities
+        WHERE id = NEW.auth_identity_id AND status = 'active';
+        IF NOT FOUND OR identity_user IS DISTINCT FROM NEW.user_id THEN
+          RAISE EXCEPTION 'Access Session identity must be active and belong to its User';
+        END IF;
+      END IF;
+      IF NEW.parent_session_id IS NULL THEN
+        RETURN NEW;
+      END IF;
+      IF NEW.parent_session_id = NEW.id THEN
+        RAISE EXCEPTION 'Access Session cannot parent itself';
+      END IF;
+      SELECT tenant_id, user_id, kind
+      INTO parent_tenant, parent_user, parent_kind
+      FROM access_sessions WHERE id = NEW.parent_session_id;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'Access Session parent must exist';
+      END IF;
+      IF NEW.transition_reason = 'identity_upgrade' THEN
+        IF parent_kind <> 'guest' OR NEW.kind <> 'user'
+           OR parent_tenant <> NEW.tenant_id THEN
+          RAISE EXCEPTION 'identity upgrade must replace a guest in the same tenant';
+        END IF;
+      ELSIF NEW.transition_reason = 'token_rotation' THEN
+        IF parent_kind <> NEW.kind OR parent_tenant <> NEW.tenant_id
+           OR parent_user IS DISTINCT FROM NEW.user_id THEN
+          RAISE EXCEPTION 'token rotation must preserve session subject and tenant';
+        END IF;
+      ELSIF NEW.transition_reason = 'tenant_switch' THEN
+        IF parent_kind <> 'user' OR NEW.kind <> 'user'
+           OR parent_user IS DISTINCT FROM NEW.user_id THEN
+          RAISE EXCEPTION 'tenant switch must preserve the User subject';
+        END IF;
+      ELSE
+        RAISE EXCEPTION 'Access Session transition reason is invalid';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+).execute_if(dialect="postgresql")
+_ACCESS_SESSION_TRIGGER_CREATE = DDL(
+    """CREATE TRIGGER trg_access_sessions_validate
+    BEFORE INSERT OR UPDATE OF tenant_id, user_id, auth_identity_id, kind, parent_session_id, transition_reason
+    ON access_sessions FOR EACH ROW EXECUTE FUNCTION bothesis_validate_access_session()"""
+).execute_if(dialect="postgresql")
+
+_CONVERSATION_SESSION_TRIGGER = DDL(
+    """
+    CREATE OR REPLACE FUNCTION bothesis_validate_conversation_session() RETURNS trigger AS $$
+    DECLARE
+      session_tenant uuid;
+      creator_user_id uuid;
+      session_kind varchar(24);
+    BEGIN
+      SELECT tenant_id, user_id, kind
+      INTO session_tenant, creator_user_id, session_kind
+      FROM access_sessions WHERE id = NEW.created_by_session_id;
+      IF NOT FOUND OR session_tenant IS DISTINCT FROM NEW.tenant_id THEN
+        RAISE EXCEPTION 'Conversation creator session must belong to its tenant';
+      END IF;
+      IF NEW.owner_user_id IS NULL AND session_kind <> 'guest' THEN
+        RAISE EXCEPTION 'Guest-owned Conversation must be created by a guest session';
+      END IF;
+      IF NEW.owner_user_id IS NOT NULL AND session_kind = 'user'
+         AND creator_user_id IS DISTINCT FROM NEW.owner_user_id THEN
+        RAISE EXCEPTION 'Conversation owner must match its creator User session';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+).execute_if(dialect="postgresql")
+_CONVERSATION_SESSION_TRIGGER_CREATE = DDL(
+    """CREATE TRIGGER trg_conversations_validate_creator_session
+    BEFORE INSERT OR UPDATE OF tenant_id, owner_user_id, created_by_session_id
+    ON conversations FOR EACH ROW EXECUTE FUNCTION bothesis_validate_conversation_session()"""
+).execute_if(dialect="postgresql")
+
 event.listen(Item.__table__, "after_create", _ITEM_PARENT_TRIGGER)
 event.listen(Item.__table__, "after_create", _ITEM_PARENT_TRIGGER_CREATE)
 event.listen(RoleAssignment.__table__, "after_create", _ROLE_ASSIGNMENT_TRIGGER)
@@ -1359,12 +1674,20 @@ event.listen(ApprovalRequest.__table__, "after_create", _APPROVAL_REQUEST_TRIGGE
 event.listen(
     ApprovalRequest.__table__, "after_create", _APPROVAL_REQUEST_TRIGGER_CREATE
 )
+event.listen(Base.metadata, "after_create", _TENANT_PUBLIC_ACCESS_TRIGGER)
+event.listen(Base.metadata, "after_create", _TENANT_PUBLIC_ACCESS_TRIGGER_CREATE)
+event.listen(Base.metadata, "after_create", _ACCESS_SESSION_TRIGGER)
+event.listen(Base.metadata, "after_create", _ACCESS_SESSION_TRIGGER_CREATE)
+event.listen(Base.metadata, "after_create", _CONVERSATION_SESSION_TRIGGER)
+event.listen(Base.metadata, "after_create", _CONVERSATION_SESSION_TRIGGER_CREATE)
 
 
 __all__ = [
     "ApprovalRequest",
+    "AccessSession",
     "ArtifactRevision",
     "AuditLog",
+    "AuthIdentity",
     "Base",
     "Citation",
     "Conversation",

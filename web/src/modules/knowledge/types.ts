@@ -129,8 +129,7 @@ export interface KnowledgeCollectionSummary {
 }
 
 export interface KnowledgeHome {
-  items: KnowledgeCollectionSummary[];
-  total: number;
+  collections: KnowledgeCollectionSummary[];
   recent_documents: KnowledgeDocumentSummary[];
   personal_collection_id?: string | null;
 }

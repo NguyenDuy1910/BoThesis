@@ -47,7 +47,8 @@ from bothesis.connector.protocol import (
 from bothesis.document_index import ContextualChunk
 from bothesis.knowledge import Evidence, ItemKnowledgeRetriever
 from api.routers import ChatRequest
-from bothesis.services import AuthContext
+from bothesis.services import AuthContext, AuthorizationError
+from bothesis.services.document_upload import DocumentUploadService
 from bothesis.services.document_presentation import (
     DocumentPresenter,
     payload_citation,
@@ -109,6 +110,20 @@ class ExposedChatTool(ToolExecutor):
         )
 
 
+def guest_access() -> AuthContext:
+    return AuthContext(
+        session_id=uuid4(),
+        session_kind="guest",
+        user_id=None,
+        email=None,
+        display_name="Guest",
+        tenant_id=uuid4(),
+        permission_codes=("collection.read", "knowledge.read"),
+        group_ids=(),
+        role_codes=("guest",),
+    )
+
+
 def test_chat_exposes_all_registered_tools() -> None:
     registry = ToolRegistry()
     registry.register(ExposedChatTool())
@@ -123,6 +138,85 @@ def test_chat_exposes_all_registered_tools() -> None:
         "exposed_chat_tool",
         "knowledge_search",
     )
+
+
+def test_guest_chat_exposes_public_safe_tools_only() -> None:
+    registry = ToolRegistry()
+    registry.register(ExposedChatTool())
+    registry.register(ExposedChatTool("knowledge_search"))
+    registry.register(ExposedChatTool("request_identity"))
+    service = ChatService(
+        session_factory=object(),  # type: ignore[arg-type]
+        agent=Agent(model=object(), tools=registry),
+        conversations=object(),  # type: ignore[arg-type]
+    )
+    access = guest_access()
+
+    assert service._available_tool_names(access=access) == (
+        "knowledge_search",
+        "request_identity",
+    )
+
+
+def test_authenticated_chat_hides_guest_identity_tool() -> None:
+    registry = ToolRegistry()
+    registry.register(ExposedChatTool("knowledge_search"))
+    registry.register(ExposedChatTool("request_identity"))
+    service = ChatService(
+        session_factory=object(),  # type: ignore[arg-type]
+        agent=Agent(model=object(), tools=registry),
+        conversations=object(),  # type: ignore[arg-type]
+    )
+
+    assert service._available_tool_names() == ("knowledge_search",)
+
+
+@pytest.mark.asyncio
+async def test_guest_cannot_create_private_upload_collection() -> None:
+    service = WorkspaceDocumentService(
+        object(),  # type: ignore[arg-type]
+        uploads=object(),  # type: ignore[arg-type]
+        presenter=object(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(AuthorizationError, match="sign in is required"):
+        await service.ensure_personal_collection(guest_access())
+
+
+@pytest.mark.asyncio
+async def test_guest_cannot_use_upload_lifecycle() -> None:
+    service = DocumentUploadService(
+        object(),  # type: ignore[arg-type]
+        object_storage=object(),  # type: ignore[arg-type]
+        ingestion_service=object(),  # type: ignore[arg-type]
+        document_source=object(),  # type: ignore[arg-type]
+        workflows=object(),  # type: ignore[arg-type]
+    )
+    access = guest_access()
+
+    with pytest.raises(AuthorizationError, match="sign in is required"):
+        await service.start_upload(
+            access,
+            idempotency_key="guest-start",
+            file_name="private.txt",
+            content_type="text/plain",
+            size_bytes=10,
+        )
+    with pytest.raises(AuthorizationError, match="sign in is required"):
+        await service.upload_to_collection(
+            access,
+            uuid4(),
+            idempotency_key="guest-collection",
+            file_name="private.txt",
+            content_type="text/plain",
+            content=object(),  # type: ignore[arg-type]
+        )
+    with pytest.raises(AuthorizationError, match="sign in is required"):
+        await service.complete_upload(access, uuid4())
+    with pytest.raises(AuthorizationError, match="sign in is required"):
+        await service.retry_indexing(access, uuid4())
+    with pytest.raises(AuthorizationError, match="sign in is required"):
+        await service.delete_document(access, uuid4())
 
 
 def test_public_chat_events_strip_provider_workspace_bindings() -> None:
@@ -191,6 +285,7 @@ def test_default_agent_composes_the_openai_transport(
     assert agent.tools.has("knowledge_search")
     assert [spec.name for spec in agent.tools.specs()] == [
         "knowledge_search",
+        "request_identity",
         "inspect_resource",
         "read_resource",
         "materialize_resource",
@@ -510,6 +605,7 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
                 "content_type": "text/plain",
                 "size_bytes": 15,
                 "status": "ready",
+                "index_status": "ready",
                 "indexed": True,
                 "upload_status": "available",
                 "created_at": now,
@@ -557,6 +653,7 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
         mime_type="text/plain",
         size_bytes=15,
         status="ready",
+        index_status="failed",
         metadata_={"file_name": "policy.txt"},
         upload=upload_record,
         created_at=now,
@@ -576,12 +673,12 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
 
         async def upload_to_collection(self, *_: Any, **__: Any) -> Any:
             self.attempts += 1
-            document.status = "failed"
+            document.index_status = "failed"
             return SimpleNamespace(item=document, created=True)
 
         async def retry_indexing(self, *_: Any, **__: Any) -> Any:
             self.attempts += 1
-            document.status = "ready"
+            document.index_status = "ready"
             document.metadata_["processing"] = {"index_schema_version": "test"}
             return document
 
@@ -611,7 +708,7 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
 
     assert result["created"] is True
     assert result["ingestion_status"] == "failed"
-    assert result["document"]["status"] == "failed"
+    assert result["document"]["status"] == "ready"
     assert result["document"]["parent_item_id"] == str(collection_id)
 
     retried = await service.retry_indexing(access, document.id)

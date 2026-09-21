@@ -43,10 +43,10 @@ from bothesis.services import (
     SOURCE_CONNECTION_REQUIRED,
     SOURCE_MANAGE_PERMISSION,
     SOURCE_READY,
-    AdminConflictError,
-    AdminExternalUnavailableError,
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneConflictError,
+    ControlPlaneExternalUnavailableError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     AuthContext,
     AuthorizationError,
     ConnectionAuthorizationRequiredError,
@@ -242,12 +242,12 @@ class IntegrationConnectionService:
         normalized_owner = _valid_owner(owner_type)
         _require_owner_permission(actor, normalized_owner)
         if definition.authentication_type == "oauth":
-            raise AdminValidationError(
+            raise ControlPlaneValidationError(
                 f"{definition.display_name} is connected by authorizing an account, "
                 "not by entering a credential"
             )
         if definition.authentication_type != "none" and not credentials:
-            raise AdminValidationError(
+            raise ControlPlaneValidationError(
                 f"{definition.display_name} credentials are required"
             )
         connection = IntegrationConnection(
@@ -374,7 +374,7 @@ class IntegrationConnectionService:
     ) -> dict[str, Any]:
         connection = await self._writable(actor, integration_connection_id)
         if connection is None:
-            raise AdminNotFoundError(
+            raise ControlPlaneNotFoundError(
                 f"integration connection not found: {integration_connection_id}"
             )
         if display_name is not None:
@@ -387,7 +387,7 @@ class IntegrationConnectionService:
             # An authorized connection is identified by its provider account;
             # renewing it means authorizing again, not pasting a secret over it.
             if connection.provider_account_id is not None:
-                raise AdminValidationError(
+                raise ControlPlaneValidationError(
                     "an authorized connection is renewed by authorizing again"
                 )
             await self._credentials().store(
@@ -418,7 +418,7 @@ class IntegrationConnectionService:
 
         connection = await self._writable(actor, integration_connection_id)
         if connection is None:
-            raise AdminNotFoundError(
+            raise ControlPlaneNotFoundError(
                 f"integration connection not found: {integration_connection_id}"
             )
         provider = self._providers.for_connector(connection.connector_key)
@@ -453,7 +453,7 @@ class IntegrationConnectionService:
     ) -> None:
         connection = await self._writable(actor, integration_connection_id)
         if connection is None:
-            raise AdminNotFoundError(
+            raise ControlPlaneNotFoundError(
                 f"integration connection not found: {integration_connection_id}"
             )
         await self.disconnect_connection(actor, connection.id)
@@ -476,7 +476,7 @@ class IntegrationConnectionService:
 
         connection = await self._writable(actor, integration_connection_id)
         if connection is None:
-            raise AdminNotFoundError(
+            raise ControlPlaneNotFoundError(
                 f"integration connection not found: {integration_connection_id}"
             )
         try:
@@ -484,16 +484,16 @@ class IntegrationConnectionService:
             connected = await runtime.test_connection()
         except ConnectionAuthorizationRequiredError:
             raise
-        except AdminValidationError:
+        except ControlPlaneValidationError:
             raise
         except Exception as exc:
             # The caller records the unhealthy state; raising here rolls this
             # transaction back, so writing it now would be writing it nowhere.
-            raise AdminExternalUnavailableError(
+            raise ControlPlaneExternalUnavailableError(
                 f"{connection.connector_key} connection validation failed: {exc}"
             ) from exc
         if not connected:
-            raise AdminExternalUnavailableError(
+            raise ControlPlaneExternalUnavailableError(
                 f"{connection.connector_key} connection validation failed: "
                 "the provider rejected these credentials"
             )
@@ -526,21 +526,21 @@ class IntegrationConnectionService:
         connection = await self._readable(actor, integration_connection_id)
         provider = self._providers.for_connector(connection.connector_key)
         if provider is None:
-            raise AdminValidationError(
+            raise ControlPlaneValidationError(
                 f"{connection.connector_key} cannot list resources"
             )
         if connection.provider_account_id is None:
             # Discovery asks the provider what an account can reach, so there
             # has to be an account. A connection configured with an API token
             # names its resource directly instead.
-            raise AdminValidationError(
+            raise ControlPlaneValidationError(
                 f"{connection.display_name} was configured with a credential "
                 "rather than an authorized account, so its resources cannot be "
                 "listed"
             )
         capability = (connector_key or connection.connector_key).strip().casefold()
         if provider.definition.capability(capability) is None:
-            raise AdminValidationError(
+            raise ControlPlaneValidationError(
                 f"{connection.display_name} does not provide {capability}"
             )
         credentials = await self._usable_credentials(connection)
@@ -554,7 +554,7 @@ class IntegrationConnectionService:
         except IntegrationAuthorizationError as exc:
             await self._require_reauthorization(connection, str(exc))
         except IntegrationError as exc:
-            raise AdminExternalUnavailableError(str(exc)) from exc
+            raise ControlPlaneExternalUnavailableError(str(exc)) from exc
         return {
             "connector_key": capability,
             "parent_id": parent_id,
@@ -623,7 +623,7 @@ class IntegrationConnectionService:
                 runtime_config, source_config, dict(credentials.values)
             )
         except ValueError as exc:
-            raise AdminValidationError(str(exc)) from exc
+            raise ControlPlaneValidationError(str(exc)) from exc
 
     async def persist_rotated_credentials(
         self, integration_connection_id: UUID, values: Mapping[str, Any]
@@ -654,12 +654,12 @@ class IntegrationConnectionService:
     @staticmethod
     def non_secret_config(values: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(values, Mapping):
-            raise AdminValidationError("integration config must be a JSON object")
+            raise ControlPlaneValidationError("integration config must be a JSON object")
         result = dict(values)
         for key, value in result.items():
             normalized_key = str(key).casefold()
             if any(term in normalized_key for term in _SECRET_KEY_TERMS):
-                raise AdminValidationError(
+                raise ControlPlaneValidationError(
                     "secret values must use Integration Credentials, not config"
                 )
             if isinstance(value, Mapping):
@@ -673,7 +673,7 @@ class IntegrationConnectionService:
 
         connection = await self._writable(actor, integration_connection_id)
         if connection is None:
-            raise AdminNotFoundError(
+            raise ControlPlaneNotFoundError(
                 f"integration connection not found: {integration_connection_id}"
             )
         return connection
@@ -709,7 +709,7 @@ class IntegrationConnectionService:
             )
         connection = await self._session.scalar(statement)
         if connection is None:
-            raise AdminNotFoundError(
+            raise ControlPlaneNotFoundError(
                 f"integration connection not found: {integration_connection_id}"
             )
         return connection
@@ -774,17 +774,17 @@ class IntegrationConnectionService:
                 select(IntegrationConnection.id).where(*filters)
             ) is None:
                 return candidate
-        raise AdminConflictError("connection display name already exists")
+        raise ControlPlaneConflictError("connection display name already exists")
 
     def _definition(self, key: str) -> ConnectorDefinition:
         try:
             return self._registry.get(key)
         except LookupError as exc:
-            raise AdminValidationError(str(exc)) from exc
+            raise ControlPlaneValidationError(str(exc)) from exc
 
     def _credentials(self) -> IntegrationCredentialService:
         if not self._credential_encryption_key:
-            raise AdminExternalUnavailableError(
+            raise ControlPlaneExternalUnavailableError(
                 "BOTHESIS_INTEGRATION_ENCRYPTION_KEY is not configured"
             )
         return IntegrationCredentialService(
@@ -835,9 +835,9 @@ class IntegrationConnectionService:
         except IntegrationAuthorizationError as exc:
             await self._require_reauthorization(connection, str(exc))
         except IntegrationConfigurationError as exc:
-            raise AdminExternalUnavailableError(str(exc)) from exc
+            raise ControlPlaneExternalUnavailableError(str(exc)) from exc
         except IntegrationError as exc:
-            raise AdminExternalUnavailableError(str(exc)) from exc
+            raise ControlPlaneExternalUnavailableError(str(exc)) from exc
         if refreshed is None:
             return stored
         await self._credentials().store(
@@ -988,14 +988,14 @@ def _require_owner_permission(actor: AuthContext, owner_type: str) -> None:
 def _valid_owner(value: str) -> str:
     normalized = value.strip().casefold()
     if normalized not in OWNER_TYPES:
-        raise AdminValidationError("connection owner_type must be user or tenant")
+        raise ControlPlaneValidationError("connection owner_type must be user or tenant")
     return normalized
 
 
 def _valid_status(value: str) -> str:
     normalized = value.strip().casefold()
     if normalized not in CONNECTION_STATUSES:
-        raise AdminValidationError("unsupported connection status")
+        raise ControlPlaneValidationError("unsupported connection status")
     return normalized
 
 

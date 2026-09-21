@@ -12,13 +12,15 @@ export interface AuthSession {
   access_token: string;
   token_type: "bearer";
   expires_at: string;
-  user_id: string;
-  email: string;
+  session_id: string;
+  user_id: string | null;
+  email: string | null;
   display_name: string | null;
   active_tenant_id: string;
   permissions: string[];
   tenants: AuthTenant[];
   platform_permissions: string[];
+  session_kind: "user" | "guest";
 }
 
 const storageKey = "bothesis.auth.session";
@@ -70,6 +72,10 @@ export function getAuthSession(): AuthSession | null {
   return getStoredAuthSession();
 }
 
+export function isGuestSession(session: AuthSession | null): boolean {
+  return session?.session_kind === "guest";
+}
+
 /** The authenticated browser session, or null when nobody is signed in. */
 export function getStoredAuthSession(): AuthSession | null {
   if (typeof window === "undefined") return null;
@@ -111,11 +117,15 @@ function isAuthSession(value: unknown): value is AuthSession {
     session.token_type === "bearer" &&
     typeof session.expires_at === "string" &&
     !Number.isNaN(Date.parse(session.expires_at)) &&
-    typeof session.user_id === "string" &&
-    typeof session.email === "string" &&
+    typeof session.session_id === "string" &&
+    session.session_id.length > 0 &&
+    (session.user_id === null || typeof session.user_id === "string") &&
+    (session.email === null || typeof session.email === "string") &&
     typeof session.active_tenant_id === "string" &&
     Array.isArray(session.permissions) &&
     Array.isArray(session.tenants) &&
-    Array.isArray(session.platform_permissions)
+    Array.isArray(session.platform_permissions) &&
+    (session.session_kind === "user" || session.session_kind === "guest") &&
+    (session.session_kind === "guest" ? session.user_id === null : typeof session.user_id === "string")
   );
 }

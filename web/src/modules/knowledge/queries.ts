@@ -43,7 +43,7 @@ export function useKnowledge() {
   const revision = useSyncExternalStore(subscribeApiData, apiRevision, () => 0);
   return useApiQuery<KnowledgeSnapshot>(async () => {
     const home = await knowledgeApi.home();
-    const collections = home.items;
+    const collections = home.collections;
     // Documents live inside Collections, so the workspace view is the union of
     // what each readable Collection holds.
     const pages = await Promise.all(

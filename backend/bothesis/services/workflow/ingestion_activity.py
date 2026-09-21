@@ -26,8 +26,8 @@ from bothesis.services.ingestion_sources import IngestionSourceService
 from bothesis.services.integration_connections import IntegrationConnectionService
 from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     InvalidDocumentStateError,
 )
 from bothesis.services.preview import KnowledgePreview
@@ -38,7 +38,7 @@ from bothesis.services.workflow import (
 )
 
 _NON_RETRYABLE_FAILURE_TYPES = frozenset(
-    {"AdminNotFoundError", "InvalidDocumentStateError", "PermissionError", "ValueError"}
+    {"ControlPlaneNotFoundError", "InvalidDocumentStateError", "PermissionError", "ValueError"}
 )
 
 
@@ -95,8 +95,8 @@ class IngestionActivity:
                 non_retryable=non_retryable,
             ) from exc
         except (
-            AdminNotFoundError,
-            AdminValidationError,
+            ControlPlaneNotFoundError,
+            ControlPlaneValidationError,
             InvalidDocumentStateError,
             PermissionError,
             ValueError,

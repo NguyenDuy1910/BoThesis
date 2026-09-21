@@ -22,6 +22,9 @@ import {
 } from "react";
 
 import { appBrand } from "@/lib/brand";
+import { useAuthPrompt } from "@/components/auth/AuthPrompt";
+import { isGuestSession } from "@/lib/auth/session";
+import { useAuthSession } from "@/lib/hooks/useAuthSession";
 import { type Collection, listCollections } from "../api";
 import type { ConversationDocument } from "../types";
 import { FileTypeIcon } from "./ResourceIcon";
@@ -71,6 +74,8 @@ export function ChatComposer({
   onSubmit,
   textareaRef,
 }: ChatComposerProps) {
+  const { requestSignIn } = useAuthPrompt();
+  const session = useAuthSession();
   const [addOpen, setAddOpen] = useState(false);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [collectionsError, setCollectionsError] = useState<string>();
@@ -239,7 +244,14 @@ export function ChatComposer({
                   <button
                     className="composer-add-popover__row"
                     disabled={attachments.length >= 12}
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={() => {
+                      if (isGuestSession(session)) {
+                        setAddOpen(false);
+                        requestSignIn("Sign in to upload a private file into this conversation.");
+                        return;
+                      }
+                      fileInputRef.current?.click();
+                    }}
                     type="button"
                   >
                     <FileUp aria-hidden="true" size={16} />

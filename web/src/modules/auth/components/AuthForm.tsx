@@ -1,12 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { Blocks, BookOpen, Bot, Check, FileText, Info, Mail, MessageSquare, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Blocks, BookOpen, Bot, Check, FileText, Info, KeyRound, MessageSquare, ShieldCheck } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 import { ProductMark } from "@/components/ui/ProductMark";
 import { appBrand } from "@/lib/brand";
-import { completeGoogleSignIn } from "@/modules/auth/api";
+import { completeGoogleSignIn, completePasswordSignIn, createPasswordAccount } from "@/modules/auth/api";
 import { renderGoogleSignInButton } from "@/modules/auth/google";
 
 const capabilities = [
@@ -24,9 +24,14 @@ const accessCommitments = [
 
 const setupSteps = ["Workspace", "Knowledge", "Apps", "Start asking"];
 
-export default function AuthForm({ mode: _mode }: { mode: "login" | "signup" }) {
+export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
+  const isSignup = mode === "signup";
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [signInError, setSignInError] = useState<string | null>(null);
+  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [password, setPassword] = useState("");
   const googleButtonHost = useRef<HTMLDivElement>(null);
 
   const signInWithGoogle = useCallback(async (credential: string) => {
@@ -40,6 +45,23 @@ export default function AuthForm({ mode: _mode }: { mode: "login" | "signup" }) 
       setIsSigningIn(false);
     }
   }, []);
+
+  const submitPassword = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setIsSigningIn(true);
+    setSignInError(null);
+    try {
+      if (isSignup) {
+        await createPasswordAccount({ username, email, password, display_name: displayName || undefined });
+      } else {
+        await completePasswordSignIn(username, password);
+      }
+      window.location.assign(loginDestination(new URLSearchParams(window.location.search).get("next")));
+    } catch (error) {
+      setSignInError(error instanceof Error ? error.message : "Sign-in could not be completed.");
+      setIsSigningIn(false);
+    }
+  }, [displayName, email, isSignup, password, username]);
 
   useEffect(() => {
     const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID?.trim();
@@ -92,13 +114,20 @@ export default function AuthForm({ mode: _mode }: { mode: "login" | "signup" }) 
         <section aria-labelledby="auth-title" className="auth-welcome__panel">
           <div className="auth-welcome__panel-mark"><ShieldCheck aria-hidden="true" size={24} strokeWidth={1.8} /></div>
           <h2 id="auth-title">Welcome to BoThesis</h2>
-          <p className="auth-welcome__panel-intro">Sign in with your work account to access the knowledge and capabilities available to your workspace.</p>
+          <p className="auth-welcome__panel-intro">{isSignup ? "Create an account to access your workspace knowledge and capabilities." : "Sign in to access the knowledge and capabilities available to your workspace."}</p>
           <div aria-busy={isSigningIn || undefined} aria-label="Continue to BoThesis with Google Workspace" className="auth-welcome__google-button" ref={googleButtonHost} />
           {isSigningIn ? <p className="auth-welcome__google-progress" role="status">Signing in…</p> : null}
           {signInError ? <p className="auth-welcome__sign-in-error" role="alert">{signInError}</p> : null}
           <div className="auth-welcome__workspace-hint"><Info aria-hidden="true" size={18} strokeWidth={1.8} /><span><strong>Use your work Google account</strong><small>Workspace access and permissions are applied after sign-in.</small></span></div>
-          <div aria-hidden="true" className="auth-welcome__divider"><span>or</span></div>
-          <button aria-disabled="true" className="auth-welcome__email-action" disabled type="button"><Mail aria-hidden="true" size={18} strokeWidth={1.8} /><span>Email sign-in is not available yet</span></button>
+          <div aria-hidden="true" className="auth-welcome__divider"><span>or use username</span></div>
+          <form className="auth-welcome__password-form" onSubmit={submitPassword}>
+            {isSignup ? <label><span>Display name</span><input autoComplete="name" onChange={(event) => setDisplayName(event.target.value)} value={displayName} /></label> : null}
+            {isSignup ? <label><span>Email</span><input autoComplete="email" onChange={(event) => setEmail(event.target.value)} required type="email" value={email} /></label> : null}
+            <label><span>Username</span><input autoCapitalize="none" autoComplete="username" onChange={(event) => setUsername(event.target.value)} required value={username} /></label>
+            <label><span>Password</span><input autoComplete={isSignup ? "new-password" : "current-password"} minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></label>
+            <button className="auth-welcome__password-submit" disabled={isSigningIn} type="submit"><KeyRound aria-hidden="true" size={17} strokeWidth={1.9} /><span>{isSignup ? "Create account" : "Sign in with username"}</span></button>
+          </form>
+          <p className="auth-welcome__switch">{isSignup ? "Already have an account?" : "New to BoThesis?"} <Link href={isSignup ? "/auth/login" : "/auth/signup"}>{isSignup ? "Sign in" : "Create an account"}</Link></p>
           <section aria-labelledby="access-title" className="auth-welcome__access"><h3 id="access-title">Your access stays governed</h3><ul>{accessCommitments.map(([title, detail]) => <li key={title}><Check aria-hidden="true" size={16} strokeWidth={2.2} /><strong>{title}</strong><small>{detail}</small></li>)}</ul></section>
           <p className="auth-welcome__terms">By continuing, you agree to your organization’s access policies and BoThesis terms.</p>
         </section>

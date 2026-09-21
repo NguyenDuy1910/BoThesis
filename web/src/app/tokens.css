@@ -129,9 +129,8 @@
      Surfaces stack canvas < nav < subtle < base < raised. Depth comes from
      this ramp plus one hairline — never from stacking borders or shadows. */
 
-  --surface-canvas: var(--palette-ivory-50);
-  /* The rail sits on the tinted canvas and the working area on white.
-     That difference is what separates them — not a heavier divider. */
+  /* Product workspace stays white; rail keeps a warm ivory tint for separation. */
+  --surface-canvas: var(--palette-ivory-0);
   --surface-nav: var(--palette-ivory-75);
   /* Figma's warm theme puts this a shade off white. In the product it carries
      skeletons, sheet tabs and inset panels, which need a step that is actually
@@ -148,16 +147,13 @@
   --surface-header: rgb(253 252 251 / 88%);
 
   --text-primary: var(--palette-warm-900);
-  /* Warm theme value is #74706a. One stop darker keeps a readable step between
-     secondary and tertiary once tertiary is raised to meet AA below. */
-  --text-secondary: var(--palette-warm-600);
-  /* Warm theme value is #9a958e, which measures 2.87:1 on the canvas — far
-     under AA, and this step carries supporting text on every row. 4.6:1. */
-  --text-tertiary: var(--palette-warm-500);
+  /* Darkened for stronger hierarchy on white surfaces and long chat sessions. */
+  --text-secondary: #4f4b47;
+  --text-tertiary: #625e59;
   /* Long-form reading. The interface ink is 15.5:1 on the chat ground, which
      is right for a label and tiring for a paragraph — a transcript is read,
      not scanned. This sits at ~10:1: still past AAA, without the glare. */
-  --text-reading: var(--palette-warm-700);
+  --text-reading: #2d2b29;
   --text-inverse: var(--palette-ivory-0);
   --text-accent: var(--palette-warm-700);
   --text-on-accent: #ffffff;

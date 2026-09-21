@@ -40,12 +40,22 @@ class ResourceRef:
     name: str
     mime_type: str
     size_bytes: int | None = None
+    #: Search readiness is deliberately distinct from byte availability.
+    index_status: str | None = None
 
     def __post_init__(self) -> None:
         if not self.id.strip() or not self.name.strip() or not self.mime_type.strip():
             raise ValueError("resource id, name, and mime type must not be blank")
         if self.size_bytes is not None and self.size_bytes < 0:
             raise ValueError("resource size must not be negative")
+        if self.index_status is not None and self.index_status not in {
+            "pending",
+            "processing",
+            "ready",
+            "failed",
+            "unsupported",
+        }:
+            raise ValueError("resource index status is invalid")
 
     @property
     def is_image(self) -> bool:

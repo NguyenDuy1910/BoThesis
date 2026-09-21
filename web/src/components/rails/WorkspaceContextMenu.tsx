@@ -1,14 +1,16 @@
 "use client";
 
-import { LogOut, Settings, ShieldCheck } from "lucide-react";
+import { LogIn, LogOut, Settings, ShieldCheck } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Dropdown, DropdownItem, DropdownSeparator } from "@/components/ui/Dropdown";
+import { useAuthPrompt } from "@/components/auth/AuthPrompt";
 import {
   clearAuthSession,
   hasAnySessionPermission,
   canAccessPlatformAdmin,
+  isGuestSession,
 } from "@/lib/auth/session";
 import { switchWorkspace } from "@/modules/auth/api";
 import { useAuthSession } from "@/lib/hooks/useAuthSession";
@@ -39,6 +41,7 @@ export function WorkspaceContextMenu({
   onNavigate?: () => void;
 }) {
   const router = useRouter();
+  const { requestSignIn } = useAuthPrompt();
   const [open, setOpen] = useState(false);
   const [accountTab, setAccountTab] = useState<"profile" | "preferences">("profile");
   const [accountOpen, setAccountOpen] = useState(false);
@@ -49,10 +52,13 @@ export function WorkspaceContextMenu({
 
   const current = session?.tenants.find((tenant) => tenant.id === session.active_tenant_id);
   const workspaceName = current?.name ?? "Workspace";
-  const userName = session?.display_name || session?.email || "Signed in";
+  const userName = isGuestSession(session)
+    ? "Guest session"
+    : session?.display_name || session?.email || "Signed in";
   const otherWorkspaces = (session?.tenants ?? []).filter((tenant) => tenant.id !== current?.id);
   const canManageWorkspace = hasAnySessionPermission(session, workspaceAdminPermissions);
   const canUsePlatformAdmin = canAccessPlatformAdmin(session);
+  const isGuest = isGuestSession(session);
 
   const changeWorkspace = async (tenantId: string) => {
     if (!session || tenantId === session.active_tenant_id) return;
@@ -71,7 +77,8 @@ export function WorkspaceContextMenu({
 
   const signOut = () => {
     clearAuthSession();
-    router.replace("/auth/login");
+    router.replace("/app");
+    router.refresh();
   };
 
   return (
@@ -127,9 +134,16 @@ export function WorkspaceContextMenu({
         </DropdownItem>
       )}
 
-      {session && (otherWorkspaces.length > 0 || canManageWorkspace || canUsePlatformAdmin) && <DropdownSeparator />}
+      {isGuest && (
+        <DropdownItem onClick={() => requestSignIn("Sign in to keep this conversation and unlock your workspace.")}>
+          <LogIn aria-hidden="true" className="h-[18px] w-[18px]" />
+          <span className="flex-1">Sign in</span>
+        </DropdownItem>
+      )}
 
-      {session && (
+      {session && !isGuest && (otherWorkspaces.length > 0 || canManageWorkspace || canUsePlatformAdmin) && <DropdownSeparator />}
+
+      {session && !isGuest && (
         <>
           <DropdownItem
             onClick={() => {
@@ -152,7 +166,7 @@ export function WorkspaceContextMenu({
         </>
       )}
 
-      {session && (
+      {session && !isGuest && (
         <>
           <DropdownSeparator />
           <DropdownItem destructive onClick={signOut}>

@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import IntegrationCredential
-from bothesis.services import AdminValidationError
+from bothesis.services import ControlPlaneValidationError
 
 #: Written in place of a secret that was revoked. An empty envelope decrypts to
 #: nothing, so every reader treats it as "no credential is configured".
@@ -40,12 +40,12 @@ class IntegrationCredentialService:
     ) -> IntegrationCredential:
         normalized_type = credential_type.strip().casefold()
         if not normalized_type or len(normalized_type) > 64:
-            raise AdminValidationError("credential type is invalid")
+            raise ControlPlaneValidationError("credential type is invalid")
         encoded = json.dumps(
             dict(payload), sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         if encoded == b"{}":
-            raise AdminValidationError("integration credentials must not be empty")
+            raise ControlPlaneValidationError("integration credentials must not be empty")
         nonce = os.urandom(12)
         encrypted = AESGCM(self._key).encrypt(
             nonce, encoded, self._associated_data(integration_connection_id)

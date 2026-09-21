@@ -22,6 +22,7 @@ from bothesis.agent.tools.materialize_resource import MaterializeResource
 from bothesis.agent.tools.materialize_sandbox_resource import MaterializeSandboxResource
 from bothesis.agent.tools.read_resource import ReadResource
 from bothesis.agent.tools.export_sandbox_file import ExportSandboxFile
+from bothesis.agent.tools.request_identity import RequestIdentity
 from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.agent.transports.openrouter_execution_capability import (
@@ -37,7 +38,7 @@ from bothesis.integrations.atlassian import AtlassianConnectionProvider
 from bothesis.integrations.google import GoogleConnectionProvider
 from bothesis.integrations.oauth_state import OAuthStateCodec
 from bothesis.integrations.registry import ConnectionProviderRegistry
-from bothesis.services.admin_console import AdminConsoleService
+from bothesis.services.workspace_control_plane import WorkspaceControlPlaneService
 from bothesis.services.integration_authorization import (
     IntegrationAuthorizationService,
 )
@@ -130,8 +131,8 @@ class AppRuntime:
             presenter=self.document_presenter(),
         )
 
-    def admin_console_service(self) -> AdminConsoleService:
-        return AdminConsoleService(
+    def workspace_control_plane_service(self) -> WorkspaceControlPlaneService:
+        return WorkspaceControlPlaneService(
             self.sessions(),
             vector_index=self._config.vector_index,
         )
@@ -209,6 +210,10 @@ class AppRuntime:
             session,
             tokens=self.jwt_token_service(),
             platform_admin_emails=self._config.identity.platform_admin_emails,
+            public_tenant_code=self._config.identity.public_tenant_code,
+            guest_session_expires_in_seconds=(
+                self._config.identity.guest_session_expires_in_seconds
+            ),
         )
 
     # -- Shared collaborators ----------------------------------------------
@@ -339,6 +344,7 @@ class AppRuntime:
                 object_storage=self.object_storage(),
                 ingestion_service=self.ingestion_service(),
                 document_source=self.stored_file_content(),
+                workflows=self.workflow_service(),
                 max_upload_bytes=upload.max_upload_bytes,
                 upload_url_seconds=upload.upload_url_seconds,
             )
@@ -427,6 +433,7 @@ class AppRuntime:
                     tracer=tracer,
                 )
             )
+            registry.register(RequestIdentity())
             registry.register(InspectResource())
             registry.register(
                 ReadResource(max_characters=agent.max_resource_read_characters)

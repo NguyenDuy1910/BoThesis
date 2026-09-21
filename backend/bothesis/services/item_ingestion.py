@@ -31,6 +31,7 @@ from bothesis.services import (
     StoredFileContent,
     DocumentProcessingError,
     DocumentUnavailableError,
+    require_user_identity,
 )
 from bothesis.services.preview import KnowledgePreview
 
@@ -40,7 +41,7 @@ log = logging.getLogger(__name__)
 class ItemIngestionService:
     """Ingest, refresh, and remove Item content for uploads and connectors.
 
-    Owns Item status transitions and citation persistence around indexing;
+    Owns Item index-status transitions and citation persistence around indexing;
     the actual indexing/search/removal work is delegated to the injected
     ItemIndex. Implements ConnectorIndexSink (write_item/write/soft_delete_item)
     directly so it can be handed straight to a ConnectorPipeline as its sink.
@@ -89,6 +90,52 @@ class ItemIngestionService:
                     {"lock_key": lock_key},
                 )
 
+    async def index_available_upload(
+        self,
+        document_id: UUID,
+        *,
+        owner_user_id: UUID,
+        tenant_id: UUID,
+        source: StoredFileContent,
+    ) -> Item:
+        """Index a durable upload from the worker after its bytes are available.
+
+        This is an internal lifecycle entry point for the native-upload
+        workflow. It verifies the immutable upload owner and tenant without
+        treating a background worker as a chat or HTTP caller. User-facing
+        requests continue through :meth:`index_upload`, which enforces the
+        caller's current Collection permission.
+        """
+
+        access = AuthContext(
+            user_id=owner_user_id,
+            email="native-upload-indexer@bothesis.internal",
+            display_name=None,
+            tenant_id=tenant_id,
+            permission_codes=(),
+            group_ids=(),
+        )
+        engine = self._require_engine()
+        lock_key = self._advisory_lock_key(document_id)
+        async with engine.connect() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_lock(:lock_key)"),
+                {"lock_key": lock_key},
+            )
+            try:
+                return await self._index_available_upload_under_lock(
+                    document_id,
+                    owner_user_id=owner_user_id,
+                    tenant_id=tenant_id,
+                    access=access,
+                    source=source,
+                )
+            finally:
+                await connection.execute(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": lock_key},
+                )
+
     async def remove_upload(
         self,
         document_id: UUID,
@@ -99,6 +146,7 @@ class ItemIngestionService:
 
         if access.tenant_id is None:
             raise DocumentUnavailableError("an active tenant is required")
+        user_id = require_user_identity(access)
         engine = self._require_engine()
         lock_key = self._advisory_lock_key(document_id)
         async with engine.connect() as connection:
@@ -111,13 +159,13 @@ class ItemIngestionService:
                     items = ItemService(session)
                     document = await items.get_owned_upload(
                         document_id,
-                        access.user_id,
+                        user_id,
                         access.tenant_id,
                         include_deleted=True,
                     )
                     if document.status == "deleted":
                         return
-                    document.status = "processing"
+                    await items.mark_index_processing(document.id)
 
                 await self._index.remove_item_content(
                     str(document_id),
@@ -143,7 +191,8 @@ class ItemIngestionService:
             item = await items.get_item(item_id, access=actor)
             if item.status == "deleted":
                 return
-            item.status = "processing"
+            if item.item_type == "document":
+                await items.mark_index_processing(item.id)
         await self._index.remove_item_content(
             str(item_id),
             tenant_id=str(actor.tenant_id),
@@ -180,7 +229,7 @@ class ItemIngestionService:
         normalized_tenant = self._validate_source(
             item, tenant_id=tenant_id, integration_connection_id=connector_id
         )
-        stored, source, _ = await self._persist_item(item, status="processing")
+        stored, source, _ = await self._persist_item(item)
         await self._persist_preview(stored)
         canonical_item, canonical_chunks = self._canonical_document(
             item,
@@ -251,7 +300,7 @@ class ItemIngestionService:
 
         try:
             async with self._session_factory.begin() as session:
-                await ItemService(session).mark_processing(stored.id)
+                await ItemService(session).mark_index_processing(stored.id)
             if item.id != str(stored.id):
                 raise ValueError("canonical item does not match the stored document")
             if any(chunk.item_id != item.id for chunk in chunks):
@@ -273,11 +322,11 @@ class ItemIngestionService:
                         stored.id,
                         {"processing": dict(processing_metadata)},
                     )
-                await items.mark_ready(stored.id)
+                await items.mark_index_ready(stored.id)
             return count
         except Exception:
             async with self._session_factory.begin() as session:
-                await ItemService(session).mark_failed(stored.id)
+                await ItemService(session).mark_index_failed(stored.id)
             raise
 
     async def aclose(self) -> None:
@@ -297,14 +346,56 @@ class ItemIngestionService:
             access=access,
             permission=COLLECTION_UPDATE_PERMISSION,
         )
+        assert access.tenant_id is not None
+        await self._index_loaded_upload(
+            document,
+            access=access,
+            tenant_id=access.tenant_id,
+            source=source,
+        )
+        return await self._load_upload(document.id, access=access)
+
+    async def _index_available_upload_under_lock(
+        self,
+        document_id: UUID,
+        *,
+        owner_user_id: UUID,
+        tenant_id: UUID,
+        access: AuthContext,
+        source: StoredFileContent,
+    ) -> Item:
+        document = await self._load_owned_available_upload(
+            document_id,
+            owner_user_id=owner_user_id,
+            tenant_id=tenant_id,
+        )
+        await self._index_loaded_upload(
+            document,
+            access=access,
+            tenant_id=tenant_id,
+            source=source,
+        )
+        return await self._load_owned_available_upload(
+            document_id,
+            owner_user_id=owner_user_id,
+            tenant_id=tenant_id,
+        )
+
+    async def _index_loaded_upload(
+        self,
+        document: Item,
+        *,
+        access: AuthContext,
+        tenant_id: UUID,
+        source: StoredFileContent,
+    ) -> None:
         if self._index_is_current(document):
-            return document
+            return
         try:
             canonical = await source.canonicalize(document, access=access)
-            assert access.tenant_id is not None
         except Exception as exc:
             async with self._session_factory.begin() as session:
-                await ItemService(session).mark_failed(document.id)
+                await ItemService(session).mark_index_failed(document.id)
             if isinstance(exc, DocumentProcessingError):
                 raise
             raise DocumentProcessingError("document canonicalization failed") from exc
@@ -315,7 +406,7 @@ class ItemIngestionService:
             canonical.item,
             canonical.chunks,
             context=IndexingContext(
-                tenant_id=str(access.tenant_id),
+                tenant_id=str(tenant_id),
                 collection_item_id=str(document.parent_item_id),
                 parent_item_id=str(document.parent_item_id),
                 document_type=document.document_type or "plain_text",
@@ -323,7 +414,6 @@ class ItemIngestionService:
             ),
             processing_metadata=self._upload_processing_metadata(document),
         )
-        return await self._load_upload(document.id, access=access)
 
     async def _load_upload(
         self,
@@ -345,13 +435,31 @@ class ItemIngestionService:
                 raise DocumentUnavailableError("document content is not available")
             return document
 
+    async def _load_owned_available_upload(
+        self,
+        document_id: UUID,
+        *,
+        owner_user_id: UUID,
+        tenant_id: UUID,
+    ) -> Item:
+        async with self._session_factory() as session:
+            document = await ItemService(session).get_owned_upload(
+                document_id,
+                owner_user_id,
+                tenant_id,
+            )
+            assert document.upload is not None
+            if document.upload.status != "available":
+                raise DocumentUnavailableError("document content is not available")
+            return document
+
     def _index_is_current(self, document: Item) -> bool:
         processing = document.metadata_.get("processing")
         if not isinstance(processing, Mapping):
             return False
         signature = self._index.current_processing_signature()
         return (
-            document.status == "ready"
+            document.index_status == "ready"
             and processing.get("provider_version") == self._provider_version(document)
             and processing.get("parser_version") == PARSER_VERSION
             and processing.get("chunker_version") == CHUNKER_VERSION
@@ -404,7 +512,7 @@ class ItemIngestionService:
     # ---- Connector-flow internals ----
 
     async def _persist_item(
-        self, item: AnyItem, *, status: str | None = None
+        self, item: AnyItem
     ) -> tuple[Item, IngestionSource, ExternalResource]:
         original = item.original if isinstance(item, DocumentItem) else None
         metadata = {
@@ -460,7 +568,7 @@ class ItemIngestionService:
                 size_bytes=original.size_bytes if original is not None else None,
                 metadata=metadata,
                 storage_key=original.key if original is not None else None,
-                status=status or "ready",
+                status="ready",
             )
             external_resource = await session.scalar(
                 select(ExternalResource).where(

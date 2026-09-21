@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "title": "Enterprise Agent canonical Item and storage ownership",
   "status": "implemented",
   "ownership": {
@@ -10,11 +10,18 @@
     "knowledge": "permission filtering, retrieval, reranking, and evidence",
     "agent": "reasoning over grounded evidence"
   },
+  "identity_entities": {
+    "users": "durable human identities only",
+    "auth_identities": "external issuer and subject mapping to Users",
+    "access_sessions": "tenant-scoped guest/user security sessions with expiry, revocation, and transition lineage",
+    "guest_upgrade": "child User session supersedes Guest session and claims guest conversations without changing creation lineage"
+  },
   "canonical_entities": {
     "items": ["collection", "document"],
     "hierarchy": "parent_item_id",
     "object_metadata": ["storage_key", "mime_type", "size_bytes"],
-    "lifecycle": ["pending", "processing", "ready", "failed", "unsupported", "deleted"]
+    "lifecycle": ["pending", "processing", "ready", "failed", "unsupported", "deleted"],
+    "index_lifecycle": ["pending", "processing", "ready", "failed", "unsupported"]
   },
   "integration_entities": {
     "integration_connections": "reusable connector configuration",
@@ -25,7 +32,8 @@
     "execution_history": "Temporal"
   },
   "upload_entities": {
-    "item_uploads": "native upload idempotency and lifecycle without external-resource tracking"
+    "item_uploads": "native upload idempotency and lifecycle without external-resource tracking",
+    "native_upload_indexing": "Temporal dispatch of the existing Item indexing pipeline after durable file availability"
   },
   "chat_entities": {
     "message_items": ["attachment", "reference", "output"]

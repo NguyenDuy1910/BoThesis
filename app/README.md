@@ -27,7 +27,8 @@ List connected device identifiers with `flutter devices`.
 
 The temporary API default uses this development Mac's Bonjour hostname,
 `http://Nguyens-MacBook-Pro.local:8000`, and the identity defaults match
-`web/.env.local`. Use the `BOTHESIS_API_URL` override on another Mac. Plain HTTP
+the deterministic local WebUI defaults. Use the `BOTHESIS_API_URL` override on
+another Mac. Plain HTTP
 and local-network access are enabled for development in `ios/Runner/Info.plist`;
 production builds should use HTTPS and tighten the App Transport Security
 policy.

@@ -36,8 +36,8 @@ init: reset-all ## Initialize the complete local Enterprise Agent environment.
 	@echo "  Qdrant:    $(LOCAL_QDRANT_URL)/dashboard"
 	@echo "  MinIO:     http://127.0.0.1:9001"
 	@echo "  Temporal:  $(LOCAL_TEMPORAL_UI)"
-	@echo "  Tenant ID: $$(sed -n 's/^NEXT_PUBLIC_BOTHESIS_TENANT_ID=//p' web/.env.local | tail -n 1)"
-	@echo "  User ID:   $$(sed -n 's/^NEXT_PUBLIC_BOTHESIS_USER_ID=//p' web/.env.local | tail -n 1)"
+	@echo "  Tenant ID: $(DEV_TENANT_ID)"
+	@echo "  User ID:   $(DEV_USER_ID)"
 	@echo
 	@echo "Start the API with: cd backend && uv run python main.py"
 	@echo "Start the worker with: cd backend && uv run python -m bothesis.services.workflow.worker"
@@ -45,10 +45,9 @@ init: reset-all ## Initialize the complete local Enterprise Agent environment.
 reset-all: _temporal-reset db-reset qdrant-init status ## Reset all databases and Qdrant, apply the current design, and seed the admin.
 	@echo "PostgreSQL, Temporal, and Qdrant reset is complete."
 
-config: ## Create missing local environment files and enforce local dependency endpoints.
+config: ## Create the local backend environment file and enforce local dependency endpoints.
 	@set -euo pipefail
 	@if [[ ! -f backend/.env ]]; then cp backend/.env.example backend/.env; fi
-	@if [[ ! -f web/.env.local ]]; then cp web/.env.example web/.env.local; fi
 	@update_env() { \
 		local file="$$1" key="$$2" value="$$3" temp_file; \
 		temp_file="$$(mktemp)"; \
@@ -89,8 +88,8 @@ config: ## Create missing local environment files and enforce local dependency e
 	remove_env backend/.env BOTHESIS_PLUGIN_ENCRYPTION_KEY; \
 	remove_env backend/.env BOTHESIS_CONNECTOR_ENCRYPTION_KEY; \
 	update_env backend/.env BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY true; \
-	update_env web/.env.local NEXT_PUBLIC_BOTHESIS_API_URL http://127.0.0.1:8000
-	@echo "Configured local backend and WebUI environment files."
+	update_env backend/.env BOTHESIS_PUBLIC_TENANT_CODE "$(DEV_TENANT_CODE)"
+	@echo "Configured the local backend environment file."
 
 services: config ## Start PostgreSQL, Qdrant, object storage, and Temporal.
 	@set -euo pipefail
@@ -130,21 +129,13 @@ db-init: services ## Apply the current database design and the permission/system
 
 db-seed: services ## Create or refresh the deterministic local admin identity.
 	@set -euo pipefail
-	@tenant_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO tenants (id, code, name, status, settings) VALUES ('$(DEV_TENANT_ID)', '$(DEV_TENANT_CODE)', 'Enterprise Agent Local', 'active', '{}'::jsonb) ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, status = 'active', updated_at = now() RETURNING id" )"; \
+	@tenant_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO tenants (id, code, name, status, visibility, public_access_role_id, settings) SELECT '$(DEV_TENANT_ID)', '$(DEV_TENANT_CODE)', 'Enterprise Agent Local', 'active', 'public', role.id, '{}'::jsonb FROM roles role WHERE role.tenant_id IS NULL AND role.code = 'guest' AND role.status = 'active' ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, status = 'active', visibility = 'public', public_access_role_id = EXCLUDED.public_access_role_id, updated_at = now() RETURNING id" )"; \
 	user_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO users (id, email, display_name, status, preferences) VALUES ('$(DEV_USER_ID)', '$(DEV_USER_EMAIL)', 'Local Administrator', true, '{}'::jsonb) ON CONFLICT (email) DO UPDATE SET display_name = EXCLUDED.display_name, status = true, updated_at = now() RETURNING id" )"; \
 	$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO tenant_memberships (user_id, tenant_id, status, joined_at, deleted_at) VALUES ('$$user_id', '$$tenant_id', 'active', now(), NULL) ON CONFLICT (user_id, tenant_id) DO UPDATE SET status = 'active', deleted_at = NULL" >/dev/null; \
 	$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO role_assignments (id, user_id, role_id, tenant_id) SELECT '$(DEV_TENANT_ADMIN_ASSIGNMENT_ID)', '$$user_id', role.id, '$$tenant_id' FROM roles role WHERE role.is_system AND role.code = 'tenant_admin' ON CONFLICT DO NOTHING" >/dev/null; \
 	if [[ "$(DEV_USER_IS_PLATFORM_ADMIN)" == "true" ]]; then \
 		$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO role_assignments (id, user_id, role_id) SELECT '$(DEV_PLATFORM_ADMIN_ASSIGNMENT_ID)', '$$user_id', role.id FROM roles role WHERE role.is_system AND role.code = 'platform_admin' ON CONFLICT DO NOTHING" >/dev/null; \
 	fi; \
-	update_env() { \
-		local file="$$1" key="$$2" value="$$3" temp_file; \
-		temp_file="$$(mktemp)"; \
-		awk -v key="$$key" -v value="$$value" 'BEGIN { found = 0 } $$0 ~ "^" key "=" { print key "=" value; found = 1; next } { print } END { if (!found) print key "=" value }' "$$file" > "$$temp_file"; \
-		mv "$$temp_file" "$$file"; \
-	}; \
-	update_env web/.env.local NEXT_PUBLIC_BOTHESIS_TENANT_ID "$$tenant_id"; \
-	update_env web/.env.local NEXT_PUBLIC_BOTHESIS_USER_ID "$$user_id"; \
 	echo "Local admin identity is ready: $$user_id"
 
 db-sample: services ## Insert a realistic sample workspace for local testing.

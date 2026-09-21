@@ -26,8 +26,8 @@ from bothesis.integrations.oauth_state import OAuthStateCodec
 from bothesis.integrations.registry import ConnectionProviderRegistry
 from bothesis.services import (
     OWNER_TENANT,
-    AdminExternalUnavailableError,
-    AdminValidationError,
+    ControlPlaneExternalUnavailableError,
+    ControlPlaneValidationError,
     AuthContext,
     AuthorizationError,
     AuthorizationStart,
@@ -54,12 +54,12 @@ class IntegrationAuthorizationService:
         """The single origin the callback page is allowed to talk back to."""
 
         if not self._client_origin:
-            raise AdminExternalUnavailableError(
+            raise ControlPlaneExternalUnavailableError(
                 "BOTHESIS_INTEGRATION_OAUTH_CLIENT_ORIGIN is not configured"
             )
         parsed = urlparse(self._client_origin)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise AdminExternalUnavailableError(
+            raise ControlPlaneExternalUnavailableError(
                 "BOTHESIS_INTEGRATION_OAUTH_CLIENT_ORIGIN must be an absolute origin"
             )
         return f"{parsed.scheme}://{parsed.netloc}"
@@ -101,7 +101,7 @@ class IntegrationAuthorizationService:
                 nonce=pending.nonce,
             )
         except IntegrationConfigurationError as exc:
-            raise AdminExternalUnavailableError(str(exc)) from exc
+            raise ControlPlaneExternalUnavailableError(str(exc)) from exc
 
     def read_state(self, state: str) -> CompletedAuthorization:
         """Recover the identity that started an authorization from its state."""
@@ -109,9 +109,9 @@ class IntegrationAuthorizationService:
         try:
             pending = self._state.read(state)
         except IntegrationConfigurationError as exc:
-            raise AdminExternalUnavailableError(str(exc)) from exc
+            raise ControlPlaneExternalUnavailableError(str(exc)) from exc
         except IntegrationAuthorizationError as exc:
-            raise AdminValidationError(str(exc)) from exc
+            raise ControlPlaneValidationError(str(exc)) from exc
         try:
             return CompletedAuthorization(
                 pending=pending,
@@ -122,7 +122,7 @@ class IntegrationAuthorizationService:
                 ),
             )
         except ValueError as exc:
-            raise AdminValidationError("authorization state is invalid") from exc
+            raise ControlPlaneValidationError("authorization state is invalid") from exc
 
     async def exchange(
         self, completed: CompletedAuthorization, *, code: str
@@ -131,26 +131,26 @@ class IntegrationAuthorizationService:
 
         provider = self._provider(completed.pending.connector_key)
         if provider.definition.key != completed.pending.provider_key:
-            raise AdminValidationError("authorization state does not match its provider")
+            raise ControlPlaneValidationError("authorization state does not match its provider")
         try:
             return await provider.exchange(
                 code=code, code_verifier=completed.pending.code_verifier
             )
         except IntegrationConfigurationError as exc:
-            raise AdminExternalUnavailableError(str(exc)) from exc
+            raise ControlPlaneExternalUnavailableError(str(exc)) from exc
         except IntegrationAuthorizationError as exc:
-            raise AdminValidationError(str(exc)) from exc
+            raise ControlPlaneValidationError(str(exc)) from exc
         except IntegrationError as exc:
-            raise AdminExternalUnavailableError(str(exc)) from exc
+            raise ControlPlaneExternalUnavailableError(str(exc)) from exc
 
     def _provider(self, connector_key: str) -> ConnectionProvider:
         provider = self._providers.for_connector(connector_key)
         if provider is None:
-            raise AdminValidationError(
+            raise ControlPlaneValidationError(
                 f"{connector_key} is not connected by authorizing an account"
             )
         if not provider.configured:
-            raise AdminExternalUnavailableError(
+            raise ControlPlaneExternalUnavailableError(
                 f"{provider.definition.display_name} authorization is not configured "
                 "in this deployment"
             )

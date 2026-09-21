@@ -35,9 +35,11 @@ from bothesis.services import (
     AuthContext,
     DocumentNotFoundError,
     InvalidDocumentStateError,
+    conversation_access_filter,
 )
 
 _ITEM_STATUSES = {"pending", "processing", "ready", "failed", "unsupported", "deleted"}
+_INDEX_STATUSES = {"pending", "processing", "ready", "failed", "unsupported"}
 _PARENT_RELATIONS = {"contains", "child", "attachment", "embedded"}
 
 
@@ -88,6 +90,7 @@ class ItemService:
             metadata_=dict(metadata or {}),
             inherit_access=bool(inherit_access),
             status="ready",
+            index_status=None,
             created_by_user_id=created_by_user_id,
         )
         self._session.add(item)
@@ -128,6 +131,7 @@ class ItemService:
             storage_key=_optional_text(storage_key),
             metadata_=dict(metadata or {}),
             status=_item_status(status),
+            index_status="pending",
             created_by_user_id=created_by_user_id,
         )
         self._session.add(item)
@@ -206,6 +210,7 @@ class ItemService:
                 metadata_={"system_kind": system_kind},
                 inherit_access=False,
                 status="ready",
+                index_status=None,
                 created_by_user_id=owner_user_id,
             )
             .on_conflict_do_nothing(index_elements=[Item.id])
@@ -329,6 +334,7 @@ class ItemService:
                 storage_key=storage_key,
                 metadata_={**dict(metadata or {}), "file_name": file_name},
                 status="pending",
+                index_status="pending",
                 created_by_user_id=owner_user_id,
             )
             .on_conflict_do_nothing(index_elements=[Item.id])
@@ -436,6 +442,7 @@ class ItemService:
                 "storage_key": _optional_text(storage_key),
                 "metadata_": dict(metadata or {}),
                 "status": _item_status(status),
+                "index_status": "pending",
                 "deleted_at": None,
             }
             await self._validate_parent(
@@ -631,6 +638,7 @@ class ItemService:
         if item.upload.status not in {"pending", "failed"}:
             raise InvalidDocumentStateError("item is not awaiting uploaded content")
         item.status = "ready"
+        item.index_status = "pending"
         item.upload.status = "available"
         item.upload.error_code = None
         item.upload.uploaded_at = datetime.now(UTC)
@@ -654,6 +662,7 @@ class ItemService:
         item.upload.status = "failed"
         item.upload.error_code = _required_text(error_code, "upload error code", max_length=128)
         item.status = "failed"
+        item.index_status = "failed"
         await self._session.flush()
         return item
 
@@ -663,14 +672,14 @@ class ItemService:
         await self._session.flush()
         return item
 
-    async def mark_processing(self, item_id: UUID) -> Item:
-        return await self._set_status(item_id, "processing")
+    async def mark_index_processing(self, item_id: UUID) -> Item:
+        return await self._set_index_status(item_id, "processing")
 
-    async def mark_ready(self, item_id: UUID) -> Item:
-        return await self._set_status(item_id, "ready")
+    async def mark_index_ready(self, item_id: UUID) -> Item:
+        return await self._set_index_status(item_id, "ready")
 
-    async def mark_failed(self, item_id: UUID) -> Item:
-        return await self._set_status(item_id, "failed")
+    async def mark_index_failed(self, item_id: UUID) -> Item:
+        return await self._set_index_status(item_id, "failed")
 
     async def link_message(
         self,
@@ -689,8 +698,8 @@ class ItemService:
             .join(Conversation, Conversation.id == Message.conversation_id)
             .where(
                 Message.id == message_id,
-                Conversation.user_id == access.user_id,
                 Conversation.tenant_id == access.tenant_id,
+                conversation_access_filter(access),
             )
         )
         if message_exists is None:
@@ -729,11 +738,13 @@ class ItemService:
         await self._session.flush()
         return item
 
-    async def _set_status(self, item_id: UUID, status: str) -> Item:
+    async def _set_index_status(self, item_id: UUID, status: str) -> Item:
         item = await self._get_internal(item_id)
         if item.status == "deleted":
             raise InvalidDocumentStateError("cannot update a deleted item")
-        item.status = _item_status(status)
+        if item.item_type != "document":
+            raise InvalidDocumentStateError("only documents have an index lifecycle")
+        item.index_status = _index_status(status)
         await self._session.flush()
         return item
 
@@ -835,6 +846,13 @@ def _item_status(value: str) -> str:
     normalized = value.strip().casefold()
     if normalized not in _ITEM_STATUSES:
         raise ValueError("invalid item status")
+    return normalized
+
+
+def _index_status(value: str) -> str:
+    normalized = _required_text(value, "index status", max_length=16).casefold()
+    if normalized not in _INDEX_STATUSES:
+        raise ValueError(f"unsupported index status: {value}")
     return normalized
 
 

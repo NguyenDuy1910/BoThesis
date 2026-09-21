@@ -30,9 +30,9 @@ from bothesis.integrations.atlassian import AtlassianConnectionProvider
 from bothesis.integrations.oauth_state import OAuthStateCodec
 from bothesis.integrations.registry import ConnectionProviderRegistry
 from bothesis.services import (
-    AdminConflictError,
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneConflictError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     AuthContext,
     AuthorizationError,
     ConnectionAuthorizationRequiredError,
@@ -445,7 +445,7 @@ async def test_a_source_cannot_run_while_its_connection_is_disconnected(
             actor, UUID(connection["id"])
         )
 
-        with pytest.raises(AdminNotFoundError, match="runnable ingestion source"):
+        with pytest.raises(ControlPlaneNotFoundError, match="runnable ingestion source"):
             await _sources(session).runtime_for_source(UUID(source["id"]))
 
 
@@ -498,7 +498,7 @@ async def test_one_persons_connection_is_invisible_to_another(
 
         # Even a source manager does not inherit someone else's personal account.
         assert (await _connections(session).list_connections(intruder))["total"] == 0
-        with pytest.raises(AdminNotFoundError):
+        with pytest.raises(ControlPlaneNotFoundError):
             await _connections(session).get_connection(
                 intruder, UUID(connection["id"])
             )
@@ -513,7 +513,7 @@ async def test_a_connection_from_another_workspace_is_not_reachable(
         second, _ = await _workspace(session)
         connection = await _authorize(session, first)
 
-        with pytest.raises(AdminNotFoundError):
+        with pytest.raises(ControlPlaneNotFoundError):
             await _connections(session).get_connection(second, UUID(connection["id"]))
         assert (await _connections(session).list_connections(second))["total"] == 0
 
@@ -535,7 +535,7 @@ async def test_the_same_space_cannot_be_synchronized_twice(
                 external_resource_id="ENG",
             )
 
-        with pytest.raises(AdminConflictError, match="already synchronized"):
+        with pytest.raises(ControlPlaneConflictError, match="already synchronized"):
             await _sources(session).create_source(
                 actor,
                 UUID(connection["id"]),
@@ -574,7 +574,7 @@ async def test_state_from_another_deployment_is_refused(
             client_origin="https://app.example",
         ).start(actor, connector_key="confluence", owner_type="tenant")
 
-        with pytest.raises(AdminValidationError, match="invalid"):
+        with pytest.raises(ControlPlaneValidationError, match="invalid"):
             _authorization().read_state(_state_from(forged.authorization_url))
 
 

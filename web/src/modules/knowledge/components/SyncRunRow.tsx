@@ -62,7 +62,7 @@ export function SyncRunRow({
       {failed && (
         <details className="knowledge-run__technical">
           <summary>Technical details</summary>
-          <code>{run.workflow_id}</code>
+          <code>{run.id}</code>
         </details>
       )}
     </li>

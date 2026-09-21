@@ -20,7 +20,7 @@ export async function adminRequest<T>(
   init: RequestInit = {},
 ): Promise<T> {
   try {
-    return await apiRequest<T>(`/admin${path.startsWith("/") ? path : `/${path}`}`, init);
+    return await apiRequest<T>(path.startsWith("/") ? path : `/${path}`, init);
   } catch (cause) {
     if (cause instanceof ApiError && !(cause instanceof AdminApiError)) {
       throw new AdminApiError(cause.message, cause.status);
@@ -164,7 +164,7 @@ export function uploadCollectionFile<T>(
     form.append("file", file, file.name);
     request.open(
       "POST",
-      `${configuration.apiUrl}/api/v1/collections/${encodeURIComponent(collectionId)}/documents/upload`,
+      `${configuration.apiUrl}/api/v1/collections/${encodeURIComponent(collectionId)}/documents`,
     );
     request.responseType = "json";
     request.setRequestHeader("Accept", "application/json");
@@ -207,9 +207,9 @@ export async function retryCollectionDocument<T>(documentId: string): Promise<T>
   let response: Response;
   try {
     response = await fetch(
-      `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(documentId)}/retry`,
+      `${configuration.apiUrl}/api/v1/documents/${encodeURIComponent(documentId)}/content`,
       {
-        method: "POST",
+        method: "PUT",
         cache: "no-store",
         headers: {
           Accept: "application/json",

@@ -46,6 +46,7 @@ class AuditService:
         event = AuditLog(
             tenant_id=tenant_id,
             actor_user_id=actor.user_id,
+            actor_session_id=actor.session_id,
             action=normalize_required_text(action, "audit action", 96).casefold(),
             resource_type=normalize_required_text(
                 resource_type, "resource type", 32

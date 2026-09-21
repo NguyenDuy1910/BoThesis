@@ -1,4 +1,4 @@
-"""Transactional application service for the tenant Admin control plane."""
+"""Transactional application service for workspace and platform resources."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from bothesis.db.engine import SessionFactory, session_scope
 from bothesis.document_index import ItemIndex
 from bothesis.services import (
     COLLECTION_SHARE_PERMISSION,
-    AdminConflictError,
+    ControlPlaneConflictError,
     AuthContext,
 )
 from bothesis.services.approval_request import ApprovalRequestService
@@ -31,8 +31,8 @@ from bothesis.services.item_ingestion import ItemIngestionService
 from config import VectorIndexConfig
 
 
-class AdminConsoleService:
-    """Own admin request transactions and delegate work to focused services."""
+class WorkspaceControlPlaneService:
+    """Own workspace-control transactions and delegate to focused services."""
 
     def __init__(
         self,
@@ -45,7 +45,7 @@ class AdminConsoleService:
 
     # -- Tenants ------------------------------------------------------------
 
-    async def overview(self, actor: AuthContext) -> dict[str, Any]:
+    async def workspace_overview(self, actor: AuthContext) -> dict[str, Any]:
         async with self._unit_of_work() as session:
             return await DashboardService(session).overview(actor)
 
@@ -61,20 +61,20 @@ class AdminConsoleService:
                 actor, **filters
             )
 
-    async def list_spaces(self, actor: AuthContext) -> dict[str, Any]:
+    async def list_workspaces(self, actor: AuthContext) -> dict[str, Any]:
         async with self._unit_of_work() as session:
             return await TenantService(session).list_tenants(actor)
 
-    async def get_space(self, actor: AuthContext, tenant_id: UUID) -> dict[str, Any]:
+    async def get_workspace(self, actor: AuthContext, workspace_id: UUID) -> dict[str, Any]:
         async with self._unit_of_work() as session:
-            return await TenantService(session).get_tenant(actor, tenant_id)
+            return await TenantService(session).get_tenant(actor, workspace_id)
 
-    async def update_space(
-        self, actor: AuthContext, tenant_id: UUID, changes: dict[str, Any]
+    async def update_workspace(
+        self, actor: AuthContext, workspace_id: UUID, changes: dict[str, Any]
     ) -> dict[str, Any]:
         async with self._unit_of_work() as session:
             return await TenantService(session).update_tenant(
-                actor, tenant_id, **changes
+                actor, workspace_id, **changes
             )
 
     # -- Users, roles, groups ----------------------------------------------
@@ -172,6 +172,13 @@ class AdminConsoleService:
             del session
             return await service.list_items(actor, **filters)
 
+    async def list_collections(self, actor: AuthContext, **filters: Any) -> dict[str, Any]:
+        result = await self.list_items(actor, item_type="collection", **filters)
+        return {
+            **result,
+            "items": [self._collection_payload(item) for item in result.get("items", [])],
+        }
+
     async def create_collection(
         self, actor: AuthContext, values: dict[str, Any]
     ) -> dict[str, Any]:
@@ -179,10 +186,16 @@ class AdminConsoleService:
             del session
             return await service.create_collection(actor, **values)
 
+    async def create_collection_contract(self, actor: AuthContext, values: dict[str, Any]) -> dict[str, Any]:
+        return self._collection_payload(await self.create_collection(actor, values))
+
     async def get_item(self, actor: AuthContext, item_id: UUID) -> dict[str, Any]:
         async with self._catalog() as (session, service):
             del session
             return await service.get_item(actor, item_id)
+
+    async def get_collection(self, actor: AuthContext, collection_id: UUID) -> dict[str, Any]:
+        return self._collection_payload(await self.get_item(actor, collection_id))
 
     async def update_collection(
         self, actor: AuthContext, item_id: UUID, changes: dict[str, Any]
@@ -196,6 +209,12 @@ class AdminConsoleService:
                 description=changes.get("description"),
                 description_provided="description" in changes,
             )
+
+    async def update_collection_contract(self, actor: AuthContext, collection_id: UUID, changes: dict[str, Any]) -> dict[str, Any]:
+        return self._collection_payload(await self.update_collection(actor, collection_id, changes))
+
+    async def delete_collection(self, actor: AuthContext, collection_id: UUID) -> None:
+        await self.delete_item(actor, collection_id)
 
     async def update_item(
         self, actor: AuthContext, item_id: UUID, status: str
@@ -333,13 +352,13 @@ class AdminConsoleService:
 
     @asynccontextmanager
     async def _unit_of_work(self) -> AsyncIterator[AsyncSession]:
-        """Commit one admin change, reporting write conflicts as conflicts."""
+        """Commit one control-plane change, reporting write conflicts."""
 
         try:
             async with session_scope(self._sessions) as session:
                 yield session
         except IntegrityError as exc:
-            raise AdminConflictError(
+            raise ControlPlaneConflictError(
                 "the requested change conflicts with durable state"
             ) from exc
 
@@ -366,5 +385,20 @@ class AdminConsoleService:
         finally:
             await index.aclose()
 
+    @staticmethod
+    def _collection_payload(item: dict[str, Any]) -> dict[str, Any]:
+        metadata = item.get("metadata") or {}
+        return {
+            "id": item["id"],
+            "title": item.get("title", ""),
+            "description": metadata.get("description"),
+            "parent_collection_id": item.get("parent_item_id"),
+            "status": "archived" if item.get("status") in {"archived", "deleted"} else "active",
+            "document_count": item.get("item_count", 0),
+            "source_count": item.get("source_count", 0),
+            "created_at": item.get("created_at"),
+            "updated_at": item.get("updated_at"),
+        }
 
-__all__ = ["AdminConsoleService"]
+
+__all__ = ["WorkspaceControlPlaneService"]

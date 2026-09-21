@@ -5,10 +5,24 @@ memberships, Integration Connections, encrypted Integration Credentials,
 Ingestion Sources and checkpoints, External Resource identity, canonical Items,
 ACLs, chat state, and audit records.
 
+Identity and session state stay separate. `users` stores durable human
+identities; `auth_identities` maps `(issuer, subject)` from an external
+provider to one User; `access_sessions` stores tenant context, guest/user
+kind, expiry, revocation, token version, and transition lineage. Guest
+sessions have no User row or role assignment. Public access resolves through
+the tenant's `public_access_role_id`. Login creates a child User session,
+supersedes the Guest session, and assigns its guest-created conversations to
+the durable User while preserving `created_by_session_id`.
+
 The canonical knowledge model is one `items` table. `item_type` distinguishes
 Collections and Documents. `parent_item_id` represents canonical containment;
 each child remains independently persisted. Binary-backed Items store only
 `storage_key`, MIME type, size, and metadata in PostgreSQL.
+
+An Item's `status` is its durable resource lifecycle. Documents also have an
+`index_status` (`pending`, `processing`, `ready`, `failed`, or `unsupported`)
+for the derived semantic projection. This lets an authorized agent read a
+stored upload directly while its Qdrant representation is not yet ready.
 
 Source configuration is separate: `integration_connections` owns reusable
 connector configuration, `integration_credentials` owns encrypted secrets, and
@@ -20,6 +34,8 @@ any of these source-layer records.
 
 Native uploads use `item_uploads` for idempotency and upload lifecycle. They do
 not create Integration Connections, Ingestion Sources, or External Resources.
+Collection uploads schedule the existing Item indexing pipeline in Temporal;
+the workflow changes only `index_status` and derived citations/index points.
 
 S3-compatible object storage is mandatory for original file bytes. Presigned
 URLs are generated at runtime and are never persisted. PostgreSQL has no blob

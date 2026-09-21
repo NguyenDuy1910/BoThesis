@@ -40,11 +40,11 @@ export function SyncActivityView({
     const source = sources.find((item) => item.id === run.source_id);
     if (source) {
       const account = connections.find(
-        (item) => item.id === source.integration_connection_id,
+        (item) => item.id === source.connection_id,
       );
       return [account?.display_name, source.display_name].filter(Boolean).join(" · ");
     }
-    return connections.find((item) => item.id === run.integration_connection_id)
+    return connections.find((item) => item.id === run.connection_id)
       ?.display_name ?? "Removed source";
   };
 
@@ -73,7 +73,7 @@ export function SyncActivityView({
     <section aria-label="Sync activity" className="knowledge-activity">
       <ul className="knowledge-run-list">
         {filtered.map((run) => (
-          <SyncRunRow key={`${run.workflow_id}:${run.run_id}`} label={nameFor(run)} run={run} />
+        <SyncRunRow key={`${run.id}:${run.id}`} label={nameFor(run)} run={run} />
         ))}
       </ul>
     </section>

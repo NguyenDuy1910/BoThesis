@@ -84,11 +84,11 @@ export function SourcesView({
         : left.display_name.localeCompare(right.display_name));
 
   const sourceCount = (connection: Connection) =>
-    sources.filter((source) => source.integration_connection_id === connection.id).length;
+    sources.filter((source) => source.connection_id === connection.id).length;
 
   const lastSynced = (connection: Connection) => {
     const times = sources
-      .filter((source) => source.integration_connection_id === connection.id)
+      .filter((source) => source.connection_id === connection.id)
       .map((source) => source.last_ingested_at)
       .filter((value): value is string => Boolean(value))
       .sort();

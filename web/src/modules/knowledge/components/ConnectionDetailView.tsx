@@ -183,7 +183,7 @@ export function ConnectionDetailView({
             <div>
               <dt>Available to</dt>
               <dd>
-                {connection.owner_type === "tenant"
+                {connection.owner_type === "workspace"
                   ? "Everyone in this workspace"
                   : "Only you"}
               </dd>
@@ -251,7 +251,7 @@ export function ConnectionDetailView({
                       <small className="block truncate">
                         {[
                           scheduleLabel(source.schedule),
-                          `synced ${relativeTime(source.last_ingested_at)}`,
+                          `synced ${relativeTime(source.last_ingested_at ?? null)}`,
                         ].join(" · ")}
                       </small>
                     </span>
@@ -315,7 +315,7 @@ export function ConnectionDetailView({
           <ul className="knowledge-run-list">
             {runs.map((run) => (
               <SyncRunRow
-                key={`${run.workflow_id}:${run.run_id}`}
+                key={`${run.id}:${run.id}`}
                 label={sources.find((item) => item.id === run.source_id)?.display_name ?? undefined}
                 run={run}
               />

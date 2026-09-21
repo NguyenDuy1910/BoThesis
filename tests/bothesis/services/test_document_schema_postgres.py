@@ -34,6 +34,12 @@ async def test_final_source_storage_schema_contract() -> None:
                 FROM information_schema.columns
                 WHERE table_schema = current_schema()
                   AND table_name IN (
+                    'users',
+                    'tenants',
+                    'auth_identities',
+                    'access_sessions',
+                    'conversations',
+                    'audit_logs',
                     'items',
                     'citations',
                     'item_uploads',
@@ -63,6 +69,17 @@ async def test_final_source_storage_schema_contract() -> None:
                 )
             )
         )
+        access_session_constraints = set(
+            await connection.scalars(
+                text(
+                    """
+                    SELECT conname
+                    FROM pg_constraint
+                    WHERE conrelid = 'access_sessions'::regclass
+                    """
+                )
+            )
+        )
         binary_columns = set(
             await connection.execute(
                 text(
@@ -78,6 +95,9 @@ async def test_final_source_storage_schema_contract() -> None:
 
     assert {
         "items",
+        "auth_identities",
+        "access_sessions",
+        "conversations",
         "citations",
         "item_uploads",
         "message_items",
@@ -86,6 +106,30 @@ async def test_final_source_storage_schema_contract() -> None:
         "ingestion_sources",
         "external_resources",
     }.issubset(table_names)
+    assert {"identity_kind", "guest_session_id", "guest_expires_at"}.isdisjoint(
+        columns_by_table["users"]
+    )
+    assert {"visibility", "public_access_role_id"}.issubset(
+        columns_by_table["tenants"]
+    )
+    assert {"issuer", "subject", "user_id", "status"}.issubset(
+        columns_by_table["auth_identities"]
+    )
+    assert {
+        "tenant_id",
+        "user_id",
+        "auth_identity_id",
+        "kind",
+        "status",
+        "token_version",
+        "parent_session_id",
+        "expires_at",
+    }.issubset(columns_by_table["access_sessions"])
+    assert {"owner_user_id", "created_by_session_id"}.issubset(
+        columns_by_table["conversations"]
+    )
+    assert "user_id" not in columns_by_table["conversations"]
+    assert "actor_session_id" in columns_by_table["audit_logs"]
     assert {
         "documents",
         "document_blobs",
@@ -99,6 +143,7 @@ async def test_final_source_storage_schema_contract() -> None:
         "parent_relation",
         "storage_key",
         "status",
+        "index_status",
         "deleted_at",
     }.issubset(columns_by_table["items"])
     assert {
@@ -134,5 +179,7 @@ async def test_final_source_storage_schema_contract() -> None:
     assert "ck_items_item_type_is_valid" in constraints
     assert "ck_items_item_document_type_matches_type" in constraints
     assert "ck_items_item_status_is_valid" in constraints
+    assert "ck_access_sessions_access_session_subject_is_complete" in access_session_constraints
+    assert "ck_access_sessions_access_session_end_is_complete" in access_session_constraints
 
     assert binary_columns == set()

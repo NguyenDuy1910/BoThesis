@@ -1,6 +1,7 @@
 import { getApiConfiguration, requestIdentityHeaders } from "@/lib/api/config";
 import type {
   KnowledgeCitationResponse,
+  KnowledgeCollectionSummary,
   KnowledgeCollectionWorkspace,
   KnowledgeDocumentSummary,
   KnowledgeHome,
@@ -27,7 +28,7 @@ export async function getKnowledgeItemViewer(
   if (!configuration) throw new Error("Knowledge viewer is not configured.");
   const query = chunkId ? `?chunk=${encodeURIComponent(chunkId)}` : "";
   const response = await fetch(
-    `${configuration.apiUrl}/api/v1/knowledge/items/${encodeURIComponent(itemId)}${query}`,
+    `${configuration.apiUrl}/api/v1/knowledge/documents/${encodeURIComponent(itemId)}${query}`,
     {
       cache: "no-store",
       headers: requestIdentityHeaders(configuration),
@@ -52,7 +53,7 @@ export async function getKnowledgeCitation(
   const configuration = getApiConfiguration();
   if (!configuration) throw new Error("Knowledge viewer is not configured.");
   const response = await fetch(
-    `${configuration.apiUrl}/api/v1/knowledge/items/${encodeURIComponent(itemId)}/citations/${encodeURIComponent(chunkId)}`,
+    `${configuration.apiUrl}/api/v1/knowledge/documents/${encodeURIComponent(itemId)}/citations/${encodeURIComponent(chunkId)}`,
     {
       cache: "no-store",
       headers: requestIdentityHeaders(configuration),
@@ -68,7 +69,16 @@ export async function getKnowledgeCitation(
 
 /** Lists only Collections and source Items the current identity can browse. */
 export async function getKnowledgeHome(signal?: AbortSignal): Promise<KnowledgeHome> {
-  return knowledgeRequest<KnowledgeHome>("/api/v1/knowledge/collections", { signal });
+  const value = await knowledgeRequest<{
+    collections: ContractCollection[];
+    recent_documents: ContractDocument[];
+    personal_collection_id: string | null;
+  }>("/api/v1/knowledge/home", { signal });
+  return {
+    collections: value.collections.map(collectionSummary),
+    recent_documents: value.recent_documents.map(documentSummary),
+    personal_collection_id: value.personal_collection_id,
+  };
 }
 
 export async function getKnowledgeCollectionWorkspace(
@@ -80,15 +90,25 @@ export async function getKnowledgeCollectionWorkspace(
     signal?: AbortSignal;
   } = {},
 ): Promise<KnowledgeCollectionWorkspace> {
-  const query = new URLSearchParams();
+  const query = new URLSearchParams({
+    collection_id: collectionId,
+    page: String(options.page ?? 1),
+    page_size: String(options.pageSize ?? 50),
+  });
   if (options.search?.trim()) query.set("search", options.search.trim());
-  if (options.page && options.page > 1) query.set("page", String(options.page));
-  if (options.pageSize && options.pageSize !== 50) query.set("page_size", String(options.pageSize));
-  const suffix = query.size ? `?${query.toString()}` : "";
-  return knowledgeRequest<KnowledgeCollectionWorkspace>(
-    `/api/v1/knowledge/collections/${encodeURIComponent(collectionId)}${suffix}`,
-    { signal: options.signal },
-  );
+  const [collection, collectionPage, documentPage] = await Promise.all([
+    knowledgeRequest<ContractCollection>(`/api/v1/collections/${encodeURIComponent(collectionId)}`, { signal: options.signal }),
+    knowledgeRequest<{ items: ContractCollection[] }>("/api/v1/collections?page_size=100", { signal: options.signal }),
+    knowledgeRequest<{ items: ContractDocument[]; total: number; page: number; page_size: number }>(`/api/v1/documents?${query.toString()}`, { signal: options.signal }),
+  ]);
+  return {
+    collection: collectionSummary(collection),
+    child_collections: collectionPage.items.filter((item) => item.parent_collection_id === collectionId).map(collectionSummary),
+    documents: documentPage.items.map(documentSummary),
+    total: documentPage.total,
+    page: documentPage.page,
+    page_size: documentPage.page_size,
+  };
 }
 
 export async function searchKnowledge(
@@ -98,7 +118,7 @@ export async function searchKnowledge(
 ): Promise<KnowledgeSearchResult[]> {
   const value = query.trim();
   if (!value) return [];
-  const result = await knowledgeRequest<{ results: KnowledgeSearchResult[] }>(
+  const result = await knowledgeRequest<{ items: KnowledgeSearchResult[] }>(
     "/api/v1/documents/search",
     {
       method: "POST",
@@ -106,12 +126,12 @@ export async function searchKnowledge(
       body: JSON.stringify({
         query: value,
         top_k: 12,
-        collection_item_ids: collectionId ? [collectionId] : undefined,
+        collection_ids: collectionId ? [collectionId] : undefined,
       }),
       signal,
     },
   );
-  return result.results;
+  return result.items;
 }
 
 /** Creates a governed Collection while keeping the person in Knowledge. */
@@ -120,7 +140,7 @@ export async function createKnowledgeCollection(
   signal?: AbortSignal,
 ): Promise<{ id: string; title: string }> {
   return knowledgeRequest<{ id: string; title: string }>(
-    "/api/v1/knowledge/collections",
+    "/api/v1/collections",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -143,12 +163,12 @@ export async function uploadKnowledgeCollectionDocument(
   body.append("file", file);
   const result = await knowledgeRequest<{ document: {
     id: string;
-    file_name: string;
+    name: string;
     content_type: string;
-    status: KnowledgeDocumentSummary["status"];
+    status: "pending_content" | "available" | "failed";
     created_at: string;
   } }>(
-    `/api/v1/collections/${encodeURIComponent(collectionId)}/documents/upload`,
+    `/api/v1/collections/${encodeURIComponent(collectionId)}/documents`,
     {
       method: "POST",
       headers: { "Idempotency-Key": crypto.randomUUID() },
@@ -158,9 +178,9 @@ export async function uploadKnowledgeCollectionDocument(
   );
   return {
     id: result.document.id,
-    title: result.document.file_name,
+    title: result.document.name,
     content_type: result.document.content_type,
-    status: result.document.status,
+    status: result.document.status === "available" ? "ready" : result.document.status === "failed" ? "failed" : "pending",
     updated_at: result.document.created_at,
   };
 }
@@ -192,4 +212,36 @@ function errorDetail(value: string) {
   } catch {
     return value;
   }
+}
+
+interface ContractCollection {
+  id: string;
+  title: string;
+  description: string | null;
+  parent_collection_id: string | null;
+  document_count: number;
+  source_count: number;
+  updated_at: string;
+}
+
+interface ContractDocument {
+  id: string;
+  name: string;
+  content_type: string;
+  status: "pending_content" | "available" | "failed";
+  updated_at: string;
+}
+
+function collectionSummary(value: ContractCollection): KnowledgeCollectionSummary {
+  return { ...value, parent_item_id: value.parent_collection_id };
+}
+
+function documentSummary(value: ContractDocument): KnowledgeDocumentSummary {
+  return {
+    id: value.id,
+    title: value.name,
+    content_type: value.content_type,
+    status: value.status === "available" ? "ready" : value.status === "failed" ? "failed" : "pending",
+    updated_at: value.updated_at,
+  };
 }

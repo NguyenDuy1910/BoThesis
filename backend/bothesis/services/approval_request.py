@@ -16,9 +16,9 @@ from bothesis.services import (
     COLLECTION_ROLE_CODES,
     COLLECTION_SCOPE,
     SOURCE_MANAGE_PERMISSION,
-    AdminConflictError,
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneConflictError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     AuthContext,
     normalize_page,
     normalize_required_text,
@@ -137,7 +137,7 @@ class ApprovalRequestService:
             )
         )
         if duplicate is not None:
-            raise AdminConflictError("an equivalent approval request is pending")
+            raise ControlPlaneConflictError("an equivalent approval request is pending")
         request = ApprovalRequest(
             tenant_id=tenant_id,
             requester_user_id=requester_id,
@@ -175,7 +175,7 @@ class ApprovalRequestService:
             )
         ).one_or_none()
         if row is None:
-            raise AdminNotFoundError(f"approval request not found: {request_id}")
+            raise ControlPlaneNotFoundError(f"approval request not found: {request_id}")
         request, user, role = row
         self._require_reviewer(actor, request.request_type)
         return self._payload(request, user, role)
@@ -199,12 +199,12 @@ class ApprovalRequestService:
             .with_for_update()
         )
         if request is None:
-            raise AdminNotFoundError(f"approval request not found: {request_id}")
+            raise ControlPlaneNotFoundError(f"approval request not found: {request_id}")
         if request.status != "pending":
-            raise AdminConflictError("only pending approval requests can change status")
+            raise ControlPlaneConflictError("only pending approval requests can change status")
         next_status = self._status(status)
         if next_status == "pending":
-            raise AdminValidationError("an approval request cannot be returned to pending")
+            raise ControlPlaneValidationError("an approval request cannot be returned to pending")
         if next_status == "cancelled":
             if request.requester_user_id != actor.user_id:
                 self._require_reviewer(actor, request.request_type)
@@ -241,7 +241,7 @@ class ApprovalRequestService:
             collection = await self._collection(request.tenant_id, UUID(request.target_id))
             role = await self._session.get(Role, request.requested_role_id)
             if role is None:
-                raise AdminValidationError("the requested role no longer exists")
+                raise ControlPlaneValidationError("the requested role no longer exists")
             # Approving is exactly the grant the request named, so an approved
             # request and an administrator's grant produce the same row.
             await RoleAssignmentService(self._session).grant_collection_role(
@@ -268,14 +268,14 @@ class ApprovalRequestService:
         try:
             item_id = UUID(normalize_required_text(target_id, "target ID", 512))
         except ValueError as exc:
-            raise AdminValidationError("resource access target ID must be a UUID") from exc
+            raise ControlPlaneValidationError("resource access target ID must be a UUID") from exc
         await self._collection(tenant_id, item_id)
         values = dict(details or {})
         if set(values) != {"role"} or not isinstance(values["role"], str):
-            raise AdminValidationError("resource access details must contain only role")
+            raise ControlPlaneValidationError("resource access details must contain only role")
         role_code = values["role"].strip().casefold()
         if role_code not in COLLECTION_ROLE_CODES:
-            raise AdminValidationError(
+            raise ControlPlaneValidationError(
                 "resource access role must be one of: " + ", ".join(COLLECTION_ROLE_CODES)
             )
         role_id = await self._session.scalar(
@@ -286,14 +286,14 @@ class ApprovalRequestService:
             )
         )
         if role_id is None:
-            raise AdminValidationError(f"collection role is unavailable: {role_code}")
+            raise ControlPlaneValidationError(f"collection role is unavailable: {role_code}")
         return str(item_id), role_id
 
     def _plugin_target(
         self, target_id: str, details: Mapping[str, Any] | None
     ) -> tuple[str, dict[str, Any]]:
         if details:
-            raise AdminValidationError("plugin installation details must be empty")
+            raise ControlPlaneValidationError("plugin installation details must be empty")
         key = normalize_required_text(target_id, "plugin target ID", 64).casefold()
         return key, {}
 
@@ -310,7 +310,7 @@ class ApprovalRequestService:
             )
         )
         if user is None:
-            raise AdminNotFoundError(f"tenant user not found: {user_id}")
+            raise ControlPlaneNotFoundError(f"tenant user not found: {user_id}")
         return user
 
     async def _collection(self, tenant_id: UUID, item_id: UUID) -> Item:
@@ -324,7 +324,7 @@ class ApprovalRequestService:
             )
         )
         if item is None:
-            raise AdminNotFoundError(f"Collection not found: {item_id}")
+            raise ControlPlaneNotFoundError(f"Collection not found: {item_id}")
         return item
 
     def _visible_types(self, actor: AuthContext, request_type: str | None) -> tuple[str, ...]:
@@ -341,21 +341,21 @@ class ApprovalRequestService:
             if actor.has_permissions(permission)
         )
         if not visible:
-            raise AdminValidationError("no approval request types are available to this actor")
+            raise ControlPlaneValidationError("no approval request types are available to this actor")
         return visible
 
     @classmethod
     def _request_type(cls, value: str) -> str:
         normalized = value.strip().casefold()
         if normalized not in cls._TYPES:
-            raise AdminValidationError("unsupported approval request type")
+            raise ControlPlaneValidationError("unsupported approval request type")
         return normalized
 
     @classmethod
     def _status(cls, value: str) -> str:
         normalized = value.strip().casefold()
         if normalized not in cls._STATUSES:
-            raise AdminValidationError("unsupported approval request status")
+            raise ControlPlaneValidationError("unsupported approval request status")
         return normalized
 
     @staticmethod

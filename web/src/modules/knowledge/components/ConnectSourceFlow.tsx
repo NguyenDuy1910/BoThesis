@@ -238,7 +238,7 @@ export function ConnectSourceFlow({
         config: submitted(setup.connection, connectionValues),
         credentials: submitted(setup.credentials, credentialValues),
         credential_type: connector.key,
-        owner_type: ownerType,
+        owner_type: ownerType === "tenant" ? "workspace" : "user",
       });
       // Verification is part of connecting: a credential that cannot reach the
       // provider should fail here, with the provider's reason, not on the first
@@ -262,7 +262,7 @@ export function ConnectSourceFlow({
         : (await collectionsApi.create(newCollection.trim() || connector.name)).id;
       const plan = canDiscover
         ? selected.map((resource) => ({
-            target_item_id: destination,
+            collection_id: destination,
             display_name: resource.name,
             resource_type: resource.resource_type,
             external_resource_id: resource.external_id,
@@ -270,7 +270,7 @@ export function ConnectSourceFlow({
           }))
         : [
             {
-              target_item_id: destination,
+              collection_id: destination,
               display_name: displayName.trim(),
               config: submitted(setup.scope, manualScope),
               schedule: scheduleFor(schedule),

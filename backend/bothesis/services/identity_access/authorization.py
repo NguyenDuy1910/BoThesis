@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import and_, literal, or_, select
+from sqlalchemy import and_, false, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -219,6 +219,8 @@ class AuthorizationService:
 def _principal_match(access: AuthContext):
     """Match grants held directly, or held through one of the actor's groups."""
 
+    if access.user_id is None:
+        return false()
     direct = RoleAssignment.user_id == access.user_id
     if not access.group_ids:
         return direct

@@ -1,0 +1,1787 @@
+# Target contract. Replace with generated runtime OpenAPI only after implementation matches it.
+openapi: 3.1.0
+info:
+  title: BoThesis Enterprise Agent API
+  version: 1.0.0
+  description: Contract-first target for workspace knowledge, IAM, integrations, and governed ingestion.
+security:
+  - bearerAuth: []
+tags:
+  - name: auth
+  - name: agent
+  - name: knowledge
+  - name: collections
+  - name: documents
+  - name: artifacts
+  - name: connections
+  - name: sources
+  - name: ingestions
+  - name: workspaces
+  - name: iam
+  - name: governance
+  - name: platform
+paths:
+  /health:
+    get:
+      tags: [platform]
+      security: []
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service health
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/HealthResponse'}
+  /api/v1/auth/accounts:
+    post:
+      tags: [auth]
+      security: []
+      operationId: createAccount
+      description: Create Account and issue its first Session. A guest bearer may be supplied to upgrade an existing guest Session.
+      x-optional-bearer: guest-upgrade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AccountCreate'}
+      responses:
+        '201': {$ref: '#/components/responses/AuthSession'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/v1/auth/sessions:
+    post:
+      tags: [auth]
+      security: []
+      operationId: createSession
+      description: Create one Session using a typed authentication method. Password, guest, and Google methods are public and may optionally upgrade a guest bearer.
+      x-optional-bearer: guest-upgrade
+      x-method-security:
+        password: public
+        guest: public
+        google: public
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateSessionRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/AuthSession'}
+        '401': {$ref: '#/components/responses/InvalidCredentials'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/AccountDisabled'}
+        '429': {$ref: '#/components/responses/TooManyAttempts'}
+  /api/v1/auth/session:
+    get:
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      operationId: getCurrentSession
+      responses:
+        '200':
+          description: Current authenticated Session/context
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CurrentSession'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    patch:
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      operationId: updateCurrentSession
+      description: Change the active workspace on the current bearer Session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CurrentSessionUpdate'}
+      responses:
+        '200': {$ref: '#/components/responses/AuthSession'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    delete:
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      operationId: deleteCurrentSession
+      description: Invalidate the bearer Session resolved from the Authorization header.
+      responses:
+        '204': {description: Current Session invalidated}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /api/v1/agent/chat:
+    post:
+      tags: [agent]
+      operationId: streamAgentChat
+      x-required-permissions: [knowledge.read]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ChatRequest'}
+      responses:
+        '200':
+          description: Server-Sent Events stream
+          content:
+            text/event-stream:
+              schema: {type: string}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /api/v1/knowledge/home:
+    get:
+      tags: [knowledge]
+      operationId: getKnowledgeHome
+      x-required-permissions: [knowledge.read]
+      responses:
+        '200':
+          description: Knowledge workspace projection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KnowledgeHome'}
+  /api/v1/knowledge/documents/{document_id}:
+    get:
+      tags: [knowledge]
+      operationId: getKnowledgeDocument
+      parameters:
+        - {$ref: '#/components/parameters/DocumentId'}
+        - name: chunk
+          in: query
+          schema: {type: string, maxLength: 512}
+      responses:
+        '200':
+          description: Permission-checked viewer
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KnowledgeDocumentViewer'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/knowledge/documents/{document_id}/citations/{chunk_id}:
+    get:
+      tags: [knowledge]
+      operationId: getKnowledgeDocumentCitation
+      parameters:
+        - {$ref: '#/components/parameters/DocumentId'}
+        - name: chunk_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Permission-checked citation
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KnowledgeDocumentCitation'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/collections:
+    get:
+      tags: [collections]
+      operationId: listCollections
+      x-required-permissions: [knowledge.collections.read]
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/Search'}
+      responses:
+        '200':
+          description: Permission-filtered Collections
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CollectionPage'}
+    post:
+      tags: [collections]
+      operationId: createCollection
+      x-required-permissions: [knowledge.collections.create]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CollectionCreate'}
+      responses:
+        '201':
+          description: Created Collection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Collection'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/v1/collections/personal:
+    put:
+      tags: [collections]
+      operationId: ensurePersonalCollection
+      responses:
+        '200':
+          description: Personal Collection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Collection'}
+  /api/v1/collections/{collection_id}:
+    parameters:
+      - {$ref: '#/components/parameters/CollectionId'}
+    get:
+      tags: [collections]
+      operationId: getCollection
+      responses:
+        '200':
+          description: Collection detail
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Collection'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      tags: [collections]
+      operationId: updateCollection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CollectionUpdate'}
+      responses:
+        '200':
+          description: Updated Collection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Collection'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [collections]
+      operationId: deleteCollection
+      responses:
+        '204': {description: Collection tombstoned}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/collections/{collection_id}/access:
+    get:
+      tags: [collections]
+      operationId: listCollectionAccess
+      x-required-permissions: [knowledge.access.read]
+      parameters:
+        - {$ref: '#/components/parameters/CollectionId'}
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+      responses:
+        '200':
+          description: Collection access grants
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CollectionAccessPage'}
+  /api/v1/collections/{collection_id}/access/{principal_type}/{principal_id}:
+    parameters:
+      - {$ref: '#/components/parameters/CollectionId'}
+      - {$ref: '#/components/parameters/PrincipalType'}
+      - {$ref: '#/components/parameters/PrincipalId'}
+    put:
+      tags: [collections]
+      operationId: putCollectionAccess
+      x-required-permissions: [knowledge.access.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CollectionAccessUpdate'}
+      responses:
+        '200':
+          description: Upserted access grant
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CollectionAccess'}
+    delete:
+      tags: [collections]
+      operationId: deleteCollectionAccess
+      x-required-permissions: [knowledge.access.manage]
+      responses:
+        '204': {description: Access grant tombstoned}
+  /api/v1/collections/{collection_id}/documents:
+    post:
+      tags: [documents]
+      operationId: createDocument
+      x-required-permissions: [knowledge.documents.create]
+      x-required-collection-role: editor
+      description: Create one Document. JSON reserves server-owned content storage; multipart stores content directly. Both transports share the same Document lifecycle.
+      parameters:
+        - {$ref: '#/components/parameters/CollectionId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              {$ref: '#/components/schemas/DocumentMultipartCreate'}
+          application/json:
+            schema: {$ref: '#/components/schemas/DocumentCreate'}
+      responses:
+        '200':
+          description: Existing Document returned for an idempotent replay
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DocumentCreateResult'}
+        '201':
+          description: Created Document and optional content instructions
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DocumentCreateResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/UploadTooLarge'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '429': {$ref: '#/components/responses/TooManyAttempts'}
+  /api/v1/documents:
+    get:
+      tags: [documents]
+      operationId: listDocuments
+      x-required-permissions: [knowledge.documents.read]
+      x-required-collection-role: viewer
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/Search'}
+        - name: collection_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/DocumentStatus'}
+      responses:
+        '200':
+          description: Permission-filtered Documents
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DocumentPage'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/v1/documents/search:
+    post:
+      tags: [documents]
+      operationId: searchDocuments
+      x-required-permissions: [knowledge.documents.search]
+      x-required-collection-role: viewer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DocumentSearchRequest'}
+      responses:
+        '200':
+          description: Ranked grounded search results
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DocumentSearchResponse'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/v1/documents/{document_id}:
+    parameters:
+      - {$ref: '#/components/parameters/DocumentId'}
+    get:
+      tags: [documents]
+      operationId: getDocument
+      x-required-permissions: [knowledge.documents.read]
+      x-required-collection-role: viewer
+      responses:
+        '200':
+          description: Document detail
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Document'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [documents]
+      operationId: deleteDocument
+      x-required-permissions: [knowledge.documents.delete]
+      x-required-collection-role: editor
+      responses:
+        '204': {description: Document deleted}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/documents/{document_id}/content:
+    put:
+      tags: [documents]
+      operationId: finalizeDocumentContent
+      x-required-permissions: [knowledge.documents.write]
+      x-required-collection-role: editor
+      description: Validate server-owned object storage content for a reserved Document and make it available.
+      parameters:
+        - {$ref: '#/components/parameters/DocumentId'}
+      responses:
+        '200':
+          description: Document content is available
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DocumentContentResult'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+  /api/v1/artifacts/{artifact_id}:
+    get:
+      tags: [artifacts]
+      operationId: getArtifact
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+      responses:
+        '200':
+          description: Artifact detail
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Artifact'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /api/v1/artifacts/{artifact_id}/revisions/{revision}/content:
+    get:
+      tags: [artifacts]
+      operationId: getArtifactRevisionContent
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+        - name: revision
+          in: path
+          required: true
+          schema: {type: integer, minimum: 1}
+      responses:
+        '200':
+          description: Artifact revision content
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArtifactContent'}
+  /api/v1/artifacts/{artifact_id}/publish:
+    post:
+      tags: [artifacts]
+      operationId: publishArtifact
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ArtifactPublish'}
+      responses:
+        '201':
+          description: Published artifact Document
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Document'}
+  /api/v1/connections/providers:
+    get:
+      tags: [connections]
+      operationId: listConnectionProviders
+      responses:
+        '200':
+          description: Connector capabilities
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProviderCatalog'}
+  /api/v1/connections:
+    get:
+      tags: [connections]
+      operationId: listConnections
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - {$ref: '#/components/parameters/Search'}
+      responses:
+        '200':
+          description: Connections
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConnectionPage'}
+    post:
+      tags: [connections]
+      operationId: createConnection
+      x-required-permissions: [connections.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConnectionCreate'}
+      responses:
+        '201':
+          description: Created Connection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Connection'}
+  /api/v1/connections/authorizations:
+    post:
+      tags: [connections]
+      operationId: createConnectionAuthorization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConnectionAuthorizationCreate'}
+      responses:
+        '201':
+          description: Provider authorization target
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConnectionAuthorization'}
+  /api/v1/connections/{connection_id}:
+    parameters:
+      - {$ref: '#/components/parameters/ConnectionId'}
+    get:
+      tags: [connections]
+      operationId: getConnection
+      responses:
+        '200':
+          description: Connection detail
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Connection'}
+    patch:
+      tags: [connections]
+      operationId: updateConnection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConnectionUpdate'}
+      responses:
+        '200':
+          description: Updated Connection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Connection'}
+    delete:
+      tags: [connections]
+      operationId: deleteConnection
+      responses:
+        '204': {description: Connection tombstoned}
+  /api/v1/connections/{connection_id}/validate:
+    post:
+      tags: [connections]
+      operationId: validateConnection
+      parameters:
+        - {$ref: '#/components/parameters/ConnectionId'}
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConnectionValidation'}
+  /api/v1/connections/{connection_id}/resources:
+    get:
+      tags: [connections]
+      operationId: listConnectionResources
+      parameters:
+        - {$ref: '#/components/parameters/ConnectionId'}
+        - name: parent_id
+          in: query
+          schema: {type: string}
+        - {$ref: '#/components/parameters/Search'}
+      responses:
+        '200':
+          description: Provider resources
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProviderResourcePage'}
+  /api/v1/connections/{connection_id}/sources:
+    post:
+      tags: [sources]
+      operationId: createConnectionSource
+      parameters:
+        - {$ref: '#/components/parameters/ConnectionId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SourceCreate'}
+      responses:
+        '201':
+          description: Created Source
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Source'}
+  /api/v1/sources:
+    get:
+      tags: [sources]
+      operationId: listSources
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - name: connection_id
+          in: query
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Sources
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SourcePage'}
+  /api/v1/sources/{source_id}:
+    parameters:
+      - {$ref: '#/components/parameters/SourceId'}
+    get:
+      tags: [sources]
+      operationId: getSource
+      responses:
+        '200':
+          description: Source detail
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Source'}
+    patch:
+      tags: [sources]
+      operationId: updateSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SourceUpdate'}
+      responses:
+        '200':
+          description: Updated Source
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Source'}
+    delete:
+      tags: [sources]
+      operationId: deleteSource
+      responses:
+        '204': {description: Source tombstoned}
+  /api/v1/sources/{source_id}/status:
+    get:
+      tags: [sources]
+      operationId: getSourceStatus
+      parameters:
+        - {$ref: '#/components/parameters/SourceId'}
+      responses:
+        '200':
+          description: Source health projection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SourceStatus'}
+  /api/v1/sources/{source_id}/ingestions:
+    parameters:
+      - {$ref: '#/components/parameters/SourceId'}
+    post:
+      tags: [ingestions]
+      operationId: createSourceIngestion
+      responses:
+        '202':
+          description: Accepted Ingestion
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Ingestion'}
+    get:
+      tags: [ingestions]
+      operationId: listSourceIngestions
+      responses:
+        '200':
+          description: Source Ingestions
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IngestionPage'}
+  /api/v1/sources/{source_id}/ingestions/{ingestion_id}:
+    get:
+      tags: [ingestions]
+      operationId: getSourceIngestion
+      parameters:
+        - {$ref: '#/components/parameters/SourceId'}
+        - {$ref: '#/components/parameters/IngestionId'}
+      responses:
+        '200':
+          description: Source Ingestion
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Ingestion'}
+  /api/v1/sources/{source_id}/schedule:
+    parameters:
+      - {$ref: '#/components/parameters/SourceId'}
+    get:
+      tags: [sources]
+      operationId: getSourceSchedule
+      responses:
+        '200':
+          description: Source schedule
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Schedule'}
+    put:
+      tags: [sources]
+      operationId: putSourceSchedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SchedulePut'}
+      responses:
+        '200':
+          description: Replaced schedule
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Schedule'}
+    patch:
+      tags: [sources]
+      operationId: patchSourceSchedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SchedulePatch'}
+      responses:
+        '200':
+          description: Updated schedule
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Schedule'}
+    delete:
+      tags: [sources]
+      operationId: deleteSourceSchedule
+      responses:
+        '204': {description: Schedule removed}
+  /api/v1/ingestions:
+    get:
+      tags: [ingestions]
+      operationId: listIngestions
+      parameters:
+        - {$ref: '#/components/parameters/Page'}
+        - {$ref: '#/components/parameters/PageSize'}
+        - name: source_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: connection_id
+          in: query
+          schema: {type: string, format: uuid}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/IngestionStatus'}
+      responses:
+        '200':
+          description: Workspace Ingestions
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IngestionPage'}
+  /api/v1/ingestions/{ingestion_id}:
+    get:
+      tags: [ingestions]
+      operationId: getIngestion
+      parameters:
+        - {$ref: '#/components/parameters/IngestionId'}
+      responses:
+        '200':
+          description: Ingestion detail
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Ingestion'}
+  /api/v1/ingestions/{ingestion_id}/retry:
+    post:
+      tags: [ingestions]
+      operationId: retryIngestion
+      parameters:
+        - {$ref: '#/components/parameters/IngestionId'}
+      responses:
+        '202':
+          description: Retried Ingestion
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Ingestion'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/ingestions/{ingestion_id}/cancel:
+    post:
+      tags: [ingestions]
+      operationId: cancelIngestion
+      parameters:
+        - {$ref: '#/components/parameters/IngestionId'}
+      responses:
+        '200':
+          description: Cancelled Ingestion
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Ingestion'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /api/v1/workspaces:
+    get:
+      tags: [workspaces]
+      operationId: listWorkspaces
+      responses:
+        '200':
+          description: Visible Workspaces
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkspacePage'}
+  /api/v1/workspaces/{workspace_id}:
+    parameters:
+      - {$ref: '#/components/parameters/WorkspaceId'}
+    get:
+      tags: [workspaces]
+      operationId: getWorkspace
+      responses:
+        '200':
+          description: Workspace detail
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Workspace'}
+    patch:
+      tags: [workspaces]
+      operationId: updateWorkspace
+      x-required-permissions: [iam.workspaces.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WorkspaceUpdate'}
+      responses:
+        '200':
+          description: Updated Workspace
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Workspace'}
+  /api/v1/workspaces/{workspace_id}/overview:
+    get:
+      tags: [workspaces]
+      operationId: getWorkspaceOverview
+      parameters:
+        - {$ref: '#/components/parameters/WorkspaceId'}
+      responses:
+        '200':
+          description: Workspace dashboard projection
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WorkspaceOverview'}
+  /api/v1/users:
+    get:
+      tags: [iam]
+      operationId: listUsers
+      x-required-permissions: [iam.users.read]
+      responses:
+        '200':
+          description: Workspace Users
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/UserPage'}
+    post:
+      tags: [iam]
+      operationId: createUser
+      x-required-permissions: [iam.users.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserCreate'}
+      responses:
+        '201':
+          description: Created User membership
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+  /api/v1/users/{user_id}:
+    parameters:
+      - {$ref: '#/components/parameters/UserId'}
+    get:
+      tags: [iam]
+      operationId: getUser
+      responses:
+        '200': {description: User, content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}
+    patch:
+      tags: [iam]
+      operationId: updateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserUpdate'}
+      responses:
+        '200': {description: Updated User, content: {application/json: {schema: {$ref: '#/components/schemas/User'}}}}
+  /api/v1/roles:
+    get:
+      tags: [iam]
+      operationId: listRoles
+      responses:
+        '200': {description: Roles, content: {application/json: {schema: {$ref: '#/components/schemas/RolePage'}}}}
+    post:
+      tags: [iam]
+      operationId: createRole
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RoleCreate'}}}
+      responses:
+        '201': {description: Created Role, content: {application/json: {schema: {$ref: '#/components/schemas/Role'}}}}
+  /api/v1/roles/{role_id}:
+    parameters:
+      - {$ref: '#/components/parameters/RoleId'}
+    get:
+      tags: [iam]
+      operationId: getRole
+      responses:
+        '200': {description: Role, content: {application/json: {schema: {$ref: '#/components/schemas/Role'}}}}
+    patch:
+      tags: [iam]
+      operationId: updateRole
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RoleUpdate'}}}
+      responses:
+        '200': {description: Updated Role, content: {application/json: {schema: {$ref: '#/components/schemas/Role'}}}}
+  /api/v1/groups:
+    get:
+      tags: [iam]
+      operationId: listGroups
+      responses:
+        '200': {description: Groups, content: {application/json: {schema: {$ref: '#/components/schemas/GroupPage'}}}}
+    post:
+      tags: [iam]
+      operationId: createGroup
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/GroupCreate'}}}
+      responses:
+        '201': {description: Created Group, content: {application/json: {schema: {$ref: '#/components/schemas/Group'}}}}
+  /api/v1/groups/{group_id}:
+    parameters:
+      - {$ref: '#/components/parameters/GroupId'}
+    get:
+      tags: [iam]
+      operationId: getGroup
+      responses:
+        '200': {description: Group, content: {application/json: {schema: {$ref: '#/components/schemas/Group'}}}}
+    patch:
+      tags: [iam]
+      operationId: updateGroup
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/GroupUpdate'}}}
+      responses:
+        '200': {description: Updated Group, content: {application/json: {schema: {$ref: '#/components/schemas/Group'}}}}
+    delete:
+      tags: [iam]
+      operationId: deleteGroup
+      responses:
+        '204': {description: Group tombstoned}
+  /api/v1/groups/{group_id}/members:
+    put:
+      tags: [iam]
+      operationId: replaceGroupMembers
+      parameters:
+        - {$ref: '#/components/parameters/GroupId'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/GroupMembersPut'}}}
+      responses:
+        '200': {description: Updated Group, content: {application/json: {schema: {$ref: '#/components/schemas/Group'}}}}
+  /api/v1/permissions:
+    get:
+      tags: [iam]
+      operationId: listPermissions
+      responses:
+        '200':
+          description: Assignable permissions
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PermissionPage'}
+  /api/v1/approval-requests:
+    get:
+      tags: [governance]
+      operationId: listApprovalRequests
+      responses:
+        '200': {description: Approval Requests, content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalRequestPage'}}}}
+    post:
+      tags: [governance]
+      operationId: createApprovalRequest
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalRequestCreate'}}}
+      responses:
+        '201': {description: Created Approval Request, content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalRequest'}}}}
+  /api/v1/approval-requests/{approval_request_id}:
+    parameters:
+      - {$ref: '#/components/parameters/ApprovalRequestId'}
+    get:
+      tags: [governance]
+      operationId: getApprovalRequest
+      responses:
+        '200': {description: Approval Request, content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalRequest'}}}}
+    patch:
+      tags: [governance]
+      operationId: updateApprovalRequest
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalRequestUpdate'}}}
+      responses:
+        '200': {description: Updated Approval Request, content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalRequest'}}}}
+  /api/v1/audit-logs:
+    get:
+      tags: [governance]
+      operationId: listAuditLogs
+      x-required-permissions: [audit.read]
+      responses:
+        '200': {description: Audit Logs, content: {application/json: {schema: {$ref: '#/components/schemas/AuditLogPage'}}}}
+  /api/v1/platform/overview:
+    get:
+      tags: [platform]
+      operationId: getPlatformOverview
+      x-required-permissions: [platform.tenant.read]
+      responses:
+        '200': {description: Platform overview, content: {application/json: {schema: {$ref: '#/components/schemas/PlatformOverview'}}}}
+  /api/v1/platform/workspaces:
+    get:
+      tags: [platform]
+      operationId: listPlatformWorkspaces
+      x-required-permissions: [platform.tenant.read]
+      responses:
+        '200': {description: Platform Workspaces, content: {application/json: {schema: {$ref: '#/components/schemas/WorkspacePage'}}}}
+  /api/v1/platform/users:
+    get:
+      tags: [platform]
+      operationId: listPlatformUsers
+      x-required-permissions: [platform.user.read]
+      responses:
+        '200': {description: Platform Users, content: {application/json: {schema: {$ref: '#/components/schemas/UserPage'}}}}
+  /api/v1/platform/audit-logs:
+    get:
+      tags: [platform]
+      operationId: listPlatformAuditLogs
+      x-required-permissions: [platform.audit.read]
+      responses:
+        '200': {description: Platform Audit Logs, content: {application/json: {schema: {$ref: '#/components/schemas/AuditLogPage'}}}}
+  /api/v1/platform/health:
+    get:
+      tags: [platform]
+      operationId: getPlatformHealth
+      x-required-permissions: [platform.health.read]
+      responses:
+        '200': {description: Platform health, content: {application/json: {schema: {$ref: '#/components/schemas/HealthResponse'}}}}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Page: {name: page, in: query, schema: {type: integer, minimum: 1, default: 1}}
+    PageSize: {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+    Search: {name: search, in: query, schema: {type: string, maxLength: 255}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1, maxLength: 128}}
+    WorkspaceId: {name: workspace_id, in: path, required: true, schema: {type: string, format: uuid}}
+    UserId: {name: user_id, in: path, required: true, schema: {type: string, format: uuid}}
+    RoleId: {name: role_id, in: path, required: true, schema: {type: string, format: uuid}}
+    GroupId: {name: group_id, in: path, required: true, schema: {type: string, format: uuid}}
+    CollectionId: {name: collection_id, in: path, required: true, schema: {type: string, format: uuid}}
+    DocumentId: {name: document_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ArtifactId: {name: artifact_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ConnectionId: {name: connection_id, in: path, required: true, schema: {type: string, format: uuid}}
+    SourceId: {name: source_id, in: path, required: true, schema: {type: string, format: uuid}}
+    IngestionId: {name: ingestion_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ApprovalRequestId: {name: approval_request_id, in: path, required: true, schema: {type: string, format: uuid}}
+    PrincipalType: {name: principal_type, in: path, required: true, schema: {type: string, enum: [user, group]}}
+    PrincipalId: {name: principal_id, in: path, required: true, schema: {type: string, format: uuid}}
+  responses:
+    AuthSession:
+      description: Issued access session
+      content: {application/json: {schema: {$ref: '#/components/schemas/AuthSession'}}}
+    Unauthorized:
+      description: Authentication required or invalid
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorResponse'}}}
+    InvalidCredentials:
+      description: Authentication failed without revealing whether the account or credential was invalid
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorResponse'}}}
+    Forbidden:
+      description: Insufficient permission
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorResponse'}}}
+    NotFound:
+      description: Resource not found or not visible
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorResponse'}}}
+    Conflict:
+      description: Resource or lifecycle conflict
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorResponse'}}}
+    AccountDisabled:
+      description: Account is disabled and cannot create a Session
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorResponse'}}}
+    ValidationError:
+      description: Request validation failed
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorResponse'}}}
+    UploadTooLarge:
+      description: Upload exceeds configured limit
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorResponse'}}}
+    UnsupportedMediaType:
+      description: Unsupported upload content type
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorResponse'}}}
+    TooManyAttempts:
+      description: Authentication rate limit exceeded
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorResponse'}}}
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [code, message, request_id, details]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        request_id: {type: string, format: uuid}
+        details: {type: object, additionalProperties: true}
+    PageFields:
+      type: object
+      required: [page, page_size, total]
+      properties:
+        page: {type: integer, minimum: 1}
+        page_size: {type: integer, minimum: 1, maximum: 100}
+        total: {type: integer, minimum: 0}
+    AccountCreate:
+      type: object
+      required: [email, password]
+      properties:
+        email: {type: string, format: email}
+        password: {type: string, minLength: 8, maxLength: 128}
+        username: {type: [string, 'null'], minLength: 3, maxLength: 64}
+        display_name: {type: [string, 'null'], maxLength: 255}
+    CreateSessionRequest:
+      oneOf:
+        - {$ref: '#/components/schemas/PasswordSessionCreate'}
+        - {$ref: '#/components/schemas/GuestSessionCreate'}
+        - {$ref: '#/components/schemas/GoogleSessionCreate'}
+      discriminator:
+        propertyName: method
+        mapping:
+          password: '#/components/schemas/PasswordSessionCreate'
+          guest: '#/components/schemas/GuestSessionCreate'
+          google: '#/components/schemas/GoogleSessionCreate'
+    PasswordSessionCreate:
+      type: object
+      additionalProperties: false
+      required: [method, email, password]
+      properties:
+        method: {type: string, const: password}
+        email: {type: string, format: email}
+        password: {type: string, format: password, minLength: 8, maxLength: 128, writeOnly: true}
+    GuestSessionCreate:
+      type: object
+      additionalProperties: false
+      required: [method]
+      properties:
+        method: {type: string, const: guest}
+    GoogleSessionCreate:
+      type: object
+      additionalProperties: false
+      required: [method, credential]
+      properties:
+        method: {type: string, const: google}
+        credential: {type: string, minLength: 1, maxLength: 12000, writeOnly: true}
+    CurrentSessionUpdate:
+      type: object
+      minProperties: 1
+      required: [active_workspace_id]
+      properties:
+        active_workspace_id: {type: string, format: uuid}
+    WorkspaceMembership:
+      type: object
+      required: [id, code, name, role_codes, permissions]
+      properties:
+        id: {type: string, format: uuid}
+        code: {type: string}
+        name: {type: string}
+        role_codes: {type: array, items: {type: string}}
+        permissions: {type: array, items: {type: string}}
+    AuthSession:
+      type: object
+      required: [access_token, token_type, expires_at, session_id, user_id, active_workspace_id, permissions, platform_permissions, session_kind, workspaces]
+      properties:
+        access_token: {type: string}
+        token_type: {type: string, const: bearer}
+        expires_at: {type: string, format: date-time}
+        session_id: {type: string, format: uuid}
+        user_id: {type: [string, 'null'], format: uuid}
+        email: {type: [string, 'null'], format: email}
+        display_name: {type: [string, 'null']}
+        active_workspace_id: {type: string, format: uuid}
+        permissions: {type: array, items: {type: string}}
+        platform_permissions: {type: array, items: {type: string}}
+        session_kind: {type: string, enum: [user, guest]}
+        workspaces: {type: array, items: {$ref: '#/components/schemas/WorkspaceMembership'}}
+    CurrentSession:
+      type: object
+      required: [session_id, expires_at, user_id, active_workspace_id, permissions, platform_permissions, session_kind, workspaces]
+      properties:
+        session_id: {type: string, format: uuid}
+        expires_at: {type: string, format: date-time}
+        user_id: {type: [string, 'null'], format: uuid}
+        email: {type: [string, 'null'], format: email}
+        display_name: {type: [string, 'null']}
+        active_workspace_id: {type: string, format: uuid}
+        permissions: {type: array, items: {type: string}}
+        platform_permissions: {type: array, items: {type: string}}
+        session_kind: {type: string, enum: [user, guest]}
+        workspaces: {type: array, items: {$ref: '#/components/schemas/WorkspaceMembership'}}
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role: {type: string, enum: [user, assistant]}
+        content: {type: string, minLength: 1, maxLength: 8000}
+    ChatRequest:
+      type: object
+      required: [message]
+      properties:
+        message: {type: string, minLength: 1, maxLength: 4000}
+        conversation_id: {type: [string, 'null'], format: uuid}
+        history: {type: array, maxItems: 24, items: {$ref: '#/components/schemas/ChatMessage'}}
+        collection_ids: {type: array, maxItems: 20, uniqueItems: true, items: {type: string, format: uuid}}
+        attachment_ids: {type: array, maxItems: 10, uniqueItems: true, items: {type: string, format: uuid}}
+    CollectionStatus: {type: string, enum: [active, archived]}
+    Collection:
+      type: object
+      required: [id, title, status, document_count, source_count, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        title: {type: string}
+        description: {type: [string, 'null']}
+        parent_collection_id: {type: [string, 'null'], format: uuid}
+        status: {$ref: '#/components/schemas/CollectionStatus'}
+        document_count: {type: integer, minimum: 0}
+        source_count: {type: integer, minimum: 0}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CollectionCreate:
+      type: object
+      required: [title]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 255}
+        description: {type: [string, 'null'], maxLength: 2000}
+        parent_collection_id: {type: [string, 'null'], format: uuid}
+        inherit_access: {type: boolean, default: true}
+    CollectionUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        title: {type: string, minLength: 1, maxLength: 255}
+        description: {type: [string, 'null'], maxLength: 2000}
+        status: {$ref: '#/components/schemas/CollectionStatus'}
+    CollectionPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/Collection'}}}
+    CollectionAccess:
+      type: object
+      required: [collection_id, principal_type, principal_id, role, created_at, updated_at]
+      properties:
+        collection_id: {type: string, format: uuid}
+        principal_type: {type: string, enum: [user, group]}
+        principal_id: {type: string, format: uuid}
+        role: {type: string, enum: [owner, editor, viewer]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CollectionAccessUpdate:
+      type: object
+      required: [role]
+      properties: {role: {type: string, enum: [owner, editor, viewer]}}
+    CollectionAccessPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/CollectionAccess'}}}
+    DocumentStatus: {type: string, enum: [pending_content, available, failed]}
+    Document:
+      type: object
+      additionalProperties: false
+      required: [id, collection_id, name, content_type, size_bytes, purpose, status, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        collection_id: {type: string, format: uuid}
+        name: {type: string, minLength: 1, maxLength: 240}
+        content_type: {type: string}
+        size_bytes: {type: integer, minimum: 0}
+        purpose: {type: string, enum: [knowledge, conversation_attachment]}
+        status: {$ref: '#/components/schemas/DocumentStatus'}
+        latest_ingestion_id: {type: [string, 'null'], format: uuid}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    DocumentPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/Document'}}}
+    DocumentSearchRequest:
+      type: object
+      additionalProperties: false
+      required: [query]
+      properties:
+        query: {type: string, minLength: 1, maxLength: 512}
+        top_k: {type: integer, minimum: 1, maximum: 20, default: 6}
+        collection_ids: {type: array, maxItems: 20, uniqueItems: true, items: {type: string, format: uuid}}
+    DocumentSearchResult:
+      type: object
+      additionalProperties: false
+      required: [document_id, collection_id, name, excerpt, score]
+      properties:
+        document_id: {type: string, format: uuid}
+        collection_id: {type: string, format: uuid}
+        name: {type: string}
+        excerpt: {type: string}
+        score: {type: number}
+        url: {type: [string, 'null'], format: uri}
+        metadata: {type: object, additionalProperties: true}
+    DocumentSearchResponse:
+      type: object
+      additionalProperties: false
+      required: [items, total]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/DocumentSearchResult'}}
+        total: {type: integer, minimum: 0}
+    DocumentCreate:
+      type: object
+      additionalProperties: false
+      required: [name, content_type, size_bytes]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 240}
+        content_type: {type: string, minLength: 1, maxLength: 160}
+        size_bytes: {type: integer, minimum: 1}
+        purpose: {type: string, enum: [knowledge, conversation_attachment], default: knowledge}
+    DocumentMultipartCreate:
+      type: object
+      additionalProperties: false
+      required: [file]
+      properties:
+        file: {type: string, format: binary}
+        purpose: {type: string, enum: [knowledge, conversation_attachment], default: knowledge}
+    DocumentContentInstructions:
+      type: object
+      additionalProperties: false
+      required: [url, method, headers, expires_at]
+      properties:
+        url: {type: string, format: uri}
+        method: {type: string, enum: [PUT]}
+        headers: {type: object, additionalProperties: {type: string}}
+        expires_at: {type: string, format: date-time}
+    DocumentCreateResult:
+      type: object
+      additionalProperties: false
+      required: [document, upload, ingestion, created]
+      properties:
+        document: {$ref: '#/components/schemas/Document'}
+        upload: {anyOf: [{$ref: '#/components/schemas/DocumentContentInstructions'}, {type: 'null'}]}
+        ingestion: {anyOf: [{$ref: '#/components/schemas/Ingestion'}, {type: 'null'}]}
+        created:
+          type: boolean
+          description: True only when this request created the Document; false on an idempotent replay.
+    DocumentContentResult:
+      type: object
+      additionalProperties: false
+      required: [document, ingestion]
+      properties:
+        document: {$ref: '#/components/schemas/Document'}
+        ingestion: {anyOf: [{$ref: '#/components/schemas/Ingestion'}, {type: 'null'}]}
+    KnowledgeHome:
+      type: object
+      required: [collections, recent_documents, personal_collection_id]
+      properties:
+        collections: {type: array, items: {$ref: '#/components/schemas/Collection'}}
+        recent_documents: {type: array, items: {$ref: '#/components/schemas/Document'}}
+        personal_collection_id: {type: [string, 'null'], format: uuid}
+    KnowledgeDocumentViewer:
+      type: object
+      required: [document_id, title, content_type, status, elements]
+      properties:
+        document_id: {type: string, format: uuid}
+        title: {type: string}
+        content_type: {type: string}
+        status: {$ref: '#/components/schemas/DocumentStatus'}
+        document_url: {type: [string, 'null'], format: uri}
+        external_url: {type: [string, 'null'], format: uri}
+        elements: {type: array, items: {type: object, additionalProperties: true}}
+    KnowledgeDocumentCitation:
+      type: object
+      required: [document_id, chunk_id, title, content_type, citation]
+      properties:
+        document_id: {type: string, format: uuid}
+        chunk_id: {type: string}
+        title: {type: string}
+        content_type: {type: string}
+        citation: {type: object, additionalProperties: true}
+    Artifact:
+      type: object
+      required: [id, title, file_name, mime_type, size_bytes, revision, revision_count]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        file_name: {type: string}
+        mime_type: {type: string}
+        size_bytes: {type: integer, minimum: 0}
+        revision: {type: integer, minimum: 1}
+        revision_count: {type: integer, minimum: 1}
+    ArtifactContent:
+      type: object
+      required: [artifact_id, revision, mime_type, content, truncated]
+      properties:
+        artifact_id: {type: string}
+        revision: {type: integer, minimum: 1}
+        mime_type: {type: string}
+        content: {type: string}
+        truncated: {type: boolean}
+    ArtifactPublish:
+      type: object
+      required: [collection_id]
+      properties:
+        collection_id: {type: string, format: uuid}
+        title: {type: [string, 'null'], maxLength: 200}
+    Connection:
+      type: object
+      required: [id, connector_key, display_name, owner_type, status, source_count]
+      properties:
+        id: {type: string, format: uuid}
+        connector_key: {type: string}
+        display_name: {type: string}
+        owner_type: {type: string, enum: [user, workspace]}
+        owner_user_id: {type: [string, 'null'], format: uuid}
+        status: {type: string, enum: [draft, connected, expired, reauth_required, revoked, error, disconnected]}
+        source_count: {type: integer, minimum: 0}
+        config: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ConnectionCreate:
+      type: object
+      required: [connector_key, display_name]
+      properties:
+        connector_key: {type: string}
+        display_name: {type: string}
+        owner_type: {type: string, enum: [user, workspace], default: workspace}
+        config: {type: object, additionalProperties: true}
+        credentials: {type: object, writeOnly: true, additionalProperties: true}
+    ConnectionUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        display_name: {type: string}
+        status: {type: string, enum: [disconnected]}
+        config: {type: object, additionalProperties: true}
+        credentials: {type: object, writeOnly: true, additionalProperties: true}
+    ConnectionPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/Connection'}}}
+    ConnectionAuthorizationCreate:
+      type: object
+      required: [connector_key, owner_type]
+      properties:
+        connector_key: {type: string}
+        owner_type: {type: string, enum: [user, workspace]}
+        connection_id: {type: [string, 'null'], format: uuid}
+    ConnectionAuthorization:
+      type: object
+      required: [authorization_url, nonce]
+      properties:
+        authorization_url: {type: string, format: uri}
+        nonce: {type: string}
+    ConnectionValidation:
+      type: object
+      required: [valid, status]
+      properties:
+        valid: {type: boolean}
+        status: {type: string}
+    ProviderCatalog:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {type: object, additionalProperties: true}}}
+    ProviderResourcePage:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {type: object, additionalProperties: true}}}
+    Source:
+      type: object
+      required: [id, connection_id, collection_id, sync_mode, status]
+      properties:
+        id: {type: string, format: uuid}
+        connection_id: {type: string, format: uuid}
+        collection_id: {type: string, format: uuid}
+        display_name: {type: [string, 'null']}
+        resource_type: {type: [string, 'null']}
+        external_resource_id: {type: [string, 'null']}
+        sync_mode: {type: string, enum: [manual, scheduled]}
+        status: {type: string, enum: [ready, paused, failed, connection_required, disabled]}
+        schedule: {anyOf: [{$ref: '#/components/schemas/Schedule'}, {type: 'null'}]}
+    SourceCreate:
+      type: object
+      required: [collection_id]
+      properties:
+        collection_id: {type: string, format: uuid}
+        display_name: {type: [string, 'null']}
+        resource_type: {type: [string, 'null']}
+        external_resource_id: {type: [string, 'null']}
+        config: {type: object, additionalProperties: true}
+        schedule: {anyOf: [{$ref: '#/components/schemas/SchedulePut'}, {type: 'null'}]}
+    SourceUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        display_name: {type: string}
+        status: {type: string, enum: [ready, paused, disabled]}
+        config: {type: object, additionalProperties: true}
+    SourcePage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/Source'}}}
+    SourceStatus:
+      type: object
+      required: [source_id, source_status, connection_status]
+      properties:
+        source_id: {type: string, format: uuid}
+        source_status: {type: string}
+        connection_status: {type: string}
+        latest_ingestion: {anyOf: [{$ref: '#/components/schemas/Ingestion'}, {type: 'null'}]}
+    SchedulePut:
+      type: object
+      required: [schedule_type, cron_expression, enabled, overlap_policy]
+      properties:
+        schedule_type: {type: string, enum: [cron, interval]}
+        cron_expression: {type: string}
+        timezone: {type: [string, 'null']}
+        enabled: {type: boolean}
+        overlap_policy: {type: string, enum: [skip, queue, replace]}
+    SchedulePatch:
+      type: object
+      minProperties: 1
+      properties:
+        cron_expression: {type: string}
+        timezone: {type: [string, 'null']}
+        enabled: {type: boolean}
+        overlap_policy: {type: string, enum: [skip, queue, replace]}
+    Schedule:
+      allOf:
+        - {$ref: '#/components/schemas/SchedulePut'}
+        - type: object
+          required: [id]
+          properties:
+            id: {type: string, format: uuid}
+            next_run_at: {type: [string, 'null'], format: date-time}
+            last_run_at: {type: [string, 'null'], format: date-time}
+    IngestionStatus: {type: string, enum: [pending, running, completed, failed, cancelled, timed_out]}
+    Ingestion:
+      type: object
+      required: [id, status, trigger_type, created_at, updated_at]
+      properties:
+        id: {type: string, format: uuid}
+        source_id: {type: [string, 'null'], format: uuid}
+        document_id: {type: [string, 'null'], format: uuid}
+        connection_id: {type: [string, 'null'], format: uuid}
+        status: {$ref: '#/components/schemas/IngestionStatus'}
+        trigger_type: {type: string, enum: [manual, scheduled, webhook, initial, upload, retry]}
+        retry_of_ingestion_id: {type: [string, 'null'], format: uuid}
+        progress:
+          type: object
+          properties:
+            phase: {type: string}
+            discovered_count: {type: integer, minimum: 0}
+            processed_count: {type: integer, minimum: 0}
+            indexed_count: {type: integer, minimum: 0}
+            deleted_count: {type: integer, minimum: 0}
+            failed_count: {type: integer, minimum: 0}
+        started_at: {type: [string, 'null'], format: date-time}
+        finished_at: {type: [string, 'null'], format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    IngestionPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/Ingestion'}}}
+    Workspace:
+      type: object
+      required: [id, code, name, status]
+      properties:
+        id: {type: string, format: uuid}
+        code: {type: string}
+        name: {type: string}
+        status: {type: string, enum: [active, inactive, suspended]}
+        visibility: {type: string}
+        settings: {type: object, additionalProperties: true}
+    WorkspaceUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name: {type: string, minLength: 1, maxLength: 255}
+        settings: {type: object, additionalProperties: true}
+    WorkspacePage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/Workspace'}}}
+    WorkspaceOverview:
+      type: object
+      required: [workspace, metrics, attention, recent_activity, generated_at]
+      properties:
+        workspace: {$ref: '#/components/schemas/Workspace'}
+        metrics: {type: object, additionalProperties: {type: integer}}
+        attention: {type: object, additionalProperties: {type: integer}}
+        recent_activity: {type: array, items: {$ref: '#/components/schemas/AuditLog'}}
+        generated_at: {type: string, format: date-time}
+    User:
+      type: object
+      required: [id, email, display_name, status, roles, groups]
+      properties:
+        id: {type: string, format: uuid}
+        email: {type: string, format: email}
+        display_name: {type: [string, 'null']}
+        status: {type: string, enum: [active, inactive, suspended]}
+        roles: {type: array, items: {type: object, additionalProperties: true}}
+        groups: {type: array, items: {type: object, additionalProperties: true}}
+    UserCreate:
+      type: object
+      required: [email]
+      properties:
+        email: {type: string, format: email}
+        display_name: {type: [string, 'null']}
+        role_ids: {type: array, uniqueItems: true, items: {type: string, format: uuid}}
+        group_ids: {type: array, uniqueItems: true, items: {type: string, format: uuid}}
+    UserUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        display_name: {type: [string, 'null']}
+        status: {type: string, enum: [active, inactive, suspended]}
+        role_ids: {type: array, uniqueItems: true, items: {type: string, format: uuid}}
+        group_ids: {type: array, uniqueItems: true, items: {type: string, format: uuid}}
+    UserPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/User'}}}
+    Role:
+      type: object
+      required: [id, code, display_name, status, permission_codes]
+      properties:
+        id: {type: string, format: uuid}
+        code: {type: string}
+        display_name: {type: string}
+        status: {type: string, enum: [active, inactive]}
+        permission_codes: {type: array, uniqueItems: true, items: {type: string}}
+    RoleCreate:
+      type: object
+      required: [code, display_name, permission_codes]
+      properties:
+        code: {type: string}
+        display_name: {type: string}
+        permission_codes: {type: array, uniqueItems: true, items: {type: string}}
+    RoleUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        display_name: {type: string}
+        status: {type: string, enum: [active, inactive]}
+        permission_codes: {type: array, uniqueItems: true, items: {type: string}}
+    RolePage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/Role'}}}
+    Group:
+      type: object
+      required: [id, code, display_name, status, member_count]
+      properties:
+        id: {type: string, format: uuid}
+        code: {type: string}
+        display_name: {type: string}
+        description: {type: [string, 'null']}
+        status: {type: string, enum: [active, inactive]}
+        member_count: {type: integer, minimum: 0}
+    GroupCreate:
+      type: object
+      required: [code, display_name]
+      properties:
+        code: {type: string}
+        display_name: {type: string}
+        description: {type: [string, 'null']}
+    GroupUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        display_name: {type: string}
+        description: {type: [string, 'null']}
+        status: {type: string, enum: [active, inactive]}
+    GroupMembersPut:
+      type: object
+      required: [user_ids]
+      properties: {user_ids: {type: array, uniqueItems: true, items: {type: string, format: uuid}}}
+    GroupPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/Group'}}}
+    Permission:
+      type: object
+      required: [code, description, scopes]
+      properties:
+        code: {type: string}
+        description: {type: string}
+        scopes: {type: array, items: {type: string}}
+    PermissionPage:
+      type: object
+      required: [items, total]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Permission'}}
+        total: {type: integer, minimum: 0}
+    ApprovalRequest:
+      type: object
+      required: [id, request_type, target_id, status, requester, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        request_type: {type: string, enum: [resource_access, plugin_installation]}
+        target_id: {type: string}
+        status: {type: string, enum: [pending, approved, denied, cancelled]}
+        requester: {$ref: '#/components/schemas/User'}
+        details: {type: object, additionalProperties: true}
+        reason: {type: [string, 'null']}
+        decision_note: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+    ApprovalRequestCreate:
+      type: object
+      required: [request_type, target_id]
+      properties:
+        request_type: {type: string, enum: [resource_access, plugin_installation]}
+        target_id: {type: string}
+        details: {type: object, additionalProperties: true}
+        reason: {type: [string, 'null'], maxLength: 4000}
+    ApprovalRequestUpdate:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string, enum: [approved, denied, cancelled]}
+        decision_note: {type: [string, 'null'], maxLength: 4000}
+    ApprovalRequestPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/ApprovalRequest'}}}
+    AuditLog:
+      type: object
+      required: [id, action, resource_type, outcome, actor, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        action: {type: string}
+        resource_type: {type: string}
+        resource_id: {type: [string, 'null']}
+        outcome: {type: string}
+        actor: {type: object, additionalProperties: true}
+        workspace: {type: [object, 'null'], additionalProperties: true}
+        details: {type: object, additionalProperties: true}
+        created_at: {type: string, format: date-time}
+    AuditLogPage:
+      allOf:
+        - {$ref: '#/components/schemas/PageFields'}
+        - type: object
+          required: [items]
+          properties: {items: {type: array, items: {$ref: '#/components/schemas/AuditLog'}}}
+    PlatformOverview:
+      type: object
+      required: [metrics, workspace_health]
+      properties:
+        metrics: {type: object, additionalProperties: {type: integer}}
+        workspace_health: {type: array, items: {type: object, additionalProperties: true}}
+    HealthResponse:
+      type: object
+      required: [status, checked_at, duration_ms, services]
+      properties:
+        status: {type: string, enum: [healthy, degraded, unhealthy]}
+        checked_at: {type: string, format: date-time}
+        duration_ms: {type: number, minimum: 0}
+        services: {type: array, items: {type: object, additionalProperties: true}}

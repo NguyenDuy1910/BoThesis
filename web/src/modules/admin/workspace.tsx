@@ -78,7 +78,7 @@ export function AdminWorkspaceProvider({ children }: { children: React.ReactNode
     const userId = configuration?.userId;
     const canViewOverview = hasSessionPermission(session, "tenant.read");
     const canViewPeople = hasSessionPermission(session, "user.manage");
-    const sessionViewer = session
+    const sessionViewer = session?.user_id && session.email
       ? {
           id: session.user_id,
           email: session.email,

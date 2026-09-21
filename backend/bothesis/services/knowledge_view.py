@@ -440,8 +440,11 @@ def _collection_payload(
         "title": item.title,
         "description": description if isinstance(description, str) else None,
         "parent_item_id": str(item.parent_item_id) if item.parent_item_id else None,
+        "parent_collection_id": str(item.parent_item_id) if item.parent_item_id else None,
+        "status": "active" if item.status != "deleted" else "archived",
         "document_count": document_count,
         "source_count": source_count,
+        "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat(),
     }
 
@@ -461,8 +464,19 @@ def _document_payload(item: Item) -> dict[str, Any]:
         }
     return {
         "id": str(item.id),
+        "collection_id": str(item.parent_item_id),
+        "name": item.title,
         "title": item.title,
         "content_type": item.mime_type,
+        "size_bytes": item.size_bytes or 0,
+        "purpose": (item.metadata_ or {}).get("purpose", "knowledge"),
+        "status": {
+            "pending": "pending_content", "processing": "available",
+            "ready": "available", "failed": "failed", "unsupported": "failed",
+        }.get(item.status, "pending_content"),
+        "latest_ingestion_id": None,
+        "created_at": item.created_at.isoformat(),
+        "updated_at": item.updated_at.isoformat(),
         "document_type": item.document_type,
         "status": item.status,
         "updated_at": item.updated_at.isoformat(),

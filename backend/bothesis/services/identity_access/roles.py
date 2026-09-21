@@ -18,9 +18,9 @@ from bothesis.services import (
     PERMISSION_CATALOG,
     ROLE_MANAGE_PERMISSION,
     TENANT_SCOPE,
-    AdminConflictError,
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneConflictError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     AuthContext,
     AuthorizationError,
     IdentityConflictError,
@@ -88,7 +88,7 @@ class RoleService:
         if status:
             normalized_status = status.strip().casefold()
             if normalized_status not in {ACTIVE_STATUS, INACTIVE_STATUS}:
-                raise AdminValidationError("role status must be active or inactive")
+                raise ControlPlaneValidationError("role status must be active or inactive")
             filters.append(Role.status == normalized_status)
 
         member_count = (
@@ -153,9 +153,9 @@ class RoleService:
                 permission_codes=permission_codes,
             )
         except IdentityConflictError as exc:
-            raise AdminConflictError(str(exc)) from exc
+            raise ControlPlaneConflictError(str(exc)) from exc
         except ValueError as exc:
-            raise AdminValidationError(str(exc)) from exc
+            raise ControlPlaneValidationError(str(exc)) from exc
         granted = await self._auth.role_permissions(role.id)
         await self._audit.record(
             actor,
@@ -178,9 +178,9 @@ class RoleService:
         tenant_id = require_tenant_permission(actor, ROLE_MANAGE_PERMISSION)
         role = await self._role(tenant_id, role_id)
         if role.is_system:
-            raise AdminValidationError("a platform-defined role cannot be changed")
+            raise ControlPlaneValidationError("a platform-defined role cannot be changed")
         if permission_codes is not None and role.code in actor.role_codes:
-            raise AdminConflictError(
+            raise ControlPlaneConflictError(
                 "an administrator cannot change permissions of a role they hold"
             )
         if permission_codes is not None:
@@ -199,20 +199,20 @@ class RoleService:
                 )
                 changed.append("permission_codes")
         except AuthorizationError as exc:
-            raise AdminValidationError(str(exc)) from exc
+            raise ControlPlaneValidationError(str(exc)) from exc
         except ValueError as exc:
-            raise AdminValidationError(str(exc)) from exc
+            raise ControlPlaneValidationError(str(exc)) from exc
         if status is not None:
             normalized_status = status.strip().casefold()
             if normalized_status not in {ACTIVE_STATUS, INACTIVE_STATUS}:
-                raise AdminValidationError("role status must be active or inactive")
+                raise ControlPlaneValidationError("role status must be active or inactive")
             if normalized_status == INACTIVE_STATUS:
                 if role.code in actor.role_codes:
-                    raise AdminConflictError(
+                    raise ControlPlaneConflictError(
                         "an administrator cannot disable a role they hold"
                     )
                 if await self._member_count(tenant_id, role_id):
-                    raise AdminConflictError(
+                    raise ControlPlaneConflictError(
                         "reassign active members before disabling this role"
                     )
             role.status = normalized_status
@@ -250,7 +250,7 @@ class RoleService:
             )
         )
         if role is None:
-            raise AdminNotFoundError(f"role not found: {role_id}")
+            raise ControlPlaneNotFoundError(f"role not found: {role_id}")
         return role
 
     async def _member_count(self, tenant_id: UUID, role_id: UUID) -> int:
@@ -271,7 +271,7 @@ class RoleService:
     ) -> None:
         disallowed = sorted(set(permission_codes) - set(actor.permission_codes))
         if disallowed:
-            raise AdminValidationError(
+            raise ControlPlaneValidationError(
                 "roles may include only permissions already held by the acting "
                 f"administrator: {', '.join(disallowed)}"
             )

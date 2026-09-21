@@ -17,7 +17,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from bothesis.integrations import PendingAuthorization
 
 from bothesis.connector.protocol import Chunk, DocumentItem
-from bothesis.db.models import Item, ItemUpload
+from sqlalchemy import and_, false
+
+from bothesis.db.models import Conversation, Item, ItemUpload
 from bothesis.storage import PresignedRequest
 
 ACTIVE_STATUS = "active"
@@ -222,6 +224,7 @@ PERMISSIONS_BY_CODE: dict[str, PermissionDefinition] = {
 PLATFORM_ADMIN_ROLE = "platform_admin"
 TENANT_ADMIN_ROLE = "tenant_admin"
 TENANT_MEMBER_ROLE = "tenant_member"
+GUEST_ROLE = "guest"
 COLLECTION_OWNER_ROLE = "collection_owner"
 COLLECTION_EDITOR_ROLE = "collection_editor"
 COLLECTION_VIEWER_ROLE = "collection_viewer"
@@ -266,6 +269,16 @@ SYSTEM_ROLES: tuple[RoleDefinition, ...] = (
         "Workspace Member",
         TENANT_SCOPE,
         (KNOWLEDGE_READ_PERMISSION, TENANT_READ_PERMISSION),
+    ),
+    RoleDefinition(
+        GUEST_ROLE,
+        "Guest",
+        TENANT_SCOPE,
+        (
+            COLLECTION_READ_PERMISSION,
+            KNOWLEDGE_READ_PERMISSION,
+            TENANT_READ_PERMISSION,
+        ),
     ),
     RoleDefinition(
         COLLECTION_OWNER_ROLE,
@@ -351,27 +364,27 @@ class IdentityProviderUnavailableError(IdentityServiceError):
     """Raised when a configured external identity provider cannot be reached."""
 
 
-class AdministrationError(Exception):
+class ControlPlaneError(Exception):
     """Base exception for governed administration failures."""
 
 
-class AdminNotFoundError(AdministrationError):
+class ControlPlaneNotFoundError(ControlPlaneError):
     """Raised when a tenant-scoped administration record is unavailable."""
 
 
-class AdminConflictError(AdministrationError):
+class ControlPlaneConflictError(ControlPlaneError):
     """Raised when an administration write conflicts with durable state."""
 
 
-class AdminValidationError(AdministrationError):
+class ControlPlaneValidationError(ControlPlaneError):
     """Raised when an administration input or state transition is invalid."""
 
 
-class AdminExternalUnavailableError(AdministrationError):
+class ControlPlaneExternalUnavailableError(ControlPlaneError):
     """Raised when a configured external source cannot be reached."""
 
 
-class ConnectionAuthorizationRequiredError(AdministrationError):
+class ConnectionAuthorizationRequiredError(ControlPlaneError):
     """Raised when a Connection's grant is gone and someone must reconnect.
 
     Distinct from a validation failure: nothing about the request is wrong, and
@@ -406,18 +419,38 @@ class AuthContext:
     context cannot carry one answer for every Collection in the workspace.
     """
 
-    user_id: UUID
-    email: str
+    user_id: UUID | None
+    email: str | None
     display_name: str | None
     tenant_id: UUID | None
     permission_codes: tuple[str, ...]
     group_ids: tuple[UUID, ...]
     role_codes: tuple[str, ...] = ()
     platform_permissions: tuple[str, ...] = ()
+    session_id: UUID | None = None
+    session_kind: Literal["guest", "user"] = "user"
+    token_version: int = 1
 
     @property
     def is_enterprise_user(self) -> bool:
         return self.tenant_id is not None
+
+    @property
+    def is_guest(self) -> bool:
+        return self.session_kind == "guest"
+
+    @property
+    def is_user(self) -> bool:
+        return self.session_kind == "user" and self.user_id is not None
+
+    @property
+    def subject_id(self) -> UUID:
+        """Stable request actor key: durable User for members, session for guests."""
+
+        value = self.user_id or self.session_id
+        if value is None:
+            raise AuthorizationError("request identity has no subject")
+        return value
 
     def has_permissions(self, *permission_codes: str) -> bool:
         required = {_permission_code(code) for code in permission_codes}
@@ -432,13 +465,16 @@ class AuthContext:
 class JwtClaims:
     """Signed access-token claims trusted at the HTTP authentication boundary."""
 
-    user_id: UUID
-    email: str
+    session_id: UUID
+    user_id: UUID | None
+    email: str | None
     active_tenant_id: UUID
     permissions: tuple[str, ...]
     issued_at: datetime
     expires_at: datetime
     platform_permissions: tuple[str, ...] = ()
+    session_kind: Literal["guest", "user"] = "user"
+    token_version: int = 1
 
     def has_permission(self, permission_code: str) -> bool:
         return _permission_code(permission_code) in self.permissions
@@ -448,6 +484,8 @@ class JwtClaims:
 class VerifiedGoogleIdentity:
     """Identity emitted only by an OAuth verifier after email verification."""
 
+    issuer: str
+    subject: str
     email: str
     display_name: str | None
 
@@ -488,13 +526,15 @@ class AuthenticationSession:
 
     access_token: str
     expires_at: datetime
-    user_id: UUID
-    email: str
+    session_id: UUID
+    user_id: UUID | None
+    email: str | None
     display_name: str | None
     active_tenant_id: UUID
     permissions: tuple[str, ...]
     tenants: tuple[TenantMembershipSummary, ...]
     platform_permissions: tuple[str, ...] = ()
+    session_kind: Literal["guest", "user"] = "user"
 
 
 SandboxSessionStatus = Literal["active", "expired", "closed"]
@@ -640,6 +680,7 @@ class UploadStart:
     upload: ItemUpload
     upload_required: bool
     target: UploadTarget | None
+    created: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -778,6 +819,27 @@ def require_tenant_permission(
     return context.tenant_id
 
 
+def require_user_identity(context: AuthContext) -> UUID:
+    """Return durable User identity or reject guest-only session context."""
+
+    if context.user_id is None or context.is_guest:
+        raise AuthorizationError("sign in is required")
+    return context.user_id
+
+
+def conversation_access_filter(context: AuthContext):
+    """Build ownership predicate for guest-created and user-owned conversations."""
+
+    if context.is_guest and context.session_id is not None:
+        return and_(
+            Conversation.created_by_session_id == context.session_id,
+            Conversation.owner_user_id.is_(None),
+        )
+    if context.user_id is not None:
+        return Conversation.owner_user_id == context.user_id
+    return false()
+
+
 def require_platform_permission(
     context: AuthContext,
     *permission_codes: str,
@@ -796,9 +858,9 @@ def require_platform_permission(
 def normalize_required_text(value: str, field_name: str, max_length: int) -> str:
     normalized = value.strip()
     if not normalized:
-        raise AdminValidationError(f"{field_name} must not be blank")
+        raise ControlPlaneValidationError(f"{field_name} must not be blank")
     if len(normalized) > max_length:
-        raise AdminValidationError(
+        raise ControlPlaneValidationError(
             f"{field_name} must be at most {max_length} characters"
         )
     return normalized
@@ -818,9 +880,9 @@ def normalize_codes(
 
 def normalize_page(page: int, page_size: int) -> tuple[int, int, int]:
     if page < 1:
-        raise AdminValidationError("page must be at least 1")
+        raise ControlPlaneValidationError("page must be at least 1")
     if not 1 <= page_size <= 100:
-        raise AdminValidationError("page_size must be between 1 and 100")
+        raise ControlPlaneValidationError("page_size must be between 1 and 100")
     return page, page_size, (page - 1) * page_size
 
 
@@ -836,11 +898,11 @@ __all__ = [
     "ARTIFACT_DOCUMENT_TYPE",
     "ARTIFACT_MIME_TYPE",
     "AUDIT_READ_PERMISSION",
-    "AdminConflictError",
-    "AdminExternalUnavailableError",
-    "AdminNotFoundError",
-    "AdminValidationError",
-    "AdministrationError",
+    "ControlPlaneConflictError",
+    "ControlPlaneExternalUnavailableError",
+    "ControlPlaneNotFoundError",
+    "ControlPlaneValidationError",
+    "ControlPlaneError",
     "ArtifactValidationError",
     "AsyncUploadStream",
     "AuthContext",
@@ -952,5 +1014,7 @@ __all__ = [
     "normalize_required_text",
     "require_platform_permission",
     "require_tenant_permission",
+    "require_user_identity",
+    "conversation_access_filter",
     "timestamp",
 ]

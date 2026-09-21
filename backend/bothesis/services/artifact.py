@@ -29,6 +29,7 @@ from bothesis.services import (
     AuthContext,
     DocumentNotFoundError,
     require_tenant_permission,
+    require_user_identity,
     timestamp,
 )
 from bothesis.services.audit import AuditService
@@ -339,6 +340,7 @@ class ArtifactService:
         Collection it lands in.
         """
 
+        require_user_identity(access)
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         item, current = await self._load(access, artifact_id)
         async with self._sessions() as session:
@@ -431,15 +433,16 @@ class ArtifactService:
         request_id: str | None,
         source_document_id: UUID | None,
     ) -> dict[str, Any]:
+        user_id = require_user_identity(access)
         item_id = uuid4()
         key = _revision_key(tenant_id, item_id, 1, document.file_name)
         await self._store_revision_objects(document, key)
         async with self._sessions.begin() as session:
             items = ItemService(session)
             collection_id = await items.ensure_personal_collection(
-                access.user_id,
+                user_id,
                 tenant_id,
-                collection_id=ItemService.artifact_collection_id(tenant_id, access.user_id),
+                collection_id=ItemService.artifact_collection_id(tenant_id, user_id),
                 title=ARTIFACT_COLLECTION_TITLE,
                 system_kind=ARTIFACT_COLLECTION_KIND,
             )
@@ -448,7 +451,7 @@ class ArtifactService:
                 parent_item_id=collection_id,
                 title=title,
                 document_type=_document_type(document.mime_type),
-                created_by_user_id=access.user_id,
+                created_by_user_id=user_id,
                 mime_type=document.mime_type,
                 size_bytes=len(document.data),
                 storage_key=key,
@@ -474,7 +477,7 @@ class ArtifactService:
                 summary=summary,
                 conversation_id=conversation_id,
                 request_id=request_id,
-                created_by_user_id=access.user_id,
+                created_by_user_id=user_id,
             )
             session.add(revision)
             await session.flush()
@@ -503,6 +506,7 @@ class ArtifactService:
         conversation_id: UUID | None,
         request_id: str | None,
     ) -> dict[str, Any]:
+        user_id = require_user_identity(access)
         async with self._sessions.begin() as session:
             item = await session.get(Item, item_id, with_for_update=True)
             if item is None or item.status == "deleted" or item.deleted_at is not None:
@@ -520,7 +524,7 @@ class ArtifactService:
                 summary=summary,
                 conversation_id=conversation_id,
                 request_id=request_id,
-                created_by_user_id=access.user_id,
+                created_by_user_id=user_id,
             )
             session.add(revision)
             item.storage_key = key

@@ -15,7 +15,7 @@ from bothesis.services import (
     ACTIVE_STATUS,
     PLATFORM_TENANT_READ_PERMISSION,
     TENANT_MANAGE_PERMISSION,
-    AdminNotFoundError,
+    ControlPlaneNotFoundError,
     AuthContext,
     normalize_required_text,
     require_tenant_permission,
@@ -61,7 +61,7 @@ class TenantService:
     async def get_tenant(self, actor: AuthContext, tenant_id: UUID) -> dict[str, Any]:
         trusted_tenant_id = require_tenant_permission(actor)
         if tenant_id != trusted_tenant_id:
-            raise AdminNotFoundError(f"tenant not found: {tenant_id}")
+            raise ControlPlaneNotFoundError(f"tenant not found: {tenant_id}")
         return tenant_payload(await self._tenant(actor))
 
     async def update_tenant(
@@ -76,7 +76,7 @@ class TenantService:
             actor, TENANT_MANAGE_PERMISSION
         )
         if tenant_id != trusted_tenant_id:
-            raise AdminNotFoundError(f"tenant not found: {tenant_id}")
+            raise ControlPlaneNotFoundError(f"tenant not found: {tenant_id}")
         tenant = await self._tenant(actor)
         changed: list[str] = []
         if name is not None:
@@ -99,7 +99,7 @@ class TenantService:
         tenant_id = require_tenant_permission(actor)
         tenant = await self._session.get(Tenant, tenant_id)
         if tenant is None:
-            raise AdminNotFoundError(f"tenant not found: {tenant_id}")
+            raise ControlPlaneNotFoundError(f"tenant not found: {tenant_id}")
         return tenant
 
 

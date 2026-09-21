@@ -28,9 +28,9 @@ from bothesis.services import (
     TENANT_ADMIN_ROLE,
     TENANT_SCOPE,
     USER_MANAGE_PERMISSION,
-    AdminConflictError,
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneConflictError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     AuthContext,
     IdentityConflictError,
     normalize_page,
@@ -108,9 +108,9 @@ class UserService:
         }
         sort_column = sort_columns.get(sort)
         if sort_column is None:
-            raise AdminValidationError("unsupported user sort field")
+            raise ControlPlaneValidationError("unsupported user sort field")
         if direction not in {"asc", "desc"}:
-            raise AdminValidationError("sort direction must be asc or desc")
+            raise ControlPlaneValidationError("sort direction must be asc or desc")
         order = sort_column.desc() if direction == "desc" else sort_column.asc()
         rows = (
             await self._session.execute(
@@ -217,9 +217,9 @@ class UserService:
         try:
             user = await self._auth.create_user(email, display_name=display_name)
         except IdentityConflictError as exc:
-            raise AdminConflictError(str(exc)) from exc
+            raise ControlPlaneConflictError(str(exc)) from exc
         except ValueError as exc:
-            raise AdminValidationError(str(exc)) from exc
+            raise ControlPlaneValidationError(str(exc)) from exc
         membership = await self._auth.assign_membership(user.id, tenant_id)
         roles = await self._assignments.replace_tenant_roles(
             user_id=user.id,
@@ -258,7 +258,7 @@ class UserService:
         if user_id == actor.user_id and any(
             change is not None for change in (role_ids, status, group_ids)
         ):
-            raise AdminConflictError(
+            raise ControlPlaneConflictError(
                 "an administrator cannot change their own workspace access"
             )
         await self._ensure_tenant_retains_an_administrator(
@@ -276,7 +276,7 @@ class UserService:
                     user_id, display_name=display_name
                 )
             except ValueError as exc:
-                raise AdminValidationError(str(exc)) from exc
+                raise ControlPlaneValidationError(str(exc)) from exc
             changed.append("display_name")
         if status is not None:
             user.status = status
@@ -333,7 +333,7 @@ class UserService:
             )
         ).one_or_none()
         if row is None:
-            raise AdminNotFoundError(f"user not found: {user_id}")
+            raise ControlPlaneNotFoundError(f"user not found: {user_id}")
         return row
 
     async def _require_assignable_roles(
@@ -366,7 +366,7 @@ class UserService:
         }
         disallowed = sorted(requested - set(actor.permission_codes))
         if disallowed:
-            raise AdminValidationError(
+            raise ControlPlaneValidationError(
                 "cannot grant a role with permissions beyond the acting "
                 f"administrator's authority: {', '.join(disallowed)}"
             )
@@ -423,7 +423,7 @@ class UserService:
             .with_for_update()
         )
         if other_administrator is None:
-            raise AdminConflictError(
+            raise ControlPlaneConflictError(
                 "the last active workspace administrator cannot be suspended or "
                 "have their administrator role removed"
             )
@@ -525,7 +525,7 @@ class UserService:
     ) -> list[Group]:
         desired_ids = set(group_ids)
         if len(desired_ids) != len(group_ids):
-            raise AdminValidationError("group IDs must be unique")
+            raise ControlPlaneValidationError("group IDs must be unique")
         groups = list(
             await self._session.scalars(
                 select(Group).where(
@@ -537,7 +537,7 @@ class UserService:
             )
         ) if desired_ids else []
         if {group.id for group in groups} != desired_ids:
-            raise AdminNotFoundError("one or more groups were not found")
+            raise ControlPlaneNotFoundError("one or more groups were not found")
 
         existing = list(
             await self._session.scalars(

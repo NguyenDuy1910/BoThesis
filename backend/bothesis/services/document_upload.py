@@ -20,6 +20,8 @@ from bothesis.storage import (
 from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.item import ItemService
 from bothesis.services.item_ingestion import ItemIngestionService
+from bothesis.services.workflow import NativeUploadIndexingInput
+from bothesis.services.workflow.service import TemporalWorkflowService
 from bothesis.services import (
     COLLECTION_READ_PERMISSION,
     COLLECTION_UPDATE_PERMISSION,
@@ -27,6 +29,7 @@ from bothesis.services import (
     DEFAULT_UPLOAD_URL_SECONDS,
     AsyncUploadStream,
     AuthContext,
+    AuthorizationError,
     StoredFileContent,
     CollectionUpload,
     DocumentNotFoundError,
@@ -37,6 +40,7 @@ from bothesis.services import (
     UploadTarget,
     UploadTooLargeError,
     UploadValidationError,
+    require_user_identity,
 )
 log = logging.getLogger(__name__)
 
@@ -51,6 +55,7 @@ class DocumentUploadService:
         object_storage: DocumentStorage,
         ingestion_service: ItemIngestionService,
         document_source: StoredFileContent,
+        workflows: TemporalWorkflowService,
         max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
         upload_url_seconds: int = DEFAULT_UPLOAD_URL_SECONDS,
     ) -> None:
@@ -60,6 +65,7 @@ class DocumentUploadService:
         self._object_storage = object_storage
         self._ingestion = ingestion_service
         self._document_source = document_source
+        self._workflows = workflows
         self.max_upload_bytes = max_upload_bytes
         self._upload_url_seconds = upload_url_seconds
 
@@ -67,11 +73,18 @@ class DocumentUploadService:
         self,
         access: AuthContext,
         *,
+        collection_id: UUID,
         idempotency_key: str,
         file_name: str,
         content_type: str,
         size_bytes: int,
+        purpose: str = "knowledge",
     ) -> UploadStart:
+        if access.is_guest:
+            raise AuthorizationError("sign in is required for private uploads")
+        if purpose not in {"knowledge", "conversation_attachment"}:
+            raise UploadValidationError("unsupported document purpose")
+        user_id = require_user_identity(access)
         normalized_name = _file_name(file_name)
         normalized_type = _content_type(content_type)
         self._validate_upload_size(size_bytes)
@@ -80,22 +93,23 @@ class DocumentUploadService:
             async with self._session_factory.begin() as session:
                 if access.tenant_id is None:
                     raise UploadValidationError("an active tenant is required")
-                item, _ = await ItemService(session).create_or_get_personal_upload(
-                    access.user_id,
-                    access.tenant_id,
-                    idempotency_key=idempotency_key,
-                    file_name=normalized_name,
-                    mime_type=normalized_type,
-                    size_bytes=size_bytes,
+                await self._require_writable_collection(access, collection_id, session=session)
+                item, created = await ItemService(session).create_or_get_collection_upload(
+                    user_id, access.tenant_id, collection_id,
+                    idempotency_key=idempotency_key, file_name=normalized_name,
+                    mime_type=normalized_type, size_bytes=size_bytes,
                     document_type=_document_type(normalized_type),
+                    metadata={"purpose": purpose},
                 )
         except InvalidDocumentStateError as exc:
             raise UploadConflictError(str(exc)) from exc
 
         assert item.upload is not None
         if item.upload.status == "available":
+            if purpose == "knowledge":
+                await self._queue_indexing(item)
             return UploadStart(
-                item=item, upload=item.upload, upload_required=False, target=None
+                item=item, upload=item.upload, upload_required=False, target=None, created=created
             )
         if item.upload.status not in {"pending", "failed"}:
             raise UploadConflictError("item is not in an uploadable state")
@@ -111,6 +125,7 @@ class DocumentUploadService:
             upload=item.upload,
             upload_required=True,
             target=UploadTarget(mode="presigned", request=request),
+            created=created,
         )
 
     async def upload_to_collection(
@@ -122,11 +137,17 @@ class DocumentUploadService:
         file_name: str,
         content_type: str,
         content: AsyncUploadStream,
+        purpose: str = "knowledge",
     ) -> CollectionUpload:
-        """Store and register one native file directly under a writable collection."""
+        """Store one native file and queue its independent semantic indexing."""
 
+        if access.is_guest:
+            raise AuthorizationError("sign in is required for private uploads")
+        if purpose not in {"knowledge", "conversation_attachment"}:
+            raise UploadValidationError("unsupported document purpose")
         if access.tenant_id is None:
             raise UploadValidationError("an active tenant is required")
+        user_id = require_user_identity(access)
         normalized_name = _file_name(file_name)
         normalized_type = _content_type(content_type)
         _validate_supported_file(normalized_name)
@@ -141,7 +162,7 @@ class DocumentUploadService:
                     item, created = await ItemService(
                         session
                     ).create_or_get_collection_upload(
-                        access.user_id,
+                        user_id,
                         access.tenant_id,
                         collection_id,
                         idempotency_key=idempotency_key,
@@ -149,6 +170,7 @@ class DocumentUploadService:
                         mime_type=normalized_type,
                         size_bytes=size_bytes,
                         document_type=_document_type(normalized_type),
+                        metadata={"purpose": purpose},
                     )
             except InvalidDocumentStateError as exc:
                 raise UploadConflictError(str(exc)) from exc
@@ -187,14 +209,15 @@ class DocumentUploadService:
                 async with self._session_factory.begin() as session:
                     item = await ItemService(session).mark_upload_available(
                         item.id,
-                        access.user_id,
+                        user_id,
                         access.tenant_id,
                         storage_metadata={
                             "etag": stored.etag,
                             "version_id": stored.version_id,
                         },
                     )
-            item = await self._index_available(item, access=access)
+            if purpose == "knowledge" and item.index_status != "ready":
+                await self._queue_indexing(item)
             return CollectionUpload(item=item, created=created)
         finally:
             temporary_path.unlink(missing_ok=True)
@@ -204,16 +227,18 @@ class DocumentUploadService:
         access: AuthContext,
         document_id: UUID,
     ) -> Item:
+        if access.is_guest:
+            raise AuthorizationError("sign in is required for private uploads")
         if access.tenant_id is None:
             raise UploadValidationError("an active tenant is required")
         async with self._session_factory() as session:
-            item = await ItemService(session).get_owned_upload(
-                document_id,
-                access.user_id,
-                access.tenant_id,
+            item = await ItemService(session).get_upload_for_access(
+                document_id, access, permission=COLLECTION_UPDATE_PERMISSION
             )
             assert item.upload is not None
             if item.upload.status == "available":
+                if (item.metadata_ or {}).get("purpose", "knowledge") == "knowledge":
+                    await self._queue_indexing(item)
                 return item
             storage_key = item.storage_key
             expected_size = item.size_bytes
@@ -244,18 +269,15 @@ class DocumentUploadService:
         async with self._session_factory.begin() as session:
             item = await ItemService(session).mark_upload_available(
                 document_id,
-                access.user_id,
+                item.upload.owner_user_id,
                 access.tenant_id,
                 storage_metadata={
                     "etag": stored.etag,
                     "version_id": stored.version_id,
                 },
             )
-        # A personal upload is a conversation resource, not Knowledge Base
-        # content. Marking bytes available never parses, chunks, embeds, OCRs,
-        # summarizes, or indexes them. Explicit resource tools resolve it only
-        # if an agent needs it; collection uploads keep their separate
-        # deliberate ingestion path above.
+        if (item.metadata_ or {}).get("purpose", "knowledge") == "knowledge":
+            await self._queue_indexing(item)
         return item
 
     async def retry_indexing(
@@ -263,6 +285,9 @@ class DocumentUploadService:
         access: AuthContext,
         document_id: UUID,
     ) -> Item:
+        if access.is_guest:
+            raise AuthorizationError("sign in is required for private uploads")
+        require_user_identity(access)
         document = await self.get_document(
             access,
             document_id,
@@ -279,6 +304,9 @@ class DocumentUploadService:
         access: AuthContext,
         document_id: UUID,
     ) -> None:
+        if access.is_guest:
+            raise AuthorizationError("sign in is required to remove documents")
+        require_user_identity(access)
         await self._ingestion.remove_upload(document_id, access=access)
 
     async def get_document(
@@ -306,10 +334,11 @@ class DocumentUploadService:
     ) -> None:
         if access.tenant_id is None:
             return
+        user_id = require_user_identity(access)
         async with self._session_factory.begin() as session:
             await ItemService(session).mark_upload_failed(
                 document_id,
-                access.user_id,
+                user_id,
                 access.tenant_id,
                 error_code=error_code,
             )
@@ -347,6 +376,28 @@ class DocumentUploadService:
             )
         except DocumentProcessingError:
             return await self.get_document(access, document.id)
+
+    async def _queue_indexing(self, document: Item) -> None:
+        """Best-effort dispatch after durable bytes make direct access possible.
+
+        A Temporal outage must not turn a successful object-storage write into
+        a failed upload. ``index_status`` stays ``pending`` and an explicit
+        retry remains available until the worker can process it.
+        """
+
+        upload = document.upload
+        if upload is None or upload.status != "available":
+            raise InvalidDocumentStateError("cannot index unavailable upload")
+        try:
+            await self._workflows.start_native_upload_indexing(
+                NativeUploadIndexingInput(
+                    document_id=str(document.id),
+                    tenant_id=str(document.tenant_id),
+                    owner_user_id=str(upload.owner_user_id),
+                )
+            )
+        except Exception:  # noqa: BLE001 - raw-resource readiness is durable first
+            log.exception("native upload indexing dispatch failed document_id=%s", document.id)
 
     async def _require_writable_collection(
         self,

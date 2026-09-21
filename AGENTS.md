@@ -1,147 +1,426 @@
-# Enterprise Agent Rules
+# BoThesis Agent Rules
 
 ## Project intent
-Enterprise Agent is an enterprise knowledge and BI assistant. It connects to trusted company sources, indexes domain knowledge, answers with grounded citations, and helps users analyze business data.
 
-Primary source types:
-- Confluence
-- Jira
-- Slack
-- PDF documents
-- Google Drive
-- Databases and datalake assets
+BoThesis is an enterprise knowledge.
 
-## Working rules
-- Keep the structure simple. Do not redesign folders unless the user asks.
-- Prefer small, explicit modules over framework-heavy abstractions.
-- Preserve enterprise boundaries: tenant, permission, source lineage, audit, and citation data must not be lost.
-- Never answer from enterprise knowledge without source grounding when the feature requires factual output.
-- Treat connectors as isolated adapters. Connector-specific code must not leak into retrieval, BI, or agent orchestration.
-- Treat BI as governed analytics: metric definitions, SQL generation, validation, and data lineage must be explicit.
-- Do not add mocks, placeholders, fake fallbacks, or TODO implementations as completed work.
-- Avoid storing secrets in the repo. Use environment variables or secret managers.
+It connects to trusted enterprise sources, ingests and indexes knowledge, retrieves permission-filtered evidence, answers with grounded citations, and supports governed business analytics.
 
-## Coding rules
-- Reuse existing patterns before adding new ones.
-- Keep public interfaces stable and typed.
-- Parse boolean configuration once at the application composition boundary,
-  then pass typed `bool` values into services. Never use ad-hoc truthy string
-  comparisons or collections.
-- Never physically delete persisted business data, raw document objects,
-  provider references, or vector points. Delete actions must use a lifecycle
-  status or `deleted_at` tombstone, and normal reads must exclude tombstones.
-- Each `backend/bothesis/<package>/<name>.py` module defines only its primary
-  class or object for that module. Put shared contexts, DTOs, errors, and
-  package-level constants in that package's `__init__.py`, and import them
-  through the `bothesis.<package>` package boundary. This applies to all
-  packages: `agent`, `chat`, `connector`, `document_index`, `services`, and
-  `storage`, including their sub-packages. (Example: `services/auth.py` defines
-  only `AuthService`; shared service types live in `services/__init__.py`.)
-- Separate ingestion, indexing, retrieval, agent orchestration, and BI logic.
-- Validate inputs at API boundaries.
-- Enforce permissions before retrieval results or BI data reach the agent.
-- Log operational events without leaking private content or secrets.
+Keep implementations simple, explicit, typed, and aligned with the existing architecture.
 
-## Application boundaries and naming
-- Before implementing or moving any tool or feature, trace its complete current
-  path: composition root, API/service entry point, runtime invocation, domain
-  boundary, persistence/retrieval dependencies, and tests. Extend the existing
-  cohesive concept and folder when it owns the behavior; create a new folder or
-  module only when a distinct current boundary requires it.
-- Keep model tools thin. A tool owns its provider-facing declaration, conversion
-  between `ToolInvocation` and `ToolResult`, and no more orchestration than is
-  required at that boundary. Put request-scoped orchestration shared by agent
-  tools in `bothesis.services.agent_runtime`; keep retrieval policy in
-  `bothesis.knowledge`, Item lifecycle in Item services, durable file access in
-  `bothesis.storage`, and connector-specific behavior in connector adapters.
-- Every new feature must preserve the current ownership model, package layout,
-  naming conventions, typed public contracts, permission boundaries, source
-  lineage, and citation flow. Do not introduce a parallel implementation,
-  generic catch-all service, or convenience import merely because it is faster
-  to add locally.
-- `backend/main.py` is executable bootstrap only: load local environment, configure
-  process logging, and start the ASGI application. It must not define HTTP
-  schemas, routers, request parsing, or business workflows.
-- `backend/api` owns the complete FastAPI boundary: request/response DTOs,
-  header and middleware identity extraction, validation, routers, HTTP error
-  mapping, application lifespan, and transport-specific application facades.
-  API modules may depend on services; services must never import FastAPI,
-  `Request`, `Response`, or API request DTOs.
-- When adding or changing an HTTP API, first identify the durable resource and
-  extend the router that owns it. Use resource-oriented REST paths: plural
-  nouns for collections, an identifier for one resource, and standard methods
-  (`GET` read, `POST` create, `PATCH` partial update, `PUT` replacement, and
-  `DELETE` lifecycle removal). Do not expose workflow verbs such as
-  `/switch-tenant`; model the resulting resource/state instead (for example,
-  `POST /api/auth/session` creates a token with a selected active tenant).
-  Use an action subpath only when the operation cannot be represented as a
-  resource or state transition, and name that action narrowly.
-- Every new API route must define boundary DTOs in `backend/api`, validate
-  input before calling a service, use the existing identity/permission
-  dependency where it protects tenant data, preserve the established API
-  prefix/version for its router, and have a focused API-level verification.
-- Parse all environment configuration at an executable/composition boundary and
-  inject typed dependencies into application and service objects. Do not create
-  storage clients, model transports, index clients, or workflow clients inside
-  a domain service from environment variables.
-- `bothesis.services.__init__` contains only shared contracts, DTOs, errors,
-  and constants. Import concrete services from the module that owns them;
-  never re-export concrete service classes through the package barrel.
-- Name a service for the durable resource or lifecycle it owns, never for the
-  caller, screen, or transport. Examples: `NativeUploadService`,
-  `StoredFileContentService`, `ItemIngestionService`, and `ItemCatalogService`.
-  Avoid catch-all names such as `ApiService`, `AdminService`, or
-  `ChatDocumentSourceService`.
-- Keep raw native upload, stored-file canonicalization, and connector extraction
-  as distinct adapters into the same Item lifecycle. `ItemIngestionService` is
-  the single owner of Item processing state, preview persistence, citations,
-  index replacement, reprocessing, and tombstone coordination.
-- Temporal workflow definitions, activities, clients, and scheduling services
-  belong in `bothesis.services.workflow`. Keep their shared workflow contracts
-  in `bothesis.services.workflow.__init__`; API modules may call its services
-  but must not contain Temporal implementation details.
+---
 
-## Item knowledge architecture
-- Read the current architecture and every affected call site before adding or
-  moving ingestion, indexing, or retrieval code.
-- Treat the existing `Item` model as the canonical identity and lifecycle
-  contract. Reuse its collection hierarchy, source lineage, chunks, previews,
-  assets, citations, metadata, and tombstone semantics.
-- Extend an existing cohesive component before creating another file or class.
-  Explain why each new file is required by a current behavior.
-- Keep user-action and cross-capability orchestration in `bothesis/services`.
-  `ItemIngestionService` owns Item persistence, processing order, status
-  transitions, citations, previews, reprocessing, and removal coordination.
-- Keep only Item content indexing, searching, replacement, and tombstoning in
-  `bothesis/document_index`. Storage payloads and vendor clients must remain
-  private implementation details.
-- Keep durable binary object access in `bothesis/storage`; parsing, Item
-  lifecycle orchestration, and indexed-content behavior belong elsewhere.
-- Keep tenant/authorization scoping, retrieval filtering, ranking, reranking,
-  evidence construction, and context budgeting in `bothesis/knowledge`.
-- Domain and application layers must never import or call vector database SDKs
-  directly. Domain-facing APIs and filenames must not expose vendor or
-  infrastructure terms such as Qdrant, vector store, or sink.
-- Do not design ingestion or retrieval as one class or file per step. Prefer a
-  single cohesive capability with only the small supporting types required by
-  current behavior.
-- Never add compatibility wrappers, obsolete-name aliases, speculative
-  repositories, factories, providers, protocols, or storage abstractions
-  without a demonstrated current requirement.
-- Prefer consolidating and deleting redundant code. Do not generate code
-  outside the requested scope.
+## Source of truth
 
-## Verification rules
-- For behavior changes, run the smallest command or scenario that proves the changed path works.
-- For connector changes, verify extraction, normalization, lineage, and permission mapping.
-- For retrieval changes, verify citations and permission filtering.
-- For BI changes, verify generated SQL or query plans before presenting insights.
-## Test rules
-    All test files must be located under:
-    /Users/duynguyen/Documents/vikki-bank-code/ai-team/BoThesis/tests
-    Never create test files inside application/source directories such as backend/, bothesis/, feature modules, or temporary folders.
-    Mirror the application structure under tests/ when useful for clarity.
-    Reuse existing test modules before creating new test files.
-    Do not create duplicate, temporary, ad-hoc, or one-off test files when an existing test module can cover the scenario.
-    Do not leave debugging scripts or temporary verification files scattered across the repository.
-    If a temporary script is strictly necessary for local verification, remove it after verification unless the user explicitly asks to keep it.
+Before making any meaningful code change, inspect:
+
+```text
+/Users/nguyenduy/Documents/utex/BoThesis/backend/docs_design
+```
+
+This directory is the architectural source of truth for the project.
+
+It includes design decisions for:
+
+```text
+OpenAPI contract
+Database / DBML
+Conversation and LLM agent loop
+Authentication contract
+RBAC / authorization
+```
+
+Always use the current documents in `docs_design` to understand the intended behavior before changing the implementation.
+
+Do not design a competing architecture when the source of truth already defines one.
+
+---
+
+## Required workflow
+
+For every implementation task:
+
+```text
+docs_design
+    ↓
+understand affected flow
+    ↓
+trace current implementation
+    ↓
+implement/change code
+    ↓
+verify affected flow
+    ↓
+update docs_design
+```
+
+Before editing code:
+
+1. Read the relevant files in `backend/docs_design`.
+2. Trace the existing implementation and affected callers.
+3. Identify which documented contract or design owns the behavior.
+4. Implement using that design.
+
+After editing code:
+
+1. Verify the changed behavior.
+2. Determine whether the implementation changed any API, schema, lifecycle, architecture, auth, RBAC, agent flow, or important design decision.
+3. Update the corresponding file(s) in `backend/docs_design`.
+4. Ensure documentation and implementation describe the same final system.
+
+Never leave:
+
+```text
+code != docs_design
+```
+
+after completing a task.
+
+---
+
+## Contract-first rule
+
+For HTTP/API work:
+
+```text
+OpenAPI contract
+    ↓
+API boundary
+    ↓
+Application service
+    ↓
+Domain / persistence / infrastructure
+```
+
+The API contract is the source of truth for public behavior.
+
+When implementing a new or changed endpoint:
+
+* follow the existing OpenAPI contract;
+* use resource-oriented REST APIs;
+* keep request/response DTOs typed;
+* keep routers thin;
+* do not expose infrastructure implementation details;
+* update the OpenAPI design document when the contract intentionally changes.
+
+Do not preserve a legacy API merely because old services were built around it.
+
+Refactor the implementation toward the canonical contract.
+
+---
+
+## Database rule
+
+Use the DBML/database design in `docs_design` as the source of truth for persisted domain concepts and relationships.
+
+Before changing:
+
+```text
+table
+column
+relationship
+identifier
+lifecycle state
+tenant/workspace ownership
+RBAC persistence
+```
+
+check the DB design first.
+
+If the implementation requires a legitimate database design change:
+
+```text
+update DB design
++
+migration/model
++
+affected service code
+```
+
+as one coherent change.
+
+Do not silently introduce a database structure that is absent from the documented design.
+
+---
+
+## Authentication and RBAC
+
+Follow the authentication and RBAC contracts in `docs_design`.
+
+Keep these concepts separate:
+
+```text
+Authentication
+→ who the caller is
+
+Workspace permission / RBAC
+→ what capability the caller has
+
+Resource ACL
+→ which resource the caller may access
+
+Platform permission
+→ cross-workspace platform capability
+```
+
+Do not hard-code role names into business authorization.
+
+Prefer stable permissions and documented authorization policies.
+
+Authorization must be enforced before enterprise data reaches retrieval, the agent, or BI execution.
+
+If auth or authorization behavior changes, update the corresponding `docs_design` contract.
+
+---
+
+## Agent / conversation flow
+
+The documented conversation/LLM loop is the source of truth for agent orchestration.
+
+Preserve the existing intelligent agent loop.
+
+Do not turn the agent into a rigid workflow unless explicitly requested.
+
+Keep:
+
+```text
+tool selection
+retrieval
+context building
+citation grounding
+agent reasoning loop
+response streaming
+```
+
+aligned with the documented conversation architecture.
+
+Temporal or other workflow infrastructure must not leak into the public agent contract unless explicitly designed there.
+
+---
+
+## Enterprise knowledge boundaries
+
+Preserve:
+
+```text
+workspace / tenant boundary
+permissions
+source lineage
+citations
+audit information
+resource lifecycle
+```
+
+Never return enterprise knowledge through retrieval or the agent without applying the required authorization filtering.
+
+Factual enterprise answers that require grounding must preserve citation/source evidence.
+
+Connector-specific behavior must remain isolated from core retrieval and agent orchestration.
+
+---
+
+## Service ownership
+
+Before creating a new service/module, determine whether an existing component already owns the behavior.
+
+Prefer:
+
+```text
+one canonical resource/lifecycle service
+```
+
+over services based on caller or screen.
+
+Good:
+
+```text
+CollectionService
+DocumentService
+ItemIngestionService
+ConnectionService
+SourceService
+```
+
+Avoid:
+
+```text
+AdminCollectionService
+AgentCollectionService
+PageService
+ApiService
+```
+
+Do not introduce parallel implementations of the same domain operation.
+
+Reuse and consolidate existing flows where possible.
+
+---
+
+## Infrastructure boundaries
+
+Keep infrastructure details behind their owning boundary.
+
+Examples:
+
+```text
+connector provider code
+→ connector adapters
+
+durable binary content
+→ storage
+
+index/search implementation
+→ document_index
+
+authorization-aware retrieval
+→ knowledge
+
+cross-capability orchestration
+→ services
+
+Temporal
+→ services.workflow
+
+HTTP/FastAPI
+→ backend/api
+```
+
+Do not expose infrastructure/vendor names through domain-facing APIs unless they are genuinely part of the domain.
+
+---
+
+## Lifecycle and deletion
+
+Persisted business resources must not be physically deleted unless the documented design explicitly says otherwise.
+
+Use the project's lifecycle/tombstone model, such as:
+
+```text
+status
+deleted_at
+```
+
+Normal reads must exclude tombstoned resources where appropriate.
+
+Deletion API semantics may still use HTTP `DELETE`; persistence implementation remains internal.
+
+---
+
+## Configuration and secrets
+
+Parse environment configuration at the application/composition boundary.
+
+Inject typed configuration into services.
+
+Do not:
+
+```text
+read environment variables throughout domain services
+create infrastructure clients ad hoc inside business logic
+store secrets in source code
+```
+
+Use environment variables or the configured secret-management mechanism.
+
+---
+
+## Testing and verification
+
+Tests belong under:
+
+```text
+/Users/duynguyen/Documents/vikki-bank-code/ai-team/BoThesis/tests
+```
+
+Reuse existing tests where possible.
+
+Do not leave temporary test/debug files in application directories.
+
+For each change, run the smallest verification that proves the affected flow works.
+
+Examples:
+
+```text
+API change
+→ API-level test + contract verification
+
+retrieval change
+→ permission filtering + citation verification
+
+connector change
+→ extraction + normalization + lineage verification
+
+agent change
+→ relevant conversation/tool flow
+
+database change
+→ affected persistence/service tests
+```
+
+---
+
+## Documentation synchronization
+
+Documentation maintenance is part of implementation, not a separate optional task.
+
+After every meaningful change, check whether any file under:
+
+```text
+backend/docs_design
+```
+
+is affected.
+
+Update it when changes affect:
+
+```text
+API contract
+database model
+authentication
+RBAC
+agent/conversation flow
+resource lifecycle
+service ownership
+important architecture decisions
+```
+
+Keep documentation concise and architectural.
+
+Do not document temporary implementation details unless they affect future design decisions.
+
+At the end of each task, report:
+
+```text
+Code changed
+Docs changed
+Contract/design decisions changed
+Tests/verification performed
+Remaining decisions, if any
+```
+
+The final state must satisfy:
+
+```text
+docs_design
+    ==
+implemented architecture
+    ==
+runtime behavior
+```
+
+---
+
+## General principle
+
+When uncertain:
+
+```text
+read docs_design first
+→ follow the existing source of truth
+→ make the smallest coherent change
+→ remove obsolete code when replaced
+→ verify the affected path
+→ update docs_design to match the final implementation
+```
+
+Do not create a new architectural direction silently.

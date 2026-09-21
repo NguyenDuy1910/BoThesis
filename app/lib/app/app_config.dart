@@ -1,5 +1,5 @@
 abstract final class AppConfig {
-  // Keep the temporary development identity aligned with web/.env.local.
+  // Keep the temporary development identity aligned with the WebUI defaults.
   // BOTHESIS_* remains the preferred mobile override; accepting the web keys
   // makes shared build configurations work without duplicating values.
   static const _webApiBaseUrl = String.fromEnvironment(

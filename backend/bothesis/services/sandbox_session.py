@@ -16,6 +16,8 @@ from bothesis.services import (
     SandboxManifestResource,
     SandboxProviderFile,
     SandboxSessionState,
+    conversation_access_filter,
+    require_user_identity,
 )
 
 
@@ -40,6 +42,7 @@ class SandboxSessionService:
     ) -> SandboxSessionState | None:
         """Return the caller's current provider binding, without creating one."""
 
+        user_id = require_user_identity(access)
         tenant_id = _tenant_id(access)
         normalized_provider = _provider(provider)
         async with self._sessions() as session:
@@ -48,7 +51,7 @@ class SandboxSessionService:
                 select(SandboxSession).where(
                     SandboxSession.conversation_id == conversation_id,
                     SandboxSession.tenant_id == tenant_id,
-                    SandboxSession.user_id == access.user_id,
+                    SandboxSession.user_id == user_id,
                     SandboxSession.provider == normalized_provider,
                     SandboxSession.status == "active",
                     SandboxSession.deleted_at.is_(None),
@@ -67,6 +70,7 @@ class SandboxSessionService:
     ) -> SandboxSessionState | None:
         """Return the newest expired manifest after rechecking conversation access."""
 
+        user_id = require_user_identity(access)
         tenant_id = _tenant_id(access)
         normalized_provider = _provider(provider)
         async with self._sessions() as session:
@@ -76,7 +80,7 @@ class SandboxSessionService:
                 .where(
                     SandboxSession.conversation_id == conversation_id,
                     SandboxSession.tenant_id == tenant_id,
-                    SandboxSession.user_id == access.user_id,
+                    SandboxSession.user_id == user_id,
                     SandboxSession.provider == normalized_provider,
                     SandboxSession.status == "expired",
                     SandboxSession.deleted_at.is_(None),
@@ -95,6 +99,7 @@ class SandboxSessionService:
     ) -> SandboxSessionState:
         """Return or lazily create the sole active sandbox for this provider."""
 
+        user_id = require_user_identity(access)
         tenant_id = _tenant_id(access)
         normalized_provider = _provider(provider)
         async with self._sessions.begin() as session:
@@ -104,7 +109,7 @@ class SandboxSessionService:
                 .where(
                     SandboxSession.conversation_id == conversation_id,
                     SandboxSession.tenant_id == tenant_id,
-                    SandboxSession.user_id == access.user_id,
+                    SandboxSession.user_id == user_id,
                     SandboxSession.provider == normalized_provider,
                     SandboxSession.status == "active",
                     SandboxSession.deleted_at.is_(None),
@@ -115,7 +120,7 @@ class SandboxSessionService:
                 row = SandboxSession(
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
-                    user_id=access.user_id,
+                    user_id=user_id,
                     provider=normalized_provider,
                     manifest={"resources": []},
                     provider_state={"materialized_files": [], "observed_files": []},
@@ -236,7 +241,7 @@ async def _conversation(
     statement = select(Conversation).where(
         Conversation.id == conversation_id,
         Conversation.tenant_id == _tenant_id(access),
-        Conversation.user_id == access.user_id,
+        conversation_access_filter(access),
         Conversation.status == "active",
     )
     if lock:
@@ -250,12 +255,13 @@ async def _conversation(
 async def _active_session(
     session: AsyncSession, access: AuthContext, session_id: UUID
 ) -> SandboxSession:
+    user_id = require_user_identity(access)
     row = await session.scalar(
         select(SandboxSession)
         .where(
             SandboxSession.id == session_id,
             SandboxSession.tenant_id == _tenant_id(access),
-            SandboxSession.user_id == access.user_id,
+            SandboxSession.user_id == user_id,
             SandboxSession.status == "active",
             SandboxSession.deleted_at.is_(None),
         )

@@ -18,6 +18,13 @@ repository / infrastructure adapter
 PostgreSQL, S3-compatible storage, Qdrant, model provider, or connector API
 ```
 
+Authentication resolves every request to an `access_sessions` row. Guest
+sessions carry only public tenant access and a session subject; User sessions
+carry durable User identity and membership permissions. Identity upgrade is a
+session transition, not a mutation of `users`: the child User session
+supersedes the Guest session and claims its conversation owner while retaining
+the original session lineage for audit and access checks.
+
 `backend/main.py` is the FastAPI boundary. It defines routes, validates HTTP
 input, resolves simple request identity, calls a service, and returns an HTTP
 response. It does not own SQLAlchemy sessions, transactions, connector
@@ -61,8 +68,11 @@ Connector or upload
     ↓
 Item metadata + raw bytes in object storage
     ↓
+├─ direct, access-checked resource reads / model file materialization
 ├─ Preview → derived WebP assets + versioned manifest
-└─ Docling → canonical Chunk[]
+└─ independent indexing lifecycle
+      ↓
+   Docling → canonical Chunk[]
     ↓
 ContextualChunk → embedding + BM25 payload → Qdrant
     ↓
@@ -74,6 +84,10 @@ agent response with citations
 The connector advances a scope checkpoint only after a successful complete
 run. Chunk identifiers are deterministic and Qdrant replaces one Item's index
 on update, so retries can be safe without a generation-based index model.
+For native files, `Item.status` records raw-resource readiness and the
+document-only `Item.index_status` records derived search readiness. A file can
+therefore be attached to chat and read directly while its semantic index is
+pending or has failed.
 Preview failures do not replace or mutate the original object and do not enter
 chunking or Qdrant. Preview page numbers align with citation pages; existing
 normalized citation bounding boxes provide the region mapping used by viewers.

@@ -277,7 +277,7 @@ export function KnowledgeScreen() {
       try {
         await authorizeConnection({
           connectorKey: connection.connector_key,
-          ownerType: connection.owner_type,
+          ownerType: connection.owner_type === "workspace" ? "tenant" : "user",
           connectionId: connection.id,
         });
         toast({
@@ -294,7 +294,7 @@ export function KnowledgeScreen() {
     });
 
   const syncConnection = (id: string) => {
-    const owned = sources.filter((source) => source.integration_connection_id === id);
+    const owned = sources.filter((source) => source.connection_id === id);
     setSyncingId(id);
     return act(async () => {
       await Promise.all(owned.map((source) => sourcesApi.syncNow(source.id)));
@@ -514,9 +514,9 @@ export function KnowledgeScreen() {
               status: source.status === "paused" ? "ready" : "paused",
             });
           })}
-          runs={runs.filter((run) => run.integration_connection_id === selectedConnection.id)}
+          runs={runs.filter((run) => run.connection_id === selectedConnection.id)}
           sources={sources.filter(
-            (source) => source.integration_connection_id === selectedConnection.id,
+            (source) => source.connection_id === selectedConnection.id,
           )}
         />
       ) : selectedEntry ? (

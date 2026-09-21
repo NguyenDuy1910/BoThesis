@@ -1,7 +1,7 @@
 "use client";
 
 import { apiRequest, queryString } from "@/lib/api/request";
-import { adminRequest, queryString as adminQueryString } from "@/modules/admin/api";
+import { queryString as adminQueryString } from "@/modules/admin/api";
 import type { KnowledgeItem, Paginated } from "@/modules/admin/collections";
 
 /**
@@ -88,7 +88,7 @@ export interface Connection {
   config: Record<string, unknown>;
   scopes: string[];
   credential_configured: boolean;
-  owner_type: "tenant" | "user";
+  owner_type: "workspace" | "user";
   owner_user_id: string | null;
   status: ConnectionStatus;
   status_detail: string | null;
@@ -120,23 +120,23 @@ export interface SourceSchedule {
 
 export interface Source {
   id: string;
-  integration_connection_id: string;
-  target_item_id: string;
+  connection_id: string;
+  collection_id: string;
   display_name: string | null;
   resource_type: string | null;
   external_resource_id: string | null;
-  config: Record<string, unknown>;
+  config?: Record<string, unknown>;
   sync_mode: "manual" | "scheduled";
   status: SourceStatus;
-  status_detail: string | null;
-  last_ingested_at: string | null;
-  last_indexed_at: string | null;
-  integration_connection: {
+  status_detail?: string | null;
+  last_ingested_at?: string | null;
+  last_indexed_at?: string | null;
+  integration_connection?: {
     id: string;
     display_name: string;
     connector_key: string;
     status: ConnectionStatus;
-    owner_type: "tenant" | "user";
+    owner_type: "workspace" | "user";
     account_label: string | null;
   };
   schedule: SourceSchedule | null;
@@ -150,12 +150,10 @@ export interface Source {
  * lets a source stay `ready` while a run of it is failing.
  */
 export interface SourceRun {
-  workflow_id: string;
-  run_id: string;
+  id: string;
   status: "running" | "completed" | "failed" | "cancelled" | "terminated" | "timed_out" | string;
   source_id: string | null;
-  integration_connection_id: string | null;
-  connector_key: string | null;
+  connection_id: string | null;
   trigger_type: string | null;
   started_at: string;
   finished_at: string | null;
@@ -178,13 +176,13 @@ export const connectionsApi = {
    *
    * Nothing is written until the provider hands back a grant, so abandoning
    * the consent screen leaves no half-made connection behind. Pass
-   * `integration_connection_id` to renew an existing account rather than add
+   * `connection_id` to renew an existing account rather than add
    * a second one.
    */
   startAuthorization: (body: {
     connector_key: string;
-    owner_type: "tenant" | "user";
-    integration_connection_id?: string;
+    owner_type: "workspace" | "user";
+    connection_id?: string;
   }) =>
     apiRequest<{ authorization_url: string; nonce: string }>(
       "/connections/authorizations",
@@ -198,7 +196,7 @@ export const connectionsApi = {
     config: Record<string, unknown>;
     credentials?: Record<string, unknown>;
     credential_type?: string;
-    owner_type?: "tenant" | "user";
+    owner_type?: "workspace" | "user";
   }) =>
     apiRequest<Connection>("/connections", {
       method: "POST",
@@ -240,7 +238,7 @@ export const connectionsApi = {
   createSource: (
     connectionId: string,
     body: {
-      target_item_id: string;
+      collection_id: string;
       display_name?: string;
       resource_type?: string;
       external_resource_id?: string;
@@ -255,7 +253,7 @@ export const connectionsApi = {
 };
 
 export const sourcesApi = {
-  list: (params: { integration_connection_id?: string; status?: string } = {}) =>
+  list: (params: { connection_id?: string; status?: string } = {}) =>
     apiRequest<Paginated<Source>>(`/sources${queryString({ page_size: 100, ...params })}`),
 
   get: (id: string) => apiRequest<Source>(`/sources/${id}`),
@@ -277,7 +275,7 @@ export const sourcesApi = {
   remove: (id: string) => apiRequest<void>(`/sources/${id}`, { method: "DELETE" }),
 
   syncNow: (id: string) =>
-    apiRequest<{ workflow_id: string; run_id: string; started: boolean }>(
+    apiRequest<SourceRun>(
       `/sources/${id}/ingestions`,
       { method: "POST" },
     ),
@@ -295,12 +293,12 @@ export const sourcesApi = {
 /** Destination collections. A source has to land in one. */
 export const collectionsApi = {
   list: () =>
-    adminRequest<Paginated<KnowledgeItem>>(
-      `/items${adminQueryString({ item_type: "collection", page_size: 100 })}`,
+    apiRequest<Paginated<KnowledgeItem>>(
+      `/collections${adminQueryString({ page_size: 100 })}`,
     ),
 
   create: (title: string) =>
-    adminRequest<KnowledgeItem>("/collections", {
+    apiRequest<KnowledgeItem>("/collections", {
       method: "POST",
       body: JSON.stringify({ title }),
     }),

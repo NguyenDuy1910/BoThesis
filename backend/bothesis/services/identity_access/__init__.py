@@ -20,6 +20,7 @@ def tenant_payload(tenant: Tenant) -> dict[str, Any]:
         "code": tenant.code,
         "name": tenant.name,
         "status": tenant.status,
+        "visibility": tenant.visibility,
         "settings": dict(tenant.settings),
         "created_at": timestamp(tenant.created_at),
         "updated_at": timestamp(tenant.updated_at),

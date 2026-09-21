@@ -111,11 +111,11 @@ ON CONFLICT (group_id, user_id) DO UPDATE
 --   └── Board papers               (its own boundary — grants above stop here)
 -- Engineering handbook             (a separate root)
 INSERT INTO items (id, tenant_id, item_type, parent_item_id, parent_relation, title,
-                   metadata, inherit_access, status, created_by_user_id, created_at, updated_at)
+                   metadata, inherit_access, status, index_status, created_by_user_id, created_at, updated_at)
 SELECT collection.id, context.tenant_id, 'collection', collection.parent_id,
        CASE WHEN collection.parent_id IS NULL THEN NULL ELSE 'contains' END,
        collection.title, jsonb_build_object('description', collection.description),
-       collection.inherit_access, 'ready', context.admin_id, now(), now()
+       collection.inherit_access, 'ready', NULL, context.admin_id, now(), now()
 FROM sample_context context
 CROSS JOIN (VALUES
     ('00000000-0000-4000-e000-000000000501'::uuid, NULL::uuid, 'Policies', 'Approved university policy', true),
@@ -129,11 +129,13 @@ ON CONFLICT (id) DO UPDATE
 
 -- 6. Documents --------------------------------------------------------------
 INSERT INTO items (id, tenant_id, item_type, parent_item_id, parent_relation, document_type,
-                   title, mime_type, size_bytes, metadata, status, created_by_user_id,
+                   title, mime_type, size_bytes, metadata, status, index_status, created_by_user_id,
                    created_at, updated_at)
 SELECT document.id, context.tenant_id, 'document', document.parent_id, 'contains',
        document.document_type, document.title, document.mime_type, document.size_bytes,
-       '{}'::jsonb, document.status, context.admin_id,
+       '{}'::jsonb, document.status,
+       CASE WHEN document.status = 'ready' THEN 'ready' ELSE document.status END,
+       context.admin_id,
        now() - document.age, now() - document.age
 FROM sample_context context
 CROSS JOIN (VALUES

@@ -17,12 +17,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
 import { useAccountPreferences } from "@/lib/hooks/useAccountPreferences";
+import { useAuthPrompt } from "@/components/auth/AuthPrompt";
 import {
   useProductShellNavigation,
   useProductShellSidebar,
 } from "@/components/shell/ProductShell";
 import { getApiConfiguration } from "@/lib/api/config";
+import { getAuthSession } from "@/lib/auth/session";
 import { WorkspaceMark } from "@/components/patterns";
+import { WorkspaceLoadingSkeleton } from "@/components/ui/WorkspaceLoadingSkeleton";
 import {
   listCollections,
   releaseConversationDocument,
@@ -138,7 +141,12 @@ export default function ChatShell() {
       router.replace("/auth/login");
       return;
     }
-    setConversationUser(configuration.userId, configuration.tenantId);
+    const session = getAuthSession();
+    setConversationUser(
+      configuration.userId,
+      configuration.tenantId,
+      session?.session_kind ?? "user",
+    );
     void refresh(readSelectedConversation());
   }, [refresh, router]);
 
@@ -287,7 +295,10 @@ export default function ChatShell() {
     return (
       <section aria-label="Chat" className="chat-main-pane relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--surface-base)]">
         <button aria-label="Open conversation sidebar" className="chat-mobile-menu topbar__menu" onClick={shellNavigation.openMobile} type="button"><Menu aria-hidden="true" size={18} /></button>
-        <div className="shell__route-boundary flex-1" role={loadError ? "alert" : "status"}>
+        <div
+          className={loadError ? "shell__route-boundary flex-1" : "flex min-h-0 flex-1 flex-col"}
+          role={loadError ? "alert" : undefined}
+        >
           {loadError ? (
             <>
               <strong>{loadError}</strong>
@@ -298,10 +309,7 @@ export default function ChatShell() {
               }} type="button">Try again</button>
             </>
           ) : (
-            <>
-              <span aria-hidden="true" className="shell__route-boundary-indicator" />
-              <span>Opening your conversation…</span>
-            </>
+            <WorkspaceLoadingSkeleton />
           )}
         </div>
       </section>
@@ -332,6 +340,7 @@ function ChatConversation({
 }) {
   const [input, setInput] = useState("");
   const { preferences } = useAccountPreferences();
+  const { requestSignIn } = useAuthPrompt();
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [contextCollections, setContextCollections] = useState<Collection[]>([]);
   // Source inspection lives beside this conversation, so opening a citation
@@ -344,6 +353,7 @@ function ChatConversation({
   const positionedTurnRef = useRef<string | null>(null);
   const didInitialScrollRef = useRef(false);
   const appliedKnowledgeLaunchRef = useRef<string | null>(null);
+  const handledIdentityRequestsRef = useRef(new Set<string>());
   const {
     messages,
     sendMessage,
@@ -378,6 +388,19 @@ function ChatConversation({
     item.progress !== "ready" && item.progress !== "failed"
   ));
   const activeConnectorLabel = "permitted knowledge";
+
+  useEffect(() => {
+    for (const message of messages) {
+      for (const runtimeActivity of message.turn?.runtimeActivities ?? []) {
+        if (
+          runtimeActivity.toolName !== "request_identity"
+          || handledIdentityRequestsRef.current.has(runtimeActivity.callId)
+        ) continue;
+        handledIdentityRequestsRef.current.add(runtimeActivity.callId);
+        requestSignIn("Sign in to continue this governed action.");
+      }
+    }
+  }, [messages, requestSignIn]);
 
   useEffect(() => () => {
     for (const controller of uploadControllersRef.current.values()) controller.abort();
@@ -590,7 +613,7 @@ function ChatConversation({
   const { hasMoreBelow, jumpToLatest } = useJumpToLatest(chatScrollRef, messageStackRef);
 
   return (
-    <section className={clsx("chat-main-pane relative flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[var(--surface-base)]", activity && "chat-main-pane--inspector-open")}>
+    <section className={clsx("chat-main-pane chat-content-enter relative flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[var(--surface-base)]", activity && "chat-main-pane--inspector-open")}>
       <button aria-label="Open conversation sidebar" className="chat-mobile-menu topbar__menu" onClick={onOpenSidebar} type="button"><Menu aria-hidden="true" size={18} /></button>
 
       <div
@@ -869,7 +892,6 @@ function reserveActiveTurnSpace(scroller: HTMLDivElement, stack: HTMLDivElement)
 
 function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
   const name = "BoThesis";
-  const prompts = suggestions.map((suggestion) => suggestion.prompt);
   return (
     <div className="welcome">
       <div className="welcome__content">
@@ -879,14 +901,19 @@ function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
             {name}
           </div>
           <div className="welcome-heading">
-            <h2>How can I help today?</h2>
+            <h2>What are you working on today?</h2>
           </div>
-          <p className="welcome-copy">Ask about policies, procedures and student services. Answers cite the documents they came from.</p>
+          <p className="welcome-copy">Search trusted workspace knowledge, analyze a file, or turn source material into a clear deliverable.</p>
         </div>
+        <p className="suggestions__label">Start with a focused task</p>
         <div className="suggestions">
-          {prompts.slice(0, 3).map((prompt) => (
+          {suggestions.map(({ description, icon: Icon, prompt, title }) => (
             <button className="suggestion" key={prompt} onClick={() => void onSelect(prompt)} type="button">
-              <span className="suggestion__copy"><span className="suggestion__title">{prompt}</span></span>
+              <span aria-hidden="true" className="suggestion__icon"><Icon size={16} /></span>
+              <span className="suggestion__copy">
+                <span className="suggestion__title">{title}</span>
+                <span className="suggestion__description">{description}</span>
+              </span>
             </button>
           ))}
         </div>

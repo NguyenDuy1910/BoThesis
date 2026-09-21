@@ -7,38 +7,75 @@ logic lives in ``bothesis.services``.
 
 from __future__ import annotations
 
+from datetime import datetime
+from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
-from bothesis.connector.protocol import BoundingBox, CitationInfo
-from bothesis.services import KnowledgePreviewView
+# --- Authentication and sessions ---
+class AccountCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-
-# --- Auth and RBAC ---
-
-
-class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=8, max_length=128)
+    username: str | None = Field(default=None, min_length=3, max_length=64)
+    display_name: str | None = Field(default=None, max_length=255)
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
+class PasswordSessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["password"]
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
 
 
-class CreateAuthSessionRequest(BaseModel):
-    tenant_id: UUID
+class GuestSessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["guest"]
 
 
-class GoogleCredentialRequest(BaseModel):
+class GoogleSessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["google"]
     credential: str = Field(min_length=1, max_length=12_000)
 
 
-class AuthTenant(BaseModel):
+class CreateSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["password", "guest", "google"]
+    email: EmailStr | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=128)
+    credential: str | None = Field(default=None, min_length=1, max_length=12_000)
+
+    @model_validator(mode="after")
+    def validate_method_payload(self) -> "CreateSessionRequest":
+        required = {
+            "password": (self.email is not None and self.password is not None),
+            "guest": True,
+            "google": self.credential is not None,
+        }
+        if not required[self.method]:
+            raise ValueError(f"method={self.method} requires its credential fields")
+        if self.method != "password" and (self.email is not None or self.password is not None):
+            raise ValueError("email/password are only valid for method=password")
+        if self.method != "google" and self.credential is not None:
+            raise ValueError("credential is only valid for method=google")
+        return self
+
+
+class CurrentSessionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    active_workspace_id: UUID
+
+
+class WorkspaceMembership(BaseModel):
     id: UUID
     code: str
     name: str
@@ -46,93 +83,59 @@ class AuthTenant(BaseModel):
     permissions: list[str]
 
 
-class AuthSessionResponse(BaseModel):
+class AuthSession(BaseModel):
     access_token: str
     token_type: Literal["bearer"] = "bearer"
-    expires_at: str
-    user_id: UUID
-    email: EmailStr
+    expires_at: datetime
+    session_id: UUID
+    user_id: UUID | None
+    email: EmailStr | None
     display_name: str | None
-    active_tenant_id: UUID
+    active_workspace_id: UUID
     permissions: list[str]
-    tenants: list[AuthTenant]
-    platform_permissions: list[str] = Field(default_factory=list)
+    platform_permissions: list[str]
+    session_kind: Literal["user", "guest"]
+    workspaces: list[WorkspaceMembership]
 
 
-class RefreshRequest(BaseModel):
-    refresh_token: str
-
-
-class UserProfile(BaseModel):
-    id: UUID
-    email: EmailStr
-    display_name: str
-    tenant_id: UUID
-    roles: list[str]
+class CurrentSession(BaseModel):
+    session_id: UUID
+    expires_at: datetime
+    user_id: UUID | None
+    email: EmailStr | None
+    display_name: str | None
+    active_workspace_id: UUID
+    permissions: list[str]
+    platform_permissions: list[str]
+    session_kind: Literal["user", "guest"]
+    workspaces: list[WorkspaceMembership]
 
 
 class RoleCreate(BaseModel):
-    name: str
-    description: str | None = None
-    permissions: list[str] = []
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    display_name: str
+    permission_codes: list[str] = Field(default_factory=list)
 
 
 class RoleUpdate(BaseModel):
-    name: str | None = None
-    description: str | None = None
-    permissions: list[str] | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = None
+    status: Literal["active", "inactive"] | None = None
+    permission_codes: list[str] | None = None
 
 
 class Role(BaseModel):
     id: UUID
-    tenant_id: UUID
-    name: str
-    description: str | None
-    permissions: list[str]
-
-
-class PermissionPatch(BaseModel):
-    grant: list[str] = []
-    revoke: list[str] = []
-
-
-class EffectivePermissions(BaseModel):
-    user_id: UUID
-    permissions: list[str]
+    code: str
+    display_name: str
+    status: Literal["active", "inactive"]
+    permission_codes: list[str]
 
 
 # --- Agent and chat ---
-
-
-class ThreadCreate(BaseModel):
-    title: str | None = None
-    metadata: dict[str, Any] = {}
-
-
-class Thread(BaseModel):
-    id: UUID
-    user_id: UUID
-    title: str | None
-    created_at: str
-    message_count: int
-
-
-class MessageSend(BaseModel):
-    content: str
-    attachments: list[str] = []  # document IDs to ground the answer
-
-
-class Message(BaseModel):
-    id: UUID
-    thread_id: UUID
-    role: str  # "user" | "assistant"
-    content: str
-    citations: list[dict[str, Any]] = []
-    created_at: str
-
-
-class ThreadDetail(Thread):
-    messages: list[Message]
 
 
 class ChatHistoryMessage(BaseModel):
@@ -146,103 +149,170 @@ class ChatRequest(BaseModel):
     """A bounded chat turn submitted by the current WebUI."""
 
     message: str = Field(min_length=1, max_length=4_000)
-    tenant_id: str | None = Field(default=None, min_length=1, max_length=256)
-    user_id: str | None = Field(default=None, min_length=1, max_length=256)
-    roles: list[str] = Field(default_factory=list, deprecated=True)
     conversation_id: UUID | None = None
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=24)
-    collection_item_ids: list[UUID] = Field(default_factory=list, max_length=20)
+    collection_ids: list[UUID] = Field(default_factory=list, max_length=20)
     # Stable identities for resources attached to this turn. Uploading them
     # stores bytes only; the agent resolves content lazily when needed.
     attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def validate_collection_selection(self) -> ChatRequest:
-        if len(self.collection_item_ids) != len(set(self.collection_item_ids)):
+        if len(self.collection_ids) != len(set(self.collection_ids)):
             raise ValueError("Collection IDs must be unique")
         return self
 
 
-# --- Documents and search ---
+class DocumentStatus(StrEnum):
+    pending_content = "pending_content"
+    available = "available"
+    failed = "failed"
 
 
-class DocumentUploadStartRequest(BaseModel):
-    file_name: str = Field(min_length=1, max_length=240)
+class IngestionStatus(StrEnum):
+    pending = "pending"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
+    timed_out = "timed_out"
+
+
+class Document(BaseModel):
+    id: UUID
+    collection_id: UUID
+    name: str = Field(min_length=1, max_length=240)
+    content_type: str
+    size_bytes: int = Field(ge=0)
+    purpose: Literal["knowledge", "conversation_attachment"]
+    status: Literal["pending_content", "available", "failed"]
+    latest_ingestion_id: UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=240)
     content_type: str = Field(min_length=1, max_length=160)
     size_bytes: int = Field(ge=1)
+    purpose: Literal["knowledge", "conversation_attachment"] = "knowledge"
 
 
-class DocumentUploadTarget(BaseModel):
-    mode: Literal["presigned"]
+class DocumentContentInstructions(BaseModel):
     url: str
-    method: str
+    method: Literal["PUT"]
     headers: dict[str, str]
-    expires_at: str
+    expires_at: datetime
 
 
-class DocumentMetadata(BaseModel):
-    id: str
-    parent_item_id: str | None = None
-    file_name: str
-    content_type: str
-    size_bytes: int
-    status: Literal["pending", "processing", "ready", "failed", "unsupported"]
-    indexed: bool = False
-    upload_status: Literal["pending", "available", "failed"] | None = None
-    created_at: str
-    uploaded_at: str | None = None
-    preview: KnowledgePreviewView | None = None
+class Ingestion(BaseModel):
+    id: UUID
+    source_id: UUID | None = None
+    document_id: UUID | None = None
+    connection_id: UUID | None = None
+    status: Literal[
+        "pending", "running", "completed", "failed", "cancelled", "timed_out"
+    ]
+    trigger_type: Literal["manual", "scheduled", "webhook", "initial", "upload", "retry"]
+    retry_of_ingestion_id: UUID | None = None
+    progress: dict[str, Any] | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
-class DocumentUploadStartResponse(BaseModel):
-    upload_required: bool
-    target: DocumentUploadTarget | None = None
-    document: DocumentMetadata
-
-
-class CollectionDocumentUploadResponse(BaseModel):
-    document: DocumentMetadata
-    ingestion_status: Literal["ready", "failed"]
+class DocumentCreateResult(BaseModel):
+    document: Document
+    upload: DocumentContentInstructions | None = None
+    ingestion: Ingestion | None = None
     created: bool
 
-class SearchRequest(BaseModel):
+
+class DocumentContentResult(BaseModel):
+    document: Document
+    ingestion: Ingestion | None = None
+
+
+class DocumentSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     query: str = Field(min_length=1, max_length=512)
     top_k: int = Field(default=6, ge=1, le=20)
-    collection_item_ids: list[UUID] | None = Field(default=None, max_length=20)
-
-    @model_validator(mode="after")
-    def validate_collection_ids(self) -> SearchRequest:
-        if self.collection_item_ids is not None and len(
-            self.collection_item_ids
-        ) != len(set(self.collection_item_ids)):
-            raise ValueError("Collection IDs must be unique")
-        return self
+    collection_ids: list[UUID] = Field(default_factory=list, max_length=20)
 
 
-class DocumentResult(BaseModel):
-    id: UUID
-    collection_item_id: UUID
-    title: str
+class DocumentSearchResult(BaseModel):
+    document_id: UUID
+    collection_id: UUID
+    name: str
     excerpt: str
     score: float
-    url: str | None
-    metadata: dict[str, Any]
+    url: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class SearchResponse(BaseModel):
-    results: list[DocumentResult]
-    total: int
+class DocumentSearchResponse(BaseModel):
+    items: list[DocumentSearchResult]
+    total: int = Field(ge=0)
 
 
-class DocumentDetail(BaseModel):
+class DocumentPage(BaseModel):
+    items: list[Document]
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total: int = Field(ge=0)
+
+
+class Collection(BaseModel):
     id: UUID
-    collection_item_id: UUID
     title: str
-    content: str
-    url: str | None
-    metadata: dict[str, Any]
-    indexed_at: str
+    description: str | None = None
+    parent_collection_id: UUID | None = None
+    status: Literal["active", "archived"]
+    document_count: int = Field(ge=0)
+    source_count: int = Field(ge=0)
+    created_at: datetime
+    updated_at: datetime
 
+
+class CollectionPage(BaseModel):
+    items: list[Collection]
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total: int = Field(ge=0)
+
+
+class CollectionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2_000)
+    status: Literal["active", "archived"] | None = None
+
+
+class CollectionAccess(BaseModel):
+    collection_id: UUID
+    principal_type: Literal["user", "group"]
+    principal_id: UUID
+    role: Literal["owner", "editor", "viewer"]
+    created_at: datetime
+    updated_at: datetime
+
+
+class CollectionAccessUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["owner", "editor", "viewer"]
+
+
+class CollectionAccessPage(BaseModel):
+    items: list[CollectionAccess]
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total: int = Field(ge=0)
 
 # --- Conversation artifacts ---
 
@@ -296,358 +366,316 @@ class ArtifactPublishResponse(BaseModel):
     created: bool
 
 
-# --- Citations and document viewer ---
-
-
-class ViewerElement(BaseModel):
-    element_id: str
-    text: str
-    page: int | None = Field(default=None, ge=1)
-    section: str | None = None
-    section_path: list[str] = Field(default_factory=list)
-    anchor: str | None = None
-    bounding_box: BoundingBox | None = None
-
-
-class ViewerFocus(BaseModel):
-    chunk_id: str
-    chunk_text: str
-    citation: CitationInfo
-
-
-class KnowledgeItemViewer(BaseModel):
-    item_id: str
-    title: str
-    content_type: str
-    status: Literal["pending", "processing", "ready", "failed", "unsupported", "deleted"]
-    external_url: str | None = None
-    document_url: str | None = None
-    preview: KnowledgePreviewView | None = None
-    elements: list[ViewerElement]
-    focus: ViewerFocus | None = None
-
-
-class KnowledgeCitationResponse(BaseModel):
-    """A permission-checked citation resolved at click time."""
-
-    item_id: str
-    chunk_id: str
-    title: str
-    content_type: str
-    document_url: str | None = None
-    external_url: str | None = None
-    preview: KnowledgePreviewView | None = None
-    citation: CitationInfo
-
-
-# --- Knowledge workspace ---
-
-
-class KnowledgeSourceSummary(BaseModel):
-    """The source lineage displayed beside a browsable knowledge Item."""
-
-    display_name: str
-    connector_key: str | None = None
-    source_url: str | None = None
-
-
-class KnowledgeDocumentSummary(BaseModel):
-    """A permission-filtered document row for the knowledge workspace."""
-
-    id: str
-    title: str
-    content_type: str | None = None
-    document_type: str | None = None
-    status: Literal["pending", "processing", "ready", "failed", "unsupported"]
-    updated_at: str
-    source: KnowledgeSourceSummary | None = None
-
-
-class KnowledgeCollectionSummary(BaseModel):
-    """A Collection the caller is allowed to browse."""
-
-    id: str
-    title: str
-    description: str | None = None
-    parent_item_id: str | None = None
-    document_count: int = Field(ge=0)
-    source_count: int = Field(ge=0)
-    updated_at: str
-
-
 class KnowledgeHomeResponse(BaseModel):
-    items: list[KnowledgeCollectionSummary]
-    total: int = Field(ge=0)
-    recent_documents: list[KnowledgeDocumentSummary]
-    personal_collection_id: str | None = None
+    collections: list[Collection]
+    recent_documents: list[Document]
+    personal_collection_id: UUID | None = None
 
 
-class KnowledgeCollectionWorkspaceResponse(BaseModel):
-    collection: KnowledgeCollectionSummary
-    child_collections: list[KnowledgeCollectionSummary]
-    documents: list[KnowledgeDocumentSummary]
-    total: int = Field(ge=0)
-    page: int = Field(ge=1)
-    page_size: int = Field(ge=1)
+# --- Workspace, IAM, and governance ---
 
 
-class KnowledgeCollectionCreate(BaseModel):
-    """The minimal collection input exposed by the knowledge workspace."""
-
-    title: str = Field(min_length=1, max_length=255)
-    description: str | None = Field(default=None, max_length=2_000)
-
-
-class KnowledgeCollectionCreated(BaseModel):
-    id: UUID
-    title: str
-
-
-# --- Scheduled jobs ---
-
-
-class CronCreate(BaseModel):
-    name: str
-    schedule: str  # cron expression, e.g. "0 2 * * *"
-    task: str  # registered task name
-    params: dict[str, Any] = {}
-    enabled: bool = True
-
-
-class CronUpdate(BaseModel):
-    name: str | None = None
-    schedule: str | None = None
-    params: dict[str, Any] | None = None
-    enabled: bool | None = None
-
-
-class CronJob(BaseModel):
-    id: UUID
-    tenant_id: UUID
-    name: str
-    schedule: str
-    task: str
-    params: dict[str, Any]
-    enabled: bool
-    last_run_at: str | None
-    next_run_at: str | None
-    last_status: str | None
-
-
-class CronRunResult(BaseModel):
-    job_id: UUID
-    run_id: UUID
-    status: str
-    started_at: str
-
-
-# --- Business intelligence ---
-
-
-class BIQueryRequest(BaseModel):
-    question: str
-    datasource_ids: list[UUID] | None = None
-    max_rows: int = 500
-
-
-class BIQueryResponse(BaseModel):
-    sql: str
-    columns: list[str]
-    rows: list[list[Any]]
-    explanation: str
-    citations: list[dict[str, Any]]
-
-
-class MetricFilter(BaseModel):
-    dimension: str
-    operator: str  # eq | in | gt | lt | between
-    value: Any
-
-
-class MetricComputeRequest(BaseModel):
-    filters: list[MetricFilter] = []
-    group_by: list[str] = []
-    date_range: dict[str, str] | None = None
-
-
-class MetricDefinition(BaseModel):
-    id: UUID
-    name: str
-    description: str
-    formula: str
-    dimensions: list[str]
-    owner: str
-
-
-class MetricResult(BaseModel):
-    metric_id: UUID
-    value: Any
-    breakdown: list[dict[str, Any]]
-    sql: str
-    computed_at: str
-
-
-# --- Tenant administration ---
-
-
-class AdminRequest(BaseModel):
+class StrictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class SpaceUpdate(AdminRequest):
-    name: str | None = Field(default=None, min_length=1, max_length=255)
-    settings: dict[str, Any] | None = None
-
-
-class UserCreate(AdminRequest):
+class UserCreate(StrictRequest):
     email: EmailStr
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     role_ids: list[UUID] = Field(default_factory=list)
     group_ids: list[UUID] = Field(default_factory=list)
 
 
-class UserUpdate(AdminRequest):
+class UserUpdate(StrictRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     role_ids: list[UUID] | None = None
     status: bool | None = None
     group_ids: list[UUID] | None = None
 
 
-class AdminRoleCreate(AdminRequest):
-    code: str = Field(min_length=1, max_length=64)
-    display_name: str = Field(min_length=1, max_length=255)
-    permission_codes: list[str] = Field(default_factory=list)
-
-
-class AdminRoleUpdate(AdminRequest):
-    display_name: str | None = Field(default=None, min_length=1, max_length=255)
-    permission_codes: list[str] | None = None
-    status: Literal["active", "inactive"] | None = None
-
-
-class GroupCreate(AdminRequest):
+class GroupCreate(StrictRequest):
     code: str = Field(min_length=1, max_length=64)
     display_name: str = Field(min_length=1, max_length=255)
     description: str | None = Field(default=None, min_length=1, max_length=2_000)
 
 
-class GroupUpdate(AdminRequest):
+class GroupUpdate(StrictRequest):
     display_name: str | None = Field(default=None, min_length=1, max_length=255)
     description: str | None = Field(default=None, min_length=1, max_length=2_000)
     status: Literal["active", "inactive"] | None = None
 
 
-class GroupMembersUpdate(AdminRequest):
+class GroupMembersUpdate(StrictRequest):
     user_ids: list[UUID]
 
 
-class IntegrationConnectionCreate(AdminRequest):
-    """A connection configured with a secret. Authorized providers use OAuth."""
-
-    connector_key: str = Field(min_length=1, max_length=64)
-    display_name: str = Field(min_length=1, max_length=255)
-    config: dict[str, Any] = Field(default_factory=dict)
-    credentials: dict[str, Any] | None = Field(default=None, repr=False)
-    credential_type: str | None = Field(default=None, min_length=1, max_length=64)
-    owner_type: Literal["user", "tenant"] = "tenant"
-
-
-class IntegrationConnectionUpdate(AdminRequest):
-    display_name: str | None = Field(default=None, min_length=1, max_length=255)
-    config: dict[str, Any] | None = None
-    credentials: dict[str, Any] | None = Field(default=None, repr=False)
-    credential_type: str | None = Field(default=None, min_length=1, max_length=64)
-    #: The only status a caller may set. Everything else follows from the grant.
-    status: Literal["disconnected"] | None = None
-
-
-class ConnectionAuthorizationCreate(AdminRequest):
-    """Begin one provider authorization for one connector and one ownership."""
-
-    connector_key: str = Field(min_length=1, max_length=64)
-    owner_type: Literal["user", "tenant"] = "tenant"
-    #: Set to re-authorize an existing connection instead of adding another.
-    integration_connection_id: UUID | None = None
-
-
-class ConnectionAuthorizationStarted(BaseModel):
-    authorization_url: str
-    nonce: str
-
-
-class ApprovalRequestCreate(AdminRequest):
+class ApprovalRequestCreate(StrictRequest):
     request_type: Literal["resource_access", "plugin_installation"]
     target_id: str = Field(min_length=1, max_length=512)
     details: dict[str, Any] = Field(default_factory=dict)
-    requester_user_id: UUID | None = None
     reason: str | None = Field(default=None, min_length=1, max_length=4_000)
 
 
-class ApprovalRequestUpdate(AdminRequest):
+class ApprovalRequestUpdate(StrictRequest):
     status: Literal["approved", "denied", "cancelled"]
     decision_note: str | None = Field(default=None, min_length=1, max_length=4_000)
 
 
-class ScheduleInput(AdminRequest):
-    schedule_type: Literal["cron", "interval"] = "cron"
-    cron_expression: str = Field(min_length=1, max_length=255)
-    timezone: str | None = Field(default=None, min_length=1, max_length=64)
+class CollectionCreate(StrictRequest):
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2_000)
+    parent_collection_id: UUID | None = None
+    inherit_access: bool = True
+
+
+class CollectionUpdate(StrictRequest):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=2_000)
+    status: Literal["active", "archived"] | None = None
+
+
+# Contract-first integration and IAM DTOs. These names mirror OpenAPI schemas;
+# service payloads are mapped at router boundaries.
+class PageFields(BaseModel):
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1, le=100)
+    total: int = Field(ge=0)
+
+
+class Connection(BaseModel):
+    id: UUID
+    connector_key: str
+    display_name: str
+    owner_type: Literal["user", "workspace"]
+    owner_user_id: UUID | None = None
+    status: Literal["draft", "connected", "expired", "reauth_required", "revoked", "error", "disconnected"]
+    source_count: int = Field(ge=0)
+    config: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConnectionPage(PageFields):
+    items: list[Connection]
+
+
+class ConnectionCreate(StrictRequest):
+    connector_key: str
+    display_name: str
+    owner_type: Literal["user", "workspace"] = "workspace"
+    config: dict[str, Any] = Field(default_factory=dict)
+    credentials: dict[str, Any] | None = Field(default=None, repr=False)
+
+
+class ConnectionUpdate(StrictRequest):
+    display_name: str | None = None
+    status: Literal["disconnected"] | None = None
+    config: dict[str, Any] | None = None
+    credentials: dict[str, Any] | None = Field(default=None, repr=False)
+
+
+class ConnectionAuthorizationCreate(StrictRequest):
+    connector_key: str
+    owner_type: Literal["user", "workspace"]
+    connection_id: UUID | None = None
+
+
+class ConnectionAuthorization(BaseModel):
+    authorization_url: str
+    nonce: str
+
+
+class ConnectionValidation(BaseModel):
+    valid: bool
+    status: str
+
+
+class ProviderCatalog(BaseModel):
+    items: list[dict[str, Any]]
+
+
+class ProviderResourcePage(BaseModel):
+    items: list[dict[str, Any]]
+
+
+class Source(BaseModel):
+    id: UUID
+    connection_id: UUID
+    collection_id: UUID
+    sync_mode: Literal["manual", "scheduled"]
+    status: Literal["ready", "paused", "failed", "connection_required", "disabled"]
+    display_name: str | None = None
+    resource_type: str | None = None
+    external_resource_id: str | None = None
+    schedule: dict[str, Any] | None = None
+
+
+class SourceCreate(StrictRequest):
+    collection_id: UUID
+    display_name: str | None = None
+    resource_type: str | None = None
+    external_resource_id: str | None = None
+    config: dict[str, Any] = Field(default_factory=dict)
+    schedule: dict[str, Any] | None = None
+
+
+class SourceUpdate(StrictRequest):
+    display_name: str | None = None
+    status: Literal["ready", "paused", "disabled"] | None = None
+    config: dict[str, Any] | None = None
+
+
+class SourcePage(PageFields):
+    items: list[Source]
+
+
+class SourceStatus(BaseModel):
+    source_id: UUID
+    source_status: str
+    connection_status: str
+    latest_ingestion: Ingestion | None = None
+
+
+class SchedulePut(StrictRequest):
+    schedule_type: Literal["cron", "interval"]
+    cron_expression: str
+    timezone: str | None = None
     enabled: bool = True
     overlap_policy: Literal["skip", "queue", "replace"] = "skip"
 
 
-class IngestionSourceCreate(AdminRequest):
-    """One selected resource, landing in one destination Collection.
-
-    Naming the resource is enough: the provider knows how to turn a space key
-    or a drive id into the config its connector runs on. ``config`` stays for
-    connectors that have no provider and are configured by hand.
-    """
-
-    target_item_id: UUID
-    display_name: str | None = Field(default=None, min_length=1, max_length=255)
-    resource_type: str | None = Field(default=None, min_length=1, max_length=64)
-    external_resource_id: str | None = Field(default=None, min_length=1, max_length=1_024)
-    config: dict[str, Any] = Field(default_factory=dict)
-    schedule: ScheduleInput | None = None
+class SchedulePatch(StrictRequest):
+    schedule_type: Literal["cron", "interval"] | None = None
+    cron_expression: str | None = None
+    timezone: str | None = None
+    enabled: bool | None = None
+    overlap_policy: Literal["skip", "queue", "replace"] | None = None
 
 
-class IngestionSourceUpdate(AdminRequest):
-    display_name: str | None = Field(default=None, min_length=1, max_length=255)
-    config: dict[str, Any] | None = None
-    #: Only an operator's own decision. ``connection_required`` and ``failed``
-    #: are consequences and are never assigned from a request.
-    status: Literal["ready", "paused", "disabled"] | None = None
-    schedule: ScheduleInput | None = None
-    clear_schedule: bool = False
+class Schedule(BaseModel):
+    id: str
+    schedule_type: Literal["cron", "interval"]
+    cron_expression: str
+    timezone: str | None = None
+    enabled: bool
+    overlap_policy: Literal["skip", "queue", "replace"]
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
 
 
-class ItemStatusUpdate(AdminRequest):
-    status: Literal["pending", "processing", "ready", "failed", "unsupported"]
+class IngestionPage(PageFields):
+    items: list[Ingestion]
 
 
-class CollectionCreate(AdminRequest):
-    title: str = Field(min_length=1, max_length=255)
-    parent_item_id: UUID | None = None
-    inherit_access: bool = True
-    metadata: dict[str, Any] = Field(default_factory=dict)
+class Workspace(BaseModel):
+    id: UUID
+    code: str
+    name: str
+    status: Literal["active", "inactive", "suspended"]
+    visibility: str | None = None
+    settings: dict[str, Any] = Field(default_factory=dict)
 
 
-class CollectionUpdate(AdminRequest):
-    title: str | None = Field(default=None, min_length=1, max_length=255)
-    description: str | None = Field(default=None, max_length=2_000)
+class WorkspacePage(PageFields):
+    items: list[Workspace]
 
 
-class CollectionRoleGrant(AdminRequest):
-    principal_type: Literal["user", "group"]
-    principal_id: UUID
-    role_code: Literal["collection_owner", "collection_editor", "collection_viewer"]
+class WorkspaceUpdate(StrictRequest):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    settings: dict[str, Any] | None = None
+
+
+class WorkspaceOverview(BaseModel):
+    workspace: Workspace
+    metrics: dict[str, int] = Field(default_factory=dict)
+    attention: dict[str, int] = Field(default_factory=dict)
+    recent_activity: list[dict[str, Any]] = Field(default_factory=list)
+    generated_at: datetime
+
+
+class User(BaseModel):
+    id: UUID
+    email: EmailStr
+    display_name: str | None = None
+    status: Literal["active", "inactive", "suspended"]
+    roles: list[dict[str, Any]] = Field(default_factory=list)
+    groups: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class UserPage(PageFields):
+    items: list[User]
+
+
+class RolePage(PageFields):
+    items: list[Role]
+
+
+class Group(BaseModel):
+    id: UUID
+    code: str
+    display_name: str
+    description: str | None = None
+    status: Literal["active", "inactive"]
+    member_count: int = Field(ge=0)
+
+
+class GroupPage(PageFields):
+    items: list[Group]
+
+
+class Permission(BaseModel):
+    code: str
+    description: str
+    scopes: list[str]
+
+
+class PermissionPage(BaseModel):
+    items: list[Permission]
+    total: int = Field(ge=0)
+
+
+class ApprovalRequest(BaseModel):
+    id: UUID
+    request_type: Literal["resource_access", "plugin_installation"]
+    target_id: str
+    status: Literal["pending", "approved", "denied", "cancelled"]
+    requester: User
+    details: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
+    decision_note: str | None = None
+    created_at: datetime
+
+
+class ApprovalRequestPage(PageFields):
+    items: list[ApprovalRequest]
+
+
+class AuditLog(BaseModel):
+    id: UUID
+    action: str
+    resource_type: str
+    resource_id: str | None = None
+    outcome: str
+    actor: dict[str, Any]
+    workspace: dict[str, Any] | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class AuditLogPage(PageFields):
+    items: list[AuditLog]
+
+
+class PlatformOverview(BaseModel):
+    metrics: dict[str, int] = Field(default_factory=dict)
+    workspace_health: list[dict[str, Any]] = Field(default_factory=list)
 
 
 __all__ = [
-    "AdminRequest",
-    "AdminRoleCreate",
-    "AdminRoleUpdate",
+    "StrictRequest",
+    "Role",
+    "RoleCreate",
+    "RoleUpdate",
     "ApprovalRequestCreate",
     "ApprovalRequestUpdate",
     "ArtifactContent",
@@ -655,67 +683,49 @@ __all__ = [
     "ArtifactPublishRequest",
     "ArtifactPublishResponse",
     "ArtifactRevisionView",
-    "BIQueryRequest",
-    "BIQueryResponse",
     "ChatHistoryMessage",
     "ChatRequest",
-    "CollectionRoleGrant",
     "CollectionCreate",
-    "CollectionDocumentUploadResponse",
     "CollectionUpdate",
-    "ConnectionAuthorizationCreate",
-    "ConnectionAuthorizationStarted",
-    "CronCreate",
-    "CronJob",
-    "CronRunResult",
-    "CronUpdate",
-    "DocumentDetail",
-    "DocumentMetadata",
-    "DocumentResult",
-    "DocumentUploadStartRequest",
-    "DocumentUploadStartResponse",
-    "DocumentUploadTarget",
-    "EffectivePermissions",
     "GroupCreate",
     "GroupMembersUpdate",
     "GroupUpdate",
-    "IngestionSourceCreate",
-    "IngestionSourceUpdate",
-    "IntegrationConnectionCreate",
-    "IntegrationConnectionUpdate",
-    "ItemStatusUpdate",
-    "KnowledgeCitationResponse",
-    "KnowledgeCollectionCreate",
-    "KnowledgeCollectionCreated",
-    "KnowledgeCollectionSummary",
-    "KnowledgeCollectionWorkspaceResponse",
-    "KnowledgeDocumentSummary",
     "KnowledgeHomeResponse",
-    "KnowledgeItemViewer",
-    "KnowledgeSourceSummary",
-    "LoginRequest",
-    "Message",
-    "MessageSend",
-    "MetricComputeRequest",
-    "MetricDefinition",
-    "MetricFilter",
-    "MetricResult",
-    "PermissionPatch",
-    "RefreshRequest",
-    "Role",
-    "RoleCreate",
-    "RoleUpdate",
-    "ScheduleInput",
-    "SearchRequest",
-    "SearchResponse",
-    "SpaceUpdate",
-    "Thread",
-    "ThreadCreate",
-    "ThreadDetail",
-    "TokenResponse",
     "UserCreate",
-    "UserProfile",
     "UserUpdate",
-    "ViewerElement",
-    "ViewerFocus",
+    "Connection",
+    "ConnectionPage",
+    "ConnectionCreate",
+    "ConnectionUpdate",
+    "ConnectionAuthorizationCreate",
+    "ConnectionAuthorization",
+    "ConnectionValidation",
+    "ProviderCatalog",
+    "ProviderResourcePage",
+    "Source",
+    "SourceCreate",
+    "SourceUpdate",
+    "SourcePage",
+    "SourceStatus",
+    "SchedulePut",
+    "SchedulePatch",
+    "Schedule",
+    "Ingestion",
+    "IngestionPage",
+    "Workspace",
+    "WorkspacePage",
+    "WorkspaceUpdate",
+    "WorkspaceOverview",
+    "User",
+    "UserPage",
+    "RolePage",
+    "Group",
+    "GroupPage",
+    "Permission",
+    "PermissionPage",
+    "ApprovalRequest",
+    "ApprovalRequestPage",
+    "AuditLog",
+    "AuditLogPage",
+    "PlatformOverview",
 ]

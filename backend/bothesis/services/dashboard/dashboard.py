@@ -26,7 +26,7 @@ from bothesis.services import (
     TENANT_ADMIN_ROLE,
     TENANT_READ_PERMISSION,
     TENANT_SCOPE,
-    AdminNotFoundError,
+    ControlPlaneNotFoundError,
     AuthContext,
     normalize_page,
     require_platform_permission,
@@ -199,7 +199,7 @@ class DashboardService:
     async def _tenant(self, tenant_id: UUID) -> Tenant:
         tenant = await self._session.get(Tenant, tenant_id)
         if tenant is None:
-            raise AdminNotFoundError(f"tenant not found: {tenant_id}")
+            raise ControlPlaneNotFoundError(f"tenant not found: {tenant_id}")
         return tenant
 
     async def _count(self, statement: Any) -> int:

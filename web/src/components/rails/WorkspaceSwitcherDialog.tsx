@@ -11,7 +11,7 @@ import type { AuthTenant } from "@/lib/auth/session";
 import { useAuthSession } from "@/lib/hooks/useAuthSession";
 
 /** A workspace open to everyone, rather than one this user is a member of. */
-const isVisitor = (item: AuthTenant) => item.role_codes.includes("visitor");
+const isVisitor = (item: AuthTenant) => item.role_codes.includes("guest");
 
 export function WorkspaceSwitcherDialog({ error, onClose, onSelect, open, switchingId, workspaces }: {
   error: string | null; onClose: () => void; onSelect: (id: string) => void;

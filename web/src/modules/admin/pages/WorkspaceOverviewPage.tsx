@@ -25,7 +25,7 @@ const ATTENTION: { key: string; label: string; href: string }[] = [
 ];
 
 export function WorkspaceOverviewPage() {
-  const query = useAdminData(directoryApi.overview);
+  const query = useAdminData(() => directoryApi.overview());
   if (query.error) return <ErrorState description={query.error} onAction={query.reload} />;
   if (!query.data) return <p role="status">Loading workspace…</p>;
   const { tenant, metrics, attention, recent_activity } = query.data;

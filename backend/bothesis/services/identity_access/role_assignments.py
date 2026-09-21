@@ -31,8 +31,8 @@ from bothesis.services import (
     COLLECTION_SCOPE,
     PLATFORM_SCOPE,
     TENANT_SCOPE,
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     timestamp,
 )
 
@@ -95,7 +95,7 @@ class RoleAssignmentService:
             )
         )
         if not retired:
-            raise AdminNotFoundError("collection role assignment not found")
+            raise ControlPlaneNotFoundError("collection role assignment not found")
 
     async def list_collection_grants(
         self,
@@ -106,7 +106,7 @@ class RoleAssignmentService:
     ) -> dict[str, Any]:
         await self.collection_tenant_id(item_id)
         if page < 1 or not 1 <= page_size <= 100:
-            raise AdminValidationError("invalid collection grant pagination")
+            raise ControlPlaneValidationError("invalid collection grant pagination")
         statement = self._collection_grants(item_id)
         total = await self._session.scalar(
             select(func.count()).select_from(statement.subquery())
@@ -152,7 +152,7 @@ class RoleAssignmentService:
 
         desired = set(role_ids)
         if len(desired) != len(role_ids):
-            raise AdminValidationError("role IDs must be unique")
+            raise ControlPlaneValidationError("role IDs must be unique")
         roles = (
             list(
                 await self._session.scalars(
@@ -168,7 +168,7 @@ class RoleAssignmentService:
             else []
         )
         if {role.id for role in roles} != desired:
-            raise AdminNotFoundError("one or more roles were not found")
+            raise ControlPlaneNotFoundError("one or more roles were not found")
 
         held = list(
             await self._session.scalars(
@@ -194,6 +194,42 @@ class RoleAssignmentService:
             )
         await self._session.flush()
         return sorted(roles, key=lambda role: (role.display_name, role.id))
+
+    async def ensure_tenant_role(
+        self,
+        *,
+        user_id: UUID,
+        tenant_id: UUID,
+        role_code: str,
+        created_by_user_id: UUID | None = None,
+    ) -> bool:
+        """Add one tenant role without disturbing stronger roles already held."""
+
+        await self._require_principal(
+            tenant_id, principal_type="user", principal_id=user_id
+        )
+        role = await self._role(role_code, tenant_id=tenant_id, scope=TENANT_SCOPE)
+        existing = await self._session.scalar(
+            select(RoleAssignment.id).where(
+                RoleAssignment.user_id == user_id,
+                RoleAssignment.role_id == role.id,
+                RoleAssignment.tenant_id == tenant_id,
+                RoleAssignment.item_id.is_(None),
+                RoleAssignment.deleted_at.is_(None),
+            )
+        )
+        if existing is not None:
+            return False
+        self._session.add(
+            RoleAssignment(
+                user_id=user_id,
+                role_id=role.id,
+                tenant_id=tenant_id,
+                created_by_user_id=created_by_user_id,
+            )
+        )
+        await self._session.flush()
+        return True
 
     async def tenant_roles_for_users(
         self, tenant_id: UUID, user_ids: list[UUID]
@@ -301,7 +337,7 @@ class RoleAssignmentService:
             )
         )
         if tenant_id is None:
-            raise AdminNotFoundError(f"collection not found: {item_id}")
+            raise ControlPlaneNotFoundError(f"collection not found: {item_id}")
         return tenant_id
 
     async def _role(self, role_code: str, *, tenant_id: UUID | None, scope: str) -> Role:
@@ -317,7 +353,7 @@ class RoleAssignmentService:
             )
         )
         if role is None:
-            raise AdminNotFoundError(f"role not found: {role_code}")
+            raise ControlPlaneNotFoundError(f"role not found: {role_code}")
         return role
 
     async def _require_principal(
@@ -345,13 +381,13 @@ class RoleAssignmentService:
                 )
             )
         if found is None:
-            raise AdminNotFoundError(f"{principal_type} principal not found")
+            raise ControlPlaneNotFoundError(f"{principal_type} principal not found")
 
 
 def _principal_type(value: str) -> str:
     normalized = value.strip().casefold()
     if normalized not in {"user", "group"}:
-        raise AdminValidationError("principal must be user or group")
+        raise ControlPlaneValidationError("principal must be user or group")
     return normalized
 
 

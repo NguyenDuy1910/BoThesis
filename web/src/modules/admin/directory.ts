@@ -10,6 +10,7 @@
 import { adminRequest, queryString } from "@/modules/admin/api";
 import { invalidateApiData } from "@/lib/api/revision";
 import type { Paginated } from "@/modules/admin/collections";
+import { getAuthSession } from "@/lib/auth/session";
 
 export interface Workspace {
   id: string;
@@ -131,10 +132,10 @@ export interface PlatformOverview {
 const ALL = 100;
 
 export const directoryApi = {
-  workspaces: () => adminRequest<Paginated<Workspace>>("/spaces"),
-  workspace: (tenantId: string) => adminRequest<Workspace>(`/spaces/${tenantId}`),
+  workspaces: () => adminRequest<Paginated<Workspace>>("/workspaces"),
+  workspace: (tenantId: string) => adminRequest<Workspace>(`/workspaces/${tenantId}`),
   async saveWorkspace(tenantId: string, patch: { name?: string; settings?: Record<string, unknown> }) {
-    const saved = await adminRequest<Workspace>(`/spaces/${tenantId}`, {
+    const saved = await adminRequest<Workspace>(`/workspaces/${tenantId}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
@@ -142,7 +143,7 @@ export const directoryApi = {
     return saved;
   },
 
-  overview: () => adminRequest<WorkspaceOverview>("/overview"),
+  overview: (workspaceId = getAuthSession()?.active_tenant_id ?? "") => adminRequest<WorkspaceOverview>(`/workspaces/${workspaceId}/overview`),
 
   members: (search = "") =>
     adminRequest<Paginated<Member>>(`/users${queryString({ page_size: ALL, search })}`),
@@ -208,7 +209,7 @@ export const directoryApi = {
       ),
     audit: (search = "") =>
       adminRequest<Paginated<AuditEvent>>(
-        `/platform/audit${queryString({ page_size: ALL, search })}`,
+        `/platform/audit-logs${queryString({ page_size: ALL, search })}`,
       ),
     health: () => adminRequest<SystemHealth>("/platform/health"),
   },

@@ -15,9 +15,9 @@ from bothesis.services import (
     ACTIVE_STATUS,
     GROUP_MANAGE_PERMISSION,
     INACTIVE_STATUS,
-    AdminConflictError,
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneConflictError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     AuthContext,
     normalize_code,
     normalize_page,
@@ -59,7 +59,7 @@ class GroupService:
         if status:
             normalized_status = status.strip().casefold()
             if normalized_status not in {ACTIVE_STATUS, INACTIVE_STATUS}:
-                raise AdminValidationError("group status must be active or inactive")
+                raise ControlPlaneValidationError("group status must be active or inactive")
             filters.append(Group.status == normalized_status)
 
         member_count = (
@@ -113,7 +113,7 @@ class GroupService:
                 Group.tenant_id == tenant_id, Group.code == normalized_code
             )
         ) is not None:
-            raise AdminConflictError(
+            raise ControlPlaneConflictError(
                 f"group code already exists in tenant: {normalized_code}"
             )
         group = Group(
@@ -164,7 +164,7 @@ class GroupService:
         if status is not None:
             normalized_status = status.strip().casefold()
             if normalized_status not in {ACTIVE_STATUS, INACTIVE_STATUS}:
-                raise AdminValidationError("group status must be active or inactive")
+                raise ControlPlaneValidationError("group status must be active or inactive")
             group.status = normalized_status
             changed.append("status")
         await self._session.flush()
@@ -187,7 +187,7 @@ class GroupService:
         group = await self._group(tenant_id, group_id)
         desired_ids = set(user_ids)
         if len(desired_ids) != len(user_ids):
-            raise AdminValidationError("user IDs must be unique")
+            raise ControlPlaneValidationError("user IDs must be unique")
         valid_ids = set(
             await self._session.scalars(
                 select(TenantMembership.user_id).where(
@@ -199,7 +199,7 @@ class GroupService:
             )
         ) if desired_ids else set()
         if valid_ids != desired_ids:
-            raise AdminNotFoundError("one or more users were not found")
+            raise ControlPlaneNotFoundError("one or more users were not found")
 
         existing = list(
             await self._session.scalars(
@@ -274,7 +274,7 @@ class GroupService:
             )
         )
         if group is None:
-            raise AdminNotFoundError(f"group not found: {group_id}")
+            raise ControlPlaneNotFoundError(f"group not found: {group_id}")
         return group
 
     async def _member_count(self, group_id: UUID) -> int:

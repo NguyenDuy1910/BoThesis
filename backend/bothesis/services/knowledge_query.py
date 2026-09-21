@@ -53,7 +53,7 @@ class KnowledgeQueryService:
             query,
             limit=top_k,
             ctx=AgentContext(
-                user_id=str(access.user_id),
+                user_id=str(access.subject_id),
                 tenant_id=str(access.tenant_id),
                 roles=list(access.role_codes),
                 collection_item_ids=tuple(str(value) for value in requested_ids),

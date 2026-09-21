@@ -29,9 +29,9 @@ from bothesis.services import (
     SOURCE_PAUSED,
     SOURCE_READY,
     SOURCE_STATUSES,
-    AdminConflictError,
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneConflictError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     AuthContext,
     AuthorizationError,
     normalize_page,
@@ -100,7 +100,7 @@ class IngestionSourceService:
             )
         )
         if target is None:
-            raise AdminNotFoundError(f"target Collection not found: {target_item_id}")
+            raise ControlPlaneNotFoundError(f"target Collection not found: {target_item_id}")
         normalized_resource = (
             normalize_required_text(external_resource_id, "resource id", 1_024)
             if external_resource_id is not None
@@ -242,11 +242,11 @@ class IngestionSourceService:
         if status is not None:
             normalized = _valid_status(status)
             if normalized not in _ASSIGNABLE_STATUSES:
-                raise AdminValidationError(
+                raise ControlPlaneValidationError(
                     f"{normalized} is set by the connection, not by an operator"
                 )
             if source.status == SOURCE_CONNECTION_REQUIRED:
-                raise AdminValidationError(
+                raise ControlPlaneValidationError(
                     "this source is waiting on its connection; reconnect the account first"
                 )
             source.status = normalized
@@ -306,7 +306,7 @@ class IngestionSourceService:
             or source.status not in {SOURCE_READY, SOURCE_FAILED}
             or source.integration_connection.deleted_at is not None
         ):
-            raise AdminNotFoundError(f"runnable ingestion source not found: {source_id}")
+            raise ControlPlaneNotFoundError(f"runnable ingestion source not found: {source_id}")
         runtime = await self._connections.runtime_for(
             source.integration_connection,
             source_config=source.config,
@@ -330,7 +330,7 @@ class IngestionSourceService:
             )
         )
         if duplicate is not None:
-            raise AdminConflictError(
+            raise ControlPlaneConflictError(
                 "this resource is already synchronized from this connection"
             )
 
@@ -360,7 +360,7 @@ class IngestionSourceService:
             statement = statement.with_for_update(of=IngestionSource)
         source = await self._session.scalar(statement)
         if source is None:
-            raise AdminNotFoundError(f"ingestion source not found: {source_id}")
+            raise ControlPlaneNotFoundError(f"ingestion source not found: {source_id}")
         return source
 
     @staticmethod
@@ -401,14 +401,14 @@ def _require_tenant(actor: AuthContext) -> UUID:
 def _valid_status(value: str) -> str:
     normalized = value.strip().casefold()
     if normalized not in SOURCE_STATUSES:
-        raise AdminValidationError("unsupported Ingestion Source status")
+        raise ControlPlaneValidationError("unsupported Ingestion Source status")
     return normalized
 
 
 def _valid_sync_mode(value: str) -> str:
     normalized = value.strip().casefold()
     if normalized not in _SYNC_MODES:
-        raise AdminValidationError("sync_mode must be manual or scheduled")
+        raise ControlPlaneValidationError("sync_mode must be manual or scheduled")
     return normalized
 
 
