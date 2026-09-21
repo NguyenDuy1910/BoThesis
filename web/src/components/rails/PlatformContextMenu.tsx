@@ -33,11 +33,11 @@ export function PlatformContextMenu({
   const [error, setError] = useState<string | null>(null);
 
   const userName = session?.display_name || session?.email || "Signed in";
-  const current = session?.tenants.find((workspace) => workspace.id === session.active_tenant_id);
-  const otherWorkspaces = (session?.tenants ?? []).filter((workspace) => workspace.id !== current?.id);
+  const current = session?.workspaces.find((workspace) => workspace.id === session.active_workspace_id);
+  const otherWorkspaces = (session?.workspaces ?? []).filter((workspace) => workspace.id !== current?.id);
 
   const changeWorkspace = async (tenantId: string) => {
-    if (!session || tenantId === session.active_tenant_id) return;
+    if (!session || tenantId === session.active_workspace_id) return;
     setSwitching(tenantId);
     setError(null);
     try {
@@ -145,7 +145,7 @@ export function PlatformContextMenu({
         onSelect={(tenantId) => void changeWorkspace(tenantId)}
         open={workspaceSwitcherOpen}
         switchingId={switching}
-        workspaces={session?.tenants ?? []}
+        workspaces={session?.workspaces ?? []}
       />
     </>
   );

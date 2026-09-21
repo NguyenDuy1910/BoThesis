@@ -76,7 +76,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           <div
             className={cn(
               "pointer-events-auto flex items-start gap-2.5 rounded-[var(--radius-md)] bg-[var(--surface-raised)] p-3",
-              "shadow-[var(--elevation-3)] motion-safe:animate-[adm-pop_var(--duration-base)_var(--ease-out)_both]",
+              "shadow-[var(--elevation-3)] motion-safe:animate-[ctl-pop_var(--duration-base)_var(--ease-out)_both]",
             )}
             key={entry.id}
             role={entry.variant === "error" ? "alert" : "status"}

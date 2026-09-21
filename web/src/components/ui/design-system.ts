@@ -2,7 +2,7 @@
  * Class recipes shared by every control in the console.
  *
  * Colour, shape, spacing and motion all resolve to the tokens declared in
- * `src/app/admin.css`; nothing here hard-codes a value. A component that needs
+ * `src/app/control-plane.css`; nothing here hard-codes a value. A component that needs
  * a different look changes a token, not a class string in one file.
  */
 
@@ -43,7 +43,7 @@ export const ui = {
   metaLabel: "text-[length:var(--text-size-caption)] font-medium uppercase tracking-[0.04em] text-[var(--text-tertiary)]",
   metaValue: "text-[length:var(--text-size-ui)] text-[var(--text-primary)]",
 
-  panel: "adm-card",
+  panel: "ctl-card",
   insetPanel:
     "rounded-[var(--radius-md)] bg-[var(--surface-inset)] shadow-[inset_0_0_0_1px_var(--border-subtle)]",
 
@@ -54,14 +54,14 @@ export const ui = {
 
   toggle: `flex min-h-9 w-full items-center justify-between gap-3 rounded-[var(--radius-sm)] bg-[var(--surface-base)] px-2.5 py-1.5 text-left text-[length:var(--text-size-ui)] text-[var(--text-secondary)] shadow-[inset_0_0_0_1px_var(--border-default)] transition-colors hover:bg-[var(--surface-hover)] ${focusRing}`,
 
-  /** Legacy aliases retained for surfaces outside the Admin console. */
+  /** Shared layout aliases for surfaces outside the control plane. */
   page: "w-full space-y-4",
   pageNarrow: "mx-auto w-full max-w-5xl space-y-4",
   pageWide: "w-full space-y-4",
   dangerFocus: focusRing,
   subtlePanel:
     "rounded-[var(--radius-sm)] bg-[var(--surface-inset)] px-3 py-2 shadow-[inset_0_0_0_1px_var(--border-subtle)]",
-  toolbar: "adm-toolbar",
-  tableShell: "adm-table-wrap",
-  adminSection: "adm-card",
+  toolbar: "ctl-toolbar",
+  tableShell: "ctl-table-wrap",
+  controlSection: "ctl-card",
 };

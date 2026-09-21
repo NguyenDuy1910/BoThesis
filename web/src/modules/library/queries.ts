@@ -4,7 +4,7 @@ import { useSyncExternalStore } from "react";
 
 import { apiRevision, invalidateApiData, subscribeApiData } from "@/lib/api/revision";
 import { useApiQuery } from "@/lib/hooks/useApiQuery";
-import { uploadCollectionFile } from "@/modules/admin/api";
+import { uploadCollectionFile } from "@/modules/workspace-control/control-plane-api";
 import { knowledgeApi } from "@/modules/knowledge/knowledge-api";
 import { toWorkspaceDocument } from "@/modules/knowledge/view-model";
 import type { WorkspaceKnowledgeDocument } from "@/modules/knowledge/workspace-repository";

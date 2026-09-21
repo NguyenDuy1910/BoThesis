@@ -11,6 +11,8 @@ from api.routers import (
     CreateSessionRequest,
     CurrentSession,
     CurrentSessionUpdate,
+    GoogleSessionCreate,
+    PasswordSessionCreate,
     WorkspaceMembership,
 )
 from bothesis.db.engine import session_scope
@@ -35,13 +37,15 @@ async def create_session(body: CreateSessionRequest, claims: OptionalTokenClaims
     async with session_scope(runtime.sessions()) as session:
         authentication = runtime.authentication_service(session)
         guest_session_id = claims.session_id if claims and claims.session_kind == "guest" else None
-        if body.method == "google":
+        if isinstance(body, GoogleSessionCreate):
             identity = await runtime.google_identity_verifier().verify(body.credential or "")
-            result = await authentication.complete_google_login(identity, guest_session_id=guest_session_id)
+            result = await authentication.complete_verified_external_session(identity, guest_session_id=guest_session_id)
         else:
-            result = await authentication.create_session_request(
-                method=body.method, email=str(body.email) if body.email else None,
-                password=body.password, guest_session_id=guest_session_id,
+            result = await authentication.create_session(
+                method=body.method,
+                email=str(body.email) if isinstance(body, PasswordSessionCreate) else None,
+                password=body.password if isinstance(body, PasswordSessionCreate) else None,
+                guest_session_id=guest_session_id,
             )
     return _session_response(result)
 

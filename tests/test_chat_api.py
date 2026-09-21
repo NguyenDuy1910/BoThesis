@@ -198,6 +198,7 @@ async def test_guest_cannot_use_upload_lifecycle() -> None:
         await service.start_upload(
             access,
             idempotency_key="guest-start",
+            collection_id=uuid4(),
             file_name="private.txt",
             content_type="text/plain",
             size_bytes=10,
@@ -586,7 +587,7 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
     async def resolve_access(*_: Any, **__: Any) -> AuthContext:
         return access
 
-    async def upload_to_collection(
+    async def create_document(
         caller: AuthContext,
         requested_collection_id: UUID,
         **values: Any,
@@ -594,24 +595,23 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
         assert caller is access
         assert requested_collection_id == collection_id
         assert values["idempotency_key"] == "upload-contract-1"
-        assert values["file_name"] == "policy.txt"
+        assert values["name"] == "policy.txt"
         assert values["content_type"] == "text/plain"
         assert await values["content"].read() == b"governed policy"
         return {
             "document": {
                 "id": str(uuid4()),
-                "parent_item_id": str(collection_id),
-                "file_name": "policy.txt",
+                "collection_id": str(collection_id),
+                "name": "policy.txt",
                 "content_type": "text/plain",
                 "size_bytes": 15,
-                "status": "ready",
-                "index_status": "ready",
-                "indexed": True,
-                "upload_status": "available",
+                "purpose": "knowledge",
+                "status": "available",
+                "latest_ingestion_id": None,
                 "created_at": now,
-                "uploaded_at": now,
+                "updated_at": now,
             },
-            "ingestion_status": "ready",
+            "ingestion": None,
             "created": True,
         }
 
@@ -619,11 +619,11 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
     monkeypatch.setitem(
         api_app.app.dependency_overrides,
         api_deps.get_workspace_document_service,
-        lambda: SimpleNamespace(upload_to_collection=upload_to_collection),
+        lambda: SimpleNamespace(create_document=create_document),
     )
     with TestClient(api_app.app) as client:
         response = client.post(
-            f"/api/v1/collections/{collection_id}/documents/upload",
+            f"/api/v1/collections/{collection_id}/documents",
             headers={
                 "Idempotency-Key": "upload-contract-1",
                 "X-Bothesis-Tenant-Id": str(tenant_id),
@@ -632,9 +632,9 @@ def test_collection_upload_route_accepts_multipart_without_a_connector(
             files={"file": ("policy.txt", b"governed policy", "text/plain")},
         )
 
-    assert response.status_code == 201
-    assert response.json()["document"]["parent_item_id"] == str(collection_id)
-    assert response.json()["ingestion_status"] == "ready"
+    assert response.status_code == 201, response.text
+    assert response.json()["document"]["collection_id"] == str(collection_id)
+    assert response.json()["document"]["status"] == "available"
 
 
 @pytest.mark.asyncio
@@ -800,7 +800,7 @@ def test_chat_api_streams_agent_retrieval_and_sources(monkeypatch) -> None:
                     {"role": "user", "content": "Recent scope question"},
                     {"role": "assistant", "content": "Recent scope answer"},
                 ],
-                "collection_item_ids": [str(UUID(int=12))],
+                "collection_ids": [str(UUID(int=12))],
             },
         )
 
@@ -955,7 +955,7 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
                 "message": "How much annual leave is there?",
                 "tenant_id": str(tenant_id),
                 "user_id": str(user_id),
-                "collection_item_ids": [str(UUID(int=12))],
+                "collection_ids": [str(UUID(int=12))],
             },
         )
 
@@ -1001,7 +1001,7 @@ def test_chat_api_resolves_a_cited_source_reference_to_canonical_metadata(
     assert citation["title"] == "Leave policy"
     assert citation["page_start"] == 7
     assert citation["internal_url"] == (
-        f"/knowledge/items/{chunk.item_id}?chunk={quote(chunk.id, safe='')}"
+        f"/knowledge/documents/{chunk.item_id}?chunk={quote(chunk.id, safe='')}"
     )
     # No infrastructure detail reaches the client.
     assert not {"collection_name", "point_id", "storage_key", "vector"} & set(citation)
@@ -1082,7 +1082,7 @@ def test_chat_api_places_repeated_and_multiple_citations_inline(monkeypatch) -> 
                 "message": "How many VPC endpoints do I need?",
                 "tenant_id": str(tenant_id),
                 "user_id": str(user_id),
-                "collection_item_ids": [str(UUID(int=12))],
+                "collection_ids": [str(UUID(int=12))],
             },
         )
 
@@ -1187,16 +1187,16 @@ def test_document_search_api_uses_authorized_retrieval_scope(monkeypatch) -> Non
             json={
                 "query": "annual leave",
                 "top_k": 4,
-                "collection_item_ids": [str(collection_id)],
+                "collection_ids": [str(collection_id)],
             },
         )
 
     assert response.status_code == 200, response.text
     payload = response.json()
     assert payload["total"] == 1
-    assert payload["results"][0]["id"] == str(item_id)
-    assert payload["results"][0]["metadata"]["chunk_id"] == "chunk-1"
-    assert payload["results"][0]["metadata"]["citation"]["page_start"] == 2
+    assert payload["items"][0]["document_id"] == str(item_id)
+    assert payload["items"][0]["metadata"]["chunk_id"] == "chunk-1"
+    assert payload["items"][0]["metadata"]["citation"]["page_start"] == 2
     assert retriever.contexts[0].tenant_id == str(tenant_id)
     assert retriever.contexts[0].collection_item_ids == (str(collection_id),)
 
@@ -1326,10 +1326,10 @@ def test_chat_api_rejects_history_message_over_context_budget(monkeypatch: pytes
 def test_chat_request_accepts_an_optional_bounded_collection_selection() -> None:
     request = ChatRequest(
         message="hello",
-        collection_item_ids=[UUID(int=12), UUID(int=14)],
+        collection_ids=[UUID(int=12), UUID(int=14)],
     )
 
-    assert request.collection_item_ids == [UUID(int=12), UUID(int=14)]
+    assert request.collection_ids == [UUID(int=12), UUID(int=14)]
 
 
 def test_artifact_routes_delegate_to_the_service_and_map_missing_documents(

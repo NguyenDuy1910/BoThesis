@@ -15,5 +15,5 @@ import { getAuthSession } from "@/lib/auth/session";
  */
 export function useWorkspaces() {
   const revision = useSyncExternalStore(subscribeApiData, apiRevision, () => 0);
-  return useApiQuery(async () => getAuthSession()?.tenants ?? [], revision);
+  return useApiQuery(async () => getAuthSession()?.workspaces ?? [], revision);
 }

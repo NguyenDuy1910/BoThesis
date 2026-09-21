@@ -7,7 +7,7 @@
  * and no two screens word the same fact differently.
  */
 
-import { fileKind, formatBytes, formatRelative } from "@/modules/admin/format";
+import { fileKind, formatBytes, formatRelative } from "@/modules/workspace-control/format";
 import type {
   KnowledgeDocumentKind,
   KnowledgeDocumentState,

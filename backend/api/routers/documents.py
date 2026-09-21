@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Header, Query, Request, Response, UploadFile, status
+from fastapi import APIRouter, Header, Query, Request, Response, status
 
 from api.deps import Caller, Documents, KnowledgeQuery
 from api.routers import (
@@ -25,6 +25,7 @@ IdempotencyKey = Annotated[str, Header(min_length=1, max_length=128, alias="Idem
 
 @collections_router.post(
     "/{collection_id}/documents",
+    tags=["documents"],
     response_model=DocumentCreateResult,
     status_code=status.HTTP_201_CREATED,
     operation_id="createDocument",
@@ -41,7 +42,7 @@ async def create_document(
     if media_type == "multipart/form-data":
         form = await request.form()
         file = form.get("file")
-        if not isinstance(file, UploadFile):
+        if file is None or not hasattr(file, "read"):
             raise ValueError("multipart request requires file")
         purpose = str(form.get("purpose") or "knowledge")
         result = await documents.create_document(

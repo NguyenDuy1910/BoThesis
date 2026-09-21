@@ -29,7 +29,7 @@ function source(overrides: Partial<AnswerSource> = {}): AnswerSource {
     title: "Lesson 3.pdf",
     itemId: "item-1",
     chunkId: "item-1:12",
-    internalUrl: "/knowledge/items/item-1?chunk=item-1%3A12",
+    internalUrl: "/knowledge/documents/item-1?chunk=item-1%3A12",
     used: true,
     spans: [],
     ...overrides,

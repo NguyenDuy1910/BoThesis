@@ -25,132 +25,84 @@ def _caller() -> AuthContext:
     )
 
 
-def _collection_payload(collection_id: UUID) -> dict[str, object]:
+def _collection(collection_id: UUID) -> dict[str, object]:
     return {
         "id": str(collection_id),
         "title": "Travel & Expense",
         "description": "Policies and receipts.",
-        "parent_item_id": None,
+        "parent_collection_id": None,
+        "status": "active",
         "document_count": 3,
         "source_count": 1,
+        "created_at": "2026-09-12T09:00:00+00:00",
         "updated_at": "2026-09-12T10:00:00+00:00",
     }
 
 
-def _document_payload(document_id: UUID) -> dict[str, object]:
+def _document(document_id: UUID, collection_id: UUID) -> dict[str, object]:
     return {
         "id": str(document_id),
-        "title": "Travel reimbursement policy.pdf",
+        "collection_id": str(collection_id),
+        "name": "Travel reimbursement policy.pdf",
         "content_type": "application/pdf",
-        "document_type": "pdf",
-        "status": "ready",
+        "size_bytes": 100,
+        "purpose": "knowledge",
+        "status": "available",
+        "latest_ingestion_id": None,
+        "created_at": "2026-09-12T09:00:00+00:00",
         "updated_at": "2026-09-12T10:00:00+00:00",
-        "source": {
-            "display_name": "Confluence",
-            "connector_key": "confluence",
-            "source_url": "https://knowledge.example.test/travel",
-        },
     }
 
 
-def test_knowledge_collection_routes_use_the_workspace_view_contract(
-    monkeypatch,
-) -> None:
+def test_knowledge_and_collection_routes_follow_resource_contract(monkeypatch) -> None:
     collection_id = uuid4()
     document_id = uuid4()
-    calls: list[tuple[str, object]] = []
+    calls: list[str] = []
 
-    class WorkspaceView:
+    class Knowledge:
         async def get_workspace_home(self, caller: AuthContext) -> dict[str, object]:
-            calls.append(("home", caller.user_id))
+            calls.append("home")
             return {
-                "items": [_collection_payload(collection_id)],
-                "total": 1,
-                "recent_documents": [_document_payload(document_id)],
+                "items": [_collection(collection_id)],
+                "recent_documents": [_document(document_id, collection_id)],
                 "personal_collection_id": None,
             }
 
-        async def get_collection_workspace(
-            self,
-            caller: AuthContext,
-            *,
-            collection_id: UUID,
-            search: str | None,
-            page: int,
-            page_size: int,
-        ) -> dict[str, object]:
-            calls.append(("collection", (collection_id, search, page, page_size)))
-            return {
-                "collection": _collection_payload(collection_id),
-                "child_collections": [],
-                "documents": [_document_payload(document_id)],
-                "total": 1,
-                "page": page,
-                "page_size": page_size,
-            }
+    class ControlPlane:
+        async def list_collections(self, caller: AuthContext, **_: object) -> dict[str, object]:
+            calls.append("list")
+            return {"items": [_collection(collection_id)], "page": 1, "page_size": 20, "total": 1}
 
-    class WorkspaceAdmin:
-        async def create_collection(
-            self, caller: AuthContext, values: dict[str, object]
-        ) -> dict[str, object]:
-            calls.append(("create", values))
-            return {"id": collection_id, "title": values["title"]}
+        async def create_collection_contract(self, caller: AuthContext, values: dict[str, object]) -> dict[str, object]:
+            calls.append("create")
+            return _collection(collection_id)
 
-    class WorkspaceDocuments:
-        async def ensure_personal_collection(
-            self, caller: AuthContext
-        ) -> dict[str, object]:
-            calls.append(("ensure_personal", caller.user_id))
-            return {"id": collection_id, "title": "My uploads"}
+        async def get_collection(self, caller: AuthContext, requested_id: UUID) -> dict[str, object]:
+            calls.append("get")
+            return _collection(requested_id)
 
     async def caller() -> AuthContext:
         return _caller()
 
+    async def get_knowledge() -> Knowledge:
+        return Knowledge()
+
+    async def get_control_plane() -> ControlPlane:
+        return ControlPlane()
+
     monkeypatch.setitem(api_app.app.dependency_overrides, api_deps.get_auth_context, caller)
-    monkeypatch.setitem(
-        api_app.app.dependency_overrides,
-        api_deps.get_knowledge_view_service,
-        WorkspaceView,
-    )
-    monkeypatch.setitem(
-        api_app.app.dependency_overrides,
-        api_deps.get_admin_console_service,
-        WorkspaceAdmin,
-    )
-    monkeypatch.setitem(
-        api_app.app.dependency_overrides,
-        api_deps.get_workspace_document_service,
-        WorkspaceDocuments,
-    )
+    monkeypatch.setitem(api_app.app.dependency_overrides, api_deps.get_knowledge_view_service, get_knowledge)
+    monkeypatch.setitem(api_app.app.dependency_overrides, api_deps.get_workspace_control_plane_service, get_control_plane)
 
     with TestClient(api_app.app) as client:
-        created = client.post(
-            "/api/v1/knowledge/collections",
-            json={"title": "Travel & Expense", "description": "Policies and receipts."},
-        )
-        personal = client.put("/api/v1/knowledge/collections/personal")
-        home = client.get("/api/v1/knowledge/collections")
-        collection = client.get(
-            f"/api/v1/knowledge/collections/{collection_id}",
-            params={"search": "travel", "page": 2, "page_size": 25},
-        )
+        home = client.get("/api/v1/knowledge/home")
+        collections = client.get("/api/v1/collections")
+        created = client.post("/api/v1/collections", json={"title": "Travel & Expense"})
+        collection = client.get(f"/api/v1/collections/{collection_id}")
 
-    assert created.status_code == 201, created.text
-    assert created.json() == {"id": str(collection_id), "title": "Travel & Expense"}
-    assert calls[0] == (
-        "create",
-        {
-            "title": "Travel & Expense",
-            "inherit_access": True,
-            "metadata": {"description": "Policies and receipts."},
-        },
-    )
-    assert personal.status_code == 200, personal.text
-    assert personal.json() == {"id": str(collection_id), "title": "My uploads"}
-    assert calls[1][0] == "ensure_personal"
     assert home.status_code == 200, home.text
-    assert home.json()["recent_documents"][0]["source"]["connector_key"] == "confluence"
+    assert home.json()["recent_documents"][0]["id"] == str(document_id)
+    assert collections.status_code == 200, collections.text
+    assert created.status_code == 201, created.text
     assert collection.status_code == 200, collection.text
-    assert collection.json()["collection"]["id"] == str(collection_id)
-    assert calls[2][0] == "home"
-    assert calls[3] == ("collection", (collection_id, "travel", 2, 25))
+    assert calls == ["home", "list", "create", "get"]

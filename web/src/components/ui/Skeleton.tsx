@@ -3,7 +3,7 @@
 import { cn } from "@/lib/cn";
 
 export function Skeleton({ className }: { className?: string }) {
-  return <div aria-hidden="true" className={cn("adm-skeleton", className)} />;
+  return <div aria-hidden="true" className={cn("ctl-skeleton", className)} />;
 }
 
 export function SkeletonLine({ className }: { className?: string }) {
@@ -45,9 +45,9 @@ export function TableSkeleton({
 
 export function StatsSkeleton({ count = 4 }: { count?: number }) {
   return (
-    <div aria-busy="true" className="adm-stats">
+    <div aria-busy="true" className="ctl-stats">
       {Array.from({ length: count }).map((_, index) => (
-        <div className="adm-stat" key={index}>
+        <div className="ctl-stat" key={index}>
           <Skeleton className="h-3 w-24" />
           <Skeleton className="h-7 w-16" />
           <Skeleton className="h-2.5 w-20" />
@@ -61,7 +61,7 @@ export function CardListSkeleton({ count = 3 }: { count?: number }) {
   return (
     <div aria-busy="true" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
       {Array.from({ length: count }).map((_, index) => (
-        <div className="adm-card p-4" key={index}>
+        <div className="ctl-card p-4" key={index}>
           <div className="flex items-center gap-3">
             <Skeleton className="h-9 w-9 rounded-[var(--radius-md)]" />
             <div className="flex-1 space-y-2">
@@ -84,12 +84,12 @@ export function DetailSkeleton() {
         <Skeleton className="h-6 w-64" />
         <Skeleton className="h-3 w-96" />
       </div>
-      <div className="adm-stats">
+      <div className="ctl-stats">
         {Array.from({ length: 3 }).map((_, index) => (
           <Skeleton className="h-20" key={index} />
         ))}
       </div>
-      <div className="adm-card">
+      <div className="ctl-card">
         <TableSkeleton rows={5} />
       </div>
     </div>

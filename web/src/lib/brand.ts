@@ -9,8 +9,8 @@ export const appBrand = {
   shortName: PRODUCT_NAME,
   productName: PRODUCT_NAME,
   platformName: PLATFORM_NAME,
-  adminName: "Admin Console",
-  adminSubtitle: "Control plane",
+  controlPlaneName: "Control Plane",
+  controlPlaneSubtitle: "Control plane",
   workspaceSubtitle: "Enterprise knowledge workspace",
   logo: {
     src: "/bothesis-logo.png",

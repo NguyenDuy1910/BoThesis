@@ -449,7 +449,7 @@ export function ConnectSourceFlow({
                 <small>
                   {canManageWorkspace
                     ? "Everyone here can ask about this knowledge without connecting the account themselves. Turn off to keep it to your own account."
-                    : "Only a workspace administrator can connect an account for everyone. This one will be yours alone."}
+                    : "Only workspace control can connect an account for everyone. This one will be yours alone."}
                 </small>
               </span>
               <Toggle
@@ -541,7 +541,6 @@ export function ConnectSourceFlow({
             {canDiscover ? (
               <ResourcePicker
                 connectionId={connection.id}
-                connectorKey={connection.connector_key}
                 onChange={setSelected}
                 selected={selected}
               />

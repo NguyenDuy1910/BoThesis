@@ -12,7 +12,7 @@ from bothesis.health import HealthService
 from bothesis.runtime import AppRuntime
 from bothesis.services import AuthenticationError, AuthContext, AuthorizationError, JwtClaims
 from bothesis.services.workspace_control_plane import WorkspaceControlPlaneService
-from bothesis.services.integration_console import IntegrationConsoleService
+from bothesis.services.integration_lifecycle import IntegrationLifecycleService
 from bothesis.services.artifact import ArtifactService
 from bothesis.services.chat import ChatService
 from bothesis.services.knowledge_query import KnowledgeQueryService
@@ -136,10 +136,10 @@ def get_workspace_control_plane_service(
     return runtime.workspace_control_plane_service()
 
 
-def get_integration_console_service(
+def get_integration_lifecycle_service(
     runtime: Annotated[AppRuntime, Depends(get_runtime)],
-) -> IntegrationConsoleService:
-    return runtime.integration_console_service()
+) -> IntegrationLifecycleService:
+    return runtime.integration_lifecycle_service()
 
 
 def get_artifact_service(
@@ -166,8 +166,8 @@ Documents = Annotated[
     WorkspaceDocumentService, Depends(get_workspace_document_service)
 ]
 WorkspaceControlPlane = Annotated[WorkspaceControlPlaneService, Depends(get_workspace_control_plane_service)]
-Integrations = Annotated[
-    IntegrationConsoleService, Depends(get_integration_console_service)
+ConnectionLifecycle = Annotated[
+    IntegrationLifecycleService, Depends(get_integration_lifecycle_service)
 ]
 Artifacts = Annotated[ArtifactService, Depends(get_artifact_service)]
 Health = Annotated[HealthService, Depends(get_health_service)]
@@ -180,7 +180,7 @@ __all__ = [
     "ChatCaller",
     "Documents",
     "Health",
-    "Integrations",
+    "ConnectionLifecycle",
     "KnowledgeQuery",
     "KnowledgeView",
     "OptionalTokenClaims",
@@ -189,7 +189,7 @@ __all__ = [
     "get_artifact_service",
     "get_auth_context",
     "get_chat_auth_context",
-    "get_integration_console_service",
+    "get_integration_lifecycle_service",
     "get_request_identity",
     "get_runtime",
     "get_token_claims",

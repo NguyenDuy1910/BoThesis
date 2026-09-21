@@ -28,15 +28,15 @@ export function EmptyState({
   className,
 }: EmptyStateProps) {
   return (
-    <div className={cn("adm-empty", sizePadding[size], className)}>
+    <div className={cn("ctl-empty", sizePadding[size], className)}>
       {icon && (
-        <span aria-hidden="true" className="adm-empty__icon">
+        <span aria-hidden="true" className="ctl-empty__icon">
           {icon}
         </span>
       )}
-      <h3 className="adm-empty__title text-balance">{title}</h3>
-      {description && <p className="adm-empty__desc text-pretty">{description}</p>}
-      {action && <div className="adm-empty__actions">{action}</div>}
+      <h3 className="ctl-empty__title text-balance">{title}</h3>
+      {description && <p className="ctl-empty__desc text-pretty">{description}</p>}
+      {action && <div className="ctl-empty__actions">{action}</div>}
     </div>
   );
 }

@@ -35,7 +35,7 @@ export function WorkspaceRail({
   const pathname = usePathname();
   const { requestSignIn } = useAuthPrompt();
   const session = useAuthSession();
-  const activeWorkspace = session?.tenants.find((item) => item.id === session.active_tenant_id);
+  const activeWorkspace = session?.workspaces.find((item) => item.id === session.active_workspace_id);
 
   return (
     <Rail ariaLabel="Workspace" collapsed={collapsed} mobileOpen={mobileOpen} onMobileClose={onMobileClose} onToggleCollapse={onToggleCollapse}>

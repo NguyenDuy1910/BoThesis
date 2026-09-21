@@ -116,8 +116,8 @@ export function DataTable<T extends object>({
   const someSelected = !allSelected && visibleIds.some((id) => selectedSet.has(id));
 
   return (
-    <div className={cn("adm-table-wrap", className)}>
-      <table aria-label={ariaLabel} className="adm-table">
+    <div className={cn("ctl-table-wrap", className)}>
+      <table aria-label={ariaLabel} className="ctl-table">
         <thead>
           <tr>
             {selectable && (
@@ -150,9 +150,9 @@ export function DataTable<T extends object>({
                     : undefined
                 }
                 className={cn(
-                  column.align === "right" && "adm-table__num",
+                  column.align === "right" && "ctl-table__num",
                   responsiveClass(column),
-                  column.key === primaryKey && "adm-table__primary",
+                  column.key === primaryKey && "ctl-table__primary",
                   column.className,
                 )}
                 key={column.key}
@@ -188,7 +188,7 @@ export function DataTable<T extends object>({
               </th>
             ))}
             {rowActions && (
-              <th className="adm-table__actions-cell" scope="col">
+              <th className="ctl-table__actions-cell" scope="col">
                 <span className="sr-only">Row actions</span>
               </th>
             )}
@@ -237,9 +237,9 @@ export function DataTable<T extends object>({
                 {columns.map((column) => (
                   <td
                     className={cn(
-                      column.align === "right" && "adm-table__num",
+                      column.align === "right" && "ctl-table__num",
                       responsiveClass(column),
-                      column.key === primaryKey && "adm-table__primary",
+                      column.key === primaryKey && "ctl-table__primary",
                       column.className,
                     )}
                     key={column.key}
@@ -252,10 +252,10 @@ export function DataTable<T extends object>({
                 ))}
                 {rowActions && (
                   <td
-                    className="adm-table__actions-cell"
+                    className="ctl-table__actions-cell"
                     onClick={(event) => event.stopPropagation()}
                   >
-                    <div className="adm-table__actions">{rowActions(row)}</div>
+                    <div className="ctl-table__actions">{rowActions(row)}</div>
                   </td>
                 )}
               </tr>

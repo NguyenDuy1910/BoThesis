@@ -18,14 +18,14 @@ const session = {
   user_id: "u",
   email: "duy.nguyen@enterprise.ai",
   display_name: "Duy Nguyen",
-  active_tenant_id: "t1",
-  permissions: ["admin"],
-  tenants: [
-    { id: "t1", code: "vikki", name: "Vikki Bank", role_id: "r", role_code: "owner", permissions: ["admin"] },
-    { id: "t2", code: "ai", name: "AI Team", role_id: "r", role_code: "admin", permissions: [] },
-    { id: "t3", code: "th", name: "Thesis Project", role_id: "r", role_code: "member", permissions: [] },
+  active_workspace_id: "t1",
+  permissions: ["tenant.read", "tenant.manage", "knowledge.read", "user.manage", "role.manage", "group.manage", "audit.read"],
+  workspaces: [
+    { id: "t1", code: "vikki", name: "Vikki Bank", role_codes: ["owner"], permissions: ["tenant.read"] },
+    { id: "t2", code: "ai", name: "AI Team", role_codes: ["admin"], permissions: [] },
+    { id: "t3", code: "th", name: "Thesis Project", role_codes: ["member"], permissions: [] },
   ],
-  platform_scopes: ["root_admin"],
+  platform_permissions: ["platform.tenant.read", "platform.user.read", "platform.audit.read", "platform.health.read"],
 };
 
 const browser = await chromium.launch();

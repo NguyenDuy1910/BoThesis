@@ -14,8 +14,8 @@ import { cn } from "@/lib/cn";
  *
  * It is a set of pieces rather than one configurable component, because the
  * questions differ by object — a member's access provenance is not a
- * workspace's lifecycle. Feature code composes `MemberInspector`,
- * `WorkspaceInspector` and so on from these.
+ * workspace's lifecycle. Feature code composes object-specific inspectors
+ * from these pieces.
  *
  * Above `--bp-inspector` it sits beside the collection as a column. Below, it
  * becomes a modal drawer with a full focus trap, because at that width it

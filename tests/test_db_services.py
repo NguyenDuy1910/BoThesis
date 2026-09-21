@@ -333,7 +333,7 @@ async def test_platform_role_grant_is_idempotent_and_audited(
             platform_admin_emails=frozenset({"root@example.com"}),
         )
 
-        first = await authentication.complete_google_login(
+        first = await authentication.complete_verified_external_session(
             VerifiedGoogleIdentity(
                 issuer="https://accounts.google.com",
                 subject="root-google-subject",
@@ -341,7 +341,7 @@ async def test_platform_role_grant_is_idempotent_and_audited(
                 display_name="Root User",
             )
         )
-        second = await authentication.complete_google_login(
+        second = await authentication.complete_verified_external_session(
             VerifiedGoogleIdentity(
                 issuer="https://accounts.google.com",
                 subject="root-google-subject",
@@ -404,7 +404,7 @@ async def test_guest_session_is_claimed_without_moving_the_conversation(
             ),
             public_tenant_code=public.code,
         )
-        guest = await authentication.create_guest_session()
+        guest = await authentication.create_session(method="guest")
         conversation = Conversation(
             tenant_id=public.id,
             owner_user_id=None,
@@ -415,12 +415,12 @@ async def test_guest_session_is_claimed_without_moving_the_conversation(
         await session.flush()
 
         with pytest.raises(AuthorizationError, match="sign in is required"):
-            await authentication.create_session(
+            await authentication.update_session(
                 current_session_id=guest.session_id,
-                tenant_id=public.id,
+                active_workspace_id=public.id,
             )
 
-        claimed = await authentication.complete_google_login(
+        claimed = await authentication.complete_verified_external_session(
             VerifiedGoogleIdentity(
                 issuer="https://accounts.google.com",
                 subject="claimed-google-subject",

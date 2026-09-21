@@ -35,12 +35,10 @@ interface Crumb {
  */
 export function ResourcePicker({
   connectionId,
-  connectorKey,
   selected,
   onChange,
 }: {
   connectionId: string;
-  connectorKey: string;
   selected: SelectedResource[];
   onChange: (next: SelectedResource[]) => void;
 }) {
@@ -58,11 +56,10 @@ export function ResourcePicker({
       setError(null);
       try {
         const page = await connectionsApi.resources(connectionId, {
-          connector_key: connectorKey,
           parent_id: parentId ?? undefined,
           search: term.trim() || undefined,
         });
-        setResources(page.resources);
+        setResources(page.items);
       } catch (cause) {
         setResources(null);
         setError(
@@ -74,7 +71,7 @@ export function ResourcePicker({
         setLoading(false);
       }
     },
-    [connectionId, connectorKey],
+    [connectionId],
   );
 
   useEffect(() => {

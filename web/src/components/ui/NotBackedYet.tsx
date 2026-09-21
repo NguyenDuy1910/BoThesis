@@ -21,7 +21,7 @@ interface NotBackedYetProps {
  */
 export function NotBackedYet({ title, description }: NotBackedYetProps) {
   return (
-    <div className="adm-card">
+    <div className="ctl-card">
       <EmptyState
         description={description}
         icon={<Construction aria-hidden="true" className="h-5 w-5" />}

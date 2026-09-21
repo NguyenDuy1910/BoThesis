@@ -40,18 +40,18 @@ export function ErrorState({
   }
 
   return (
-    <div className={cn("adm-card", className)} role="alert">
-      <div className="adm-empty">
+    <div className={cn("ctl-card", className)} role="alert">
+      <div className="ctl-empty">
         <span
           aria-hidden="true"
-          className="adm-empty__icon bg-[var(--status-danger-bg)] text-[var(--status-danger-solid)]"
+          className="ctl-empty__icon bg-[var(--status-danger-bg)] text-[var(--status-danger-solid)]"
         >
           <AlertTriangle className="h-5 w-5" />
         </span>
-        <h3 className="adm-empty__title">{title}</h3>
-        <p className="adm-empty__desc">{description}</p>
+        <h3 className="ctl-empty__title">{title}</h3>
+        <p className="ctl-empty__desc">{description}</p>
         {actionLabel && onAction && (
-          <div className="adm-empty__actions">
+          <div className="ctl-empty__actions">
             <Button
               icon={<RotateCw aria-hidden="true" className="h-4 w-4" />}
               onClick={onAction}

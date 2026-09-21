@@ -22,12 +22,12 @@ const session = {
   user_id: "00000000-0000-0000-0000-000000000002",
   email: "duy.nguyen@enterprise.ai",
   display_name: "Duy Nguyen",
-  active_tenant_id: "00000000-0000-0000-0000-000000000001",
-  permissions: ["admin"],
-  tenants: [
-    { id: "00000000-0000-0000-0000-000000000001", code: "vikki", name: "Vikki Bank", role_id: "r1", role_code: "Owner", permissions: ["admin"] },
+  active_workspace_id: "00000000-0000-0000-0000-000000000001",
+  permissions: ["tenant.read", "tenant.manage", "knowledge.read", "user.manage", "role.manage", "group.manage", "audit.read"],
+  workspaces: [
+    { id: "00000000-0000-0000-0000-000000000001", code: "vikki", name: "Vikki Bank", role_codes: ["owner"], permissions: ["tenant.read", "tenant.manage"] },
   ],
-  platform_scopes: ["root_admin"],
+  platform_permissions: ["platform.tenant.read", "platform.user.read", "platform.audit.read", "platform.health.read"],
 };
 
 const knowledgeHome = {
@@ -52,7 +52,7 @@ await context.addInitScript((s) => {
 await context.route("**/api/v1/knowledge/**", (route) =>
   route.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify(knowledgeHome) }),
 );
-await context.route("**/api/v1/admin/**", (route) =>
+await context.route(/\/api\/v1\/(?!knowledge(?:\/|$)|agent(?:\/|$))/, (route) =>
   route.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify({ items: [], total: 0 }) }),
 );
 

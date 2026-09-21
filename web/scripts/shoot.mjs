@@ -33,35 +33,32 @@ const session = {
   user_id: "00000000-0000-0000-0000-000000000002",
   email: "duy.nguyen@enterprise.ai",
   display_name: "Duy Nguyen",
-  active_tenant_id: "00000000-0000-0000-0000-000000000001",
-  permissions: ["admin"],
-  tenants: [
+  active_workspace_id: "00000000-0000-0000-0000-000000000001",
+  permissions: ["tenant.read", "tenant.manage", "knowledge.read", "user.manage", "role.manage", "group.manage", "audit.read"],
+  workspaces: [
     {
       id: "00000000-0000-0000-0000-000000000001",
       code: "vikki",
       name: "Vikki Bank",
-      role_id: "r1",
-      role_code: "Owner",
-      permissions: ["admin"],
+      role_codes: ["owner"],
+      permissions: ["tenant.read", "tenant.manage"],
     },
     {
       id: "00000000-0000-0000-0000-000000000009",
       code: "ai-team",
       name: "AI Team",
-      role_id: "r2",
-      role_code: "Admin",
-      permissions: ["admin"],
+      role_codes: ["admin"],
+      permissions: ["tenant.read", "tenant.manage"],
     },
     {
       id: "00000000-0000-0000-0000-00000000000a",
       code: "thesis",
       name: "Thesis Project",
-      role_id: "r3",
-      role_code: "Member",
+      role_codes: ["member"],
       permissions: [],
     },
   ],
-  platform_scopes: ["root_admin"],
+  platform_permissions: ["platform.tenant.read", "platform.user.read", "platform.audit.read", "platform.health.read"],
 };
 
 const browser = await chromium.launch();
@@ -105,7 +102,7 @@ const overview = {
   recent_activity: [],
 };
 
-await context.route("**/api/v1/admin/**", async (route) => {
+await context.route(/\/api\/v1\/(?!knowledge(?:\/|$)|agent(?:\/|$))/, async (route) => {
   const url = route.request().url();
   const body = url.includes("/platform/workspaces")
     ? workspaces

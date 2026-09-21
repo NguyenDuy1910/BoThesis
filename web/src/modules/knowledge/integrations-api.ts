@@ -1,8 +1,8 @@
 "use client";
 
 import { apiRequest, queryString } from "@/lib/api/request";
-import { queryString as adminQueryString } from "@/modules/admin/api";
-import type { KnowledgeItem, Paginated } from "@/modules/admin/collections";
+import { queryString as controlPlaneQueryString } from "@/modules/workspace-control/control-plane-api";
+import type { KnowledgeItem, Paginated } from "@/modules/workspace-control/collections";
 
 /**
  * Connections and Sources.
@@ -162,7 +162,7 @@ export interface SourceRun {
 export const connectionsApi = {
   /** What this deployment can connect, and how each one is authorized. */
   providers: () =>
-    apiRequest<{ connectors: ConnectorCapability[] }>("/connections/providers"),
+    apiRequest<{ items: ConnectorCapability[] }>("/connections/providers"),
 
   list: (params: { connector_key?: string; status?: string; owner_type?: string } = {}) =>
     apiRequest<Paginated<Connection>>(
@@ -231,7 +231,7 @@ export const connectionsApi = {
     id: string,
     params: { connector_key?: string; parent_id?: string; search?: string } = {},
   ) =>
-    apiRequest<{ connector_key: string; parent_id: string | null; resources: ProviderResource[] }>(
+    apiRequest<{ items: ProviderResource[] }>(
       `/connections/${id}/resources${queryString(params)}`,
     ),
 
@@ -294,7 +294,7 @@ export const sourcesApi = {
 export const collectionsApi = {
   list: () =>
     apiRequest<Paginated<KnowledgeItem>>(
-      `/collections${adminQueryString({ page_size: 100 })}`,
+      `/collections${controlPlaneQueryString({ page_size: 100 })}`,
     ),
 
   create: (title: string) =>

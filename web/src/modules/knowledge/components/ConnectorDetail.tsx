@@ -107,7 +107,7 @@ export function ConnectorDetail({
       {!available && (
         <p className="knowledge-connector-page__unavailable">
           This deployment has no {connector.name} adapter, so there is nothing to connect yet.
-          A platform administrator adds one by registering it in the connector registry;
+          Platform control adds one by registering it in the connector registry;
           it appears here the moment they do.
         </p>
       )}

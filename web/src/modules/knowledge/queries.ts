@@ -6,7 +6,7 @@ import { getApiConfiguration } from "@/lib/api/config";
 import { apiRequest } from "@/lib/api/request";
 import { apiRevision, invalidateApiData, subscribeApiData } from "@/lib/api/revision";
 import { useApiQuery } from "@/lib/hooks/useApiQuery";
-import { retryCollectionDocument, uploadCollectionFile } from "@/modules/admin/api";
+import { retryCollectionDocument, uploadCollectionFile } from "@/modules/workspace-control/control-plane-api";
 import { knowledgeApi } from "@/modules/knowledge/knowledge-api";
 import {
   lastActivityLabel,
@@ -117,14 +117,14 @@ export function useConnectorCatalogue() {
     if (!getApiConfiguration()) {
       return knowledgeConnectors.map((connector) => ({ connector }));
     }
-    const { connectors } = await connectionsApi.providers();
-    // A response that is not the documented shape is a broken deployment, not
+    const { items } = await connectionsApi.providers();
+    // A response that is not the documented `{items}` shape is a broken deployment, not
     // a deployment with no connectors — and the reader gets a sentence rather
     // than whatever a property access on `undefined` happens to throw.
-    if (!Array.isArray(connectors)) {
+    if (!Array.isArray(items)) {
       throw new Error("The connector registry returned an unexpected response.");
     }
-    return connectors.map((capability) => ({
+    return items.map((capability) => ({
       connector: describeConnector(capability.connector_key, capability.display_name),
       capability,
     }));

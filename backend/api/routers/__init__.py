@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Union
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
@@ -45,28 +45,10 @@ class GoogleSessionCreate(BaseModel):
     credential: str = Field(min_length=1, max_length=12_000)
 
 
-class CreateSessionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    method: Literal["password", "guest", "google"]
-    email: EmailStr | None = None
-    password: str | None = Field(default=None, min_length=8, max_length=128)
-    credential: str | None = Field(default=None, min_length=1, max_length=12_000)
-
-    @model_validator(mode="after")
-    def validate_method_payload(self) -> "CreateSessionRequest":
-        required = {
-            "password": (self.email is not None and self.password is not None),
-            "guest": True,
-            "google": self.credential is not None,
-        }
-        if not required[self.method]:
-            raise ValueError(f"method={self.method} requires its credential fields")
-        if self.method != "password" and (self.email is not None or self.password is not None):
-            raise ValueError("email/password are only valid for method=password")
-        if self.method != "google" and self.credential is not None:
-            raise ValueError("credential is only valid for method=google")
-        return self
+CreateSessionRequest = Annotated[
+    Union[PasswordSessionCreate, GuestSessionCreate, GoogleSessionCreate],
+    Field(discriminator="method"),
+]
 
 
 class CurrentSessionUpdate(BaseModel):
@@ -85,12 +67,12 @@ class WorkspaceMembership(BaseModel):
 
 class AuthSession(BaseModel):
     access_token: str
-    token_type: Literal["bearer"] = "bearer"
+    token_type: Literal["bearer"]
     expires_at: datetime
     session_id: UUID
     user_id: UUID | None
-    email: EmailStr | None
-    display_name: str | None
+    email: EmailStr | None = None
+    display_name: str | None = None
     active_workspace_id: UUID
     permissions: list[str]
     platform_permissions: list[str]
@@ -102,8 +84,8 @@ class CurrentSession(BaseModel):
     session_id: UUID
     expires_at: datetime
     user_id: UUID | None
-    email: EmailStr | None
-    display_name: str | None
+    email: EmailStr | None = None
+    display_name: str | None = None
     active_workspace_id: UUID
     permissions: list[str]
     platform_permissions: list[str]
@@ -507,7 +489,7 @@ class Source(BaseModel):
     display_name: str | None = None
     resource_type: str | None = None
     external_resource_id: str | None = None
-    schedule: dict[str, Any] | None = None
+    schedule: "Schedule | None" = None
 
 
 class SourceCreate(StrictRequest):
@@ -516,7 +498,7 @@ class SourceCreate(StrictRequest):
     resource_type: str | None = None
     external_resource_id: str | None = None
     config: dict[str, Any] = Field(default_factory=dict)
-    schedule: dict[str, Any] | None = None
+    schedule: "SchedulePut | None" = None
 
 
 class SourceUpdate(StrictRequest):
@@ -540,12 +522,11 @@ class SchedulePut(StrictRequest):
     schedule_type: Literal["cron", "interval"]
     cron_expression: str
     timezone: str | None = None
-    enabled: bool = True
-    overlap_policy: Literal["skip", "queue", "replace"] = "skip"
+    enabled: bool
+    overlap_policy: Literal["skip", "queue", "replace"]
 
 
 class SchedulePatch(StrictRequest):
-    schedule_type: Literal["cron", "interval"] | None = None
     cron_expression: str | None = None
     timezone: str | None = None
     enabled: bool | None = None
@@ -553,7 +534,7 @@ class SchedulePatch(StrictRequest):
 
 
 class Schedule(BaseModel):
-    id: str
+    id: UUID
     schedule_type: Literal["cron", "interval"]
     cron_expression: str
     timezone: str | None = None
@@ -669,6 +650,10 @@ class AuditLogPage(PageFields):
 class PlatformOverview(BaseModel):
     metrics: dict[str, int] = Field(default_factory=dict)
     workspace_health: list[dict[str, Any]] = Field(default_factory=list)
+
+
+Source.model_rebuild()
+SourceCreate.model_rebuild()
 
 
 __all__ = [

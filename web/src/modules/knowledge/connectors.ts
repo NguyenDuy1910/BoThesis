@@ -14,7 +14,7 @@
  * `IngestionSource.config` the connector runtime reads.
  *
  * What a deployment can actually connect is decided by the backend, not by
- * this file: `GET /admin/connectors/capabilities` is the source of truth, and
+ * this file: `GET /api/v1/connections/providers` is the source of truth, and
  * an entry here without a registration there is never offered. Adding a
  * connector to the product is a registration in the backend plus a row here —
  * never a new screen.

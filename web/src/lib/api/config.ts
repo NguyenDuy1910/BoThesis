@@ -38,7 +38,7 @@ function resolveApiConfiguration(session: ReturnType<typeof getStoredAuthSession
   if (session) {
     return {
       apiUrl,
-      tenantId: session.active_tenant_id,
+      tenantId: session.active_workspace_id,
       userId: session.user_id ?? session.session_id,
       accessToken: session.access_token,
     };

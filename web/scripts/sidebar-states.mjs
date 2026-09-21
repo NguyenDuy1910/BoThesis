@@ -16,10 +16,10 @@ const session = (permissions) => ({
   user_id: "u",
   email: "duy.nguyen@enterprise.ai",
   display_name: "Duy Nguyen",
-  active_tenant_id: "t1",
+  active_workspace_id: "t1",
   permissions,
-  tenants: [{ id: "t1", code: "v", name: "Vikki Bank", role_id: "r", role_code: "owner", permissions }],
-  platform_scopes: [],
+  workspaces: [{ id: "t1", code: "v", name: "Vikki Bank", role_codes: ["owner"], permissions }],
+  platform_permissions: [],
 });
 
 const now = Date.now();
@@ -43,7 +43,7 @@ const check = (ok, message) => {
 
 const browser = await chromium.launch();
 
-async function open({ permissions = ["admin"], theme = "light", seedChats = false } = {}) {
+async function open({ permissions = ["tenant.read", "knowledge.read"], theme = "light", seedChats = false } = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   await context.addInitScript(
     ([s, t, chats]) => {

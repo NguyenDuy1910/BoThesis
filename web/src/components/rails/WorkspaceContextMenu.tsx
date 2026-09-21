@@ -9,7 +9,7 @@ import { useAuthPrompt } from "@/components/auth/AuthPrompt";
 import {
   clearAuthSession,
   hasAnySessionPermission,
-  canAccessPlatformAdmin,
+  canAccessPlatformControl,
   isGuestSession,
 } from "@/lib/auth/session";
 import { switchWorkspace } from "@/modules/auth/api";
@@ -19,7 +19,7 @@ import { AccountDialog } from "./AccountDialog";
 import { IdentityContextDock } from "./IdentityContextDock";
 import { WorkspaceSwitcherDialog } from "./WorkspaceSwitcherDialog";
 
-const workspaceAdminPermissions = [
+const workspaceControlPermissions = [
   "admin",
   "user.manage",
   "role.manage",
@@ -31,7 +31,7 @@ const workspaceAdminPermissions = [
 
 /**
  * The workspace dock's compact context menu. It is the only control in either
- * workspace rail that can change workspaces or cross into platform admin.
+ * workspace rail that can change workspaces or cross into platform control.
  */
 export function WorkspaceContextMenu({
   collapsed,
@@ -50,18 +50,18 @@ export function WorkspaceContextMenu({
   const [switching, setSwitching] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const current = session?.tenants.find((tenant) => tenant.id === session.active_tenant_id);
+  const current = session?.workspaces.find((tenant) => tenant.id === session.active_workspace_id);
   const workspaceName = current?.name ?? "Workspace";
   const userName = isGuestSession(session)
     ? "Guest session"
     : session?.display_name || session?.email || "Signed in";
-  const otherWorkspaces = (session?.tenants ?? []).filter((tenant) => tenant.id !== current?.id);
-  const canManageWorkspace = hasAnySessionPermission(session, workspaceAdminPermissions);
-  const canUsePlatformAdmin = canAccessPlatformAdmin(session);
+  const otherWorkspaces = (session?.workspaces ?? []).filter((tenant) => tenant.id !== current?.id);
+  const canManageWorkspace = hasAnySessionPermission(session, workspaceControlPermissions);
+  const canUsePlatformControl = canAccessPlatformControl(session);
   const isGuest = isGuestSession(session);
 
   const changeWorkspace = async (tenantId: string) => {
-    if (!session || tenantId === session.active_tenant_id) return;
+    if (!session || tenantId === session.active_workspace_id) return;
     setSwitching(tenantId);
     setError(null);
     try {
@@ -114,7 +114,7 @@ export function WorkspaceContextMenu({
         <DropdownItem
           onClick={() => {
             onNavigate?.();
-            router.push("/admin");
+            router.push("/workspace-control");
           }}
         >
           <Settings aria-hidden="true" className="h-[18px] w-[18px]" />
@@ -122,15 +122,15 @@ export function WorkspaceContextMenu({
         </DropdownItem>
       )}
 
-      {canUsePlatformAdmin && (
+      {canUsePlatformControl && (
         <DropdownItem
           onClick={() => {
             onNavigate?.();
-            router.push("/admin/platform");
+            router.push("/workspace-control/platform");
           }}
         >
           <ShieldCheck aria-hidden="true" className="h-[18px] w-[18px]" />
-          <span className="flex-1">Platform admin</span>
+          <span className="flex-1">Platform control</span>
         </DropdownItem>
       )}
 
@@ -141,7 +141,7 @@ export function WorkspaceContextMenu({
         </DropdownItem>
       )}
 
-      {session && !isGuest && (otherWorkspaces.length > 0 || canManageWorkspace || canUsePlatformAdmin) && <DropdownSeparator />}
+      {session && !isGuest && (otherWorkspaces.length > 0 || canManageWorkspace || canUsePlatformControl) && <DropdownSeparator />}
 
       {session && !isGuest && (
         <>
@@ -189,7 +189,7 @@ export function WorkspaceContextMenu({
         onSelect={(tenantId) => void changeWorkspace(tenantId)}
         open={workspaceSwitcherOpen}
         switchingId={switching}
-        workspaces={session?.tenants ?? []}
+        workspaces={session?.workspaces ?? []}
       />
     </>
   );

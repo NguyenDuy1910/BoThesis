@@ -54,7 +54,7 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
       if (isSignup) {
         await createPasswordAccount({ username, email, password, display_name: displayName || undefined });
       } else {
-        await completePasswordSignIn(username, password);
+        await completePasswordSignIn(email, password);
       }
       window.location.assign(loginDestination(new URLSearchParams(window.location.search).get("next")));
     } catch (error) {
@@ -119,13 +119,13 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
           {isSigningIn ? <p className="auth-welcome__google-progress" role="status">Signing in…</p> : null}
           {signInError ? <p className="auth-welcome__sign-in-error" role="alert">{signInError}</p> : null}
           <div className="auth-welcome__workspace-hint"><Info aria-hidden="true" size={18} strokeWidth={1.8} /><span><strong>Use your work Google account</strong><small>Workspace access and permissions are applied after sign-in.</small></span></div>
-          <div aria-hidden="true" className="auth-welcome__divider"><span>or use username</span></div>
+          <div aria-hidden="true" className="auth-welcome__divider"><span>or use email</span></div>
           <form className="auth-welcome__password-form" onSubmit={submitPassword}>
             {isSignup ? <label><span>Display name</span><input autoComplete="name" onChange={(event) => setDisplayName(event.target.value)} value={displayName} /></label> : null}
-            {isSignup ? <label><span>Email</span><input autoComplete="email" onChange={(event) => setEmail(event.target.value)} required type="email" value={email} /></label> : null}
-            <label><span>Username</span><input autoCapitalize="none" autoComplete="username" onChange={(event) => setUsername(event.target.value)} required value={username} /></label>
+            <label><span>Email</span><input autoCapitalize="none" autoComplete="email" onChange={(event) => setEmail(event.target.value)} required type="email" value={email} /></label>
+            {isSignup ? <label><span>Username (optional)</span><input autoCapitalize="none" autoComplete="username" onChange={(event) => setUsername(event.target.value)} value={username} /></label> : null}
             <label><span>Password</span><input autoComplete={isSignup ? "new-password" : "current-password"} minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></label>
-            <button className="auth-welcome__password-submit" disabled={isSigningIn} type="submit"><KeyRound aria-hidden="true" size={17} strokeWidth={1.9} /><span>{isSignup ? "Create account" : "Sign in with username"}</span></button>
+            <button className="auth-welcome__password-submit" disabled={isSigningIn} type="submit"><KeyRound aria-hidden="true" size={17} strokeWidth={1.9} /><span>{isSignup ? "Create account" : "Sign in with email"}</span></button>
           </form>
           <p className="auth-welcome__switch">{isSignup ? "Already have an account?" : "New to BoThesis?"} <Link href={isSignup ? "/auth/login" : "/auth/signup"}>{isSignup ? "Sign in" : "Create an account"}</Link></p>
           <section aria-labelledby="access-title" className="auth-welcome__access"><h3 id="access-title">Your access stays governed</h3><ul>{accessCommitments.map(([title, detail]) => <li key={title}><Check aria-hidden="true" size={16} strokeWidth={2.2} /><strong>{title}</strong><small>{detail}</small></li>)}</ul></section>

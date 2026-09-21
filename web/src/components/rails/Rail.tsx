@@ -9,7 +9,7 @@ import { cn } from "@/lib/cn";
  *
  * Width, collapse and the mobile overlay live here so no page can move them.
  * Geometry comes from shell.css; this only chooses the surface and the state
- * attributes. Platform Admin sits on a different surface from the two
+ * attributes. Platform control sits on a different surface from the two
  * workspace modes, which is one of the signals that it is a separate plane.
  */
 export function Rail({

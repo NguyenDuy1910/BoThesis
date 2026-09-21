@@ -34,11 +34,11 @@ export function StatTile({
 }: StatTileProps) {
   const body = (
     <>
-      <span className="adm-stat__top">
+      <span className="ctl-stat__top">
         {icon}
         {label}
       </span>
-      <span className={cn("adm-stat__value", toneClasses[tone])}>
+      <span className={cn("ctl-stat__value", toneClasses[tone])}>
         {value === undefined ? (
           <span aria-label="Not available">—</span>
         ) : typeof value === "number" ? (
@@ -47,7 +47,7 @@ export function StatTile({
           value
         )}
       </span>
-      {note && <span className="adm-stat__note">{note}</span>}
+      {note && <span className="ctl-stat__note">{note}</span>}
     </>
   );
 
@@ -55,7 +55,7 @@ export function StatTile({
     return (
       <Link
         className={cn(
-          "adm-stat focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-canvas)]",
+          "ctl-stat focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-canvas)]",
           className,
         )}
         href={href}
@@ -65,7 +65,7 @@ export function StatTile({
     );
   }
 
-  return <div className={cn("adm-stat", className)}>{body}</div>;
+  return <div className={cn("ctl-stat", className)}>{body}</div>;
 }
 
 export function StatGrid({
@@ -75,5 +75,5 @@ export function StatGrid({
   children: React.ReactNode;
   className?: string;
 }) {
-  return <div className={cn("adm-stats", className)}>{children}</div>;
+  return <div className={cn("ctl-stats", className)}>{children}</div>;
 }

@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { AuthPromptProvider } from "@/components/auth/AuthPrompt";
 import { getStoredAuthSession, isGuestSession } from "@/lib/auth/session";
 import { useAuthSession } from "@/lib/hooks/useAuthSession";
-import { createGuestSession } from "@/modules/auth/api";
+import { createSession } from "@/modules/auth/api";
 
 const publicPathPrefix = "/auth/";
 
@@ -35,7 +35,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     let mounted = true;
     setChecking(true);
     setError(null);
-    void createGuestSession()
+    void createSession()
       .catch((cause: unknown) => {
         if (mounted) {
           setError(cause instanceof Error ? cause.message : "Guest access could not be started.");
@@ -82,7 +82,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 function protectedRouteReason(pathname: string): string | undefined {
   if (pathname === "/library") return "Sign in to upload and keep private files.";
   if (pathname === "/workspaces") return "Sign in to open private workspaces.";
-  if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+  if (pathname === "/workspace-control" || pathname.startsWith("/workspace-control/")) {
     return "Sign in to manage agents, knowledge, and workspace settings.";
   }
   return undefined;

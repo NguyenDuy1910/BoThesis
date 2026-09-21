@@ -42,7 +42,7 @@ from bothesis.services.workspace_control_plane import WorkspaceControlPlaneServi
 from bothesis.services.integration_authorization import (
     IntegrationAuthorizationService,
 )
-from bothesis.services.integration_console import IntegrationConsoleService
+from bothesis.services.integration_lifecycle import IntegrationLifecycleService
 from bothesis.services.identity_access.auth import AuthenticationService
 from bothesis.services.identity_access.google import GoogleIdentityVerifier
 from bothesis.services.artifact import ArtifactService
@@ -137,8 +137,8 @@ class AppRuntime:
             vector_index=self._config.vector_index,
         )
 
-    def integration_console_service(self) -> IntegrationConsoleService:
-        return IntegrationConsoleService(
+    def integration_lifecycle_service(self) -> IntegrationLifecycleService:
+        return IntegrationLifecycleService(
             self.sessions(),
             workflows=self.workflow_service(),
             integration=self._config.integration,

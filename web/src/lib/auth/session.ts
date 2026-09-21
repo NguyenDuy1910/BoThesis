@@ -1,6 +1,6 @@
 import { invalidateApiData } from "@/lib/api/revision";
 
-export interface AuthTenant {
+export interface AuthWorkspace {
   id: string;
   code: string;
   name: string;
@@ -16,9 +16,9 @@ export interface AuthSession {
   user_id: string | null;
   email: string | null;
   display_name: string | null;
-  active_tenant_id: string;
+  active_workspace_id: string;
   permissions: string[];
-  tenants: AuthTenant[];
+  workspaces: AuthWorkspace[];
   platform_permissions: string[];
   session_kind: "user" | "guest";
 }
@@ -54,7 +54,7 @@ export function hasPlatformPermission(
   return Boolean(session?.platform_permissions.includes(permission));
 }
 
-export const PLATFORM_ADMIN_PERMISSIONS = [
+export const PLATFORM_CONTROL_PERMISSIONS = [
   "platform.tenant.read",
   "platform.user.read",
   "platform.audit.read",
@@ -62,8 +62,8 @@ export const PLATFORM_ADMIN_PERMISSIONS = [
 ] as const;
 
 /** The platform console is available to anyone holding any platform grant. */
-export function canAccessPlatformAdmin(session: AuthSession | null): boolean {
-  return PLATFORM_ADMIN_PERMISSIONS.some((permission) =>
+export function canAccessPlatformControl(session: AuthSession | null): boolean {
+  return PLATFORM_CONTROL_PERMISSIONS.some((permission) =>
     hasPlatformPermission(session, permission),
   );
 }
@@ -121,9 +121,9 @@ function isAuthSession(value: unknown): value is AuthSession {
     session.session_id.length > 0 &&
     (session.user_id === null || typeof session.user_id === "string") &&
     (session.email === null || typeof session.email === "string") &&
-    typeof session.active_tenant_id === "string" &&
+    typeof session.active_workspace_id === "string" &&
     Array.isArray(session.permissions) &&
-    Array.isArray(session.tenants) &&
+    Array.isArray(session.workspaces) &&
     Array.isArray(session.platform_permissions) &&
     (session.session_kind === "user" || session.session_kind === "guest") &&
     (session.session_kind === "guest" ? session.user_id === null : typeof session.user_id === "string")

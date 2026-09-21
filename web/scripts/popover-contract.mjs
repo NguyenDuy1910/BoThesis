@@ -16,9 +16,9 @@ const makeSession = (workspaceCount) => ({
   user_id: "u",
   email: "duy.nguyen@enterprise.ai",
   display_name: "Duy Nguyen",
-  active_tenant_id: "t1",
-  permissions: ["admin"],
-  tenants: Array.from({ length: workspaceCount }, (_, i) => ({
+  active_workspace_id: "t1",
+  permissions: ["tenant.read", "tenant.manage", "knowledge.read", "user.manage", "role.manage", "group.manage", "audit.read"],
+  workspaces: Array.from({ length: workspaceCount }, (_, i) => ({
     id: `t${i + 1}`,
     code: `w${i + 1}`,
     name:
@@ -27,11 +27,10 @@ const makeSession = (workspaceCount) => ({
         : i === 1
           ? "A deliberately long workspace name that must truncate"
           : `Workspace ${i + 1}`,
-    role_id: "r",
-    role_code: i === 0 ? "owner" : "member",
+    role_codes: [i === 0 ? "owner" : "member"],
     permissions: i === 0 ? ["admin"] : [],
   })),
-  platform_scopes: ["root_admin"],
+  platform_permissions: ["platform.tenant.read", "platform.user.read", "platform.audit.read", "platform.health.read"],
 });
 
 let failures = 0;

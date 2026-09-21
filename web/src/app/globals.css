@@ -4,7 +4,7 @@
 @import "./tokens.css";
 @import "../components/shell/shell.css";
 @import "../components/patterns/patterns.css";
-@import "./admin.css";
+@import "./control-plane.css";
 
 /* Element resets.
    ---------------------------------------------------------------------------

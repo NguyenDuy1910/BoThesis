@@ -77,7 +77,7 @@ class AuthenticationService:
             guest_session_id=guest_session_id,
         )
 
-    async def create_session_request(
+    async def create_session(
         self,
         *,
         method: str,
@@ -89,7 +89,7 @@ class AuthenticationService:
         """Dispatch typed auth methods into one Session creation operation."""
 
         if method == "guest":
-            return await self.create_guest_session()
+            return await self._create_guest_access_session()
         if method == "password":
             if email is None or password is None:
                 raise AuthenticationError("email or password is incorrect")
@@ -117,7 +117,7 @@ class AuthenticationService:
     async def update_session(
         self, *, current_session_id: UUID, active_workspace_id: UUID
     ) -> AuthenticationSession:
-        return await self.create_session(
+        return await self._switch_session(
             current_session_id=current_session_id, tenant_id=active_workspace_id
         )
 
@@ -150,54 +150,7 @@ class AuthenticationService:
         memberships = await self._identities.list_active_tenant_memberships(row.user_id)
         return row, context, memberships
 
-    async def complete_password_login(
-        self,
-        *,
-        username: str,
-        password: str,
-        guest_session_id: UUID | None = None,
-    ) -> AuthenticationSession:
-        """Verify a local credential and issue a tenant-scoped session."""
-
-        try:
-            user = await self._identities.get_user_by_username(username)
-        except IdentityNotFoundError as exc:
-            raise AuthenticationError("username or password is incorrect") from exc
-        if user.password_hash is None or not PasswordCredentialService.verify(
-            password, user.password_hash
-        ):
-            raise AuthenticationError("username or password is incorrect")
-        return await self._issue_user_session(
-            user,
-            authentication_method="password",
-            guest_session_id=guest_session_id,
-        )
-
-    async def create_password_account(
-        self,
-        *,
-        username: str,
-        email: str,
-        password: str,
-        display_name: str | None = None,
-        guest_session_id: UUID | None = None,
-    ) -> AuthenticationSession:
-        """Create a local account with a personal workspace."""
-
-        user = await self._identities.create_user(
-            email,
-            username=username,
-            password_hash=PasswordCredentialService.hash(password),
-            display_name=display_name,
-        )
-        await self._create_personal_workspace(user)
-        return await self._issue_user_session(
-            user,
-            authentication_method="password",
-            guest_session_id=guest_session_id,
-        )
-
-    async def create_guest_session(self) -> AuthenticationSession:
+    async def _create_guest_access_session(self) -> AuthenticationSession:
         """Create one anonymous security session in configured public workspace."""
 
         tenant = await self._public_tenant()
@@ -221,7 +174,7 @@ class AuthenticationService:
             session_kind="guest",
         )
 
-    async def complete_google_login(
+    async def complete_verified_external_session(
         self,
         identity: VerifiedGoogleIdentity,
         *,
@@ -337,7 +290,7 @@ class AuthenticationService:
             session_kind="user",
         )
 
-    async def create_session(
+    async def _switch_session(
         self, *, current_session_id: UUID, tenant_id: UUID
     ) -> AuthenticationSession:
         """Replace current user session with one selecting another membership."""

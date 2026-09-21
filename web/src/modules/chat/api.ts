@@ -215,7 +215,7 @@ export interface ArtifactContent {
 export interface Collection {
   id: string;
   title: string;
-  parent_item_id: string | null;
+  parent_collection_id: string | null;
 }
 
 export interface ArtifactPublishResult {
@@ -261,7 +261,7 @@ export async function getArtifactContent(
  */
 export async function listCollections(signal?: AbortSignal): Promise<Collection[]> {
   const result = await artifactRequest<{ items: Collection[] }>(
-    "/api/v1/agent/collections",
+    "/api/v1/collections?page_size=100",
     { signal },
     "Could not load your collections.",
   );
