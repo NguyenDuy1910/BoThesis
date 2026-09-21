@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.db.models import AuditLog, User
+from bothesis.db.models import AuditLog, Tenant, User
 from bothesis.services import (
     AUDIT_READ_PERMISSION,
+    PLATFORM_AUDIT_READ_PERMISSION,
     AuthContext,
     normalize_page,
     normalize_required_text,
+    require_platform_permission,
     require_tenant_permission,
     timestamp,
 )
@@ -43,6 +46,43 @@ class AuditService:
         event = AuditLog(
             tenant_id=tenant_id,
             actor_user_id=actor.user_id,
+            actor_session_id=actor.session_id,
+            action=normalize_required_text(action, "audit action", 96).casefold(),
+            resource_type=normalize_required_text(
+                resource_type, "resource type", 32
+            ).casefold(),
+            resource_id=(
+                normalize_required_text(resource_id, "resource ID", 512)
+                if resource_id is not None
+                else None
+            ),
+            outcome=normalize_required_text(outcome, "audit outcome", 16).casefold(),
+            details=_safe_details(details or {}),
+        )
+        self._session.add(event)
+        await self._session.flush()
+        return event
+
+    async def record_platform_event(
+        self,
+        *,
+        actor_user_id: UUID | None,
+        action: str,
+        resource_type: str,
+        resource_id: str | None = None,
+        outcome: str = "success",
+        details: Mapping[str, Any] | None = None,
+    ) -> AuditLog:
+        """Record an action that belongs to the platform, not to one workspace.
+
+        Granting platform administration or changing platform configuration has
+        no tenant to be filed under; forcing one would either lose the event or
+        attribute it to an unrelated workspace.
+        """
+
+        event = AuditLog(
+            tenant_id=None,
+            actor_user_id=actor_user_id,
             action=normalize_required_text(action, "audit action", 96).casefold(),
             resource_type=normalize_required_text(
                 resource_type, "resource type", 32
@@ -123,6 +163,78 @@ class AuditService:
                     "created_at": timestamp(event.created_at),
                 }
                 for event, email, display_name in rows
+            ],
+            "total": int(total or 0),
+            "page": page,
+            "page_size": page_size,
+        }
+
+    async def list_platform_events(
+        self,
+        actor: AuthContext,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+    ) -> dict[str, Any]:
+        """Return safe audit metadata across workspaces and the platform itself."""
+
+        require_platform_permission(actor, PLATFORM_AUDIT_READ_PERMISSION)
+        page, page_size, offset = normalize_page(page, page_size)
+        filters: list[Any] = []
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            filters.append(
+                or_(
+                    AuditLog.action.ilike(term),
+                    AuditLog.resource_id.ilike(term),
+                    User.email.ilike(term),
+                    User.display_name.ilike(term),
+                    Tenant.name.ilike(term),
+                )
+            )
+        base = (
+            # Outer-joined: a platform action has no tenant, and must still
+            # appear in the platform audit trail.
+            select(AuditLog, User.email, User.display_name, Tenant.name)
+            .outerjoin(Tenant, Tenant.id == AuditLog.tenant_id)
+            .outerjoin(User, User.id == AuditLog.actor_user_id)
+            .where(*filters)
+        )
+        total = await self._session.scalar(
+            select(func.count()).select_from(base.subquery())
+        )
+        rows = (
+            await self._session.execute(
+                base.order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+                .limit(page_size)
+                .offset(offset)
+            )
+        ).all()
+        return {
+            "items": [
+                {
+                    "id": str(event.id),
+                    "workspace": (
+                        {"id": str(event.tenant_id), "name": tenant_name}
+                        if event.tenant_id is not None
+                        else None
+                    ),
+                    "action": event.action,
+                    "resource_type": event.resource_type,
+                    "resource_id": event.resource_id,
+                    "outcome": event.outcome,
+                    "details": dict(event.details),
+                    "actor": {
+                        "id": str(event.actor_user_id)
+                        if event.actor_user_id is not None
+                        else None,
+                        "email": email,
+                        "display_name": display_name,
+                    },
+                    "created_at": timestamp(event.created_at),
+                }
+                for event, email, display_name, tenant_name in rows
             ],
             "total": int(total or 0),
             "page": page,

@@ -9,16 +9,17 @@ from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from bothesis.db.models import ExternalResource, IngestionSource, Item
+from bothesis.db.models import ExternalResource, IngestionSource, Item, RoleAssignment
 from bothesis.services.audit import AuditService
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.role_assignments import RoleAssignmentService
 from bothesis.services.item import ItemService
 from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (
+    COLLECTION_OWNER_ROLE,
     ITEM_MANAGE_PERMISSION,
-    AdminConflictError,
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneConflictError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     AuthContext,
     normalize_page,
     normalize_required_text,
@@ -61,12 +62,14 @@ class ItemCatalogService:
             inherit_access=inherit_access,
             metadata=metadata,
         )
-        await CollectionAccessService(self._session).grant(
+        _, owner_role = await RoleAssignmentService(
+            self._session
+        ).grant_collection_role(
             item.id,
             principal_type="user",
             principal_id=actor.user_id,
-            role="owner",
-            actor=actor,
+            role_code=COLLECTION_OWNER_ROLE,
+            created_by_user_id=actor.user_id,
         )
         await self._audit.record(
             actor,
@@ -75,7 +78,7 @@ class ItemCatalogService:
             resource_id=str(item.id),
             details={
                 "parent_item_id": str(parent_item_id) if parent_item_id else None,
-                "creator_role": "owner",
+                "creator_role": owner_role.code,
             },
         )
         return await self.get_item(actor, item.id)
@@ -118,12 +121,12 @@ class ItemCatalogService:
         if status:
             normalized = status.strip().casefold()
             if normalized not in _ITEM_STATUSES:
-                raise AdminValidationError("unsupported item status")
+                raise ControlPlaneValidationError("unsupported item status")
             filters.append(Item.status == normalized)
         if item_type:
             normalized_type = item_type.strip().casefold()
             if normalized_type not in {"collection", "document"}:
-                raise AdminValidationError("unsupported item type")
+                raise ControlPlaneValidationError("unsupported item type")
             filters.append(Item.item_type == normalized_type)
         if parent_item_id is not None:
             filters.append(Item.parent_item_id == parent_item_id)
@@ -149,7 +152,7 @@ class ItemCatalogService:
         }
         sort_column = sort_columns.get(sort)
         if sort_column is None or direction not in {"asc", "desc"}:
-            raise AdminValidationError("unsupported item sort")
+            raise ControlPlaneValidationError("unsupported item sort")
         order = sort_column.desc() if direction == "desc" else sort_column.asc()
         items = list(
             await self._session.scalars(
@@ -229,7 +232,7 @@ class ItemCatalogService:
                 selectinload(Item.external_resources)
                 .selectinload(ExternalResource.ingestion_source)
                 .selectinload(IngestionSource.integration_connection),
-                selectinload(Item.access_grants),
+                selectinload(Item.role_assignments).joinedload(RoleAssignment.role),
             )
             .where(
                 Item.id == item_id,
@@ -239,18 +242,18 @@ class ItemCatalogService:
             )
         )
         if item is None:
-            raise AdminNotFoundError(f"item not found: {item_id}")
+            raise ControlPlaneNotFoundError(f"item not found: {item_id}")
         return {
             **self._payload(item),
             "metadata": dict(item.metadata_),
             "inherit_access": item.inherit_access,
-            "collection_access": [
+            "role_assignments": [
                 {
                     "principal_type": grant.principal_type,
                     "principal_id": str(grant.principal_id),
-                    "role": grant.role,
+                    "role_code": grant.role.code,
                 }
-                for grant in item.access_grants
+                for grant in item.role_assignments
                 if grant.deleted_at is None
             ],
             "raw_content_available": bool(item.storage_key),
@@ -262,7 +265,7 @@ class ItemCatalogService:
         previous = await self.get_item(actor, item_id)
         normalized = status.strip().casefold()
         if normalized not in _ITEM_STATUSES:
-            raise AdminValidationError("unsupported item status")
+            raise ControlPlaneValidationError("unsupported item status")
         item = await self._session.get(Item, item_id)
         assert item is not None
         item.status = normalized
@@ -287,9 +290,9 @@ class ItemCatalogService:
     ) -> dict[str, Any]:
         previous = await self.get_item(actor, item_id)
         if previous["item_type"] != "collection":
-            raise AdminValidationError("only collections can use this update")
+            raise ControlPlaneValidationError("only collections can use this update")
         if title is None and not description_provided:
-            raise AdminValidationError("collection update has no changes")
+            raise ControlPlaneValidationError("collection update has no changes")
 
         item = await self._session.get(Item, item_id)
         assert item is not None
@@ -302,7 +305,7 @@ class ItemCatalogService:
                 description.strip() if description is not None else ""
             )
             if len(normalized_description) > 2_000:
-                raise AdminValidationError(
+                raise ControlPlaneValidationError(
                     "collection description must be at most 2000 characters"
                 )
             metadata = dict(item.metadata_)
@@ -326,7 +329,7 @@ class ItemCatalogService:
     async def retry_item(self, actor: AuthContext, item_id: UUID) -> dict[str, Any]:
         payload = await self.get_item(actor, item_id)
         if payload["status"] != "failed":
-            raise AdminConflictError("only failed items can be retried")
+            raise ControlPlaneConflictError("only failed items can be retried")
         external_resource = await self._session.scalar(
             select(ExternalResource).where(
                 ExternalResource.item_id == item_id,
@@ -362,7 +365,6 @@ class ItemCatalogService:
 
     @staticmethod
     def _payload(item: Item) -> dict[str, Any]:
-        processing = item.metadata_.get("processing")
         description = item.metadata_.get("description")
         external_resources = [
             resource
@@ -379,8 +381,8 @@ class ItemCatalogService:
             "parent_item_id": str(item.parent_item_id) if item.parent_item_id else None,
             "parent_relation": item.parent_relation,
             "status": item.status,
-            "indexed": isinstance(processing, dict)
-            and processing.get("index_schema_version") is not None,
+            "index_status": item.index_status,
+            "indexed": item.index_status == "ready",
             "metadata": (
                 {"description": description} if isinstance(description, str) else {}
             ),

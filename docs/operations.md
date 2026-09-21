@@ -9,7 +9,7 @@ boundaries that must be configured explicitly in deployment. Start with
 | File | Purpose |
 | --- | --- |
 | `backend/.env.example` | Complete backend configuration template. Copy values into ignored `backend/.env`. |
-| `web/.env.example` | Public WebUI configuration template. Local setup creates ignored `web/.env.local`. |
+| `web/.env.example` | Optional public WebUI configuration template for a non-default API endpoint or deployment. |
 | `deployment/compose.yml` | Local PostgreSQL, Qdrant, MinIO, and Temporal topology. Optional Compose overrides go in ignored `deployment/.env`. |
 
 Do not commit credentials, encryption keys, signed object URLs, or deployment
@@ -61,7 +61,14 @@ BOTHESIS_OBJECT_STORAGE_BUCKET=bothesis
 BOTHESIS_S3_REGION=us-east-1
 BOTHESIS_S3_ENDPOINT_URL=http://127.0.0.1:9000
 BOTHESIS_S3_ADDRESSING_STYLE=path
+AWS_ACCESS_KEY_ID=bothesis
+AWS_SECRET_ACCESS_KEY=bothesis
 ```
+
+Those are the repository's local MinIO defaults. Start the service and create
+the bucket with `make services`; use `http://127.0.0.1:9001` for the MinIO
+console. Keep `BOTHESIS_OBJECT_STORAGE_PROVIDER=aws_s3` — MinIO is handled by
+the existing S3 adapter, not by a separate provider.
 
 AWS S3 uses boto3's standard credential chain. Cloudflare R2 uses its
 S3-compatible endpoint and API-token access key pair:

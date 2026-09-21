@@ -95,6 +95,18 @@ def optional_number(name: str) -> float | None:
         raise RuntimeError(f"{name} must be a number") from exc
 
 
+def email_set(name: str) -> frozenset[str]:
+    """Read a comma-separated, normalized email allowlist."""
+
+    raw_value = os.getenv(name) or ""
+    emails = frozenset(
+        value.strip().casefold() for value in raw_value.split(",") if value.strip()
+    )
+    if any("@" not in value for value in emails):
+        raise RuntimeError(f"{name} must contain comma-separated email addresses")
+    return emails
+
+
 def number(name: str, *, default: float) -> float:
     """Read one floating point setting."""
 
@@ -140,6 +152,9 @@ class IdentityConfig:
     jwt_expires_in_seconds: int = 900
     google_client_id: str | None = None
     google_jwks_url: str = "https://www.googleapis.com/oauth2/v3/certs"
+    platform_admin_emails: frozenset[str] = frozenset()
+    public_tenant_code: str | None = None
+    guest_session_expires_in_seconds: int = 86_400
 
     @classmethod
     def from_environment(cls) -> IdentityConfig:
@@ -157,6 +172,11 @@ class IdentityConfig:
             google_jwks_url=text(
                 "BOTHESIS_GOOGLE_JWKS_URL",
                 "https://www.googleapis.com/oauth2/v3/certs",
+            ),
+            platform_admin_emails=email_set("BOTHESIS_PLATFORM_ADMIN_EMAILS"),
+            public_tenant_code=optional_text("BOTHESIS_PUBLIC_TENANT_CODE"),
+            guest_session_expires_in_seconds=_positive_integer(
+                "BOTHESIS_GUEST_SESSION_EXPIRES_IN_SECONDS", default=86_400
             ),
         )
 
@@ -552,38 +572,66 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class ConfluenceEnvironmentConfig:
-    """One deployment-managed Confluence account for demo and local setup."""
+class OAuthClientConfig:
+    """One provider's registered OAuth application."""
 
-    base_url: str | None = None
-    username: str | None = None
-    api_token: str | None = None
-    is_cloud: bool = True
-    timeout_seconds: int = 30
+    client_id: str | None = None
+    client_secret: str | None = None
 
     @property
     def configured(self) -> bool:
-        return bool(self.base_url and self.username and self.api_token)
+        return bool(self.client_id and self.client_secret)
 
     @classmethod
-    def from_environment(cls) -> ConfluenceEnvironmentConfig:
+    def from_environment(cls, prefix: str) -> OAuthClientConfig:
         return cls(
-            base_url=optional_text("BOTHESIS_CONFLUENCE_BASE_URL"),
-            username=optional_text("BOTHESIS_CONFLUENCE_USERNAME"),
-            api_token=optional_text("BOTHESIS_CONFLUENCE_API_TOKEN"),
-            is_cloud=boolean("BOTHESIS_CONFLUENCE_IS_CLOUD", default=True),
-            timeout_seconds=integer("BOTHESIS_CONFLUENCE_TIMEOUT_SECONDS", default=30),
+            client_id=optional_text(f"{prefix}_CLIENT_ID"),
+            client_secret=optional_text(f"{prefix}_CLIENT_SECRET"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrationOAuthConfig:
+    """Shared settings every connector authorization flow runs on.
+
+    One redirect URI serves every provider: which provider a callback belongs
+    to is carried in the signed state, so a deployment registers a single URL
+    per provider console instead of one per integration.
+    """
+
+    redirect_uri: str | None = None
+    #: The exact web origin allowed to receive the completion message. The
+    #: callback page posts to this and nothing else.
+    client_origin: str | None = None
+    state_secret: str | None = None
+    timeout_seconds: float = 20.0
+    google: OAuthClientConfig = field(default_factory=OAuthClientConfig)
+    atlassian: OAuthClientConfig = field(default_factory=OAuthClientConfig)
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.redirect_uri and self.client_origin and self.state_secret)
+
+    @classmethod
+    def from_environment(cls) -> IntegrationOAuthConfig:
+        return cls(
+            redirect_uri=optional_text("BOTHESIS_INTEGRATION_OAUTH_REDIRECT_URI"),
+            client_origin=optional_text("BOTHESIS_INTEGRATION_OAUTH_CLIENT_ORIGIN"),
+            state_secret=optional_text("BOTHESIS_INTEGRATION_OAUTH_STATE_SECRET"),
+            timeout_seconds=number(
+                "BOTHESIS_INTEGRATION_OAUTH_TIMEOUT_SECONDS", default=20.0
+            ),
+            google=OAuthClientConfig.from_environment("BOTHESIS_GOOGLE_OAUTH"),
+            atlassian=OAuthClientConfig.from_environment("BOTHESIS_ATLASSIAN_OAUTH"),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class IntegrationConfig:
-    """Secrets protecting stored connector credentials."""
+    """Secrets protecting stored connector credentials and authorizations."""
 
     credential_encryption_key: str | None = None
-    confluence: ConfluenceEnvironmentConfig = field(
-        default_factory=ConfluenceEnvironmentConfig
-    )
+    oauth: IntegrationOAuthConfig = field(default_factory=IntegrationOAuthConfig)
 
     @classmethod
     def from_environment(cls) -> IntegrationConfig:
@@ -591,7 +639,7 @@ class IntegrationConfig:
             credential_encryption_key=optional_text(
                 "BOTHESIS_INTEGRATION_ENCRYPTION_KEY"
             ),
-            confluence=ConfluenceEnvironmentConfig.from_environment(),
+            oauth=IntegrationOAuthConfig.from_environment(),
         )
 
 
@@ -675,7 +723,6 @@ def reset_config() -> None:
 __all__ = [
     "AWS_S3_PROVIDER",
     "CLOUDFLARE_R2_PROVIDER",
-    "ConfluenceEnvironmentConfig",
     "LANGFUSE_DEFAULT_BASE_URL",
     "OPENAI_DEFAULT_BASE_URL",
     "OPENROUTER_DEFAULT_BASE_URL",
@@ -684,7 +731,9 @@ __all__ = [
     "ArtifactConfig",
     "IdentityConfig",
     "IntegrationConfig",
+    "IntegrationOAuthConfig",
     "ModelConfig",
+    "OAuthClientConfig",
     "ObjectStorageConfig",
     "ObservabilityConfig",
     "PreviewConfig",
@@ -694,6 +743,7 @@ __all__ = [
     "VectorIndexConfig",
     "WorkerConfig",
     "boolean",
+    "email_set",
     "get_config",
     "integer",
     "number",

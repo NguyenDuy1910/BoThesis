@@ -36,13 +36,17 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from bothesis.services.workflow import (
     INGESTION_WORKFLOW_NAME,
+    NATIVE_UPLOAD_INDEXING_WORKFLOW_NAME,
     IngestionProgress,
     IngestionResult,
     IngestionWorkflowInput,
+    NativeUploadIndexingInput,
+    NativeUploadIndexingResult,
     TemporalSettings,
     WorkflowExecutionNotFoundError,
     ingestion_schedule_id,
     ingestion_workflow_id,
+    native_upload_indexing_workflow_id,
 )
 from bothesis.services.workflow.client import TemporalClientProvider
 
@@ -106,6 +110,35 @@ class TemporalWorkflowService:
             payload = self._execution_payload(description)
             payload["started"] = False
             payload["conflict"] = "source_ingestion_already_running"
+            return payload
+
+    async def start_native_upload_indexing(
+        self, input: NativeUploadIndexingInput
+    ) -> dict[str, Any]:
+        """Queue one stored upload for the existing Item indexing pipeline."""
+
+        client = await self._provider.get()
+        workflow_id = native_upload_indexing_workflow_id(input.document_id)
+        try:
+            handle = await client.start_workflow(
+                NATIVE_UPLOAD_INDEXING_WORKFLOW_NAME,
+                input,
+                result_type=NativeUploadIndexingResult,
+                id=workflow_id,
+                task_queue=self._settings.task_queue,
+                id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+                id_conflict_policy=WorkflowIDConflictPolicy.FAIL,
+                static_summary=f"Index native upload {input.document_id}",
+            )
+            description = await handle.describe()
+            payload = self._execution_payload(description)
+            payload["started"] = True
+            return payload
+        except WorkflowAlreadyStartedError:
+            description = await client.get_workflow_handle(workflow_id).describe()
+            payload = self._execution_payload(description)
+            payload["started"] = False
+            payload["conflict"] = "native_upload_indexing_already_running"
             return payload
 
     async def list_ingestions(

@@ -7,13 +7,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from bothesis.db.models import (
-    CollectionAccess,
     Conversation,
     Item,
     ExternalResource,
@@ -21,17 +20,26 @@ from bothesis.db.models import (
     Message,
     MessageItem,
     IngestionSource,
+    Role,
+    RoleAssignment,
 )
 from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services import (
     ACTIVE_STATUS,
+    COLLECTION_OWNER_ROLE,
+    COLLECTION_READ_PERMISSION,
+    COLLECTION_UPDATE_PERMISSION,
+    CONNECTION_NEEDS_AUTHORIZATION,
+    RUNNABLE_SOURCE_STATUSES,
     MESSAGE_ITEM_RELATIONS,
     AuthContext,
     DocumentNotFoundError,
     InvalidDocumentStateError,
+    conversation_access_filter,
 )
 
 _ITEM_STATUSES = {"pending", "processing", "ready", "failed", "unsupported", "deleted"}
+_INDEX_STATUSES = {"pending", "processing", "ready", "failed", "unsupported"}
 _PARENT_RELATIONS = {"contains", "child", "attachment", "embedded"}
 
 
@@ -82,6 +90,7 @@ class ItemService:
             metadata_=dict(metadata or {}),
             inherit_access=bool(inherit_access),
             status="ready",
+            index_status=None,
             created_by_user_id=created_by_user_id,
         )
         self._session.add(item)
@@ -122,6 +131,7 @@ class ItemService:
             storage_key=_optional_text(storage_key),
             metadata_=dict(metadata or {}),
             status=_item_status(status),
+            index_status="pending",
             created_by_user_id=created_by_user_id,
         )
         self._session.add(item)
@@ -200,26 +210,39 @@ class ItemService:
                 metadata_={"system_kind": system_kind},
                 inherit_access=False,
                 status="ready",
+                index_status=None,
                 created_by_user_id=owner_user_id,
             )
             .on_conflict_do_nothing(index_elements=[Item.id])
         )
+        owner_role_id = await self._session.scalar(
+            select(Role.id).where(
+                Role.code == COLLECTION_OWNER_ROLE,
+                Role.tenant_id.is_(None),
+                Role.status == ACTIVE_STATUS,
+            )
+        )
+        if owner_role_id is None:
+            raise InvalidDocumentStateError(
+                "system roles are missing; run the system role sync"
+            )
         await self._session.execute(
-            insert(CollectionAccess)
+            insert(RoleAssignment)
             .values(
+                user_id=owner_user_id,
+                role_id=owner_role_id,
                 item_id=collection_id,
-                principal_type="user",
-                principal_id=owner_user_id,
-                role="owner",
                 created_by_user_id=owner_user_id,
             )
-            .on_conflict_do_update(
+            .on_conflict_do_nothing(
                 index_elements=[
-                    CollectionAccess.item_id,
-                    CollectionAccess.principal_type,
-                    CollectionAccess.principal_id,
+                    RoleAssignment.user_id,
+                    RoleAssignment.group_id,
+                    RoleAssignment.tenant_id,
+                    RoleAssignment.item_id,
+                    RoleAssignment.role_id,
                 ],
-                set_={"role": "owner", "deleted_at": None},
+                index_where=text("deleted_at IS NULL"),
             )
         )
         return collection_id
@@ -311,6 +334,7 @@ class ItemService:
                 storage_key=storage_key,
                 metadata_={**dict(metadata or {}), "file_name": file_name},
                 status="pending",
+                index_status="pending",
                 created_by_user_id=owner_user_id,
             )
             .on_conflict_do_nothing(index_elements=[Item.id])
@@ -418,6 +442,7 @@ class ItemService:
                 "storage_key": _optional_text(storage_key),
                 "metadata_": dict(metadata or {}),
                 "status": _item_status(status),
+                "index_status": "pending",
                 "deleted_at": None,
             }
             await self._validate_parent(
@@ -482,9 +507,9 @@ class ItemService:
         return external_resource.item
 
     async def get_item(self, item_id: UUID, *, access: AuthContext) -> Item:
-        from bothesis.services.identity_access.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.authorization import AuthorizationService
 
-        return await CollectionAccessService(self._session).require_item_access(
+        return await AuthorizationService(self._session).require_item(
             item_id, access=access
         )
 
@@ -504,11 +529,11 @@ class ItemService:
         limit: int = 100,
         offset: int = 0,
     ) -> list[Item]:
-        from bothesis.services.identity_access.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.authorization import AuthorizationService
 
         if not 1 <= limit <= 1_000 or offset < 0:
             raise ValueError("invalid item pagination")
-        allowed = await CollectionAccessService(self._session).allowed_collection_ids(access)
+        allowed = await AuthorizationService(self._session).allowed_collection_ids(access)
         if not allowed:
             return []
         visible = (
@@ -572,16 +597,16 @@ class ItemService:
         item_id: UUID,
         access: AuthContext,
         *,
-        minimum_role: str = "viewer",
+        permission: str = COLLECTION_READ_PERMISSION,
     ) -> Item:
         """Load a native upload through its governing collection permission."""
 
-        from bothesis.services.identity_access.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.authorization import AuthorizationService
 
-        authorized = await CollectionAccessService(self._session).require_item_access(
+        authorized = await AuthorizationService(self._session).require_item(
             item_id,
             access=access,
-            minimum_role=minimum_role,
+            permission=permission,
         )
         if authorized.item_type != "document":
             raise DocumentNotFoundError(f"item not found: {item_id}")
@@ -613,6 +638,7 @@ class ItemService:
         if item.upload.status not in {"pending", "failed"}:
             raise InvalidDocumentStateError("item is not awaiting uploaded content")
         item.status = "ready"
+        item.index_status = "pending"
         item.upload.status = "available"
         item.upload.error_code = None
         item.upload.uploaded_at = datetime.now(UTC)
@@ -636,6 +662,7 @@ class ItemService:
         item.upload.status = "failed"
         item.upload.error_code = _required_text(error_code, "upload error code", max_length=128)
         item.status = "failed"
+        item.index_status = "failed"
         await self._session.flush()
         return item
 
@@ -645,14 +672,14 @@ class ItemService:
         await self._session.flush()
         return item
 
-    async def mark_processing(self, item_id: UUID) -> Item:
-        return await self._set_status(item_id, "processing")
+    async def mark_index_processing(self, item_id: UUID) -> Item:
+        return await self._set_index_status(item_id, "processing")
 
-    async def mark_ready(self, item_id: UUID) -> Item:
-        return await self._set_status(item_id, "ready")
+    async def mark_index_ready(self, item_id: UUID) -> Item:
+        return await self._set_index_status(item_id, "ready")
 
-    async def mark_failed(self, item_id: UUID) -> Item:
-        return await self._set_status(item_id, "failed")
+    async def mark_index_failed(self, item_id: UUID) -> Item:
+        return await self._set_index_status(item_id, "failed")
 
     async def link_message(
         self,
@@ -671,8 +698,8 @@ class ItemService:
             .join(Conversation, Conversation.id == Message.conversation_id)
             .where(
                 Message.id == message_id,
-                Conversation.user_id == access.user_id,
                 Conversation.tenant_id == access.tenant_id,
+                conversation_access_filter(access),
             )
         )
         if message_exists is None:
@@ -701,21 +728,23 @@ class ItemService:
         return link
 
     async def soft_delete_item(self, item_id: UUID, *, actor: AuthContext) -> Item:
-        from bothesis.services.identity_access.collection_access import CollectionAccessService
+        from bothesis.services.identity_access.authorization import AuthorizationService
 
-        item = await CollectionAccessService(self._session).require_item_access(
-            item_id, access=actor, minimum_role="editor"
+        item = await AuthorizationService(self._session).require_item(
+            item_id, access=actor, permission=COLLECTION_UPDATE_PERMISSION
         )
         item.status = "deleted"
         item.deleted_at = datetime.now(UTC)
         await self._session.flush()
         return item
 
-    async def _set_status(self, item_id: UUID, status: str) -> Item:
+    async def _set_index_status(self, item_id: UUID, status: str) -> Item:
         item = await self._get_internal(item_id)
         if item.status == "deleted":
             raise InvalidDocumentStateError("cannot update a deleted item")
-        item.status = _item_status(status)
+        if item.item_type != "document":
+            raise InvalidDocumentStateError("only documents have an index lifecycle")
+        item.index_status = _index_status(status)
         await self._session.flush()
         return item
 
@@ -736,9 +765,11 @@ class ItemService:
         )
         unavailable = (
             source is None
-            or source.status != ACTIVE_STATUS
+            # A retry of a run that failed must still be able to write, so a
+            # failed source is writable; a paused or disabled one is not.
+            or source.status not in RUNNABLE_SOURCE_STATUSES
             or source.deleted_at is not None
-            or source.integration_connection.status != ACTIVE_STATUS
+            or source.integration_connection.status in CONNECTION_NEEDS_AUTHORIZATION
             or source.integration_connection.deleted_at is not None
             or source.target_item.item_type != "collection"
             or source.target_item.status == "deleted"
@@ -746,7 +777,9 @@ class ItemService:
             or source.target_item.tenant_id != source.integration_connection.tenant_id
         )
         if unavailable:
-            raise DocumentNotFoundError(f"active ingestion source not found: {source_id}")
+            raise DocumentNotFoundError(
+                f"runnable ingestion source not found: {source_id}"
+            )
         assert source is not None
         return source
 
@@ -813,6 +846,13 @@ def _item_status(value: str) -> str:
     normalized = value.strip().casefold()
     if normalized not in _ITEM_STATUSES:
         raise ValueError("invalid item status")
+    return normalized
+
+
+def _index_status(value: str) -> str:
+    normalized = _required_text(value, "index status", max_length=16).casefold()
+    if normalized not in _INDEX_STATUSES:
+        raise ValueError(f"unsupported index status: {value}")
     return normalized
 
 

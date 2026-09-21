@@ -37,13 +37,13 @@ export function useToast() {
 
 const variantIcon: Record<ToastVariant, React.ReactNode> = {
   success: (
-    <CheckCircle2 aria-hidden="true" className="h-4 w-4 text-[var(--success)]" />
+    <CheckCircle2 aria-hidden="true" className="h-4 w-4 text-[var(--status-success-solid)]" />
   ),
-  error: <XCircle aria-hidden="true" className="h-4 w-4 text-[var(--danger)]" />,
+  error: <XCircle aria-hidden="true" className="h-4 w-4 text-[var(--status-danger-solid)]" />,
   warning: (
-    <AlertTriangle aria-hidden="true" className="h-4 w-4 text-[var(--warning)]" />
+    <AlertTriangle aria-hidden="true" className="h-4 w-4 text-[var(--status-warning-solid)]" />
   ),
-  info: <Info aria-hidden="true" className="h-4 w-4 text-[var(--info)]" />,
+  info: <Info aria-hidden="true" className="h-4 w-4 text-[var(--status-info-solid)]" />,
 };
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
@@ -75,25 +75,25 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {toasts.map((entry) => (
           <div
             className={cn(
-              "pointer-events-auto flex items-start gap-2.5 rounded-[var(--adm-r-md)] bg-[var(--adm-raised)] p-3",
-              "shadow-[var(--adm-e3)] motion-safe:animate-[adm-pop_var(--adm-base)_var(--adm-ease)_both]",
+              "pointer-events-auto flex items-start gap-2.5 rounded-[var(--radius-md)] bg-[var(--surface-raised)] p-3",
+              "shadow-[var(--elevation-3)] motion-safe:animate-[ctl-pop_var(--duration-base)_var(--ease-out)_both]",
             )}
             key={entry.id}
             role={entry.variant === "error" ? "alert" : "status"}
           >
             <span className="mt-px shrink-0">{variantIcon[entry.variant]}</span>
             <div className="min-w-0 flex-1">
-              <p className="text-[0.8125rem] font-semibold text-[var(--text)]">
+              <p className="text-[length:var(--text-size-ui)] font-semibold text-[var(--text-primary)]">
                 {entry.title}
               </p>
               {entry.description && (
-                <p className="mt-0.5 text-[0.75rem] leading-4 text-[var(--text-muted)]">
+                <p className="mt-0.5 text-[length:var(--text-size-meta)] leading-4 text-[var(--text-tertiary)]">
                   {entry.description}
                 </p>
               )}
               {entry.action && (
                 <button
-                  className="mt-1.5 text-[0.75rem] font-semibold text-[var(--brand-accent)] underline-offset-4 hover:underline"
+                  className="mt-1.5 text-[length:var(--text-size-meta)] font-semibold text-[var(--text-accent)] underline-offset-4 hover:underline"
                   onClick={() => {
                     entry.action?.onClick();
                     dismiss(entry.id);

@@ -17,16 +17,16 @@ export function RecoveryNotice({
 }) {
   return (
     <section className={`recovery-notice recovery-notice--${recovery.variant}`} role="alert">
-      <AlertTriangle aria-hidden="true" className="recovery-notice__icon" size={17} />
+      <AlertTriangle aria-hidden="true" className="recovery-notice__icon" size={16} />
       <div className="recovery-notice__body">
         <h3>{recovery.title}</h3>
         <p>{recovery.detail}</p>
         <div className="recovery-notice__actions">
-          <ChatButton icon={<RotateCcw aria-hidden="true" size={13} />} onClick={onRetry} tone="primary">
+          <ChatButton icon={<RotateCcw aria-hidden="true" size={14} />} onClick={onRetry} tone="primary">
             {recovery.retryLabel}
           </ChatButton>
           {onEditRequest && (
-            <ChatButton icon={<SquarePen aria-hidden="true" size={13} />} onClick={onEditRequest} tone="ghost">
+            <ChatButton icon={<SquarePen aria-hidden="true" size={14} />} onClick={onEditRequest} tone="ghost">
               Edit request
             </ChatButton>
           )}

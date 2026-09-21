@@ -15,7 +15,7 @@ class CitationResolver:
         if not normalized_item_id or not normalized_chunk_id:
             raise ValueError("item_id and chunk_id are required")
         return (
-            f"/knowledge/items/{quote(normalized_item_id, safe='')}"
+            f"/knowledge/documents/{quote(normalized_item_id, safe='')}"
             f"?chunk={quote(normalized_chunk_id, safe='')}"
         )
 

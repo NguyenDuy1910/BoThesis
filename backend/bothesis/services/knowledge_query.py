@@ -14,7 +14,7 @@ from bothesis.services import (
     AuthContext,
     require_tenant_permission,
 )
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.authorization import AuthorizationService
 
 
 class KnowledgeQueryService:
@@ -41,7 +41,7 @@ class KnowledgeQueryService:
 
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         async with session_scope(self._sessions) as session:
-            allowed_ids = await CollectionAccessService(session).allowed_collection_ids(
+            allowed_ids = await AuthorizationService(session).allowed_collection_ids(
                 access
             )
         requested_ids = tuple(dict.fromkeys(collection_item_ids or allowed_ids))
@@ -53,9 +53,9 @@ class KnowledgeQueryService:
             query,
             limit=top_k,
             ctx=AgentContext(
-                user_id=str(access.user_id),
+                user_id=str(access.subject_id),
                 tenant_id=str(access.tenant_id),
-                roles=[access.role_code] if access.role_code else [],
+                roles=list(access.role_codes),
                 collection_item_ids=tuple(str(value) for value in requested_ids),
             ),
         )

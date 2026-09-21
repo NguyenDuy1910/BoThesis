@@ -32,7 +32,7 @@ from bothesis.services import (
     AuthContext,
     require_tenant_permission,
 )
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.conversation import ConversationService
 
 HistoryTurn = tuple[Literal["user", "assistant"], str]
@@ -95,9 +95,9 @@ class ChatService:
             attachments, access=access
         )
         context = AgentContext(
-            user_id=str(access.user_id),
+            user_id=str(access.subject_id),
             tenant_id=str(access.tenant_id),
-            roles=[access.role_code] if access.role_code else [],
+            roles=list(access.role_codes),
             collection_item_ids=tuple(str(value) for value in selected_ids),
             conversation_id=str(resolved_conversation_id),
             request_id=uuid4().hex,
@@ -106,6 +106,7 @@ class ChatService:
                 for role, content in history
             ),
             allowed_tool_names=self._available_tool_names(
+                access=access,
                 resources_available=bool(attachment_resources or referenced_resources)
             ),
             resources=referenced_resources,
@@ -141,7 +142,7 @@ class ChatService:
             ),
             sandbox_runtime=(
                 self._sandbox_runtime(access, resolved_conversation_id, context.request_id or "")
-                if self._sandbox_runtime is not None
+                if self._sandbox_runtime is not None and not access.is_guest
                 else None
             ),
             is_disconnected=is_disconnected,
@@ -196,7 +197,7 @@ class ChatService:
         """Bind the turn to Collections the caller may actually read."""
 
         async with session_scope(self._sessions) as session:
-            allowed_ids = await CollectionAccessService(session).allowed_collection_ids(
+            allowed_ids = await AuthorizationService(session).allowed_collection_ids(
                 access
             )
         if not collection_item_ids:
@@ -206,14 +207,21 @@ class ChatService:
         return tuple(dict.fromkeys(collection_item_ids))
 
     def _available_tool_names(
-        self, *, resources_available: bool = True
+        self, *, access: AuthContext | None = None, resources_available: bool = True
     ) -> tuple[str, ...]:
         """Expose the runtime's registered chat tools for this turn."""
 
+        if access is not None and access.is_guest:
+            return tuple(
+                name
+                for name, _ in self._agent.tools.executors()
+                if name in {"knowledge_search", "request_identity"}
+            )
         return tuple(
             name
             for name, _ in self._agent.tools.executors()
-            if resources_available or name not in _RESOURCE_TOOL_NAMES
+            if name != "request_identity"
+            and (resources_available or name not in _RESOURCE_TOOL_NAMES)
         )
 
 

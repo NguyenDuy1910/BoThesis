@@ -36,7 +36,7 @@ class DocumentPresenter:
         """Describe one uploaded document for the workspace document API."""
 
         upload = document.upload
-        processing = document.metadata_.get("processing")
+        index_status = getattr(document, "index_status", None)
         return {
             "id": str(document.id),
             "parent_item_id": (
@@ -48,8 +48,8 @@ class DocumentPresenter:
             "content_type": document.mime_type or "application/octet-stream",
             "size_bytes": document.size_bytes or 0,
             "status": document.status,
-            "indexed": isinstance(processing, Mapping)
-            and processing.get("index_schema_version") is not None,
+            "index_status": index_status,
+            "indexed": index_status == "ready",
             "upload_status": upload.status if upload is not None else None,
             "created_at": document.created_at.isoformat(),
             "uploaded_at": (
@@ -58,6 +58,31 @@ class DocumentPresenter:
                 else None
             ),
             "preview": self.preview_payload(document),
+        }
+
+    def contract_document(self, document: Any) -> dict[str, Any]:
+        """Map internal Item/upload state to the public Document contract."""
+
+        upload = getattr(document, "upload", None)
+        raw_status = getattr(document, "status", None)
+        if upload is not None and upload.status == "available":
+            public_status = "available"
+        elif raw_status == "failed" or (upload is not None and upload.status == "failed"):
+            public_status = "failed"
+        else:
+            public_status = "pending_content"
+        metadata = getattr(document, "metadata_", {}) or {}
+        return {
+            "id": document.id,
+            "collection_id": document.parent_item_id,
+            "name": str(metadata.get("file_name") or document.title or "document"),
+            "content_type": document.mime_type or "application/octet-stream",
+            "size_bytes": document.size_bytes or 0,
+            "purpose": metadata.get("purpose", "knowledge"),
+            "status": public_status,
+            "latest_ingestion_id": metadata.get("latest_ingestion_id"),
+            "created_at": document.created_at,
+            "updated_at": document.updated_at,
         }
 
     def presigned_url(self, document: Any) -> str | None:

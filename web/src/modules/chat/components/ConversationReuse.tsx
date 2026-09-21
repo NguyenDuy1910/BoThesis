@@ -21,7 +21,7 @@ export function ConversationReuse({ resources }: { resources: ConversationResour
         {visible.map((resource) => (
           <span className="conversation-reuse__item" key={resource.id} title={`${resource.title} · ${resource.kind} · Turn ${resource.turn}`}>
             {resource.kind === "source"
-              ? <LibraryBig aria-hidden="true" size={13} />
+              ? <LibraryBig aria-hidden="true" size={14} />
               : <FileTypeIcon name={resource.title} />}
             <span>{resource.title}</span>
             <small>{resource.kind === "artifact" ? "Artifact" : resource.kind === "source" ? "Source" : "Attachment"} · Turn {resource.turn}</small>

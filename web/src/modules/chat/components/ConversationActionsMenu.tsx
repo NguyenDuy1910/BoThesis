@@ -30,13 +30,12 @@ export function ConversationActionsMenu({
     <Dropdown
       align="left"
       ariaLabel={`Actions for ${conversationTitle}`}
-      buttonClassName="sidebar-conversation-menu__trigger"
-      className="sidebar-conversation-menu"
+      buttonClassName="h-7 w-7 bg-transparent px-0 shadow-none hover:bg-[var(--surface-hover)] hover:shadow-none"
       closeOnScroll
       label={deleting
-        ? <LoaderCircle aria-hidden="true" className="spin" size={15} />
+        ? <LoaderCircle aria-hidden="true" className="animate-spin" size={16} />
         : <MoreHorizontal aria-hidden="true" size={16} />}
-      menuClassName="sidebar-popover sidebar-popover--conversation"
+      menuClassName="min-w-44"
       onOpenChange={onOpenChange}
       open={open}
       showChevron={false}
@@ -48,7 +47,6 @@ export function ConversationActionsMenu({
       />
       <DropdownItem
         aria-label="Hide conversation"
-        className="sidebar-popover__item sidebar-popover__item--delete"
         destructive
         disabled={deleting}
         onClick={onDelete}
@@ -72,7 +70,6 @@ function ConversationMenuItem({
   return (
     <DropdownItem
       aria-label={label}
-      className="sidebar-popover__item"
       onClick={onClick}
     >
       {icon}

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bothesis.services.identity_access.access_session import AccessSessionService
 from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services import (
     AuthContext,
@@ -46,18 +47,7 @@ async def resolve_auth_context(
     token_claims = identity.token_claims
     if token_claims is not None:
         _validate_tenant_claim(token_claims, claimed_tenant_id)
-        context = await IdentityStoreService(session).get_context(
-            token_claims.user_id, tenant_id=token_claims.active_tenant_id
-        )
-        if (
-            context.email != token_claims.email
-            or context.tenant_id != token_claims.active_tenant_id
-            or tuple(sorted(set(context.permission_codes))) != token_claims.permissions
-        ):
-            raise AuthenticationError(
-                "access token no longer reflects the active tenant membership"
-            )
-        return context
+        return await AccessSessionService(session).resolve(token_claims)
 
     if not allow_insecure_development_identity:
         raise AuthorizationError("authenticated request context is required")
@@ -81,7 +71,14 @@ async def resolve_auth_context(
             )
         except (TypeError, ValueError) as exc:
             raise AuthorizationError("tenant ID must be a UUID") from exc
-    context = await IdentityStoreService(session).get_context(user_id, tenant_id=tenant_id)
+    identities = IdentityStoreService(session)
+    user = await identities.get_user(user_id)
+    durable_context = await identities.get_context(user_id, tenant_id=tenant_id)
+    if durable_context.tenant_id is None:
+        raise AuthorizationError("development identity requires an active tenant")
+    context = await AccessSessionService(session).internal_user(
+        user=user, tenant_id=durable_context.tenant_id
+    )
     _validate_tenant_claim(context, raw_tenant_id)
     return context
 

@@ -1,0 +1,564 @@
+// Enterprise Agent canonical knowledge architecture.
+// PostgreSQL owns durable domain state. Raw bytes live in S3/R2. Retrieval
+// chunks, embeddings, and BM25 representation live in Qdrant.
+
+// Durable human identity only. Session lifecycle, anonymous access, device
+// state, token revocation, and expiry never live on this row.
+Table users {
+  id uuid [pk]
+  username varchar(64) [note: 'Optional local-login identifier; normalized lowercase; unique by lower(username) when present']
+  email varchar(255) [not null, unique]
+  password_hash varchar(256) [note: 'Scrypt password hash; plaintext is never stored']
+  display_name varchar(255)
+  status boolean [not null, default: true]
+  preferences jsonb [not null, default: `{}`]
+  last_login_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    username [unique, note: 'Implemented as partial unique lower(username) index; NULL usernames are allowed']
+  }
+}
+
+// Durable mapping from an external identity provider to one human User.
+// Provider email is profile data, never the stable login key.
+Table auth_identities {
+  id uuid [pk]
+  user_id uuid [not null]
+  protocol varchar(24) [not null, note: 'oidc | saml']
+  provider_key varchar(64) [not null, note: 'Configured provider, for example google or company-okta']
+  issuer text [not null]
+  subject text [not null]
+  email varchar(255)
+  email_verified boolean
+  status varchar(16) [not null, default: 'active', note: 'active | disabled']
+  profile jsonb [not null, default: `{}`, note: 'Non-secret normalized provider profile only']
+  last_authenticated_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (issuer, subject) [unique]
+    (user_id, status)
+    (provider_key, status)
+  }
+}
+
+// One logical access session for one tenant context. A guest has no User row.
+// Login, token rotation, or another identity transition creates a child session
+// instead of changing the session subject in place.
+Table access_sessions {
+  id uuid [pk]
+  tenant_id uuid [not null, note: 'Active tenant context; a guest must target a public tenant']
+  user_id uuid [note: 'Null for guest; required for a user session']
+  auth_identity_id uuid [note: 'External identity used to establish this user session; null for guest or legacy/internal authentication']
+  kind varchar(24) [not null, note: 'guest | user; add a typed subject FK before adding another kind']
+  authentication_method varchar(32) [not null, note: 'anonymous | oidc | saml | password | internal']
+  assurance_level varchar(16) [not null, default: 'aal0', note: 'aal0 | aal1 | aal2']
+  status varchar(16) [not null, default: 'active', note: 'active | superseded | revoked | expired']
+  token_version int [not null, default: 1, note: 'Increment to invalidate every token issued for this session']
+  parent_session_id uuid [note: 'Previous session when this row results from an identity upgrade or token rotation; multiple child sessions are allowed for concurrent renewal attempts']
+  transition_reason varchar(32) [note: 'identity_upgrade | token_rotation | tenant_switch; null for an initial session']
+  expires_at timestamptz [not null]
+  idle_expires_at timestamptz
+  last_seen_at timestamptz
+  ended_at timestamptz
+  end_reason varchar(64)
+  metadata jsonb [not null, default: `{}`, note: 'Non-secret client/device context only']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (user_id, status)
+    (auth_identity_id, status)
+    (tenant_id, kind, status)
+    parent_session_id
+    (status, expires_at)
+    (status, idle_expires_at)
+  }
+  Note: 'Checks enforce: guest means user_id and auth_identity_id are null, anonymous method, and aal0; user means user_id is set and method is not anonymous; when set, auth_identity_id must belong to user_id; parent_session_id and transition_reason are both null or both set; identity upgrades stay in the same tenant while tenant_switch may change it; non-active status requires ended_at; only active, unexpired sessions may authorize requests.'
+}
+
+Table tenants {
+  id uuid [pk]
+  code varchar(64) [not null, unique]
+  name varchar(255) [not null]
+  status varchar(16) [not null, default: 'active']
+  visibility varchar(16) [not null, default: 'private', note: 'private | public']
+  public_access_role_id uuid [note: 'Tenant-scoped role resolved as baseline public access; required only when visibility is public']
+  settings jsonb [not null, default: `{}`]
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  Note: 'A trigger enforces that public_access_role_id names an active tenant-scope Role available to this tenant. Private tenants cannot define public access.'
+}
+
+// A named permission bundle. tenant_id is null for platform-defined roles,
+// which is how platform capability exists without a second role table.
+Table roles {
+  id uuid [pk]
+  tenant_id uuid [note: 'Null for a platform-defined (system) role']
+  code varchar(64) [not null]
+  display_name varchar(255) [not null]
+  scope_type varchar(16) [not null, note: 'platform | tenant | collection']
+  is_system boolean [not null, default: false]
+  status varchar(16) [not null, default: 'active']
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (tenant_id, code) [unique, note: 'NULLS NOT DISTINCT, so a tenant cannot reuse a system role code']
+    (scope_type, status)
+  }
+  Note: 'A system role has no tenant; a tenant-defined role is always tenant-scoped.'
+}
+
+Table permissions {
+  code varchar(64) [pk]
+  description text [not null]
+  scope_types text[] [not null, default: `{}`, note: 'Role scopes allowed to carry this permission']
+  created_at timestamptz [not null]
+}
+
+Table role_permissions {
+  role_id uuid [not null]
+  permission_code varchar(64) [not null]
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes { (role_id, permission_code) [pk] }
+  Note: 'Revoking a permission tombstones the row. Every authorization read excludes deleted_at rows; re-adding the same permission reactivates its row.'
+}
+
+// WHO holds WHICH ROLE at WHICH SCOPE. The only authorization grant there is.
+// Principal (user | group) and scope (platform | tenant | collection) are
+// exclusive arcs of real foreign keys, so PostgreSQL checks every reference.
+Table role_assignments {
+  id uuid [pk]
+  user_id uuid [note: 'Exactly one of user_id and group_id is set']
+  group_id uuid
+  role_id uuid [not null]
+  tenant_id uuid [note: 'Set for a tenant-scoped grant']
+  item_id uuid [note: 'Set for a Collection-scoped grant; both null means platform']
+  created_by_user_id uuid
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (user_id, group_id, tenant_id, item_id, role_id) [unique, note: 'NULLS NOT DISTINCT, partial while deleted_at is null']
+    (user_id, tenant_id)
+    (group_id, tenant_id)
+    item_id
+    role_id
+  }
+  Note: 'A trigger enforces that the Role scope matches the assignment scope, that a tenant-defined Role is never assigned outside its tenant, that a group principal belongs to the scope tenant, and that a user principal is a member of it.'
+}
+
+// Identity membership only. It answers "does this user belong to this tenant",
+// never "what may they do" - that is a role assignment.
+Table tenant_memberships {
+  user_id uuid [not null]
+  tenant_id uuid [not null]
+  status varchar(16) [not null, default: 'active']
+  joined_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (user_id, tenant_id) [pk]
+    (tenant_id, status)
+  }
+}
+
+Table groups {
+  id uuid [pk]
+  tenant_id uuid [not null]
+  code varchar(64) [not null]
+  display_name varchar(255) [not null]
+  description text
+  status varchar(16) [not null, default: 'active']
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (tenant_id, code) [unique]
+    (tenant_id, status)
+  }
+}
+
+Table group_memberships {
+  group_id uuid [not null]
+  user_id uuid [not null]
+  status varchar(16) [not null, default: 'active']
+  joined_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (group_id, user_id) [pk]
+    (user_id, status)
+    (group_id, status)
+  }
+}
+
+Table items {
+  id uuid [pk]
+  tenant_id uuid [not null]
+  item_type varchar(16) [not null, note: 'collection | document']
+  parent_item_id uuid
+  parent_relation varchar(32) [note: 'contains | child | attachment | embedded']
+  document_type varchar(64) [note: 'Required only for Documents; semantic, not provider identity']
+  title text [not null]
+  mime_type varchar(255)
+  size_bytes bigint
+  storage_key text [note: 'Durable object key only; no raw bytes']
+  metadata jsonb [not null, default: `{}`]
+  inherit_access boolean [not null, default: true, note: 'Only a Collection may end inheritance; a Document always inherits']
+  status varchar(16) [not null, default: 'pending', note: 'Raw resource lifecycle: pending | processing | ready | failed | unsupported | deleted']
+  index_status varchar(16) [note: 'Document-only derived search lifecycle: pending | processing | ready | failed | unsupported']
+  created_by_user_id uuid
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    tenant_id
+    parent_item_id
+    (tenant_id, status)
+  }
+  Note: 'Only Collections may be roots. Parent and parent_relation are both null or both set; self-parenting is rejected. Collection children are allowed only under Collections. Document children may be Documents. Database constraints/triggers enforce same-tenant parentage, prevent cycles, and reject Document -> Collection. Only Collections carry role assignments, so only a Collection may set inherit_access to false. Raw readiness and index readiness are independent.'
+}
+
+Table artifact_revisions {
+  id uuid [pk]
+  item_id uuid [not null, note: 'Canonical artifact Item; its storage_key points to the current revision']
+  revision_number int [not null, note: 'Starts at 1 and is unique per Item']
+  storage_key text [not null, note: 'Immutable revision object key']
+  mime_type varchar(255) [not null]
+  size_bytes bigint [not null]
+  summary text
+  conversation_id uuid
+  request_id varchar(64)
+  created_by_user_id uuid
+  exports jsonb [not null, default: `{}`]
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  indexes {
+    (item_id, revision_number) [unique]
+    (conversation_id, deleted_at)
+  }
+  Note: 'Revisions are append-only; deleting an artifact revision is a tombstone.'
+}
+
+Table citations {
+  id uuid [pk]
+  item_id uuid [not null, note: 'References the canonical Document Item']
+  chunk_id text [not null, note: 'Stable bridge to the corresponding indexed chunk']
+  section_path text[] [not null, default: `{}`]
+  anchor text
+  page_start int
+  page_end int
+  spans jsonb [not null, default: `[]`, note: 'Detailed offsets and normalized 0..1 visual regions']
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (item_id, chunk_id) [unique]
+    (item_id, deleted_at)
+  }
+  Note: 'One canonical citation per chunk. Re-ingestion tombstones stale rows and reactivates matching chunk identities.'
+}
+
+Table item_uploads {
+  item_id uuid [pk, note: 'Must reference a Document Item']
+  tenant_id uuid [not null]
+  owner_user_id uuid [not null]
+  idempotency_key varchar(128) [not null]
+  status varchar(16) [not null, default: 'pending', note: 'pending | available | failed']
+  error_code varchar(128)
+  uploaded_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes { (tenant_id, owner_user_id, idempotency_key) [unique] }
+  Note: 'Native uploads require an authenticated owner. Guest conversations can exist, but private upload ownership is never inferred from a guest session.'
+}
+
+Table message_items {
+  message_id uuid [not null]
+  item_id uuid [not null]
+  relation_type varchar(16) [not null]
+  position int [not null, default: 0]
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  indexes {
+    (message_id, item_id, relation_type) [pk]
+    (message_id, deleted_at)
+    item_id
+  }
+}
+
+Table integration_connections {
+  id uuid [pk]
+  tenant_id uuid [not null]
+  connector_key varchar(64) [not null]
+  owner_type varchar(16) [not null, default: 'tenant', note: 'user | tenant']
+  owner_user_id uuid
+  display_name varchar(255) [not null]
+  provider_account_id varchar(255) [note: 'Provider account identifier; unique with provider resource while active']
+  provider_account_label varchar(255)
+  provider_resource_id varchar(255) [note: 'Provider resource a grant is bound to, if any']
+  provider_resource_label varchar(255)
+  scopes text[] [not null, default: `{}`, note: 'Scopes actually granted by the provider']
+  config jsonb [not null, default: `{}`, note: 'Non-secret connection/runtime configuration']
+  status varchar(32) [not null, default: 'draft', note: 'draft | connected | expired | reauth_required | revoked | error | disconnected']
+  status_detail text
+  expires_at timestamptz
+  connected_at timestamptz
+  disconnected_at timestamptz
+  last_checked_at timestamptz
+  created_by_user_id uuid
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (tenant_id, connector_key, status)
+    (owner_user_id, status)
+    (tenant_id, display_name) [unique]
+    (tenant_id, connector_key, owner_type, owner_user_id, provider_account_id, provider_resource_id) [unique, note: 'Partial unique while deleted_at is null and provider_account_id is not null']
+  }
+}
+
+Table integration_credentials {
+  id uuid [pk]
+  integration_connection_id uuid [not null, unique]
+  credential_type varchar(64) [not null]
+  encrypted_payload text [not null]
+  expires_at timestamptz
+  key_version varchar(64)
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+}
+
+Table ingestion_sources {
+  id uuid [pk]
+  integration_connection_id uuid [not null]
+  target_item_id uuid [not null, note: 'Must reference an Item with item_type=collection']
+  display_name varchar(255)
+  resource_type varchar(64) [note: 'Provider resource kind, for example folder or shared_drive']
+  external_resource_id text [note: 'Provider resource identifier; unique per active connection and resource type']
+  config jsonb [not null, default: `{}`, note: 'Connector-owned external scope']
+  checkpoint jsonb [not null, default: `{}`]
+  sync_mode varchar(16) [not null, default: 'manual', note: 'manual | scheduled']
+  status varchar(32) [not null, default: 'ready', note: 'ready | paused | failed | connection_required | disabled']
+  status_detail text
+  last_ingested_at timestamptz
+  last_indexed_at timestamptz
+  created_by_user_id uuid
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (integration_connection_id, status)
+    (target_item_id, status)
+    (integration_connection_id, resource_type, external_resource_id) [unique, note: 'Partial unique while deleted_at is null and external_resource_id is not null']
+  }
+}
+
+Table external_resources {
+  id uuid [pk]
+  item_id uuid [not null, note: 'Normally references a Document Item']
+  ingestion_source_id uuid [not null]
+  external_id text [not null]
+  external_version text
+  etag text
+  external_updated_at timestamptz
+  source_url text
+  metadata jsonb [not null, default: `{}`]
+  last_seen_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (ingestion_source_id, external_id) [unique, note: 'Tombstoned rows are reactivated on rediscovery; this preserves stable provider identity without duplicate rows.']
+    item_id
+    (ingestion_source_id, last_seen_at)
+  }
+}
+
+Table conversations {
+  id uuid [pk]
+  tenant_id uuid [not null]
+  owner_user_id uuid [note: 'Durable owner after authentication; null while conversation is guest-owned']
+  created_by_session_id uuid [not null, note: 'Immutable creation lineage and guest access boundary']
+  title varchar(512)
+  summary text
+  summary_updated_at timestamptz
+  state jsonb [not null, default: `{}`]
+  status varchar(16) [not null, default: 'active']
+  last_message_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (tenant_id, owner_user_id, updated_at)
+    (tenant_id, created_by_session_id, updated_at)
+    (tenant_id, status)
+  }
+  Note: 'Guest reads require created_by_session_id to equal the active guest session. User reads require owner_user_id to equal the active user. Identity upgrade sets owner_user_id once; created_by_session_id never changes. A trigger enforces creator-session tenant consistency.'
+}
+
+Table sandbox_sessions {
+  id uuid [pk]
+  tenant_id uuid [not null]
+  conversation_id uuid [not null]
+  user_id uuid [not null]
+  provider varchar(64) [not null]
+  manifest jsonb [not null, default: `{}`, note: 'Provider-neutral Item identities; no workspace output bytes']
+  provider_state jsonb [not null, default: `{}`, note: 'Opaque provider recovery metadata']
+  status varchar(16) [not null, default: 'active', note: 'active | expired | closed']
+  last_used_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (tenant_id, conversation_id, status)
+    (conversation_id, provider, status)
+  }
+}
+
+Table messages {
+  id uuid [pk]
+  conversation_id uuid [not null]
+  role varchar(16) [not null]
+  content text [not null]
+  metadata jsonb [not null, default: `{}`]
+  sequence_number bigint [not null]
+  created_at timestamptz [not null]
+  indexes { (conversation_id, sequence_number) [unique] }
+}
+
+Table memories {
+  id uuid [pk]
+  tenant_id uuid [not null]
+  user_id uuid [not null]
+  conversation_id uuid
+  memory_type varchar(32) [not null]
+  memory_key varchar(255)
+  content text [not null]
+  metadata jsonb [not null, default: `{}`]
+  source_message_id uuid
+  importance float
+  confidence float
+  status varchar(16) [not null, default: 'active']
+  last_used_at timestamptz
+  expires_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (tenant_id, user_id, status)
+    (tenant_id, user_id, memory_key)
+    (conversation_id, status)
+  }
+}
+
+Table approval_requests {
+  id uuid [pk]
+  tenant_id uuid [not null]
+  requester_user_id uuid [not null]
+  request_type varchar(32) [not null, note: 'resource_access | plugin_installation']
+  target_id varchar(512) [not null, note: 'Item UUID for resource_access; connector key for plugin_installation']
+  requested_role_id uuid [note: 'Required for resource_access: the Collection Role approving will assign']
+  details jsonb [not null, default: `{}`, note: 'Type-specific data only']
+  reason text
+  status varchar(16) [not null, default: 'pending', note: 'pending | approved | denied | cancelled']
+  decided_by_user_id uuid
+  decision_note text
+  decided_at timestamptz
+  deleted_at timestamptz
+  created_at timestamptz [not null]
+  updated_at timestamptz [not null]
+  indexes {
+    (tenant_id, status, created_at)
+    (requester_user_id, status)
+    (request_type, target_id)
+    (tenant_id, requester_user_id, request_type, target_id) [unique, note: 'Partial unique while status=pending and deleted_at is null']
+  }
+}
+
+// A null tenant_id is a platform-scoped action, which belongs to no workspace.
+Table audit_logs {
+  id uuid [pk]
+  tenant_id uuid
+  actor_user_id uuid
+  actor_session_id uuid [note: 'Execution session; set for guest and authenticated browser actions']
+  action varchar(96) [not null]
+  resource_type varchar(32) [not null]
+  resource_id varchar(512)
+  outcome varchar(16) [not null, default: 'success']
+  details jsonb [not null, default: `{}`]
+  created_at timestamptz [not null]
+  indexes {
+    (tenant_id, created_at)
+    (tenant_id, action, created_at)
+    (actor_user_id, created_at)
+    (actor_session_id, created_at)
+    created_at
+  }
+}
+
+Ref: access_sessions.tenant_id > tenants.id
+Ref: access_sessions.user_id > users.id
+Ref: access_sessions.auth_identity_id > auth_identities.id
+Ref: access_sessions.parent_session_id > access_sessions.id
+Ref: auth_identities.user_id > users.id
+Ref: roles.tenant_id > tenants.id
+Ref: tenants.public_access_role_id > roles.id
+Ref: role_permissions.role_id > roles.id
+Ref: role_permissions.permission_code > permissions.code
+Ref: role_assignments.user_id > users.id
+Ref: role_assignments.group_id > groups.id
+Ref: role_assignments.role_id > roles.id
+Ref: role_assignments.tenant_id > tenants.id
+Ref: role_assignments.item_id > items.id
+Ref: role_assignments.created_by_user_id > users.id
+Ref: tenant_memberships.user_id > users.id
+Ref: tenant_memberships.tenant_id > tenants.id
+Ref: groups.tenant_id > tenants.id
+Ref: group_memberships.group_id > groups.id
+Ref: group_memberships.user_id > users.id
+
+Ref: items.tenant_id > tenants.id
+Ref: items.parent_item_id > items.id
+Ref: items.created_by_user_id > users.id
+Ref: artifact_revisions.item_id > items.id
+Ref: artifact_revisions.conversation_id > conversations.id
+Ref: artifact_revisions.created_by_user_id > users.id
+Ref: citations.item_id > items.id
+Ref: item_uploads.item_id - items.id
+Ref: item_uploads.tenant_id > tenants.id
+Ref: item_uploads.owner_user_id > users.id
+Ref: message_items.message_id > messages.id
+Ref: message_items.item_id > items.id
+
+Ref: integration_connections.tenant_id > tenants.id
+Ref: integration_connections.owner_user_id > users.id
+Ref: integration_connections.created_by_user_id > users.id
+Ref: integration_credentials.integration_connection_id - integration_connections.id
+Ref: ingestion_sources.integration_connection_id > integration_connections.id
+Ref: ingestion_sources.target_item_id > items.id
+Ref: ingestion_sources.created_by_user_id > users.id
+Ref: external_resources.item_id > items.id
+Ref: external_resources.ingestion_source_id > ingestion_sources.id
+Ref: conversations.tenant_id > tenants.id
+Ref: conversations.owner_user_id > users.id
+Ref: conversations.created_by_session_id > access_sessions.id
+Ref: sandbox_sessions.tenant_id > tenants.id
+Ref: sandbox_sessions.conversation_id > conversations.id
+Ref: sandbox_sessions.user_id > users.id
+Ref: messages.conversation_id > conversations.id
+Ref: memories.tenant_id > tenants.id
+Ref: memories.user_id > users.id
+Ref: memories.conversation_id > conversations.id
+Ref: memories.source_message_id > messages.id
+
+Ref: approval_requests.tenant_id > tenants.id
+Ref: approval_requests.requester_user_id > users.id
+Ref: approval_requests.decided_by_user_id > users.id
+Ref: approval_requests.requested_role_id > roles.id
+Ref: audit_logs.tenant_id > tenants.id
+Ref: audit_logs.actor_user_id > users.id
+Ref: audit_logs.actor_session_id > access_sessions.id

@@ -1,8 +1,8 @@
 # Enterprise Agent documentation
 
-This directory contains the durable project documentation. Keep the root
-[README](../README.md) focused on orientation and a working quick start; place
-design decisions, operational procedures, and package-level detail here.
+This directory contains operational and architecture documentation. API design
+ownership lives in [`backend/docs_design`](../backend/docs_design), so do not
+create a second API contract here.
 
 ## Start here
 
@@ -10,6 +10,9 @@ design decisions, operational procedures, and package-level detail here.
 | --- | --- |
 | [Getting started](getting-started.md) | Local dependencies, initialization, development identity, and reset behavior. |
 | [Architecture](architecture.md) | HTTP boundary, package ownership, request flow, and infrastructure responsibilities. |
+| [API contract](../backend/docs_design/api_contract.md) | Versioned routes, DTO rules, auth/session semantics, errors, and lifecycle contract. |
+| [OpenAPI snapshot](../backend/docs_design/openapi.yaml) | Checked-in OpenAPI 3.1 contract generated from the FastAPI application. |
+| [Database architecture](../backend/docs_design/database_architecture.md) | Tenant boundaries, identity/session separation, Item lineage, storage ownership, and ID/index policy. |
 | [Connectors and indexing](connectors-and-indexing.md) | Source hierarchy, Docling processing, contextual hybrid indexing, deletion, ACLs, and checkpoint semantics. |
 | [Operations and configuration](operations.md) | Environment configuration, object storage, health checks, observability, testing, and common local failures. |
 

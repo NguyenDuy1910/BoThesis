@@ -25,7 +25,8 @@ async def get_artifact(
 
 
 @router.get(
-    "/{artifact_id}/revisions/{revision}/content", response_model=ArtifactContent
+    "/{artifact_id}/revisions/{revision}/content", response_model=ArtifactContent,
+    operation_id="getArtifactRevisionContent",
 )
 async def get_artifact_content(
     artifact_id: UUID, revision: int, caller: Caller, artifacts: Artifacts

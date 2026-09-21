@@ -8,6 +8,7 @@ import { assistantTurnItems, groupAssistantTurnItems } from "../assistant-turn";
 import type { AnswerSource } from "../sources";
 import type { RuntimeActivity, TurnState } from "../types";
 import { appBrand } from "@/lib/brand";
+import { ProductMark } from "@/components/ui/ProductMark";
 import {
   CitationRenderingProvider,
   citationRenderingSources,
@@ -19,6 +20,7 @@ export const AssistantTurn = memo(function AssistantTurn({
   isStreaming,
   onOpenSource,
   onRevealingChange,
+  showAgentActivity = true,
   sources,
   turn,
 }: {
@@ -27,6 +29,7 @@ export const AssistantTurn = memo(function AssistantTurn({
   onOpenSource?: (source: AnswerSource) => void;
   /** Report while the turn's newest text is still easing onto screen. */
   onRevealingChange?: (isRevealing: boolean) => void;
+  showAgentActivity?: boolean;
   /** The citations this answer produced, for the inline chips. */
   sources?: readonly AnswerSource[];
   turn?: TurnState;
@@ -35,6 +38,7 @@ export const AssistantTurn = memo(function AssistantTurn({
   const renderItems = groupAssistantTurnItems(items);
   const pending = Boolean(isStreaming && turn?.modelPending);
   const { visible: showPending } = usePendingIndicator(pending);
+  const hasRuntimeActivity = items.some((item) => item.kind === "activity");
   const revealingItemId = items.filter((item) => item.kind === "message").at(-1)?.id;
   const citations = useMemo(() => ({
     sources: citationRenderingSources(sources ?? []),
@@ -47,6 +51,13 @@ export const AssistantTurn = memo(function AssistantTurn({
   return (
     <CitationRenderingProvider value={citations}>
       <div className="assistant-turn">
+        {(isStreaming || hasRuntimeActivity) && (
+          <div className="assistant-turn__identity">
+            <ProductMark decorative size="sm" />
+            <span className="assistant-turn__identity-name">{appBrand.productName} AI</span>
+            <span className="assistant-turn__identity-badge">Grounded response</span>
+          </div>
+        )}
         {renderItems.map((item) => {
           if (item.kind === "message") {
             return (
@@ -64,18 +75,20 @@ export const AssistantTurn = memo(function AssistantTurn({
             );
           }
           if (item.kind === "activity_group") {
+            if (!showAgentActivity) return null;
             return (
               <ActivityGroup
                 activities={item.activities}
                 key={item.id}
-                sourceCount={sources?.length}
               />
             );
           }
-          return <HostedExecutionActivity execution={item} key={item.id} />;
+          return showAgentActivity ? <HostedExecutionActivity execution={item} key={item.id} /> : null;
         })}
         {showPending && (
-          <span aria-label={`${appBrand.productName} is starting`} className="assistant-turn__pending" role="status">Starting</span>
+          <span aria-label={`${appBrand.productName} is understanding the request`} className="assistant-turn__pending" role="status">
+            Understanding the request
+          </span>
         )}
       </div>
     </CitationRenderingProvider>
@@ -118,10 +131,10 @@ function HostedExecutionActivity({
     >
       <summary aria-label={label}>
         <Icon aria-hidden="true" className="assistant-turn__execution-status" size={14} />
-        <FileCog aria-hidden="true" className="assistant-turn__execution-terminal" size={15} />
+        <FileCog aria-hidden="true" className="assistant-turn__execution-terminal" size={16} />
         <span className="assistant-turn__execution-label">{label}</span>
         {execution.files.length > 0 && <span className="assistant-turn__execution-file-count">{execution.files.length} file{execution.files.length === 1 ? "" : "s"}</span>}
-        <ChevronRight aria-hidden="true" className="assistant-turn__execution-caret" size={15} />
+        <ChevronRight aria-hidden="true" className="assistant-turn__execution-caret" size={16} />
       </summary>
       <div className="assistant-turn__execution-body">
         {execution.files.length > 0 && (
@@ -137,56 +150,33 @@ function HostedExecutionActivity({
 
 function ActivityGroup({
   activities,
-  sourceCount,
 }: {
   activities: RuntimeActivity[];
-  sourceCount?: number;
 }) {
   const active = activities.some((activity) => activity.state === "active");
   const failed = activities.some((activity) => (
     activity.state === "failed" || activity.state === "timeout"
   ));
-  // The activity surface is deliberately a single, quiet line. The newest
-  // in-progress operation adds just enough useful context without turning
-  // the conversation into a running tool log.
-  const currentActivity = [...activities].reverse().find((activity) => activity.state === "active")
-    ?? activities.at(-1);
-  const currentLabel = currentActivity ? toolPresentation(currentActivity).label : "Working";
-  const label = active
-    ? `Working · ${currentLabel}`
-    : activitySummary(activities, sourceCount);
-  const Icon = active ? LoaderCircle : failed ? CircleAlert : Check;
-
-  // Active work has no disclosure at all. Besides matching the Figma progress
-  // primitive, this prevents a native <details> state from leaving a tool log
-  // visibly expanded while the response is still being streamed.
-  if (active) {
-    return (
-      <div
-        aria-label={`${label}. Activity in progress`}
-        className="assistant-turn__activity-group assistant-turn__activity-group--active"
-        role="status"
-      >
-        <Icon aria-hidden="true" className="assistant-turn__activity-group-status" size={14} />
-        <span>{label}</span>
-      </div>
-    );
-  }
-
+  const statusLabel = active ? "Working" : failed ? "Needs attention" : "Completed";
   return (
-    <details
-      className="assistant-turn__activity-group"
-      open={failed}
+    <div
+      aria-busy={active}
+      aria-label={`${statusLabel}. ${activities.length} steps.`}
+      className={clsx(
+        "assistant-turn__activity-group",
+        active && "assistant-turn__activity-group--active",
+        failed && "assistant-turn__activity-group--failed",
+      )}
+      role="status"
     >
-      <summary aria-label={`${label}. Show activity details`}>
-        <Icon aria-hidden="true" className="assistant-turn__activity-group-status" size={14} />
-        <span>{label}</span>
-        <ChevronRight aria-hidden="true" className="assistant-turn__activity-group-caret" size={15} />
-      </summary>
-      <div className="assistant-turn__activity-group-body">
+      <div className="assistant-turn__progress-heading">
+        <span className="assistant-turn__progress-kicker">{statusLabel}</span>
+        <span className="assistant-turn__progress-count">{activities.length} step{activities.length === 1 ? "" : "s"}</span>
+      </div>
+      <div className="assistant-turn__progress-list">
         {activities.map((activity) => <ToolActivity activity={activity} key={activity.callId} />)}
       </div>
-    </details>
+    </div>
   );
 }
 
@@ -204,14 +194,21 @@ function ToolActivity({ activity }: { activity: RuntimeActivity }) {
   return (
     <div
       aria-label={accessibleLabel}
-      className={clsx("assistant-turn__activity", `assistant-turn__activity--${activity.state}`)}
+      className={clsx("assistant-turn__activity", "assistant-turn__progress-row", `assistant-turn__activity--${activity.state}`)}
       role={active ? "status" : undefined}
       title={accessibleLabel}
     >
-      <Icon aria-hidden="true" className="assistant-turn__activity-icon" size={13} />
-      <span className="assistant-turn__activity-label">{presentation.label}</span>
-      {presentation.detail && <span className="assistant-turn__activity-detail">· {presentation.detail}</span>}
-      {elapsedLabel && <time>· {elapsedLabel}</time>}
+      <span className="assistant-turn__progress-node">
+        <Icon aria-hidden="true" className="assistant-turn__activity-icon" size={14} />
+      </span>
+      <span className="assistant-turn__progress-copy">
+        <span className="assistant-turn__activity-label">{presentation.label}</span>
+        {(presentation.detail || elapsedLabel) && (
+          <span className="assistant-turn__progress-detail">
+            {presentation.detail ?? elapsedLabel}
+          </span>
+        )}
+      </span>
     </div>
   );
 }
@@ -254,15 +251,6 @@ function toolPresentation(activity: RuntimeActivity) {
       ? `${resultCount} document${resultCount === 1 ? "" : "s"}`
       : undefined,
   };
-}
-
-function activitySummary(activities: RuntimeActivity[], sourceCount?: number) {
-  const actions = activities.length;
-  // Citation identities are the source of truth. Search result counts are not
-  // evidence used in the final answer and must not be presented as such.
-  return sourceCount
-    ? `Used ${sourceCount} source${sourceCount === 1 ? "" : "s"} · ${actions} action${actions === 1 ? "" : "s"}`
-    : `${actions} action${actions === 1 ? "" : "s"}`;
 }
 
 function numericProgress(progress: Record<string, unknown> | undefined, key: string) {

@@ -2,19 +2,26 @@ interface GoogleCredentialResponse {
   credential?: string;
 }
 
-interface GooglePromptNotification {
-  isNotDisplayed(): boolean;
-  isSkippedMoment(): boolean;
-}
-
 interface GoogleIdentityApi {
   initialize(options: {
     client_id: string;
     callback: (response: GoogleCredentialResponse) => void;
     auto_select: boolean;
     cancel_on_tap_outside: boolean;
+    use_fedcm_for_button: boolean;
   }): void;
-  prompt(callback?: (notification: GooglePromptNotification) => void): void;
+  renderButton(
+    parent: HTMLElement,
+    options: {
+      type: "standard";
+      theme: "outline";
+      size: "large";
+      text: "continue_with";
+      shape: "rectangular";
+      logo_alignment: "left";
+      width: number;
+    },
+  ): void;
 }
 
 declare global {
@@ -25,29 +32,38 @@ declare global {
 
 const scriptId = "google-identity-services";
 
-export async function requestGoogleCredential(clientId: string): Promise<string> {
+/** Render Google's supported button flow instead of driving One Tap from a
+ * custom click handler. FedCM treats the button click as the required user
+ * activation and no longer exposes dependable display-moment callbacks. */
+export async function renderGoogleSignInButton(
+  host: HTMLElement,
+  clientId: string,
+  onCredential: (credential: string) => void,
+  onError: (message: string) => void,
+): Promise<void> {
   const identity = await loadGoogleIdentity();
-  return new Promise<string>((resolve, reject) => {
-    let settled = false;
-    const finish = (callback: () => void) => {
-      if (settled) return;
-      settled = true;
-      callback();
-    };
-    identity.initialize({
-      client_id: clientId,
-      auto_select: false,
-      cancel_on_tap_outside: true,
-      callback: (response) => {
-        if (response.credential) finish(() => resolve(response.credential!));
-        else finish(() => reject(new Error("Google did not return a sign-in credential.")));
-      },
-    });
-    identity.prompt((notification) => {
-      if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
-        finish(() => reject(new Error("Google sign-in was not completed. Please allow Google sign-in and try again.")));
+  identity.initialize({
+    client_id: clientId,
+    auto_select: false,
+    cancel_on_tap_outside: true,
+    use_fedcm_for_button: true,
+    callback: (response) => {
+      if (response.credential) {
+        onCredential(response.credential);
+        return;
       }
-    });
+      onError("Google did not return a sign-in credential. Please try again.");
+    },
+  });
+  host.replaceChildren();
+  identity.renderButton(host, {
+    type: "standard",
+    theme: "outline",
+    size: "large",
+    text: "continue_with",
+    shape: "rectangular",
+    logo_alignment: "left",
+    width: Math.min(400, Math.max(240, Math.floor(host.getBoundingClientRect().width))),
   });
 }
 

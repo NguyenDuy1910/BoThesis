@@ -134,7 +134,7 @@ def test_citation_resolver_builds_internal_and_native_targets() -> None:
     source = DOCUMENT.source
 
     assert CitationResolver.internal_path("item:kafka", "item:kafka:12") == (
-        "/knowledge/items/item%3Akafka?chunk=item%3Akafka%3A12"
+        "/knowledge/documents/item%3Akafka?chunk=item%3Akafka%3A12"
     )
     assert CitationResolver.original_url(source, citation) == (
         "https://knowledge.example/leave-policy#replication"

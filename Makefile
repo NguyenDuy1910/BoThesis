@@ -16,11 +16,13 @@ QDRANT_VECTOR_SIZE ?= 1536
 
 DEV_TENANT_ID ?= 00000000-0000-0000-0000-000000000001
 DEV_USER_ID ?= 00000000-0000-0000-0000-000000000002
-DEV_ROLE_ID ?= 00000000-0000-0000-0000-000000000003
+DEV_TENANT_ADMIN_ASSIGNMENT_ID ?= 00000000-0000-0000-0000-000000000003
+DEV_PLATFORM_ADMIN_ASSIGNMENT_ID ?= 00000000-0000-0000-0000-000000000004
 DEV_TENANT_CODE ?= local
 DEV_USER_EMAIL ?= local-admin@bothesis.dev
+DEV_USER_IS_PLATFORM_ADMIN ?= true
 
-.PHONY: help init reset-all config services _temporal-reset db-init db-seed db-reset qdrant-init status
+.PHONY: help init reset-all config services _temporal-reset db-init db-seed db-seed-accounts db-reset qdrant-init status
 
 help: ## Show available local-development commands.
 	@echo "Enterprise Agent local development"
@@ -34,19 +36,18 @@ init: reset-all ## Initialize the complete local Enterprise Agent environment.
 	@echo "  Qdrant:    $(LOCAL_QDRANT_URL)/dashboard"
 	@echo "  MinIO:     http://127.0.0.1:9001"
 	@echo "  Temporal:  $(LOCAL_TEMPORAL_UI)"
-	@echo "  Tenant ID: $$(sed -n 's/^NEXT_PUBLIC_BOTHESIS_TENANT_ID=//p' web/.env.local | tail -n 1)"
-	@echo "  User ID:   $$(sed -n 's/^NEXT_PUBLIC_BOTHESIS_USER_ID=//p' web/.env.local | tail -n 1)"
+	@echo "  Tenant ID: $(DEV_TENANT_ID)"
+	@echo "  User ID:   $(DEV_USER_ID)"
 	@echo
 	@echo "Start the API with: cd backend && uv run python main.py"
 	@echo "Start the worker with: cd backend && uv run python -m bothesis.services.workflow.worker"
 
-reset-all: _temporal-reset db-reset qdrant-init status ## Reset all databases and Qdrant, apply the current design, and seed the admin.
+reset-all: _temporal-reset db-reset db-seed-accounts qdrant-init status ## Reset all databases and Qdrant, apply the current design, and seed full-access test accounts.
 	@echo "PostgreSQL, Temporal, and Qdrant reset is complete."
 
-config: ## Create missing local environment files and enforce local dependency endpoints.
+config: ## Create the local backend environment file and enforce local dependency endpoints.
 	@set -euo pipefail
 	@if [[ ! -f backend/.env ]]; then cp backend/.env.example backend/.env; fi
-	@if [[ ! -f web/.env.local ]]; then cp web/.env.example web/.env.local; fi
 	@update_env() { \
 		local file="$$1" key="$$2" value="$$3" temp_file; \
 		temp_file="$$(mktemp)"; \
@@ -87,8 +88,8 @@ config: ## Create missing local environment files and enforce local dependency e
 	remove_env backend/.env BOTHESIS_PLUGIN_ENCRYPTION_KEY; \
 	remove_env backend/.env BOTHESIS_CONNECTOR_ENCRYPTION_KEY; \
 	update_env backend/.env BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY true; \
-	update_env web/.env.local NEXT_PUBLIC_BOTHESIS_API_URL http://127.0.0.1:8000
-	@echo "Configured local backend and WebUI environment files."
+	update_env backend/.env BOTHESIS_PUBLIC_TENANT_CODE "$(DEV_TENANT_CODE)"
+	@echo "Configured the local backend environment file."
 
 services: config ## Start PostgreSQL, Qdrant, object storage, and Temporal.
 	@set -euo pipefail
@@ -120,30 +121,29 @@ _temporal-reset: services
 	@$(COMPOSE) run --rm temporal-init >/dev/null
 	@echo "Temporal persistence is reset."
 
-db-init: services ## Apply the current database design from the ORM model.
+db-init: services ## Apply the current database design and the permission/system-role catalogs.
 	@set -euo pipefail
 	@$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"' >/dev/null
-	@cd backend && DATABASE_URL="$(LOCAL_DATABASE_URL)" uv run python -c 'import asyncio; from bothesis.db.engine import get_engine; from bothesis.db.models import Base; exec("async def initialize():\n    engine = get_engine()\n    async with engine.begin() as connection:\n        await connection.run_sync(Base.metadata.create_all)\n    await engine.dispose()") ; asyncio.run(initialize())'
-	@echo "PostgreSQL schema is initialized."
+	@cd backend && DATABASE_URL="$(LOCAL_DATABASE_URL)" uv run python -c 'import asyncio; from bothesis.db.engine import get_engine, get_session_factory; from bothesis.db.models import Base; from bothesis.services.identity_access.identity_store import IdentityStoreService; exec("async def initialize():\n    engine = get_engine()\n    async with engine.begin() as connection:\n        await connection.run_sync(Base.metadata.create_all)\n    async with get_session_factory()() as session:\n        async with session.begin():\n            await IdentityStoreService(session).sync_system_roles()\n    await engine.dispose()") ; asyncio.run(initialize())'
+	@echo "PostgreSQL schema, permissions, and system roles are initialized."
 
 db-seed: services ## Create or refresh the deterministic local admin identity.
 	@set -euo pipefail
-	@tenant_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO tenants (id, code, name, status, settings) VALUES ('$(DEV_TENANT_ID)', '$(DEV_TENANT_CODE)', 'Enterprise Agent Local', 'active', '{}'::jsonb) ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, status = 'active', updated_at = now() RETURNING id" )"; \
-	user_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO users (id, email, display_name, status, preferences) VALUES ('$(DEV_USER_ID)', '$(DEV_USER_EMAIL)', 'Local Administrator', 'active', '{}'::jsonb) ON CONFLICT (email) DO UPDATE SET display_name = EXCLUDED.display_name, status = 'active', updated_at = now() RETURNING id" )"; \
-	role_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO roles (id, tenant_id, code, display_name, permission_codes, status) VALUES ('$(DEV_ROLE_ID)', '$$tenant_id', 'admin', 'Administrator', ARRAY['admin'], 'active') ON CONFLICT (tenant_id, code) DO UPDATE SET display_name = EXCLUDED.display_name, permission_codes = EXCLUDED.permission_codes, status = 'active', updated_at = now() RETURNING id" )"; \
-	$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO tenant_memberships (user_id, tenant_id, role_id, status, joined_at, deleted_at) VALUES ('$$user_id', '$$tenant_id', '$$role_id', 'active', now(), NULL) ON CONFLICT (user_id, tenant_id) DO UPDATE SET role_id = EXCLUDED.role_id, status = 'active', deleted_at = NULL" >/dev/null; \
-	update_env() { \
-		local file="$$1" key="$$2" value="$$3" temp_file; \
-		temp_file="$$(mktemp)"; \
-		awk -v key="$$key" -v value="$$value" 'BEGIN { found = 0 } $$0 ~ "^" key "=" { print key "=" value; found = 1; next } { print } END { if (!found) print key "=" value }' "$$file" > "$$temp_file"; \
-		mv "$$temp_file" "$$file"; \
-	}; \
-	update_env web/.env.local NEXT_PUBLIC_BOTHESIS_TENANT_ID "$$tenant_id"; \
-	update_env web/.env.local NEXT_PUBLIC_BOTHESIS_USER_ID "$$user_id"; \
+	@tenant_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO tenants (id, code, name, status, visibility, public_access_role_id, settings) SELECT '$(DEV_TENANT_ID)', '$(DEV_TENANT_CODE)', 'Enterprise Agent Local', 'active', 'public', role.id, '{}'::jsonb FROM roles role WHERE role.tenant_id IS NULL AND role.code = 'guest' AND role.status = 'active' ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name, status = 'active', visibility = 'public', public_access_role_id = EXCLUDED.public_access_role_id, updated_at = now() RETURNING id" )"; \
+	user_id="$$( $(COMPOSE) exec -T postgres sh -c 'psql -Atq -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO users (id, email, display_name, status, preferences) VALUES ('$(DEV_USER_ID)', '$(DEV_USER_EMAIL)', 'Local Administrator', true, '{}'::jsonb) ON CONFLICT (email) DO UPDATE SET display_name = EXCLUDED.display_name, status = true, updated_at = now() RETURNING id" )"; \
+	$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO tenant_memberships (user_id, tenant_id, status, joined_at, deleted_at) VALUES ('$$user_id', '$$tenant_id', 'active', now(), NULL) ON CONFLICT (user_id, tenant_id) DO UPDATE SET status = 'active', deleted_at = NULL" >/dev/null; \
+	$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO role_assignments (id, user_id, role_id, tenant_id) SELECT '$(DEV_TENANT_ADMIN_ASSIGNMENT_ID)', '$$user_id', role.id, '$$tenant_id' FROM roles role WHERE role.is_system AND role.code = 'tenant_admin' ON CONFLICT DO NOTHING" >/dev/null; \
+	if [[ "$(DEV_USER_IS_PLATFORM_ADMIN)" == "true" ]]; then \
+		$(COMPOSE) exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -c "$$1"' _ "INSERT INTO role_assignments (id, user_id, role_id) SELECT '$(DEV_PLATFORM_ADMIN_ASSIGNMENT_ID)', '$$user_id', role.id FROM roles role WHERE role.is_system AND role.code = 'platform_admin' ON CONFLICT DO NOTHING" >/dev/null; \
+	fi; \
 	echo "Local admin identity is ready: $$user_id"
 
-db-reset: db-init db-seed ## Rebuild PostgreSQL from the current ORM and reseed local identity.
+db-reset: db-init db-seed ## Rebuild PostgreSQL from the current ORM and reseed the local admin identity.
 	@echo "PostgreSQL reset is complete."
+
+db-seed-accounts: db-reset ## Seed three full-access local test accounts.
+	@set -euo pipefail
+	@cd backend && DATABASE_URL="$(LOCAL_DATABASE_URL)" uv run python script/seed_account.py
 
 qdrant-init: services ## Rebuild the derived contextual-hybrid Qdrant collection.
 	@set -euo pipefail

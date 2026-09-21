@@ -1,6 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  devIndicators: false,
   reactCompiler: false,
   turbopack: {},
   webpack: (config) => {

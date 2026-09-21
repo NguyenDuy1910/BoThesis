@@ -15,7 +15,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.db.models import IntegrationCredential
-from bothesis.services import AdminValidationError
+from bothesis.services import ControlPlaneValidationError
+
+#: Written in place of a secret that was revoked. An empty envelope decrypts to
+#: nothing, so every reader treats it as "no credential is configured".
+CLEARED_PAYLOAD = ""
 
 
 class IntegrationCredentialService:
@@ -36,12 +40,12 @@ class IntegrationCredentialService:
     ) -> IntegrationCredential:
         normalized_type = credential_type.strip().casefold()
         if not normalized_type or len(normalized_type) > 64:
-            raise AdminValidationError("credential type is invalid")
+            raise ControlPlaneValidationError("credential type is invalid")
         encoded = json.dumps(
             dict(payload), sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         if encoded == b"{}":
-            raise AdminValidationError("integration credentials must not be empty")
+            raise ControlPlaneValidationError("integration credentials must not be empty")
         nonce = os.urandom(12)
         encrypted = AESGCM(self._key).encrypt(
             nonce, encoded, self._associated_data(integration_connection_id)
@@ -69,13 +73,38 @@ class IntegrationCredentialService:
         await self._session.flush()
         return record
 
+    async def clear(self, integration_connection_id: UUID) -> None:
+        """Destroy one connection's secret while keeping the record of it.
+
+        Disconnecting must leave no usable token behind, so the ciphertext is
+        overwritten rather than tombstoned — a row that still holds a decryptable
+        grant is not revoked in any sense that matters. The record itself stays,
+        because when a credential was cleared is audit history, and because the
+        Connection and its sources stay so reconnecting resumes them.
+        """
+
+        record = await self._session.scalar(
+            select(IntegrationCredential)
+            .where(
+                IntegrationCredential.integration_connection_id
+                == integration_connection_id
+            )
+            .with_for_update()
+        )
+        if record is None:
+            return
+        record.encrypted_payload = CLEARED_PAYLOAD
+        record.expires_at = None
+        record.key_version = None
+        await self._session.flush()
+
     async def resolve(self, integration_connection_id: UUID) -> dict[str, Any]:
         record = await self._session.scalar(
             select(IntegrationCredential).where(
                 IntegrationCredential.integration_connection_id == integration_connection_id
             )
         )
-        if record is None:
+        if record is None or record.encrypted_payload == CLEARED_PAYLOAD:
             raise LookupError("integration credentials are not configured")
         try:
             envelope = base64.urlsafe_b64decode(record.encrypted_payload.encode("ascii"))
@@ -119,4 +148,4 @@ class IntegrationCredentialService:
         return f"bothesis:plugin-credential:{integration_connection_id}".encode("ascii")
 
 
-__all__ = ["IntegrationCredentialService"]
+__all__ = ["CLEARED_PAYLOAD", "IntegrationCredentialService"]

@@ -23,6 +23,12 @@ from bothesis.services.workflow import TemporalSettings
 from bothesis.services.workflow.client import TemporalClientProvider
 from bothesis.services.workflow.ingestion_activity import IngestionActivity
 from bothesis.services.workflow.ingestion_workflow import IngestionWorkflow
+from bothesis.services.workflow.native_upload_indexing_activity import (
+    NativeUploadIndexingActivity,
+)
+from bothesis.services.workflow.native_upload_indexing_workflow import (
+    NativeUploadIndexingWorkflow,
+)
 
 
 class TemporalWorker:
@@ -43,11 +49,12 @@ class TemporalWorker:
         client = await TemporalClientProvider(self._settings).get()
         worker_config = self._config.worker
         ingestion = self._configured_ingestion_activity()
+        native_upload_indexing = self._configured_native_upload_indexing_activity()
         worker = Worker(
             client,
             task_queue=self._settings.task_queue,
-            workflows=[IngestionWorkflow],
-            activities=[ingestion.ingest_items],
+            workflows=[IngestionWorkflow, NativeUploadIndexingWorkflow],
+            activities=[ingestion.ingest_items, native_upload_indexing.index_upload],
             # Importing a submodule of ``bothesis.services`` executes that
             # package's database-backed public boundary. Pass through only the
             # already-loaded workflow module and its lightweight contracts;
@@ -56,6 +63,7 @@ class TemporalWorker:
                 restrictions=SandboxRestrictions.default.with_passthrough_modules(
                     "bothesis.services",
                     "bothesis.services.workflow.ingestion_workflow",
+                    "bothesis.services.workflow.native_upload_indexing_workflow",
                     "bothesis.services.workflow",
                 )
             ),
@@ -103,7 +111,18 @@ class TemporalWorker:
             credential_encryption_key=(
                 self._config.integration.credential_encryption_key
             ),
-            confluence_environment=self._config.integration.confluence,
+            providers=self._runtime.connection_providers(),
+            preview=self._runtime.knowledge_preview(),
+        )
+
+    def _configured_native_upload_indexing_activity(
+        self,
+    ) -> NativeUploadIndexingActivity:
+        assert self._index is not None
+        return NativeUploadIndexingActivity(
+            get_session_factory(),
+            index=self._index,
+            source=self._runtime.stored_file_content(),
             preview=self._runtime.knowledge_preview(),
         )
 

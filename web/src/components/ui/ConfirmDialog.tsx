@@ -62,7 +62,7 @@ export function ConfirmDialog({
               setError(null);
               onClose();
             }}
-            variant="secondary"
+            variant="ghost"
           >
             {cancelLabel}
           </Button>
@@ -84,7 +84,7 @@ export function ConfirmDialog({
       title={title}
     >
       <div className="space-y-3">
-        <div className="text-[0.8125rem] leading-5 text-[var(--text-secondary)]">
+        <div className="text-[length:var(--text-size-ui)] leading-5 text-[var(--text-secondary)]">
           {description}
         </div>
         {error && <ErrorState description={error} layout="inline" />}

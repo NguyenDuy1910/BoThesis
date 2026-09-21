@@ -11,17 +11,23 @@ import {
   LibraryBig,
   Menu,
   RefreshCw,
-  ShieldCheck,
 } from "lucide-react";
 import { memo, type RefObject, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import { useClipboard } from "@/lib/hooks/useClipboard";
-import { appBrand } from "@/lib/brand";
-import { AppShell } from "@/components/ui/AppShell";
-import { ProductMark } from "@/components/ui/ProductMark";
-import { getApiConfiguration } from "@/lib/api/config";
+import { useAccountPreferences } from "@/lib/hooks/useAccountPreferences";
+import { useAuthPrompt } from "@/components/auth/AuthPrompt";
 import {
+  useProductShellNavigation,
+  useProductShellSidebar,
+} from "@/components/shell/ProductShell";
+import { getApiConfiguration } from "@/lib/api/config";
+import { getAuthSession } from "@/lib/auth/session";
+import { WorkspaceMark } from "@/components/patterns";
+import { WorkspaceLoadingSkeleton } from "@/components/ui/WorkspaceLoadingSkeleton";
+import {
+  listCollections,
   releaseConversationDocument,
   uploadConversationDocument,
   type Collection,
@@ -30,13 +36,15 @@ import {
   cachedToUIMessage,
   conversationAdapter,
   getMessageText,
+  readSelectedConversation,
+  rememberSelectedConversation,
+  resolveSelectedConversation,
   setConversationUser,
   titleFromMessage,
   uiToCachedMessage,
 } from "@/modules/chat/conversations";
 import { useChat } from "@/modules/chat/hooks/useBothesisChat";
 import { useJumpToLatest } from "@/modules/chat/hooks/useJumpToLatest";
-import { useSidebarState } from "@/modules/chat/hooks/useSidebarState";
 import type {
   ChatConversation,
   ChatMessage,
@@ -52,7 +60,7 @@ import { turnArtifacts, type TurnArtifact } from "@/modules/chat/artifacts";
 import { answerSources, type AnswerSource } from "@/modules/chat/sources";
 import { recoveryForTurn } from "@/modules/chat/recovery";
 import { conversationResources } from "@/modules/chat/conversation-resources";
-import { AppSidebar } from "./AppSidebar";
+import { ChatSidebarContent } from "./AppSidebar";
 import { AnswerSources } from "./AnswerSources";
 import { ArtifactCards } from "./ArtifactCard";
 import { AssistantTurn } from "./AssistantTurn";
@@ -88,25 +96,43 @@ function createDraftConversationId() {
 
 export default function ChatShell() {
   const router = useRouter();
-  const sidebar = useSidebarState();
+  const searchParams = useSearchParams();
+  const shellNavigation = useProductShellNavigation();
+  const { setSidebarContent } = useProductShellSidebar();
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draftId, setDraftId] = useState(createDraftConversationId);
   const [initialMessages, setInitialMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [searchRequested, setSearchRequested] = useState(false);
+  const restoreRequestRef = useRef(0);
+  const visibleConversationRef = useRef(activeId ?? draftId);
+  const handledProductActionRef = useRef<string | null>(null);
+  const requestedProductAction = searchParams.get("action");
 
   const refresh = useCallback(async (requestedId?: string | null) => {
-    const list = await conversationAdapter.listConversations();
-    const selectedId = requestedId && list.some((item) => item.id === requestedId)
-      ? requestedId
-      : list[0]?.id ?? null;
-    const messages = selectedId
-      ? (await conversationAdapter.getConversationMessages(selectedId)).map(cachedToUIMessage)
-      : [];
-    setConversations(list);
-    setActiveId(selectedId);
-    setInitialMessages(messages);
-    setIsLoading(false);
+    const requestId = ++restoreRequestRef.current;
+    try {
+      const list = await conversationAdapter.listConversations();
+      if (requestId !== restoreRequestRef.current) return;
+      const selectedId = resolveSelectedConversation(list, requestedId);
+      const messages = selectedId
+        ? (await conversationAdapter.getConversationMessages(selectedId)).map(cachedToUIMessage)
+        : [];
+      if (requestId !== restoreRequestRef.current) return;
+      setConversations(list);
+      setActiveId(selectedId);
+      if (selectedId) visibleConversationRef.current = selectedId;
+      setInitialMessages(messages);
+      setLoadError(null);
+      setIsLoading(false);
+      rememberSelectedConversation(selectedId);
+    } catch {
+      if (requestId !== restoreRequestRef.current) return;
+      setLoadError("Could not restore your conversations. Please try again.");
+      setIsLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -115,30 +141,65 @@ export default function ChatShell() {
       router.replace("/auth/login");
       return;
     }
-    setConversationUser(configuration.userId, configuration.tenantId);
-    void refresh();
+    const session = getAuthSession();
+    setConversationUser(
+      configuration.userId,
+      configuration.tenantId,
+      session?.session_kind ?? "user",
+    );
+    void refresh(readSelectedConversation());
   }, [refresh, router]);
 
   useEffect(() => {
-    if (!sidebar.mobileOpen) return;
+    if (!shellNavigation.mobileOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") sidebar.closeMobile();
+      if (event.key === "Escape") shellNavigation.closeMobile();
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [sidebar.closeMobile, sidebar.mobileOpen]);
+  }, [shellNavigation]);
 
   const startNewChat = useCallback(() => {
-    setDraftId(createDraftConversationId());
+    const nextDraftId = createDraftConversationId();
+    visibleConversationRef.current = nextDraftId;
+    setDraftId(nextDraftId);
     setActiveId(null);
     setInitialMessages([]);
-    sidebar.closeMobile();
-  }, [sidebar]);
+    setLoadError(null);
+    rememberSelectedConversation(null);
+    void refresh(null);
+    shellNavigation.closeMobile();
+  }, [refresh, shellNavigation]);
+
+  // Product-level actions can originate from any surface. Consume the URL
+  // intent once, then return Chat to its canonical address for reliable Back.
+  useEffect(() => {
+    if (!requestedProductAction) {
+      handledProductActionRef.current = null;
+      return;
+    }
+    if (handledProductActionRef.current === requestedProductAction) return;
+    handledProductActionRef.current = requestedProductAction;
+
+    if (requestedProductAction === "new") {
+      startNewChat();
+      router.replace("/app", { scroll: false });
+    }
+    if (requestedProductAction === "search") {
+      setSearchRequested(true);
+      router.replace("/app", { scroll: false });
+    }
+  }, [requestedProductAction, router, startNewChat]);
+
+  const handleSearchRequestHandled = useCallback(() => {
+    setSearchRequested((requested) => requested ? false : requested);
+  }, []);
 
   const selectConversation = useCallback(async (id: string) => {
-    sidebar.closeMobile();
+    visibleConversationRef.current = id;
+    shellNavigation.closeMobile();
     await refresh(id);
-  }, [refresh, sidebar]);
+  }, [refresh, shellNavigation]);
 
   const deleteConversation = useCallback(async (id: string) => {
     const storedMessages = await conversationAdapter.getConversationMessages(id);
@@ -189,59 +250,97 @@ export default function ChatShell() {
         titleSource: "generated",
       });
     }
-    await refresh(persistedId);
+    if (visibleConversationRef.current === conversationId) {
+      await refresh(persistedId);
+    } else {
+      // A completed response can finish saving after the reader starts a new
+      // draft or opens another chat. Update recents without stealing that view.
+      const requestId = restoreRequestRef.current;
+      const list = await conversationAdapter.listConversations();
+      if (requestId === restoreRequestRef.current) setConversations(list);
+    }
   }, [conversations, refresh]);
 
-  return (
-    <AppShell
-      sidebar={<AppSidebar
+  useEffect(() => {
+    setSidebarContent(
+      <ChatSidebarContent
         activeId={activeId}
-        collapsed={sidebar.collapsed}
+        collapsed={shellNavigation.collapsed}
         conversations={conversations}
         isLoading={isLoading}
-        mobileOpen={sidebar.mobileOpen}
-        onCloseMobile={sidebar.closeMobile}
         onDeleteConversation={deleteConversation}
-        onNewChat={startNewChat}
         onRenameConversation={renameConversation}
+        onSearchRequestHandled={handleSearchRequestHandled}
         onSelectConversation={(id) => void selectConversation(id)}
-        onToggleCollapse={sidebar.toggleCollapse}
-      />}
-    >
-      {sidebar.mobileOpen && (
-        <button
-          aria-label="Close conversation sidebar"
-          className="sidebar-overlay sidebar-overlay--visible"
-          onClick={sidebar.closeMobile}
-          type="button"
-        />
-      )}
-      <ChatConversation
-        key={activeId ?? draftId}
-        conversationId={activeId ?? draftId}
-        conversationTitle={conversations.find((conversation) => conversation.id === activeId)?.title ?? null}
-        initialMessages={initialMessages}
-        onMessagesSaved={saveMessages}
-        onOpenSidebar={sidebar.openMobile}
-      />
-    </AppShell>
+        searchRequested={searchRequested}
+      />,
+    );
+  }, [
+    activeId,
+    conversations,
+    deleteConversation,
+    handleSearchRequestHandled,
+    isLoading,
+    renameConversation,
+    searchRequested,
+    selectConversation,
+    setSidebarContent,
+    shellNavigation.collapsed,
+    startNewChat,
+  ]);
+
+  useEffect(() => () => setSidebarContent(null), [setSidebarContent]);
+
+  if (isLoading || loadError) {
+    return (
+      <section aria-label="Chat" className="chat-main-pane relative flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--surface-base)]">
+        <button aria-label="Open conversation sidebar" className="chat-mobile-menu topbar__menu" onClick={shellNavigation.openMobile} type="button"><Menu aria-hidden="true" size={18} /></button>
+        <div
+          className={loadError ? "shell__route-boundary flex-1" : "flex min-h-0 flex-1 flex-col"}
+          role={loadError ? "alert" : undefined}
+        >
+          {loadError ? (
+            <>
+              <strong>{loadError}</strong>
+              <button onClick={() => {
+                setIsLoading(true);
+                setLoadError(null);
+                void refresh(readSelectedConversation());
+              }} type="button">Try again</button>
+            </>
+          ) : (
+            <WorkspaceLoadingSkeleton />
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <ChatConversation
+      key={activeId ?? draftId}
+      conversationId={activeId ?? draftId}
+      initialMessages={initialMessages}
+      onMessagesSaved={saveMessages}
+      onOpenSidebar={shellNavigation.openMobile}
+    />
   );
 }
 
 function ChatConversation({
   conversationId,
-  conversationTitle,
   initialMessages,
   onMessagesSaved,
   onOpenSidebar,
 }: {
   conversationId: string;
-  conversationTitle: string | null;
   initialMessages: ChatMessage[];
   onMessagesSaved: (conversationId: string, messages: ChatMessage[]) => Promise<void>;
   onOpenSidebar: () => void;
 }) {
   const [input, setInput] = useState("");
+  const { preferences } = useAccountPreferences();
+  const { requestSignIn } = useAuthPrompt();
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [contextCollections, setContextCollections] = useState<Collection[]>([]);
   // Source inspection lives beside this conversation, so opening a citation
@@ -253,6 +352,8 @@ function ChatConversation({
   const uploadControllersRef = useRef(new Map<string, AbortController>());
   const positionedTurnRef = useRef<string | null>(null);
   const didInitialScrollRef = useRef(false);
+  const appliedKnowledgeLaunchRef = useRef<string | null>(null);
+  const handledIdentityRequestsRef = useRef(new Set<string>());
   const {
     messages,
     sendMessage,
@@ -288,9 +389,50 @@ function ChatConversation({
   ));
   const activeConnectorLabel = "permitted knowledge";
 
+  useEffect(() => {
+    for (const message of messages) {
+      for (const runtimeActivity of message.turn?.runtimeActivities ?? []) {
+        if (
+          runtimeActivity.toolName !== "request_identity"
+          || handledIdentityRequestsRef.current.has(runtimeActivity.callId)
+        ) continue;
+        handledIdentityRequestsRef.current.add(runtimeActivity.callId);
+        requestSignIn("Sign in to continue this governed action.");
+      }
+    }
+  }, [messages, requestSignIn]);
+
   useEffect(() => () => {
     for (const controller of uploadControllersRef.current.values()) controller.abort();
     uploadControllersRef.current.clear();
+  }, []);
+
+  // A collection workspace can hand a person back to Chat with one explicit
+  // scope. The authoritative collection list is fetched again here, so a URL
+  // never grants access and a revoked Collection is simply not attached.
+  useEffect(() => {
+    const parameters = new URLSearchParams(window.location.search);
+    const collectionId = parameters.get("collection");
+    const prompt = parameters.get("message")?.trim();
+    const launchKey = collectionId || (prompt ? `message:${prompt}` : "");
+    if (!launchKey || appliedKnowledgeLaunchRef.current === launchKey) return;
+    appliedKnowledgeLaunchRef.current = launchKey;
+    if (!collectionId) {
+      if (prompt) setInput(prompt);
+      return;
+    }
+    const controller = new AbortController();
+    void listCollections(controller.signal).then((collections) => {
+      if (controller.signal.aborted) return;
+      const collection = collections.find((candidate) => candidate.id === collectionId);
+      if (!collection) return;
+      setContextCollections([collection]);
+      if (prompt) setInput(prompt);
+    }).catch(() => {
+      // The chat composer retains its normal no-scope behavior when the
+      // selected Collection can no longer be read.
+    });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -471,26 +613,8 @@ function ChatConversation({
   const { hasMoreBelow, jumpToLatest } = useJumpToLatest(chatScrollRef, messageStackRef);
 
   return (
-    <section className={clsx("main-pane", activity && "main-pane--inspector-open")} id="main-content">
-      <header className="topbar">
-        <div className="topbar__left">
-          <button
-            aria-label="Open conversation sidebar"
-            className="topbar__menu"
-            onClick={onOpenSidebar}
-            type="button"
-          >
-            <Menu aria-hidden="true" size={18} />
-          </button>
-          <div className="topbar__title-wrap">
-            <span className="topbar__identity-mark"><ProductMark decorative size="sm" /></span>
-            <span className="topbar__title-copy">
-              <span className="topbar__eyebrow">Conversation</span>
-              <h1 title={conversationTitle ?? "New conversation"}>{conversationTitle ?? "New conversation"}</h1>
-            </span>
-          </div>
-        </div>
-      </header>
+    <section className={clsx("chat-main-pane chat-content-enter relative flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[var(--surface-base)]", activity && "chat-main-pane--inspector-open")}>
+      <button aria-label="Open conversation sidebar" className="chat-mobile-menu topbar__menu" onClick={onOpenSidebar} type="button"><Menu aria-hidden="true" size={18} /></button>
 
       <div
         className={clsx(
@@ -519,6 +643,7 @@ function ChatConversation({
                     onOpenSource={openSource}
                     onPreviewArtifact={previewArtifact}
                     onRegenerate={handleRegenerate}
+                    showAgentActivity={preferences.showAgentActivity}
                     stackRef={messageStackRef}
                   />
                 )}
@@ -533,7 +658,7 @@ function ChatConversation({
                 title="Jump to latest"
                 type="button"
               >
-                <ArrowDown aria-hidden="true" size={15} />
+                <ArrowDown aria-hidden="true" size={16} />
               </button>
             )}
 
@@ -547,6 +672,7 @@ function ChatConversation({
             <ChatComposer
               attachments={composerAttachments}
               contextCollections={contextCollections}
+              enterToSend={preferences.enterToSend}
               input={input}
               isConfigured={isConfigured}
               isStreaming={isStreaming}
@@ -580,6 +706,7 @@ function MessageList({
   onOpenSource,
   onPreviewArtifact,
   onRegenerate,
+  showAgentActivity,
   stackRef,
 }: {
   activeArtifactId?: string;
@@ -593,6 +720,7 @@ function MessageList({
   onOpenSource: (source: AnswerSource) => void;
   onPreviewArtifact: (artifact: TurnArtifact) => void;
   onRegenerate: (messageId: string) => void;
+  showAgentActivity: boolean;
   stackRef: RefObject<HTMLDivElement | null>;
 }) {
   return (
@@ -610,6 +738,7 @@ function MessageList({
           onOpenSource={onOpenSource}
           onPreviewArtifact={onPreviewArtifact}
           onRegenerate={onRegenerate}
+          showAgentActivity={showAgentActivity}
         />
       ))}
     </div>
@@ -627,6 +756,7 @@ const MessageView = memo(function MessageView({
   onOpenSource,
   onPreviewArtifact,
   onRegenerate,
+  showAgentActivity,
 }: {
   activeArtifactId?: string;
   activeCitationId?: string;
@@ -638,6 +768,7 @@ const MessageView = memo(function MessageView({
   onOpenSource: (source: AnswerSource) => void;
   onPreviewArtifact: (artifact: TurnArtifact) => void;
   onRegenerate: (messageId: string) => void;
+  showAgentActivity: boolean;
 }) {
   const { copy, copied } = useClipboard();
   // Collected once per message and shared by the inline chips and the summary
@@ -669,7 +800,7 @@ const MessageView = memo(function MessageView({
             <div className="message-attachments message-attachments--collections">
               {messageCollections.map((part) => (
                 <span className="message-attachment message-attachment--collection" key={part.data.id}>
-                  <LibraryBig aria-hidden="true" size={13} />
+                  <LibraryBig aria-hidden="true" size={14} />
                   <span title={part.data.title}>{part.data.title}</span>
                 </span>
               ))}
@@ -679,7 +810,7 @@ const MessageView = memo(function MessageView({
             <div className="message-attachments">
               {messageDocuments.map((part) => (
                 <span className="message-attachment" key={part.data.id}>
-                  <FileSearch aria-hidden="true" size={13} />
+                  <FileSearch aria-hidden="true" size={14} />
                   <span title={part.data.fileName}>{part.data.fileName}</span>
                 </span>
               ))}
@@ -699,6 +830,7 @@ const MessageView = memo(function MessageView({
           isStreaming={isStreaming}
           onOpenSource={onOpenSource}
           onRevealingChange={setIsRevealing}
+          showAgentActivity={showAgentActivity}
           sources={sources}
           turn={message.turn}
         />
@@ -755,32 +887,33 @@ function latestMessageId(messages: ChatMessage[], role: ChatMessage["role"]) {
 
 function reserveActiveTurnSpace(scroller: HTMLDivElement, stack: HTMLDivElement) {
   const reservedHeight = Math.max(240, scroller.clientHeight - 96);
-  stack.style.setProperty("--chat-active-fill", `${reservedHeight}px`);
+  stack.style.setProperty("--surface-selected", `${reservedHeight}px`);
 }
 
 function Welcome({ onSelect }: { onSelect: (text: string) => Promise<void> }) {
+  const name = "BoThesis";
   return (
     <div className="welcome">
       <div className="welcome__content">
-          <div className="welcome-hero">
-          <span className="welcome-hero__mark"><ProductMark decorative size="lg" /></span>
+        <div className="welcome-hero">
+          <span className="welcome-hero__mark"><WorkspaceMark name={name} size="lg" /></span>
           <div className="welcome-identity">
-            {appBrand.productName}
+            {name}
           </div>
           <div className="welcome-heading">
-            <h2>What can I help you accomplish?</h2>
+            <h2>What are you working on today?</h2>
           </div>
-          <p className="welcome-copy">Research your company knowledge, analyze a document, or turn trusted context into a clear next step.</p>
-          <div className="welcome-trust" aria-label="Assistant capabilities">
-            <span><ShieldCheck aria-hidden="true" size={14} /> Searches only content you can access</span>
-            <span><FileSearch aria-hidden="true" size={14} /> Keeps evidence with every answer</span>
-          </div>
+          <p className="welcome-copy">Search trusted workspace knowledge, analyze a file, or turn source material into a clear deliverable.</p>
         </div>
+        <p className="suggestions__label">Start with a focused task</p>
         <div className="suggestions">
-          {suggestions.map((suggestion) => (
-            <button className="suggestion" key={suggestion.title} onClick={() => void onSelect(suggestion.prompt)} type="button">
-              <span className="suggestion__icon"><suggestion.icon aria-hidden="true" size={17} /></span>
-              <span className="suggestion__copy"><span className="suggestion__title">{suggestion.title}</span><span className="suggestion__description">{suggestion.description}</span></span>
+          {suggestions.map(({ description, icon: Icon, prompt, title }) => (
+            <button className="suggestion" key={prompt} onClick={() => void onSelect(prompt)} type="button">
+              <span aria-hidden="true" className="suggestion__icon"><Icon size={16} /></span>
+              <span className="suggestion__copy">
+                <span className="suggestion__title">{title}</span>
+                <span className="suggestion__description">{description}</span>
+              </span>
             </button>
           ))}
         </div>

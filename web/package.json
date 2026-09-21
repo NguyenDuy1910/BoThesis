@@ -30,6 +30,7 @@
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
+    "playwright": "^1.63.0",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.9.3"
   }

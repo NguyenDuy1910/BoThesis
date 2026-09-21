@@ -95,6 +95,17 @@ class BaseSourceConnector(abc.ABC):
         """
         raise NotImplementedError("connector does not implement fetch_item")
 
+    @property
+    def refreshed_credentials(self) -> dict[str, Any] | None:
+        """Credentials this connector rotated while it was running, if any.
+
+        A connector that refreshes its own OAuth token holds the only copy of
+        the new secret until the run ends. Returning it here is how ingestion
+        writes it back; returning ``None`` means nothing changed.
+        """
+
+        return None
+
     async def fetch_chunks(self, item: DocumentItem) -> tuple[Chunk, ...] | None:
         """Return chunks already produced while fetching a document, if any."""
 

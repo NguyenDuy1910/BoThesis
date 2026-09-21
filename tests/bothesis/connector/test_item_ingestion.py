@@ -73,17 +73,17 @@ async def test_item_ingestion_owns_the_source_neutral_indexing_sequence(
         def __init__(self, _: object) -> None:
             pass
 
-        async def mark_processing(self, _: Any) -> None:
+        async def mark_index_processing(self, _: Any) -> None:
             events.append("processing")
 
         async def merge_metadata(self, _: Any, values: dict[str, Any]) -> None:
             assert values["processing"]["source"] == "test"
             events.append("metadata")
 
-        async def mark_ready(self, _: Any) -> None:
+        async def mark_index_ready(self, _: Any) -> None:
             events.append("ready")
 
-        async def mark_failed(self, _: Any) -> None:
+        async def mark_index_failed(self, _: Any) -> None:
             events.append("failed")
 
     class Citations:
@@ -159,10 +159,9 @@ def _access(user_id: Any, tenant_id: Any | None = None) -> AuthContext:
         email="person@example.test",
         display_name="Person",
         tenant_id=tenant_id,
-        role_id=uuid4() if tenant_id else None,
-        role_code="analyst" if tenant_id else None,
         permission_codes=("knowledge.read",) if tenant_id else (),
         group_ids=(),
+        role_codes=("analyst",) if tenant_id else (),
     )
 
 
@@ -186,6 +185,7 @@ def _document(
         mime_type=content_type,
         size_bytes=size_bytes,
         status=status,
+        index_status="pending",
         metadata_={"file_name": "sample", "processing": processing}
         if processing
         else {"file_name": "sample"},
@@ -206,6 +206,7 @@ def test_upload_limits_reject_oversize_objects() -> None:
         object_storage=cast(Any, SimpleNamespace()),
         ingestion_service=cast(Any, SimpleNamespace()),
         document_source=cast(Any, SimpleNamespace()),
+        workflows=cast(Any, SimpleNamespace()),
         max_upload_bytes=100,
     )
 

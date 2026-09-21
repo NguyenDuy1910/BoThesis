@@ -43,12 +43,15 @@ class ItemResourceResolver:
             "mime_type": item.mime_type or "application/octet-stream",
             "size_bytes": item.size_bytes,
             "kind": "image" if (item.mime_type or "").startswith("image/") else "file",
+            "index_status": item.index_status,
         }
 
     async def read(self, resource: ResourceRef, *, max_characters: int) -> str:
         if max_characters < 1:
             raise ValueError("resource read limit must be greater than zero")
         item = await self._item(resource)
+        if item.upload is not None and item.upload.status != "available":
+            raise DocumentProcessingError("resource content is not available")
         canonical = await self._content.canonicalize(item, access=self._access)
         text = canonical.item.get_text_content().strip()
         limit = min(max_characters, self._max_read_characters)

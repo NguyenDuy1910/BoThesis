@@ -18,6 +18,8 @@ from bothesis.agent.models import AgentContext, ConversationArtifact
 from bothesis.db.engine import SessionFactory
 from bothesis.db.models import ArtifactRevision, Item
 from bothesis.services import (
+    COLLECTION_READ_PERMISSION,
+    COLLECTION_UPDATE_PERMISSION,
     ARTIFACT_COLLECTION_KIND,
     ARTIFACT_COLLECTION_TITLE,
     ARTIFACT_DOCUMENT_TYPE,
@@ -27,10 +29,11 @@ from bothesis.services import (
     AuthContext,
     DocumentNotFoundError,
     require_tenant_permission,
+    require_user_identity,
     timestamp,
 )
 from bothesis.services.audit import AuditService
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.document_upload import DocumentUploadService
 from bothesis.services.identity_access.identity_store import resolve_agent_access
 from bothesis.services.item import ItemService
@@ -220,7 +223,7 @@ class ArtifactService:
 
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         async with self._sessions() as session:
-            source = await CollectionAccessService(session).require_item_access(
+            source = await AuthorizationService(session).require_item(
                 document_id, access=access
             )
             if source.item_type != "document" or not source.storage_key:
@@ -337,11 +340,12 @@ class ArtifactService:
         Collection it lands in.
         """
 
+        require_user_identity(access)
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         item, current = await self._load(access, artifact_id)
         async with self._sessions() as session:
-            target = await CollectionAccessService(session).require_item_access(
-                collection_id, access=access, minimum_role="editor"
+            target = await AuthorizationService(session).require_item(
+                collection_id, access=access, permission=COLLECTION_UPDATE_PERMISSION
             )
             if target.item_type != "collection":
                 raise ArtifactValidationError("the destination must be a Collection")
@@ -429,15 +433,16 @@ class ArtifactService:
         request_id: str | None,
         source_document_id: UUID | None,
     ) -> dict[str, Any]:
+        user_id = require_user_identity(access)
         item_id = uuid4()
         key = _revision_key(tenant_id, item_id, 1, document.file_name)
         await self._store_revision_objects(document, key)
         async with self._sessions.begin() as session:
             items = ItemService(session)
             collection_id = await items.ensure_personal_collection(
-                access.user_id,
+                user_id,
                 tenant_id,
-                collection_id=ItemService.artifact_collection_id(tenant_id, access.user_id),
+                collection_id=ItemService.artifact_collection_id(tenant_id, user_id),
                 title=ARTIFACT_COLLECTION_TITLE,
                 system_kind=ARTIFACT_COLLECTION_KIND,
             )
@@ -446,7 +451,7 @@ class ArtifactService:
                 parent_item_id=collection_id,
                 title=title,
                 document_type=_document_type(document.mime_type),
-                created_by_user_id=access.user_id,
+                created_by_user_id=user_id,
                 mime_type=document.mime_type,
                 size_bytes=len(document.data),
                 storage_key=key,
@@ -472,7 +477,7 @@ class ArtifactService:
                 summary=summary,
                 conversation_id=conversation_id,
                 request_id=request_id,
-                created_by_user_id=access.user_id,
+                created_by_user_id=user_id,
             )
             session.add(revision)
             await session.flush()
@@ -501,6 +506,7 @@ class ArtifactService:
         conversation_id: UUID | None,
         request_id: str | None,
     ) -> dict[str, Any]:
+        user_id = require_user_identity(access)
         async with self._sessions.begin() as session:
             item = await session.get(Item, item_id, with_for_update=True)
             if item is None or item.status == "deleted" or item.deleted_at is not None:
@@ -518,7 +524,7 @@ class ArtifactService:
                 summary=summary,
                 conversation_id=conversation_id,
                 request_id=request_id,
-                created_by_user_id=access.user_id,
+                created_by_user_id=user_id,
             )
             session.add(revision)
             item.storage_key = key
@@ -553,11 +559,15 @@ class ArtifactService:
         )
 
     async def _load(
-        self, access: AuthContext, artifact_id: UUID, *, minimum_role: str = "viewer"
+        self,
+        access: AuthContext,
+        artifact_id: UUID,
+        *,
+        permission: str = COLLECTION_READ_PERMISSION,
     ) -> tuple[Item, ArtifactRevision]:
         async with self._sessions() as session:
             item = await self._authorized_item(
-                session, access, artifact_id, minimum_role=minimum_role
+                session, access, artifact_id, permission=permission
             )
             revisions = await self._revisions(session, item.id)
             return item, revisions[-1]
@@ -568,10 +578,10 @@ class ArtifactService:
         access: AuthContext,
         artifact_id: UUID,
         *,
-        minimum_role: str = "viewer",
+        permission: str = COLLECTION_READ_PERMISSION,
     ) -> Item:
-        item = await CollectionAccessService(session).require_item_access(
-            artifact_id, access=access, minimum_role=minimum_role
+        item = await AuthorizationService(session).require_item(
+            artifact_id, access=access, permission=permission
         )
         if item.item_type != "document" or not isinstance(
             item.metadata_.get("artifact"), Mapping

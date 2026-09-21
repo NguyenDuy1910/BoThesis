@@ -51,7 +51,7 @@ export const AnswerSources = memo(function AnswerSources({
                   target="_blank"
                   title="Open original source"
                 >
-                  <ExternalLink aria-hidden="true" size={11} />
+                  <ExternalLink aria-hidden="true" size={12} />
                 </a>
               )}
             </span>

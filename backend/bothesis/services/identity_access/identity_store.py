@@ -13,21 +13,31 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from bothesis.db.engine import SessionFactory
 from bothesis.db.models import (
+    AuthIdentity,
     Group,
     GroupMembership,
+    Item,
+    Permission,
     Role,
+    RoleAssignment,
+    RolePermission,
     Tenant,
     TenantMembership,
     User,
 )
 from bothesis.services import (
     ACTIVE_STATUS,
+    PERMISSIONS_BY_CODE,
+    PERMISSION_CATALOG,
+    PLATFORM_SCOPE,
+    SYSTEM_ROLES,
+    TENANT_SCOPE,
     AuthContext,
     AuthorizationError,
     IdentityConflictError,
@@ -48,10 +58,13 @@ class IdentityStoreService:
         self,
         email: str,
         *,
+        username: str | None = None,
+        password_hash: str | None = None,
         display_name: str | None = None,
         preferences: Mapping[str, Any] | None = None,
     ) -> User:
         normalized_email = _normalize_email(email)
+        normalized_username = _optional_username(username)
         existing = await self._session.scalar(
             select(User.id).where(User.email == normalized_email)
         )
@@ -59,9 +72,17 @@ class IdentityStoreService:
             raise IdentityConflictError(
                 f"user email already exists: {normalized_email}"
             )
+        if normalized_username is not None:
+            existing_username = await self._session.scalar(
+                select(User.id).where(func.lower(User.username) == normalized_username)
+            )
+            if existing_username is not None:
+                raise IdentityConflictError("username is already in use")
 
         user = User(
+            username=normalized_username,
             email=normalized_email,
+            password_hash=password_hash,
             display_name=_optional_text(display_name, "display name", 255),
             preferences=dict(preferences or {}),
         )
@@ -69,9 +90,50 @@ class IdentityStoreService:
         await self._session.flush()
         return user
 
+    async def get_auth_identity(
+        self, issuer: str, subject: str, *, include_disabled: bool = False
+    ) -> AuthIdentity:
+        identity = await self._session.scalar(
+            select(AuthIdentity).where(
+                AuthIdentity.issuer == _required_text(issuer, "identity issuer", 2048),
+                AuthIdentity.subject == _required_text(subject, "identity subject", 2048),
+            )
+        )
+        if identity is None or (not include_disabled and identity.status != ACTIVE_STATUS):
+            raise IdentityNotFoundError("external identity not found")
+        return identity
+
+    async def create_auth_identity(
+        self,
+        user_id: UUID,
+        *,
+        protocol: str,
+        provider_key: str,
+        issuer: str,
+        subject: str,
+        email: str | None,
+        email_verified: bool | None,
+        profile: Mapping[str, Any] | None = None,
+    ) -> AuthIdentity:
+        await self.get_user(user_id)
+        identity = AuthIdentity(
+            user_id=user_id,
+            protocol=_required_text(protocol, "identity protocol", 24).casefold(),
+            provider_key=_required_text(provider_key, "identity provider", 64).casefold(),
+            issuer=_required_text(issuer, "identity issuer", 2048),
+            subject=_required_text(subject, "identity subject", 2048),
+            email=_normalize_email(email) if email is not None else None,
+            email_verified=email_verified,
+            profile=dict(profile or {}),
+            last_authenticated_at=datetime.now(UTC),
+        )
+        self._session.add(identity)
+        await self._session.flush()
+        return identity
+
     async def get_user(self, user_id: UUID, *, include_inactive: bool = False) -> User:
         user = await self._session.get(User, user_id)
-        if user is None or (not include_inactive and user.status != ACTIVE_STATUS):
+        if user is None or (not include_inactive and not user.status):
             raise IdentityNotFoundError(f"user not found: {user_id}")
         return user
 
@@ -84,7 +146,23 @@ class IdentityStoreService:
         user = await self._session.scalar(
             select(User).where(User.email == _normalize_email(email))
         )
-        if user is None or (not include_inactive and user.status != ACTIVE_STATUS):
+        if user is None or (not include_inactive and not user.status):
+            raise IdentityNotFoundError("user not found")
+        return user
+
+    async def get_user_by_username(
+        self,
+        username: str,
+        *,
+        include_inactive: bool = False,
+    ) -> User:
+        normalized = _optional_username(username)
+        if normalized is None:
+            raise IdentityNotFoundError("user not found")
+        user = await self._session.scalar(
+            select(User).where(func.lower(User.username) == normalized)
+        )
+        if user is None or (not include_inactive and not user.status):
             raise IdentityNotFoundError("user not found")
         return user
 
@@ -103,9 +181,9 @@ class IdentityStoreService:
         await self._session.flush()
         return user
 
-    async def set_user_status(self, user_id: UUID, status: str) -> User:
+    async def set_user_status(self, user_id: UUID, status: bool) -> User:
         user = await self.get_user(user_id, include_inactive=True)
-        user.status = _required_text(status, "user status", 16).casefold()
+        user.status = status
         await self._session.flush()
         return user
 
@@ -115,6 +193,7 @@ class IdentityStoreService:
         name: str,
         *,
         settings: Mapping[str, Any] | None = None,
+        visibility: str = "private",
     ) -> Tenant:
         normalized_code = _normalize_code(code, "tenant code")
         existing = await self._session.scalar(
@@ -128,8 +207,11 @@ class IdentityStoreService:
         tenant = Tenant(
             code=normalized_code,
             name=_required_text(name, "tenant name", 255),
+            visibility=visibility,
             settings=dict(settings or {}),
         )
+        if visibility == "public":
+            tenant.public_access_role_id = await self._public_role_id()
         self._session.add(tenant)
         await self._session.flush()
         return tenant
@@ -166,6 +248,64 @@ class IdentityStoreService:
         await self._session.flush()
         return tenant
 
+    async def sync_system_roles(self) -> None:
+        """Make the database match the permission and system-role catalogs.
+
+        Permissions and platform-defined roles are product definitions, not
+        tenant data, so they are declared in code and reconciled here. Running
+        this again is safe, and is how a new capability reaches deployed roles.
+        """
+
+        for permission in PERMISSION_CATALOG:
+            await self._session.execute(
+                insert(Permission)
+                .values(
+                    code=permission.code,
+                    description=permission.description,
+                    scope_types=sorted(permission.scopes),
+                )
+                .on_conflict_do_update(
+                    index_elements=[Permission.code],
+                    set_={
+                        "description": permission.description,
+                        "scope_types": sorted(permission.scopes),
+                    },
+                )
+            )
+        for definition in SYSTEM_ROLES:
+            role_id = await self._session.scalar(
+                insert(Role)
+                .values(
+                    tenant_id=None,
+                    code=definition.code,
+                    display_name=definition.display_name,
+                    scope_type=definition.scope_type,
+                    is_system=True,
+                    status=ACTIVE_STATUS,
+                )
+                .on_conflict_do_update(
+                    index_elements=[Role.tenant_id, Role.code],
+                    set_={
+                        "display_name": definition.display_name,
+                        "scope_type": definition.scope_type,
+                        "status": ACTIVE_STATUS,
+                        "updated_at": datetime.now(UTC),
+                    },
+                )
+                .returning(Role.id)
+            )
+            await self._replace_role_permissions(role_id, definition.permission_codes)
+            if definition.code == "guest":
+                await self._session.execute(
+                    Tenant.__table__.update()
+                    .where(
+                        Tenant.visibility == "public",
+                        Tenant.public_access_role_id.is_(None),
+                    )
+                    .values(public_access_role_id=role_id)
+                )
+        await self._session.flush()
+
     async def create_role(
         self,
         tenant_id: UUID,
@@ -174,26 +314,33 @@ class IdentityStoreService:
         *,
         permission_codes: Iterable[str] = (),
     ) -> Role:
+        """Define a tenant-owned role. Platform and Collection roles are system roles."""
+
         await self.get_tenant(tenant_id)
         normalized_code = _normalize_code(code, "role code")
-        existing = await self._session.scalar(
+        conflict = await self._session.scalar(
             select(Role.id).where(
-                Role.tenant_id == tenant_id,
+                or_(Role.tenant_id == tenant_id, Role.tenant_id.is_(None)),
                 Role.code == normalized_code,
             )
         )
-        if existing is not None:
+        if conflict is not None:
             raise IdentityConflictError(
-                f"role code already exists in tenant: {normalized_code}"
+                f"role code is already in use: {normalized_code}"
             )
 
         role = Role(
             tenant_id=tenant_id,
             code=normalized_code,
             display_name=_required_text(display_name, "role display name", 255),
-            permission_codes=_normalize_codes(permission_codes, "permission code"),
+            scope_type=TENANT_SCOPE,
+            is_system=False,
         )
         self._session.add(role)
+        await self._session.flush()
+        await self._replace_role_permissions(
+            role.id, _tenant_permissions(permission_codes)
+        )
         await self._session.flush()
         return role
 
@@ -206,7 +353,7 @@ class IdentityStoreService:
     ) -> Role:
         statement = select(Role).where(
             Role.id == role_id,
-            Role.tenant_id == tenant_id,
+            or_(Role.tenant_id == tenant_id, Role.tenant_id.is_(None)),
         )
         if not include_inactive:
             statement = statement.where(Role.status == ACTIVE_STATUS)
@@ -221,12 +368,82 @@ class IdentityStoreService:
         *,
         include_inactive: bool = False,
     ) -> list[Role]:
+        """Return the roles assignable inside one tenant, system roles included."""
+
         await self.get_tenant(tenant_id, include_inactive=include_inactive)
-        statement = select(Role).where(Role.tenant_id == tenant_id)
+        statement = select(Role).where(
+            Role.scope_type == TENANT_SCOPE,
+            or_(Role.tenant_id == tenant_id, Role.tenant_id.is_(None)),
+        )
         if not include_inactive:
             statement = statement.where(Role.status == ACTIVE_STATUS)
         result = await self._session.scalars(statement.order_by(Role.code))
         return list(result)
+
+    async def role_permissions(self, role_id: UUID) -> tuple[str, ...]:
+        codes = await self._session.scalars(
+            select(RolePermission.permission_code)
+            .where(RolePermission.role_id == role_id, RolePermission.deleted_at.is_(None))
+            .order_by(RolePermission.permission_code)
+        )
+        return tuple(codes)
+
+    async def _public_role_id(self) -> UUID:
+        role_id = await self._session.scalar(
+            select(Role.id).where(
+                Role.code == "guest",
+                Role.scope_type == TENANT_SCOPE,
+                Role.status == ACTIVE_STATUS,
+                Role.tenant_id.is_(None),
+            )
+        )
+        if role_id is None:
+            raise IdentityNotFoundError(
+                "public access role is missing; run the system role sync"
+            )
+        return role_id
+
+    async def public_access(
+        self, tenant: Tenant
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Resolve baseline permissions without manufacturing a principal grant."""
+
+        if tenant.visibility != "public" or tenant.public_access_role_id is None:
+            raise AuthorizationError("tenant does not allow public access")
+        role = await self._session.scalar(
+            select(Role).where(
+                Role.id == tenant.public_access_role_id,
+                Role.scope_type == TENANT_SCOPE,
+                Role.status == ACTIVE_STATUS,
+                or_(Role.tenant_id.is_(None), Role.tenant_id == tenant.id),
+            )
+        )
+        if role is None:
+            raise AuthorizationError("tenant public access role is unavailable")
+        return (role.code,), await self.role_permissions(role.id)
+
+    async def permissions_for_roles(
+        self, role_ids: Iterable[UUID]
+    ) -> dict[UUID, tuple[str, ...]]:
+        """Read several roles' permissions in one query, for list endpoints."""
+
+        wanted = list(role_ids)
+        if not wanted:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(RolePermission.role_id, RolePermission.permission_code)
+                .where(
+                    RolePermission.role_id.in_(wanted),
+                    RolePermission.deleted_at.is_(None),
+                )
+                .order_by(RolePermission.permission_code)
+            )
+        ).all()
+        held: dict[UUID, list[str]] = {role_id: [] for role_id in wanted}
+        for role_id, code in rows:
+            held[role_id].append(code)
+        return {role_id: tuple(codes) for role_id, codes in held.items()}
 
     async def update_role(
         self,
@@ -237,11 +454,13 @@ class IdentityStoreService:
         permission_codes: Iterable[str] | None = None,
     ) -> Role:
         role = await self.get_role(tenant_id, role_id, include_inactive=True)
+        if role.is_system:
+            raise AuthorizationError("a platform-defined role cannot be edited")
         if display_name is not None:
             role.display_name = _required_text(display_name, "role display name", 255)
         if permission_codes is not None:
-            role.permission_codes = _normalize_codes(
-                permission_codes, "permission code"
+            await self._replace_role_permissions(
+                role.id, _tenant_permissions(permission_codes)
             )
         await self._session.flush()
         return role
@@ -253,19 +472,42 @@ class IdentityStoreService:
         status: str,
     ) -> Role:
         role = await self.get_role(tenant_id, role_id, include_inactive=True)
+        if role.is_system:
+            raise AuthorizationError("a platform-defined role cannot be disabled")
         role.status = _required_text(status, "role status", 16).casefold()
         await self._session.flush()
         return role
+
+    async def _replace_role_permissions(
+        self, role_id: UUID, permission_codes: Iterable[str]
+    ) -> None:
+        """Make the role carry exactly these permissions, tombstoning the rest."""
+
+        wanted = set(permission_codes)
+        held = list(
+            await self._session.scalars(
+                select(RolePermission).where(RolePermission.role_id == role_id)
+            )
+        )
+        now = datetime.now(UTC)
+        for grant in held:
+            if grant.permission_code in wanted:
+                grant.deleted_at = None
+            elif grant.deleted_at is None:
+                grant.deleted_at = now
+        for code in wanted - {grant.permission_code for grant in held}:
+            self._session.add(RolePermission(role_id=role_id, permission_code=code))
+        await self._session.flush()
 
     async def assign_membership(
         self,
         user_id: UUID,
         tenant_id: UUID,
-        role_id: UUID,
     ) -> TenantMembership:
+        """Record that a user belongs to a tenant. Roles are assigned separately."""
+
         await self.get_user(user_id)
         await self.get_tenant(tenant_id)
-        await self.get_role(tenant_id, role_id)
 
         membership = await self._session.get(
             TenantMembership, {"user_id": user_id, "tenant_id": tenant_id}
@@ -274,12 +516,10 @@ class IdentityStoreService:
             membership = TenantMembership(
                 user_id=user_id,
                 tenant_id=tenant_id,
-                role_id=role_id,
                 joined_at=datetime.now(UTC),
             )
             self._session.add(membership)
         else:
-            membership.role_id = role_id
             membership.status = ACTIVE_STATUS
             membership.joined_at = membership.joined_at or datetime.now(UTC)
             membership.deleted_at = None
@@ -294,59 +534,92 @@ class IdentityStoreService:
             raise IdentityNotFoundError(f"membership not found for user: {user_id}")
         if membership.deleted_at is not None:
             return
+        now = datetime.now(UTC)
         membership.status = INACTIVE_STATUS
-        membership.deleted_at = datetime.now(UTC)
+        membership.deleted_at = now
+        # Losing membership loses every role held inside that tenant, so a
+        # readmitted member never silently regains yesterday's access.
+        tenant_collections = select(Item.id).where(
+            Item.tenant_id == membership.tenant_id
+        )
+        assignments = await self._session.scalars(
+            select(RoleAssignment).where(
+                RoleAssignment.user_id == user_id,
+                RoleAssignment.deleted_at.is_(None),
+                or_(
+                    RoleAssignment.tenant_id == membership.tenant_id,
+                    RoleAssignment.item_id.in_(tenant_collections),
+                ),
+            )
+        )
+        for assignment in assignments:
+            assignment.deleted_at = now
         await self._session.flush()
 
     async def get_context(
         self, user_id: UUID, *, tenant_id: UUID | None = None
     ) -> AuthContext:
-        user = await self._session.scalar(
-            select(User)
-            .options(
-                selectinload(User.tenant_memberships).joinedload(TenantMembership.tenant),
-                selectinload(User.tenant_memberships).joinedload(TenantMembership.role),
-            )
-            .where(User.id == user_id)
-            .execution_options(populate_existing=True)
-        )
+        """Resolve what the caller may do, fail-closed, from durable grants only."""
+
+        user = await self._session.get(User, user_id)
         if user is None:
             raise IdentityNotFoundError(f"user not found: {user_id}")
-        if user.status != ACTIVE_STATUS:
+        if not user.status:
             raise IdentityInactiveError(f"user is not active: {user_id}")
-
-        memberships = [
-            value
-            for value in user.tenant_memberships
-            if value.deleted_at is None
-            and (tenant_id is None or value.tenant_id == tenant_id)
-        ]
+        memberships = list(
+            await self._session.scalars(
+                select(TenantMembership).where(
+                    TenantMembership.user_id == user_id,
+                    TenantMembership.deleted_at.is_(None),
+                    *(
+                        (TenantMembership.tenant_id == tenant_id,)
+                        if tenant_id is not None
+                        else ()
+                    ),
+                )
+            )
+        )
         if tenant_id is None and len(memberships) > 1:
             raise AuthorizationError("tenant ID is required for a multi-tenant user")
         membership = memberships[0] if memberships else None
-        if membership is None or membership.deleted_at is not None:
+        if membership is None:
             if tenant_id is not None:
-                raise AuthorizationError("user is not a member of the requested tenant")
+                tenant = await self.get_tenant(tenant_id, include_inactive=True)
+                if tenant.status != ACTIVE_STATUS:
+                    raise IdentityInactiveError(f"tenant is not active: {tenant_id}")
+                if tenant.visibility != "public":
+                    raise AuthorizationError(
+                        f"user is not a member of tenant: {tenant_id}"
+                    )
+                role_codes, permission_codes = await self.public_access(tenant)
+                _, platform_permissions = await self._grants(user_id, None, ())
+                return AuthContext(
+                    user_id=user.id,
+                    email=user.email,
+                    display_name=user.display_name,
+                    tenant_id=tenant.id,
+                    permission_codes=permission_codes,
+                    group_ids=(),
+                    role_codes=role_codes,
+                    platform_permissions=platform_permissions,
+                )
+            _, platform_permissions = await self._grants(user_id, None, ())
             return AuthContext(
                 user_id=user.id,
                 email=user.email,
                 display_name=user.display_name,
                 tenant_id=None,
-                role_id=None,
-                role_code=None,
                 permission_codes=(),
                 group_ids=(),
+                role_codes=(),
+                platform_permissions=platform_permissions,
             )
 
         if membership.status != ACTIVE_STATUS:
             raise IdentityInactiveError(f"membership is not active: {user_id}")
-        if membership.tenant.status != ACTIVE_STATUS:
+        tenant = await self.get_tenant(membership.tenant_id, include_inactive=True)
+        if tenant.status != ACTIVE_STATUS:
             raise IdentityInactiveError(f"tenant is not active: {membership.tenant_id}")
-        if membership.role.status != ACTIVE_STATUS:
-            raise IdentityInactiveError(f"role is not active: {membership.role_id}")
-        if membership.role.tenant_id != membership.tenant_id:
-            raise AuthorizationError("membership role belongs to a different tenant")
-
         group_ids = tuple(
             await self._session.scalars(
                 select(Group.id)
@@ -362,54 +635,159 @@ class IdentityStoreService:
                 .order_by(Group.id)
             )
         )
-
+        tenant_grants, platform_permissions = await self._grants(
+            user_id, membership.tenant_id, group_ids
+        )
+        role_codes, permission_codes = tenant_grants
+        if tenant.visibility == "public":
+            public_roles, public_permissions = await self.public_access(tenant)
+            role_codes = tuple(sorted(set(role_codes) | set(public_roles)))
+            permission_codes = tuple(
+                sorted(set(permission_codes) | set(public_permissions))
+            )
         return AuthContext(
             user_id=user.id,
             email=user.email,
             display_name=user.display_name,
             tenant_id=membership.tenant_id,
-            role_id=membership.role_id,
-            role_code=membership.role.code,
-            permission_codes=tuple(sorted(set(membership.role.permission_codes))),
+            permission_codes=permission_codes,
             group_ids=group_ids,
+            role_codes=role_codes,
+            platform_permissions=platform_permissions,
+        )
+
+    async def _grants(
+        self,
+        user_id: UUID,
+        tenant_id: UUID | None,
+        group_ids: tuple[UUID, ...],
+    ) -> tuple[tuple[tuple[str, ...], tuple[str, ...]], tuple[str, ...]]:
+        """Read tenant-scope and platform-scope grants in one query.
+
+        Direct and group-held assignments are resolved identically: a group is
+        a principal, not a second kind of permission.
+        """
+
+        principal = RoleAssignment.user_id == user_id
+        if group_ids:
+            principal = or_(principal, RoleAssignment.group_id.in_(group_ids))
+        platform_scope = and_(
+            RoleAssignment.tenant_id.is_(None), RoleAssignment.item_id.is_(None)
+        )
+        scope = (
+            or_(platform_scope, RoleAssignment.tenant_id == tenant_id)
+            if tenant_id is not None
+            else platform_scope
+        )
+        rows = (
+            await self._session.execute(
+                select(Role.scope_type, Role.code, RolePermission.permission_code)
+                .join(RoleAssignment, RoleAssignment.role_id == Role.id)
+                .join(RolePermission, RolePermission.granted_by(Role.id))
+                .where(
+                    Role.status == ACTIVE_STATUS,
+                    RoleAssignment.deleted_at.is_(None),
+                    principal,
+                    scope,
+                )
+            )
+        ).all()
+        role_codes: set[str] = set()
+        permissions: set[str] = set()
+        platform_permissions: set[str] = set()
+        for scope_type, role_code, permission_code in rows:
+            if scope_type == PLATFORM_SCOPE:
+                platform_permissions.add(permission_code)
+                continue
+            role_codes.add(role_code)
+            permissions.add(permission_code)
+        return (
+            (tuple(sorted(role_codes)), tuple(sorted(permissions))),
+            tuple(sorted(platform_permissions)),
         )
 
     async def list_active_tenant_memberships(
         self, user_id: UUID
     ) -> tuple[TenantMembershipSummary, ...]:
-        """Return only memberships that may be selected as an active tenant."""
+        """Return workspaces the user may select as an active tenant."""
 
         await self.get_user(user_id)
-        rows = (
-            await self._session.execute(
-                select(TenantMembership, Tenant, Role)
-                .join(Tenant, Tenant.id == TenantMembership.tenant_id)
-                .join(
-                    Role,
-                    Role.id == TenantMembership.role_id,
-                )
+        tenants = list(
+            await self._session.scalars(
+                select(Tenant)
+                .join(TenantMembership, TenantMembership.tenant_id == Tenant.id)
                 .where(
                     TenantMembership.user_id == user_id,
                     TenantMembership.status == ACTIVE_STATUS,
                     TenantMembership.deleted_at.is_(None),
                     Tenant.status == ACTIVE_STATUS,
-                    Role.status == ACTIVE_STATUS,
-                    Role.tenant_id == TenantMembership.tenant_id,
                 )
                 .order_by(Tenant.created_at, Tenant.id)
             )
-        ).all()
+        )
+        if not tenants:
+            return ()
+        grants = await self._tenant_grants_by_tenant(user_id)
         return tuple(
             TenantMembershipSummary(
                 tenant_id=tenant.id,
                 tenant_code=tenant.code,
                 tenant_name=tenant.name,
-                role_id=role.id,
-                role_code=role.code,
-                permissions=tuple(sorted(set(role.permission_codes))),
+                role_codes=grants.get(tenant.id, ((), ()))[0],
+                permissions=grants.get(tenant.id, ((), ()))[1],
             )
-            for _, tenant, role in rows
+            for tenant in tenants
         )
+
+    async def _tenant_grants_by_tenant(
+        self, user_id: UUID
+    ) -> dict[UUID, tuple[tuple[str, ...], tuple[str, ...]]]:
+        """Read every tenant-scope grant the user holds, across all workspaces."""
+
+        held_group = (
+            select(GroupMembership.group_id)
+            .join(Group, Group.id == GroupMembership.group_id)
+            .where(
+                GroupMembership.user_id == user_id,
+                GroupMembership.status == ACTIVE_STATUS,
+                GroupMembership.deleted_at.is_(None),
+                Group.status == ACTIVE_STATUS,
+                Group.deleted_at.is_(None),
+            )
+        )
+        rows = (
+            await self._session.execute(
+                select(
+                    RoleAssignment.tenant_id,
+                    Role.code,
+                    RolePermission.permission_code,
+                )
+                .join(RoleAssignment, RoleAssignment.role_id == Role.id)
+                .join(RolePermission, RolePermission.granted_by(Role.id))
+                .where(
+                    Role.status == ACTIVE_STATUS,
+                    Role.scope_type == TENANT_SCOPE,
+                    RoleAssignment.deleted_at.is_(None),
+                    RoleAssignment.tenant_id.is_not(None),
+                    or_(
+                        RoleAssignment.user_id == user_id,
+                        RoleAssignment.group_id.in_(held_group),
+                    ),
+                )
+            )
+        ).all()
+        codes: dict[UUID, set[str]] = {}
+        permissions: dict[UUID, set[str]] = {}
+        for tenant_id, role_code, permission_code in rows:
+            codes.setdefault(tenant_id, set()).add(role_code)
+            permissions.setdefault(tenant_id, set()).add(permission_code)
+        return {
+            tenant_id: (
+                tuple(sorted(codes[tenant_id])),
+                tuple(sorted(permissions.get(tenant_id, set()))),
+            )
+            for tenant_id in codes
+        }
 
     async def require_permissions(
         self,
@@ -474,12 +852,15 @@ def _normalize_code(value: str, field_name: str, max_length: int = 64) -> str:
     return _required_text(value, field_name, max_length).casefold()
 
 
-def _normalize_codes(
-    values: Iterable[str],
-    field_name: str,
-    max_length: int = 64,
-) -> list[str]:
-    return sorted({_normalize_code(value, field_name, max_length) for value in values})
+def _tenant_permissions(values: Iterable[str]) -> list[str]:
+    """Keep a tenant-defined role to capabilities a tenant may actually hold."""
+
+    codes = sorted({_normalize_code(value, "permission code") for value in values})
+    for code in codes:
+        permission = PERMISSIONS_BY_CODE.get(code)
+        if permission is None or TENANT_SCOPE not in permission.scopes:
+            raise ValueError(f"unknown tenant permission code: {code}")
+    return codes
 
 
 def _required_text(value: str, field_name: str, max_length: int) -> str:
@@ -488,6 +869,17 @@ def _required_text(value: str, field_name: str, max_length: int) -> str:
         raise ValueError(f"{field_name} must not be blank")
     if len(normalized) > max_length:
         raise ValueError(f"{field_name} must be at most {max_length} characters")
+    return normalized
+
+
+def _optional_username(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().casefold()
+    if not 3 <= len(normalized) <= 64:
+        raise ValueError("username must be between 3 and 64 characters")
+    if not all(character.isalnum() or character in "._-" for character in normalized):
+        raise ValueError("username contains unsupported characters")
     return normalized
 
 

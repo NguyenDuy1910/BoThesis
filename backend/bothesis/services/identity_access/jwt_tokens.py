@@ -30,23 +30,39 @@ class JwtTokenService:
         self._audience = audience
         self._expires_in_seconds = expires_in_seconds
 
-    def issue(self, context: AuthContext) -> tuple[str, datetime]:
+    @property
+    def expires_in_seconds(self) -> int:
+        return self._expires_in_seconds
+
+    def issue(
+        self,
+        context: AuthContext,
+        *,
+        expires_in_seconds: int | None = None,
+    ) -> tuple[str, datetime]:
         """Sign an access token for one already-authorized active tenant."""
 
         if context.tenant_id is None:
             raise AuthenticationError("an active tenant is required to issue a token")
+        if context.session_id is None:
+            raise AuthenticationError("an access session is required to issue a token")
         secret = self._secret_or_error()
         issued_at = int(time.time())
-        expires_at = issued_at + self._expires_in_seconds
+        expires_at = issued_at + (expires_in_seconds or self._expires_in_seconds)
         header = {"alg": "HS256", "typ": "JWT"}
         payload = {
             "iss": self._issuer,
             "aud": self._audience,
-            "sub": str(context.user_id),
-            "user_id": str(context.user_id),
+            # Token subject identifies revocable access session, never durable User.
+            "sub": f"session:{context.session_id}",
+            "session_id": str(context.session_id),
+            "user_id": str(context.user_id) if context.user_id is not None else None,
             "email": context.email,
             "active_tenant_id": str(context.tenant_id),
             "permissions": list(context.permission_codes),
+            "platform_permissions": list(context.platform_permissions),
+            "session_kind": context.session_kind,
+            "token_version": context.token_version,
             "iat": issued_at,
             "exp": expires_at,
             "jti": str(uuid4()),
@@ -116,18 +132,45 @@ def _claims_from_payload(
     if payload.get("iss") != issuer or payload.get("aud") != audience:
         raise AuthenticationError("access token issuer or audience is invalid")
     try:
-        user_id = UUID(_string_claim(payload, "user_id"))
+        session_id = UUID(_string_claim(payload, "session_id"))
         tenant_id = UUID(_string_claim(payload, "active_tenant_id"))
     except ValueError as exc:
         raise AuthenticationError("access token has an invalid identifier") from exc
-    if payload.get("sub") != str(user_id):
-        raise AuthenticationError("access token subject is invalid")
+    user_value = payload.get("user_id")
+    try:
+        user_id = UUID(user_value) if isinstance(user_value, str) and user_value else None
+    except ValueError as exc:
+        raise AuthenticationError("access token user is invalid") from exc
     permissions_value = payload.get("permissions")
     if not isinstance(permissions_value, list) or not all(
         isinstance(value, str) and value.strip() for value in permissions_value
     ):
         raise AuthenticationError("access token permissions are invalid")
     permissions = tuple(sorted({value.strip().casefold() for value in permissions_value}))
+    platform_value = payload.get("platform_permissions", [])
+    if not isinstance(platform_value, list) or not all(
+        isinstance(value, str) and value.strip() for value in platform_value
+    ):
+        raise AuthenticationError("access token platform permissions are invalid")
+    platform_permissions = tuple(
+        sorted({value.strip().casefold() for value in platform_value})
+    )
+    session_kind = payload.get("session_kind")
+    if session_kind not in {"user", "guest"}:
+        raise AuthenticationError("access token session kind is invalid")
+    expected_subject = f"session:{session_id}"
+    if payload.get("sub") != expected_subject or (session_kind == "guest") != (
+        user_id is None
+    ):
+        raise AuthenticationError("access token subject is invalid")
+    token_version = payload.get("token_version")
+    if isinstance(token_version, bool) or not isinstance(token_version, int) or token_version < 1:
+        raise AuthenticationError("access token version is invalid")
+    email_value = payload.get("email")
+    if email_value is not None and (
+        not isinstance(email_value, str) or not email_value.strip()
+    ):
+        raise AuthenticationError("access token email is invalid")
     issued_at = _timestamp_claim(payload, "iat")
     expires_at = _timestamp_claim(payload, "exp")
     now = int(time.time())
@@ -136,10 +179,14 @@ def _claims_from_payload(
     if issued_at > now + 60 or expires_at <= issued_at:
         raise AuthenticationError("access token timestamps are invalid")
     return JwtClaims(
+        session_id=session_id,
         user_id=user_id,
-        email=_string_claim(payload, "email").casefold(),
+        email=email_value.strip().casefold() if isinstance(email_value, str) else None,
         active_tenant_id=tenant_id,
         permissions=permissions,
+        platform_permissions=platform_permissions,
+        session_kind=session_kind,
+        token_version=token_version,
         issued_at=datetime.fromtimestamp(issued_at, UTC),
         expires_at=datetime.fromtimestamp(expires_at, UTC),
     )

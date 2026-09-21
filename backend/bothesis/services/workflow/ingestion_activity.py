@@ -14,20 +14,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from config import ConfluenceEnvironmentConfig
-
 from bothesis.connector import ConnectorPipeline, ConnectorPipelineConfig
 from bothesis.connector.file.file_connector import FileConnector
 from bothesis.connector.pipeline import ConnectorPipelineError, PipelineResult
 from bothesis.connector.registry import ConnectorRegistry
+from bothesis.integrations.registry import ConnectionProviderRegistry
 from bothesis.db.models import ExternalResource, IngestionSource, Item
 from bothesis.document_index import ItemIndex
 from bothesis.storage import DocumentStorage
 from bothesis.services.ingestion_sources import IngestionSourceService
+from bothesis.services.integration_connections import IntegrationConnectionService
 from bothesis.services.item_ingestion import ItemIngestionService
 from bothesis.services import (
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     InvalidDocumentStateError,
 )
 from bothesis.services.preview import KnowledgePreview
@@ -38,7 +38,7 @@ from bothesis.services.workflow import (
 )
 
 _NON_RETRYABLE_FAILURE_TYPES = frozenset(
-    {"AdminNotFoundError", "InvalidDocumentStateError", "PermissionError", "ValueError"}
+    {"ControlPlaneNotFoundError", "InvalidDocumentStateError", "PermissionError", "ValueError"}
 )
 
 
@@ -52,8 +52,8 @@ class IngestionActivity:
         raw_storage: DocumentStorage,
         *,
         registry: ConnectorRegistry | None = None,
+        providers: ConnectionProviderRegistry | None = None,
         credential_encryption_key: str | None = None,
-        confluence_environment: ConfluenceEnvironmentConfig | None = None,
         pipeline_config: ConnectorPipelineConfig | None = None,
         preview: KnowledgePreview | None = None,
     ) -> None:
@@ -61,8 +61,8 @@ class IngestionActivity:
         self._index = index
         self._raw_storage = raw_storage
         self._registry = registry
+        self._providers = providers
         self._credential_encryption_key = credential_encryption_key
-        self._confluence_environment = confluence_environment
         self._pipeline_config = pipeline_config
         self._preview = preview
 
@@ -95,8 +95,8 @@ class IngestionActivity:
                 non_retryable=non_retryable,
             ) from exc
         except (
-            AdminNotFoundError,
-            AdminValidationError,
+            ControlPlaneNotFoundError,
+            ControlPlaneValidationError,
             InvalidDocumentStateError,
             PermissionError,
             ValueError,
@@ -131,12 +131,9 @@ class IngestionActivity:
         self, source_id: UUID, *, test_connection: bool
     ) -> PipelineResult:
         async with self._session_factory() as session:
-            source, connector = await IngestionSourceService(
-                session,
-                registry=self._registry,
-                credential_encryption_key=self._credential_encryption_key,
-                confluence_environment=self._confluence_environment,
-            ).runtime_for_source(source_id)
+            source, connector = await self._sources(session).runtime_for_source(
+                source_id
+            )
             resolved_source_id = source.id
             integration_connection_id = source.integration_connection_id
             connector_key = source.integration_connection.connector_key
@@ -169,13 +166,43 @@ class IngestionActivity:
             connector_id=str(integration_connection_id),
             config=self._pipeline_config or ConnectorPipelineConfig(),
         )
-        result = await pipeline.run_scope(
-            scopes[0],
-            connector.checkpoint_model.model_validate(checkpoint_data),
-            test_connection=test_connection,
-        )
+        try:
+            result = await pipeline.run_scope(
+                scopes[0],
+                connector.checkpoint_model.model_validate(checkpoint_data),
+                test_connection=test_connection,
+            )
+        finally:
+            # A connector that refreshed its own token mid-run holds the only
+            # copy of the rotated secret. Persist it whether the run succeeded
+            # or not, or the next run starts from a credential that is gone.
+            await self._persist_rotated_credentials(
+                integration_connection_id, connector
+            )
         await self._complete(resolved_source_id, result)
         return result
+
+    def _sources(self, session: AsyncSession) -> IngestionSourceService:
+        return IngestionSourceService(
+            session,
+            registry=self._registry,
+            providers=self._providers,
+            credential_encryption_key=self._credential_encryption_key,
+        )
+
+    async def _persist_rotated_credentials(
+        self, integration_connection_id: UUID, connector: object
+    ) -> None:
+        rotated = getattr(connector, "refreshed_credentials", None)
+        if not rotated:
+            return
+        async with self._session_factory.begin() as session:
+            await IntegrationConnectionService(
+                session,
+                registry=self._registry,
+                providers=self._providers,
+                credential_encryption_key=self._credential_encryption_key,
+            ).persist_rotated_credentials(integration_connection_id, rotated)
 
     async def _load_file_records(
         self,

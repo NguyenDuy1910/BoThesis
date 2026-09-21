@@ -49,7 +49,7 @@ export function Pagination({
         className,
       )}
     >
-      <p className="text-[0.75rem] tabular-nums text-[var(--text-muted)]">
+      <p className="text-[length:var(--text-size-meta)] tabular-nums text-[var(--text-tertiary)]">
         {start.toLocaleString()}–{end.toLocaleString()} of {total.toLocaleString()}
       </p>
       <div className="flex items-center gap-0.5">
@@ -66,7 +66,7 @@ export function Pagination({
           entry === "gap" ? (
             <span
               aria-hidden="true"
-              className="px-1 text-[0.75rem] text-[var(--text-muted)]"
+              className="px-1 text-[length:var(--text-size-meta)] text-[var(--text-tertiary)]"
               key={`gap-${index}`}
             >
               …
@@ -76,11 +76,11 @@ export function Pagination({
               aria-current={page === entry ? "page" : undefined}
               aria-label={`Page ${entry}`}
               className={cn(
-                "inline-flex h-7 min-w-7 items-center justify-center rounded-[var(--adm-r-xs)] px-1.5 text-[0.75rem] font-medium tabular-nums transition-colors",
+                "inline-flex h-7 min-w-7 items-center justify-center rounded-[var(--radius-xs)] px-1.5 text-[length:var(--text-size-meta)] font-medium tabular-nums transition-colors",
                 ui.focus,
                 page === entry
-                  ? "bg-[var(--primary)] text-[var(--text-on-brand)]"
-                  : "text-[var(--text-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--text)]",
+                  ? "bg-[var(--accent-primary)] text-[var(--text-on-accent)]"
+                  : "text-[var(--text-tertiary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]",
               )}
               key={entry}
               onClick={() => onPageChange(entry)}

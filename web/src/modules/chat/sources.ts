@@ -62,7 +62,7 @@ function toAnswerSource(citation: CitationReference): AnswerSource | null {
   const id = citation.id?.trim() || chunkId;
   const spans = citation.spans ?? [];
   const internalUrl = citation.internal_url?.trim()
-    || `/knowledge/items/${encodeURIComponent(itemId)}?chunk=${encodeURIComponent(chunkId)}`;
+    || `/knowledge/documents/${encodeURIComponent(itemId)}?chunk=${encodeURIComponent(chunkId)}`;
   const originalUrl = citation.original_url?.trim() || citation.source?.url?.trim() || undefined;
   return {
     id,

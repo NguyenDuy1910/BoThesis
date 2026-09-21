@@ -19,7 +19,7 @@ test("collects a citation once when it arrives in annotation and final content",
   assert.equal(sources.length, 1);
   assert.equal(sources[0]?.title, "Access Policy");
   assert.equal(sources[0]?.originalUrl, "https://kb/e1");
-  assert.equal(sources[0]?.internalUrl, "/knowledge/items/item-1?chunk=chunk-1");
+  assert.equal(sources[0]?.internalUrl, "/knowledge/documents/item-1?chunk=chunk-1");
 });
 
 test("keeps citations in content order", () => {
@@ -36,7 +36,7 @@ test("an internal citation always links to the exact viewer target", () => {
     annotation({ id: "secret", item_id: "item-3", chunk_id: "secret", title: "Board Pack" }),
   ]));
 
-  assert.equal(source?.internalUrl, "/knowledge/items/item-3?chunk=secret");
+  assert.equal(source?.internalUrl, "/knowledge/documents/item-3?chunk=secret");
 });
 
 test("page and section become one locator", () => {

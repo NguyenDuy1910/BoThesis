@@ -14,35 +14,308 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from bothesis.integrations import PendingAuthorization
+
 from bothesis.connector.protocol import Chunk, DocumentItem
-from bothesis.db.models import Item, ItemUpload
+from sqlalchemy import and_, false
+
+from bothesis.db.models import Conversation, Item, ItemUpload
 from bothesis.storage import PresignedRequest
 
 ACTIVE_STATUS = "active"
 INACTIVE_STATUS = "inactive"
-ADMIN_PERMISSION = "admin"
+
+#: Connection lifecycle. These describe the *grant*, never a sync run.
+CONNECTION_DRAFT = "draft"
+CONNECTION_CONNECTED = "connected"
+CONNECTION_EXPIRED = "expired"
+CONNECTION_REAUTH_REQUIRED = "reauth_required"
+CONNECTION_REVOKED = "revoked"
+CONNECTION_ERROR = "error"
+CONNECTION_DISCONNECTED = "disconnected"
+CONNECTION_STATUSES = (
+    CONNECTION_DRAFT,
+    CONNECTION_CONNECTED,
+    CONNECTION_EXPIRED,
+    CONNECTION_REAUTH_REQUIRED,
+    CONNECTION_REVOKED,
+    CONNECTION_ERROR,
+    CONNECTION_DISCONNECTED,
+)
+#: A connection in any of these states cannot reach the provider until someone
+#: authorizes it again.
+CONNECTION_NEEDS_AUTHORIZATION = (
+    CONNECTION_EXPIRED,
+    CONNECTION_REAUTH_REQUIRED,
+    CONNECTION_REVOKED,
+    CONNECTION_DISCONNECTED,
+)
+
+#: Ingestion Source enablement and health. Run state lives in the workflow.
+SOURCE_READY = "ready"
+SOURCE_PAUSED = "paused"
+SOURCE_FAILED = "failed"
+SOURCE_CONNECTION_REQUIRED = "connection_required"
+SOURCE_DISABLED = "disabled"
+SOURCE_STATUSES = (
+    SOURCE_READY,
+    SOURCE_PAUSED,
+    SOURCE_FAILED,
+    SOURCE_CONNECTION_REQUIRED,
+    SOURCE_DISABLED,
+)
+#: A source the worker may run, and write Items for. A failed source is included
+#: because retrying one is exactly how it stops being failed.
+RUNNABLE_SOURCE_STATUSES = (SOURCE_READY, SOURCE_FAILED)
+
+#: Who a Connection acts as. A workspace connection is shared enterprise
+#: access; a personal connection acts as one member and is never shared.
+OWNER_TENANT = "tenant"
+OWNER_USER = "user"
+OWNER_TYPES = (OWNER_TENANT, OWNER_USER)
 MESSAGE_ITEM_RELATIONS = frozenset({"attachment", "reference", "output"})
-KNOWLEDGE_READ_PERMISSION = "knowledge.read"
-SOURCE_MANAGE_PERMISSION = "source.manage"
+
+#: The three scopes authorization is ever granted at. They mirror the domain
+#: exactly: the platform owns Tenants, a Tenant owns Collections, and a
+#: Collection owns the Documents beneath it.
+PLATFORM_SCOPE = "platform"
+TENANT_SCOPE = "tenant"
+COLLECTION_SCOPE = "collection"
+ROLE_SCOPES = (PLATFORM_SCOPE, TENANT_SCOPE, COLLECTION_SCOPE)
+
+#: Platform capabilities. They are deliberately enumerated instead of collapsed
+#: into one "root" flag so a future support or security role can hold a subset.
+PLATFORM_TENANT_READ_PERMISSION = "platform.tenant.read"
+PLATFORM_USER_READ_PERMISSION = "platform.user.read"
+PLATFORM_AUDIT_READ_PERMISSION = "platform.audit.read"
+PLATFORM_HEALTH_READ_PERMISSION = "platform.health.read"
+
+#: Tenant administration capabilities.
+TENANT_READ_PERMISSION = "tenant.read"
+TENANT_MANAGE_PERMISSION = "tenant.manage"
 USER_MANAGE_PERMISSION = "user.manage"
 ROLE_MANAGE_PERMISSION = "role.manage"
 GROUP_MANAGE_PERMISSION = "group.manage"
-TENANT_MANAGE_PERMISSION = "tenant.manage"
+SOURCE_MANAGE_PERMISSION = "source.manage"
 ACCESS_MANAGE_PERMISSION = "access.manage"
 AUDIT_READ_PERMISSION = "audit.read"
 ITEM_MANAGE_PERMISSION = "item.manage"
-ADMIN_PERMISSION_CATALOG = (
-    (ADMIN_PERMISSION, "Full administration access"),
-    (ACCESS_MANAGE_PERMISSION, "Review access requests and manage resource access"),
-    (AUDIT_READ_PERMISSION, "Read tenant administration audit events"),
-    (ITEM_MANAGE_PERMISSION, "Manage canonical Item lifecycle and indexing"),
-    (GROUP_MANAGE_PERMISSION, "Manage groups and group membership"),
-    (KNOWLEDGE_READ_PERMISSION, "Read tenant knowledge through permission filters"),
-    (ROLE_MANAGE_PERMISSION, "Manage roles and permission assignments"),
-    (SOURCE_MANAGE_PERMISSION, "Manage data sources, scopes, and ingestion"),
-    (TENANT_MANAGE_PERMISSION, "Manage tenant profile and settings"),
-    (USER_MANAGE_PERMISSION, "Manage users and tenant membership"),
+KNOWLEDGE_READ_PERMISSION = "knowledge.read"
+
+#: Collection capabilities. Documents are governed by the Collection that
+#: contains them, so they need no permissions of their own.
+COLLECTION_READ_PERMISSION = "collection.read"
+COLLECTION_UPDATE_PERMISSION = "collection.update"
+COLLECTION_DELETE_PERMISSION = "collection.delete"
+COLLECTION_SHARE_PERMISSION = "collection.share"
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionDefinition:
+    """One product action, and the role scopes allowed to carry it."""
+
+    code: str
+    description: str
+    scopes: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class RoleDefinition:
+    """A system role: a named permission bundle owned by the platform."""
+
+    code: str
+    display_name: str
+    scope_type: str
+    permission_codes: tuple[str, ...]
+
+
+_PLATFORM_ONLY = frozenset({PLATFORM_SCOPE})
+_TENANT_ONLY = frozenset({TENANT_SCOPE})
+#: A Collection capability granted at tenant scope applies to every Collection
+#: in that tenant. That is what makes a tenant administrator able to read the
+#: whole workspace without a per-Collection grant, and without a special case.
+_TENANT_OR_COLLECTION = frozenset({TENANT_SCOPE, COLLECTION_SCOPE})
+
+PERMISSION_CATALOG: tuple[PermissionDefinition, ...] = (
+    PermissionDefinition(
+        PLATFORM_TENANT_READ_PERMISSION,
+        "Read the workspace inventory and platform overview",
+        _PLATFORM_ONLY,
+    ),
+    PermissionDefinition(
+        PLATFORM_USER_READ_PERMISSION,
+        "Read user identities across workspaces",
+        _PLATFORM_ONLY,
+    ),
+    PermissionDefinition(
+        PLATFORM_AUDIT_READ_PERMISSION,
+        "Read audit events across workspaces",
+        _PLATFORM_ONLY,
+    ),
+    PermissionDefinition(
+        PLATFORM_HEALTH_READ_PERMISSION,
+        "Read platform service health",
+        _PLATFORM_ONLY,
+    ),
+    PermissionDefinition(
+        ACCESS_MANAGE_PERMISSION,
+        "Review access requests and manage Collection access",
+        _TENANT_ONLY,
+    ),
+    PermissionDefinition(
+        AUDIT_READ_PERMISSION, "Read tenant administration audit events", _TENANT_ONLY
+    ),
+    PermissionDefinition(
+        GROUP_MANAGE_PERMISSION, "Manage groups and group membership", _TENANT_ONLY
+    ),
+    PermissionDefinition(
+        ITEM_MANAGE_PERMISSION,
+        "Manage canonical Item lifecycle and indexing",
+        _TENANT_ONLY,
+    ),
+    PermissionDefinition(
+        KNOWLEDGE_READ_PERMISSION,
+        "Read tenant knowledge through permission filters",
+        _TENANT_ONLY,
+    ),
+    PermissionDefinition(
+        ROLE_MANAGE_PERMISSION, "Manage roles and role assignments", _TENANT_ONLY
+    ),
+    PermissionDefinition(
+        SOURCE_MANAGE_PERMISSION,
+        "Manage data sources, scopes, and ingestion",
+        _TENANT_ONLY,
+    ),
+    PermissionDefinition(
+        TENANT_READ_PERMISSION,
+        "Read the tenant profile and administration overview",
+        _TENANT_ONLY,
+    ),
+    PermissionDefinition(
+        TENANT_MANAGE_PERMISSION, "Manage tenant profile and settings", _TENANT_ONLY
+    ),
+    PermissionDefinition(
+        USER_MANAGE_PERMISSION, "Manage users and tenant membership", _TENANT_ONLY
+    ),
+    PermissionDefinition(
+        COLLECTION_READ_PERMISSION,
+        "Read a Collection and the Documents it contains",
+        _TENANT_OR_COLLECTION,
+    ),
+    PermissionDefinition(
+        COLLECTION_UPDATE_PERMISSION,
+        "Add, update, and remove content in a Collection",
+        _TENANT_OR_COLLECTION,
+    ),
+    PermissionDefinition(
+        COLLECTION_DELETE_PERMISSION, "Delete a Collection", _TENANT_OR_COLLECTION
+    ),
+    PermissionDefinition(
+        COLLECTION_SHARE_PERMISSION,
+        "Grant and revoke access to a Collection",
+        _TENANT_OR_COLLECTION,
+    ),
 )
+
+PERMISSIONS_BY_CODE: dict[str, PermissionDefinition] = {
+    permission.code: permission for permission in PERMISSION_CATALOG
+}
+
+PLATFORM_ADMIN_ROLE = "platform_admin"
+TENANT_ADMIN_ROLE = "tenant_admin"
+TENANT_MEMBER_ROLE = "tenant_member"
+GUEST_ROLE = "guest"
+COLLECTION_OWNER_ROLE = "collection_owner"
+COLLECTION_EDITOR_ROLE = "collection_editor"
+COLLECTION_VIEWER_ROLE = "collection_viewer"
+
+#: Roles the platform defines and keeps in step with the catalog above. A
+#: tenant may define its own roles, but never one of these codes.
+SYSTEM_ROLES: tuple[RoleDefinition, ...] = (
+    RoleDefinition(
+        PLATFORM_ADMIN_ROLE,
+        "Platform Administrator",
+        PLATFORM_SCOPE,
+        (
+            PLATFORM_AUDIT_READ_PERMISSION,
+            PLATFORM_HEALTH_READ_PERMISSION,
+            PLATFORM_TENANT_READ_PERMISSION,
+            PLATFORM_USER_READ_PERMISSION,
+        ),
+    ),
+    RoleDefinition(
+        TENANT_ADMIN_ROLE,
+        "Workspace Administrator",
+        TENANT_SCOPE,
+        (
+            ACCESS_MANAGE_PERMISSION,
+            AUDIT_READ_PERMISSION,
+            COLLECTION_DELETE_PERMISSION,
+            COLLECTION_READ_PERMISSION,
+            COLLECTION_SHARE_PERMISSION,
+            COLLECTION_UPDATE_PERMISSION,
+            GROUP_MANAGE_PERMISSION,
+            ITEM_MANAGE_PERMISSION,
+            KNOWLEDGE_READ_PERMISSION,
+            ROLE_MANAGE_PERMISSION,
+            SOURCE_MANAGE_PERMISSION,
+            TENANT_MANAGE_PERMISSION,
+            TENANT_READ_PERMISSION,
+            USER_MANAGE_PERMISSION,
+        ),
+    ),
+    RoleDefinition(
+        TENANT_MEMBER_ROLE,
+        "Workspace Member",
+        TENANT_SCOPE,
+        (KNOWLEDGE_READ_PERMISSION, TENANT_READ_PERMISSION),
+    ),
+    RoleDefinition(
+        GUEST_ROLE,
+        "Guest",
+        TENANT_SCOPE,
+        (
+            COLLECTION_READ_PERMISSION,
+            KNOWLEDGE_READ_PERMISSION,
+            TENANT_READ_PERMISSION,
+        ),
+    ),
+    RoleDefinition(
+        COLLECTION_OWNER_ROLE,
+        "Collection Owner",
+        COLLECTION_SCOPE,
+        (
+            COLLECTION_DELETE_PERMISSION,
+            COLLECTION_READ_PERMISSION,
+            COLLECTION_SHARE_PERMISSION,
+            COLLECTION_UPDATE_PERMISSION,
+        ),
+    ),
+    RoleDefinition(
+        COLLECTION_EDITOR_ROLE,
+        "Collection Editor",
+        COLLECTION_SCOPE,
+        (COLLECTION_READ_PERMISSION, COLLECTION_UPDATE_PERMISSION),
+    ),
+    RoleDefinition(
+        COLLECTION_VIEWER_ROLE,
+        "Collection Viewer",
+        COLLECTION_SCOPE,
+        (COLLECTION_READ_PERMISSION,),
+    ),
+)
+
+SYSTEM_ROLES_BY_CODE: dict[str, RoleDefinition] = {
+    role.code: role for role in SYSTEM_ROLES
+}
+#: The Collection roles a share grant or an access request may ask for,
+#: strongest first.
+COLLECTION_ROLE_CODES = (
+    COLLECTION_OWNER_ROLE,
+    COLLECTION_EDITOR_ROLE,
+    COLLECTION_VIEWER_ROLE,
+)
+
 DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 DEFAULT_UPLOAD_URL_SECONDS = 600
 DEFAULT_PROCESSING_MAX_BYTES = 100 * 1024 * 1024
@@ -91,73 +364,149 @@ class IdentityProviderUnavailableError(IdentityServiceError):
     """Raised when a configured external identity provider cannot be reached."""
 
 
-class AdministrationError(Exception):
+class ControlPlaneError(Exception):
     """Base exception for governed administration failures."""
 
 
-class AdminNotFoundError(AdministrationError):
+class ControlPlaneNotFoundError(ControlPlaneError):
     """Raised when a tenant-scoped administration record is unavailable."""
 
 
-class AdminConflictError(AdministrationError):
+class ControlPlaneConflictError(ControlPlaneError):
     """Raised when an administration write conflicts with durable state."""
 
 
-class AdminValidationError(AdministrationError):
+class ControlPlaneValidationError(ControlPlaneError):
     """Raised when an administration input or state transition is invalid."""
 
 
-class AdminExternalUnavailableError(AdministrationError):
+class ControlPlaneExternalUnavailableError(ControlPlaneError):
     """Raised when a configured external source cannot be reached."""
+
+
+class ConnectionAuthorizationRequiredError(ControlPlaneError):
+    """Raised when a Connection's grant is gone and someone must reconnect.
+
+    Distinct from a validation failure: nothing about the request is wrong, and
+    no retry helps until a person completes the provider's flow again.
+
+    It carries the state it implies, because raising this rolls back the
+    transaction that discovered it — the caller has to write the state down in
+    a transaction of its own, or the next request would rediscover the same
+    failure and the UI would never learn to offer a reconnect.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: str = CONNECTION_REAUTH_REQUIRED,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.detail = detail or message
 
 
 @dataclass(frozen=True, slots=True)
 class AuthContext:
-    """Resolved identity used at service and retrieval permission boundaries."""
+    """Resolved identity used at service and retrieval permission boundaries.
 
-    user_id: UUID
-    email: str
+    ``permission_codes`` holds everything the caller was granted at tenant
+    scope in ``tenant_id``, which includes any Collection capability granted
+    tenant-wide. Capabilities granted on one Collection are deliberately absent:
+    those are resolved per resource by ``AuthorizationService``, because a
+    context cannot carry one answer for every Collection in the workspace.
+    """
+
+    user_id: UUID | None
+    email: str | None
     display_name: str | None
     tenant_id: UUID | None
-    role_id: UUID | None
-    role_code: str | None
     permission_codes: tuple[str, ...]
     group_ids: tuple[UUID, ...]
+    role_codes: tuple[str, ...] = ()
+    platform_permissions: tuple[str, ...] = ()
+    session_id: UUID | None = None
+    session_kind: Literal["guest", "user"] = "user"
+    token_version: int = 1
 
     @property
     def is_enterprise_user(self) -> bool:
         return self.tenant_id is not None
 
     @property
-    def is_admin(self) -> bool:
-        return ADMIN_PERMISSION in self.permission_codes or "*:*" in self.permission_codes
+    def is_guest(self) -> bool:
+        return self.session_kind == "guest"
+
+    @property
+    def is_user(self) -> bool:
+        return self.session_kind == "user" and self.user_id is not None
+
+    @property
+    def subject_id(self) -> UUID:
+        """Stable request actor key: durable User for members, session for guests."""
+
+        value = self.user_id or self.session_id
+        if value is None:
+            raise AuthorizationError("request identity has no subject")
+        return value
 
     def has_permissions(self, *permission_codes: str) -> bool:
         required = {_permission_code(code) for code in permission_codes}
-        return self.is_admin or required.issubset(self.permission_codes)
+        return required.issubset(self.permission_codes)
+
+    def has_platform_permissions(self, *permission_codes: str) -> bool:
+        required = {_permission_code(code) for code in permission_codes}
+        return required.issubset(self.platform_permissions)
 
 
 @dataclass(frozen=True, slots=True)
 class JwtClaims:
     """Signed access-token claims trusted at the HTTP authentication boundary."""
 
-    user_id: UUID
-    email: str
+    session_id: UUID
+    user_id: UUID | None
+    email: str | None
     active_tenant_id: UUID
     permissions: tuple[str, ...]
     issued_at: datetime
     expires_at: datetime
+    platform_permissions: tuple[str, ...] = ()
+    session_kind: Literal["guest", "user"] = "user"
+    token_version: int = 1
 
     def has_permission(self, permission_code: str) -> bool:
-        return "*:*" in self.permissions or _permission_code(permission_code) in self.permissions
+        return _permission_code(permission_code) in self.permissions
 
 
 @dataclass(frozen=True, slots=True)
 class VerifiedGoogleIdentity:
     """Identity emitted only by an OAuth verifier after email verification."""
 
+    issuer: str
+    subject: str
     email: str
     display_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorizationStart:
+    """Where to send the browser for consent, and the value it returns with."""
+
+    authorization_url: str
+    #: Echoed back to the opener so a page cannot be fooled by a stray message.
+    nonce: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedAuthorization:
+    """One verified provider callback, resolved to the identity that began it."""
+
+    pending: PendingAuthorization
+    tenant_id: UUID
+    user_id: UUID
+    connection_id: UUID | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,8 +516,7 @@ class TenantMembershipSummary:
     tenant_id: UUID
     tenant_code: str
     tenant_name: str
-    role_id: UUID
-    role_code: str
+    role_codes: tuple[str, ...]
     permissions: tuple[str, ...]
 
 
@@ -178,12 +526,15 @@ class AuthenticationSession:
 
     access_token: str
     expires_at: datetime
-    user_id: UUID
-    email: str
+    session_id: UUID
+    user_id: UUID | None
+    email: str | None
     display_name: str | None
     active_tenant_id: UUID
     permissions: tuple[str, ...]
     tenants: tuple[TenantMembershipSummary, ...]
+    platform_permissions: tuple[str, ...] = ()
+    session_kind: Literal["guest", "user"] = "user"
 
 
 SandboxSessionStatus = Literal["active", "expired", "closed"]
@@ -329,6 +680,7 @@ class UploadStart:
     upload: ItemUpload
     upload_required: bool
     target: UploadTarget | None
+    created: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,7 +739,7 @@ class PreviewManifest(BaseModel):
     truncated: bool = False
 
     @model_validator(mode="after")
-    def _validate_assets(self) -> "PreviewManifest":
+    def _validate_assets(self) -> PreviewManifest:
         pages = [asset.page for asset in self.assets if asset.page is not None]
         if len(pages) != len(set(pages)):
             raise ValueError("preview asset pages must be unique")
@@ -467,12 +819,48 @@ def require_tenant_permission(
     return context.tenant_id
 
 
+def require_user_identity(context: AuthContext) -> UUID:
+    """Return durable User identity or reject guest-only session context."""
+
+    if context.user_id is None or context.is_guest:
+        raise AuthorizationError("sign in is required")
+    return context.user_id
+
+
+def conversation_access_filter(context: AuthContext):
+    """Build ownership predicate for guest-created and user-owned conversations."""
+
+    if context.is_guest and context.session_id is not None:
+        return and_(
+            Conversation.created_by_session_id == context.session_id,
+            Conversation.owner_user_id.is_(None),
+        )
+    if context.user_id is not None:
+        return Conversation.owner_user_id == context.user_id
+    return false()
+
+
+def require_platform_permission(
+    context: AuthContext,
+    *permission_codes: str,
+) -> None:
+    """Reject a platform operation the actor holds no platform role for.
+
+    Platform capability never implies tenant capability: administering the
+    platform and reading a workspace's knowledge are separate grants.
+    """
+
+    if not context.has_platform_permissions(*permission_codes):
+        required = ", ".join(sorted(permission_codes))
+        raise AuthorizationError(f"missing required platform permissions: {required}")
+
+
 def normalize_required_text(value: str, field_name: str, max_length: int) -> str:
     normalized = value.strip()
     if not normalized:
-        raise AdminValidationError(f"{field_name} must not be blank")
+        raise ControlPlaneValidationError(f"{field_name} must not be blank")
     if len(normalized) > max_length:
-        raise AdminValidationError(
+        raise ControlPlaneValidationError(
             f"{field_name} must be at most {max_length} characters"
         )
     return normalized
@@ -492,9 +880,9 @@ def normalize_codes(
 
 def normalize_page(page: int, page_size: int) -> tuple[int, int, int]:
     if page < 1:
-        raise AdminValidationError("page must be at least 1")
+        raise ControlPlaneValidationError("page must be at least 1")
     if not 1 <= page_size <= 100:
-        raise AdminValidationError("page_size must be between 1 and 100")
+        raise ControlPlaneValidationError("page_size must be between 1 and 100")
     return page, page_size, (page - 1) * page_size
 
 
@@ -505,14 +893,46 @@ def timestamp(value: datetime | None) -> str | None:
 __all__ = [
     "ACCESS_MANAGE_PERMISSION",
     "ACTIVE_STATUS",
-    "ADMIN_PERMISSION",
-    "ADMIN_PERMISSION_CATALOG",
     "ARTIFACT_COLLECTION_KIND",
     "ARTIFACT_COLLECTION_TITLE",
     "ARTIFACT_DOCUMENT_TYPE",
     "ARTIFACT_MIME_TYPE",
     "AUDIT_READ_PERMISSION",
+    "ControlPlaneConflictError",
+    "ControlPlaneExternalUnavailableError",
+    "ControlPlaneNotFoundError",
+    "ControlPlaneValidationError",
+    "ControlPlaneError",
+    "ArtifactValidationError",
+    "AsyncUploadStream",
+    "AuthContext",
+    "AuthenticationError",
+    "AuthenticationSession",
+    "AuthorizationError",
+    "AuthorizationStart",
     "CHUNKER_VERSION",
+    "COLLECTION_DELETE_PERMISSION",
+    "COLLECTION_EDITOR_ROLE",
+    "COLLECTION_OWNER_ROLE",
+    "COLLECTION_READ_PERMISSION",
+    "COLLECTION_ROLE_CODES",
+    "COLLECTION_SCOPE",
+    "COLLECTION_SHARE_PERMISSION",
+    "COLLECTION_UPDATE_PERMISSION",
+    "COLLECTION_VIEWER_ROLE",
+    "CONNECTION_CONNECTED",
+    "CONNECTION_DISCONNECTED",
+    "CONNECTION_DRAFT",
+    "CONNECTION_ERROR",
+    "CONNECTION_EXPIRED",
+    "CONNECTION_NEEDS_AUTHORIZATION",
+    "CONNECTION_REAUTH_REQUIRED",
+    "CONNECTION_REVOKED",
+    "CONNECTION_STATUSES",
+    "CanonicalDocumentContent",
+    "CollectionUpload",
+    "CompletedAuthorization",
+    "ConnectionAuthorizationRequiredError",
     "DEFAULT_MAX_UPLOAD_BYTES",
     "DEFAULT_PREVIEW_MAX_DIMENSION",
     "DEFAULT_PREVIEW_MAX_PAGES",
@@ -520,55 +940,69 @@ __all__ = [
     "DEFAULT_PREVIEW_WEBP_QUALITY",
     "DEFAULT_PROCESSING_MAX_BYTES",
     "DEFAULT_UPLOAD_URL_SECONDS",
-    "GROUP_MANAGE_PERMISSION",
-    "INACTIVE_STATUS",
-    "ITEM_MANAGE_PERMISSION",
-    "KNOWLEDGE_READ_PERMISSION",
-    "MESSAGE_ITEM_RELATIONS",
-    "PARSER_VERSION",
-    "PREVIEW_RENDERER_VERSION",
-    "PREVIEW_SCHEMA_VERSION",
-    "ROLE_MANAGE_PERMISSION",
-    "SOURCE_MANAGE_PERMISSION",
-    "TenantMembershipSummary",
-    "TENANT_MANAGE_PERMISSION",
-    "USER_MANAGE_PERMISSION",
-    "AdminConflictError",
-    "AdminExternalUnavailableError",
-    "AdminNotFoundError",
-    "AdministrationError",
-    "AdminValidationError",
-    "ArtifactValidationError",
-    "AuthenticationError",
-    "AuthenticationSession",
-    "AsyncUploadStream",
-    "AuthContext",
-    "IdentityServiceError",
-    "AuthorizationError",
-    "CanonicalDocumentContent",
-    "StoredFileContent",
-    "CollectionUpload",
     "DocumentNotFoundError",
     "DocumentProcessingError",
     "DocumentServiceError",
     "DocumentUnavailableError",
+    "GROUP_MANAGE_PERMISSION",
+    "INACTIVE_STATUS",
+    "ITEM_MANAGE_PERMISSION",
     "IdentityConflictError",
     "IdentityInactiveError",
     "IdentityNotFoundError",
     "IdentityProviderUnavailableError",
+    "IdentityServiceError",
     "InvalidDocumentStateError",
     "JwtClaims",
+    "KNOWLEDGE_READ_PERMISSION",
     "KnowledgePreviewView",
+    "MESSAGE_ITEM_RELATIONS",
+    "NativeUploadError",
+    "OWNER_TENANT",
+    "OWNER_TYPES",
+    "OWNER_USER",
+    "PARSER_VERSION",
+    "PERMISSIONS_BY_CODE",
+    "PERMISSION_CATALOG",
+    "PLATFORM_ADMIN_ROLE",
+    "PLATFORM_AUDIT_READ_PERMISSION",
+    "PLATFORM_HEALTH_READ_PERMISSION",
+    "PLATFORM_SCOPE",
+    "PLATFORM_TENANT_READ_PERMISSION",
+    "PLATFORM_USER_READ_PERMISSION",
+    "PREVIEW_RENDERER_VERSION",
+    "PREVIEW_SCHEMA_VERSION",
+    "PermissionDefinition",
     "PreviewAsset",
     "PreviewGenerationError",
     "PreviewManifest",
     "PreviewOriginal",
     "PreviewRepresentation",
+    "ROLE_MANAGE_PERMISSION",
+    "ROLE_SCOPES",
+    "RUNNABLE_SOURCE_STATUSES",
     "RenderedPreview",
     "RenderedPreviewAsset",
     "ResolvedPreviewAsset",
+    "RoleDefinition",
+    "SOURCE_CONNECTION_REQUIRED",
+    "SOURCE_DISABLED",
+    "SOURCE_FAILED",
+    "SOURCE_MANAGE_PERMISSION",
+    "SOURCE_PAUSED",
+    "SOURCE_READY",
+    "SOURCE_STATUSES",
+    "SYSTEM_ROLES",
+    "SYSTEM_ROLES_BY_CODE",
+    "StoredFileContent",
+    "TENANT_ADMIN_ROLE",
+    "TENANT_MANAGE_PERMISSION",
+    "TENANT_MEMBER_ROLE",
+    "TENANT_READ_PERMISSION",
+    "TENANT_SCOPE",
+    "TenantMembershipSummary",
+    "USER_MANAGE_PERMISSION",
     "UploadConflictError",
-    "NativeUploadError",
     "UploadStart",
     "UploadTarget",
     "UploadTooLargeError",
@@ -578,6 +1012,9 @@ __all__ = [
     "normalize_codes",
     "normalize_page",
     "normalize_required_text",
+    "require_platform_permission",
     "require_tenant_permission",
+    "require_user_identity",
+    "conversation_access_filter",
     "timestamp",
 ]

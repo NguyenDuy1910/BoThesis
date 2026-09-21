@@ -25,13 +25,15 @@ _STORAGE_PROVIDERS = frozenset({_AWS_S3_PROVIDER, _CLOUDFLARE_R2_PROVIDER})
 
 
 class S3DocumentStorage:
-    """Store raw binaries in AWS S3 or Cloudflare R2 through boto3.
+    """Store raw binaries in AWS S3, MinIO, or Cloudflare R2 through boto3.
 
     Both providers expose the S3 API, so object operations and presigning stay
     in this one adapter. AWS S3 uses the standard boto3 credential chain. R2
     uses its account endpoint, path-style addressing, ``auto`` as its signing
-    region, and an R2 API-token access-key pair. Passing ``client`` keeps the
-    adapter independently testable.
+    region, and an R2 API-token access-key pair. Local MinIO deliberately uses
+    the AWS S3 branch with its endpoint URL, path-style addressing, and the
+    same standard credential chain. Passing ``client`` keeps the adapter
+    independently testable.
     """
 
     def __init__(

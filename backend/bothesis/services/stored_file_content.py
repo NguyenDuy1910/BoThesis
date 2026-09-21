@@ -7,6 +7,7 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from bothesis.connector.file import FileProcessingError, FileProcessor, ProcessedFile
 from bothesis.connector.protocol import (
@@ -24,6 +25,7 @@ from bothesis.services import (
     DEFAULT_PROCESSING_MAX_BYTES,
     DocumentProcessingError,
     DocumentUnavailableError,
+    require_user_identity,
 )
 
 
@@ -51,6 +53,7 @@ class StoredFileContentService:
     ) -> CanonicalDocumentContent:
         """Stream or read one authorized upload through the file connector."""
 
+        user_id = require_user_identity(access)
         self._validate_size(document)
         if not document.storage_key:
             raise DocumentUnavailableError("item has no raw object storage key")
@@ -67,11 +70,11 @@ class StoredFileContentService:
                 processed = await asyncio.to_thread(
                     self._processor.process_path,
                     path,
-                    **self._processing_arguments(document, access=access),
+                    **self._processing_arguments(document, user_id=user_id),
                 )
             except FileProcessingError as exc:
                 raise DocumentProcessingError("document source processing failed") from exc
-            return self._canonical_content(document, processed, access=access)
+            return self._canonical_content(document, processed, user_id=user_id)
 
     async def direct_file_data(
         self,
@@ -95,7 +98,7 @@ class StoredFileContentService:
         document: Item,
         processed: ProcessedFile,
         *,
-        access: AuthContext,
+        user_id: UUID,
     ) -> CanonicalDocumentContent:
         expected_item_id = str(document.id)
         if processed.item.id != expected_item_id:
@@ -106,7 +109,7 @@ class StoredFileContentService:
             raise DocumentProcessingError(
                 "canonical chunk does not belong to its stored source"
             )
-        if processed.item.access.effective.reader_ids != [str(access.user_id)]:
+        if processed.item.access.effective.reader_ids != [str(user_id)]:
             raise DocumentProcessingError(
                 "canonical document access does not match its authorized owner"
             )
@@ -133,7 +136,7 @@ class StoredFileContentService:
         cls,
         document: Item,
         *,
-        access: AuthContext,
+        user_id: UUID,
     ) -> dict[str, Any]:
         file_name = cls._file_name(document)
         return {
@@ -149,7 +152,7 @@ class StoredFileContentService:
                 url=None,
             ),
             "document_kind": cls._document_kind(document.mime_type),
-            "access": AccessPolicy.from_reader_ids([str(access.user_id)]),
+            "access": AccessPolicy.from_reader_ids([str(user_id)]),
             "hierarchy": Hierarchy(),
             "metadata": cls._source_metadata(document.metadata_),
         }

@@ -5,16 +5,25 @@ from __future__ import annotations
 from typing import Any, Literal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+
 from bothesis.db.engine import SessionFactory, session_scope
 from bothesis.db.models import Item
-from bothesis.services import AsyncUploadStream, AuthContext
+from bothesis.services import (
+    KNOWLEDGE_READ_PERMISSION,
+    AsyncUploadStream,
+    AuthContext,
+    AuthorizationError,
+    require_user_identity,
+    require_tenant_permission,
+)
 from bothesis.services.audit import AuditService
-from bothesis.services.identity_access.collection_access import CollectionAccessService
 from bothesis.services.document_presentation import DocumentPresenter
 from bothesis.services.document_upload import DocumentUploadService
+from bothesis.services.identity_access.authorization import AuthorizationService
+from bothesis.services.item import ItemService
 
-IngestionStatus = Literal["ready", "failed"]
+IngestionStatus = Literal["pending", "processing", "ready", "failed", "unsupported"]
 
 
 class WorkspaceDocumentService:
@@ -35,7 +44,7 @@ class WorkspaceDocumentService:
         """List the Collections the caller may select for a chat turn."""
 
         async with session_scope(self._sessions) as session:
-            ids = await CollectionAccessService(session).allowed_collection_ids(access)
+            ids = await AuthorizationService(session).allowed_collection_ids(access)
             if not ids:
                 return {"items": [], "total": 0}
             collections = list(
@@ -56,6 +65,28 @@ class WorkspaceDocumentService:
             ],
             "total": len(collections),
         }
+
+    async def ensure_personal_collection(self, access: AuthContext) -> dict[str, Any]:
+        """Return the caller's private upload Collection, creating it once."""
+
+        if access.is_guest:
+            raise AuthorizationError("sign in is required for private uploads")
+        user_id = require_user_identity(access)
+        tenant_id = require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
+        collection_id = ItemService.upload_collection_id(tenant_id, user_id)
+        async with session_scope(self._sessions) as session:
+            items = ItemService(session)
+            await items.ensure_personal_collection(
+                user_id,
+                tenant_id,
+                collection_id=collection_id,
+                title="My uploads",
+                system_kind="personal_uploads",
+            )
+            collection = await session.get(Item, collection_id)
+            if collection is None:
+                raise RuntimeError("personal Collection could not be created")
+            return {"id": collection.id, "title": collection.title}
 
     async def start_upload(
         self,
@@ -81,6 +112,45 @@ class WorkspaceDocumentService:
             "document": self._presenter.metadata(result.item),
         }
 
+    async def create_document(
+        self,
+        access: AuthContext,
+        collection_id: UUID,
+        *,
+        idempotency_key: str,
+        name: str,
+        content_type: str,
+        size_bytes: int | None = None,
+        purpose: str = "knowledge",
+        content: AsyncUploadStream | None = None,
+    ) -> dict[str, Any]:
+        """Create one Document through either direct or presigned transport."""
+
+        if content is None:
+            if size_bytes is None:
+                raise ValueError("size_bytes is required for presigned creation")
+            result = await self._uploads.start_upload(
+                access, collection_id=collection_id, idempotency_key=idempotency_key,
+                file_name=name, content_type=content_type, size_bytes=size_bytes,
+                purpose=purpose,
+            )
+            return {
+                "document": self._presenter.contract_document(result.item),
+                "upload": self._presenter.upload_target(result.target),
+                "ingestion": None,
+                "created": result.created,
+            }
+        upload = await self._uploads.upload_to_collection(
+            access, collection_id, idempotency_key=idempotency_key,
+            file_name=name, content_type=content_type, content=content, purpose=purpose,
+        )
+        return {
+            "document": self._presenter.contract_document(upload.item),
+            "upload": None,
+            "ingestion": None,
+            "created": upload.created,
+        }
+
     async def complete_upload(
         self, access: AuthContext, document_id: UUID
     ) -> dict[str, Any]:
@@ -88,6 +158,57 @@ class WorkspaceDocumentService:
 
         document = await self._uploads.complete_upload(access, document_id)
         return self._presenter.metadata(document)
+
+    async def finalize_document_content(
+        self, access: AuthContext, document_id: UUID
+    ) -> dict[str, Any]:
+        document = await self._uploads.complete_upload(access, document_id)
+        return {
+            "document": self._presenter.contract_document(document),
+            "ingestion": None,
+        }
+
+    async def get_contract_document(
+        self, access: AuthContext, document_id: UUID
+    ) -> dict[str, Any]:
+        document = await self._uploads.get_document(access, document_id)
+        return self._presenter.contract_document(document)
+
+    async def list_documents(
+        self,
+        access: AuthContext,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        search: str | None = None,
+        collection_id: UUID | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        async with session_scope(self._sessions) as session:
+            allowed = await AuthorizationService(session).allowed_collection_ids(access)
+            if collection_id is not None:
+                allowed = tuple(item for item in allowed if item == collection_id)
+            statement = select(Item).where(
+                Item.item_type == "document",
+                Item.parent_item_id.in_(allowed),
+                Item.deleted_at.is_(None),
+            )
+            if search:
+                statement = statement.where(Item.title.ilike(f"%{search}%"))
+            if status:
+                internal = {"pending_content": "pending", "available": "ready", "failed": "failed"}.get(status, status)
+                statement = statement.where(Item.status == internal)
+            total = await session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+            items = list(await session.scalars(
+                statement.order_by(Item.updated_at.desc(), Item.id)
+                .offset((page - 1) * page_size).limit(page_size)
+            ))
+            return {
+                "items": [self._presenter.contract_document(item) for item in items],
+                "page": page,
+                "page_size": page_size,
+                "total": int(total),
+            }
 
     async def upload_to_collection(
         self,
@@ -99,7 +220,7 @@ class WorkspaceDocumentService:
         content_type: str,
         content: AsyncUploadStream,
     ) -> dict[str, Any]:
-        """Store and index a native upload under one authorized Collection."""
+        """Store a native upload and queue its independent indexing lifecycle."""
 
         upload = await self._uploads.upload_to_collection(
             access,
@@ -174,7 +295,10 @@ class WorkspaceDocumentService:
 
 
 def _ingestion_status(document: Any) -> IngestionStatus:
-    return "ready" if document.status == "ready" else "failed"
+    status = getattr(document, "index_status", None)
+    if status in {"pending", "processing", "ready", "failed", "unsupported"}:
+        return status
+    return "failed"
 
 
 __all__ = ["IngestionStatus", "WorkspaceDocumentService"]

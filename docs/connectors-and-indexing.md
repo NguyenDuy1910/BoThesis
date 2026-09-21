@@ -71,6 +71,24 @@ again before evidence reaches the agent.
 
 ## Ingestion semantics
 
+Native uploads have two independent readiness states:
+
+```text
+object storage write succeeds
+    ↓
+Item / ItemUpload resource is ready
+    ├─ direct, access-checked resource read or file materialization
+    └─ native-upload indexing workflow
+          ↓
+       Docling → chunks → ItemIndex → semantic retrieval ready
+```
+
+`items.status` describes the durable resource lifecycle. Documents additionally
+carry `items.index_status` for their derived semantic representation. A parsing
+or indexing failure therefore does not make an already-stored original file
+unavailable. The background workflow calls the same `ItemIngestionService` and
+`ItemIndex` path as connectors; it is not a second RAG implementation.
+
 - An `integration_connections` row is reusable provider configuration and
   optional credentials, not canonical knowledge.
 - An `ingestion_sources` row is one independently checkpointed external scope

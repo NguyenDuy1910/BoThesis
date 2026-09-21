@@ -3,7 +3,10 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
-import { getApiConfiguration } from "@/lib/api/config";
+import { AuthPromptProvider } from "@/components/auth/AuthPrompt";
+import { getStoredAuthSession, isGuestSession } from "@/lib/auth/session";
+import { useAuthSession } from "@/lib/hooks/useAuthSession";
+import { createSession } from "@/modules/auth/api";
 
 const publicPathPrefix = "/auth/";
 
@@ -14,20 +17,73 @@ const publicPathPrefix = "/auth/";
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const [authorizedPath, setAuthorizedPath] = useState<string | null>(null);
+  const session = useAuthSession();
+  const [checking, setChecking] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [requiredPrompt, setRequiredPrompt] = useState<{
+    reason: string;
+    requestId: number;
+  }>();
   const isPublicRoute = pathname.startsWith(publicPathPrefix);
-  const hasAccess = isPublicRoute || authorizedPath === pathname;
 
   useEffect(() => {
     if (isPublicRoute) return;
-    if (getApiConfiguration()) {
-      setAuthorizedPath(pathname);
+    if (getStoredAuthSession()) {
+      setChecking(false);
       return;
     }
-    setAuthorizedPath(null);
-    router.replace(`/auth/login?next=${encodeURIComponent(pathname)}`);
-  }, [isPublicRoute, pathname, router]);
+    let mounted = true;
+    setChecking(true);
+    setError(null);
+    void createSession()
+      .catch((cause: unknown) => {
+        if (mounted) {
+          setError(cause instanceof Error ? cause.message : "Guest access could not be started.");
+        }
+      })
+      .finally(() => { if (mounted) setChecking(false); });
+    return () => { mounted = false; };
+  }, [isPublicRoute]);
 
-  if (hasAccess) return <>{children}</>;
-  return <div aria-busy="true" aria-label="Checking access" className="auth-gate" role="status" />;
+  useEffect(() => {
+    if (!isGuestSession(session)) {
+      setRequiredPrompt(undefined);
+      return;
+    }
+    const reason = protectedRouteReason(pathname);
+    if (!reason) return;
+    setRequiredPrompt((current) => ({
+      reason,
+      requestId: (current?.requestId ?? 0) + 1,
+    }));
+    router.replace("/app");
+  }, [pathname, router, session]);
+
+  if (isPublicRoute) return <>{children}</>;
+  if (!checking && session) {
+    return (
+      <AuthPromptProvider
+        requiredReason={requiredPrompt?.reason}
+        requiredRequestId={requiredPrompt?.requestId}
+      >
+        {children}
+      </AuthPromptProvider>
+    );
+  }
+  return (
+    <div aria-busy="true" className="auth-gate" role="status">
+      <span aria-hidden="true" className="shell__route-boundary-indicator" />
+      <span>{error ?? "Opening public workspace…"}</span>
+      {error && <button onClick={() => window.location.reload()} type="button">Try again</button>}
+    </div>
+  );
+}
+
+function protectedRouteReason(pathname: string): string | undefined {
+  if (pathname === "/library") return "Sign in to upload and keep private files.";
+  if (pathname === "/workspaces") return "Sign in to open private workspaces.";
+  if (pathname === "/workspace-control" || pathname.startsWith("/workspace-control/")) {
+    return "Sign in to manage agents, knowledge, and workspace settings.";
+  }
+  return undefined;
 }

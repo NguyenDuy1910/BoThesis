@@ -3,6 +3,10 @@ import test from "node:test";
 
 import {
   conversationAdapter,
+  migrateConversationUser,
+  readSelectedConversation,
+  rememberSelectedConversation,
+  resolveSelectedConversation,
   setConversationUser,
   uiToCachedMessage,
 } from "../src/modules/chat/conversations.ts";
@@ -106,4 +110,75 @@ test("retains collection context on a persisted user turn", async () => {
 
   const restored = await conversationAdapter.getConversationMessages("chat-collections");
   assert.equal(restored[0]?.parts[1]?.type, "data-collection");
+});
+
+test("restores the selected chat or empty New chat draft within the same tab and workspace", () => {
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage() },
+  });
+  setConversationUser("chat-restore-test", "workspace-a");
+  assert.equal(readSelectedConversation(), undefined);
+
+  rememberSelectedConversation("conversation-1");
+  assert.equal(readSelectedConversation(), "conversation-1");
+  rememberSelectedConversation(null);
+  assert.equal(readSelectedConversation(), null);
+
+  setConversationUser("chat-restore-test", "workspace-b");
+  assert.equal(readSelectedConversation(), undefined);
+  setConversationUser("chat-restore-test", "workspace-a");
+  assert.equal(readSelectedConversation(), null);
+});
+
+test("an empty draft stays empty while a missing saved chat falls back to recents", () => {
+  const conversations = [{ id: "latest" }, { id: "older" }] as Awaited<ReturnType<typeof conversationAdapter.listConversations>>;
+  assert.equal(resolveSelectedConversation(conversations, null), null);
+  assert.equal(resolveSelectedConversation(conversations, "older"), "older");
+  assert.equal(resolveSelectedConversation(conversations, "missing"), "latest");
+  assert.equal(resolveSelectedConversation(conversations, undefined), "latest");
+});
+
+test("claiming a guest keeps current chat and existing authenticated history", async () => {
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage() },
+  });
+
+  setConversationUser("member", "public", "user");
+  await conversationAdapter.createConversation("Existing chat", "existing-chat");
+  await conversationAdapter.saveConversationMessages("existing-chat", [{
+    id: "existing-message",
+    role: "user",
+    content: "Existing history",
+    parts: [{ type: "text", text: "Existing history", state: "done" }],
+    createdAt: Date.now(),
+  }]);
+
+  setConversationUser("guest", "public", "guest");
+  await conversationAdapter.createConversation("Guest chat", "guest-chat");
+  await conversationAdapter.saveConversationMessages("guest-chat", [{
+    id: "guest-message",
+    role: "user",
+    content: "Keep this position",
+    parts: [{ type: "text", text: "Keep this position", state: "done" }],
+    createdAt: Date.now(),
+  }]);
+  rememberSelectedConversation("guest-chat");
+
+  migrateConversationUser("guest", "public", "member", "public");
+
+  assert.deepEqual(
+    (await conversationAdapter.listConversations()).map(({ id }) => id),
+    ["guest-chat", "existing-chat"],
+  );
+  assert.equal(
+    (await conversationAdapter.getConversationMessages("guest-chat"))[0]?.content,
+    "Keep this position",
+  );
+  assert.equal(
+    (await conversationAdapter.getConversationMessages("existing-chat"))[0]?.content,
+    "Existing history",
+  );
+  assert.equal(readSelectedConversation(), "guest-chat");
 });

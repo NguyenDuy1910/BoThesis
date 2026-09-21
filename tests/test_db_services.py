@@ -14,6 +14,7 @@ import pytest_asyncio
 from bothesis.connector.protocol import BoundingBox, Chunk, CitationInfo, CitationSpan
 from bothesis.db.models import (
     ArtifactRevision,
+    AccessSession,
     AuditLog,
     Base,
     Citation,
@@ -26,7 +27,10 @@ from bothesis.db.models import (
     ItemUpload,
     Message,
     MessageItem,
+    Role,
+    RoleAssignment,
     SandboxSession,
+    User,
 )
 from bothesis.agent.models import AgentContext
 from bothesis.agent.protocol import ExtensionItem, Response
@@ -37,21 +41,40 @@ from bothesis.storage import (
     StoredObject,
 )
 from bothesis.services import (
+    COLLECTION_EDITOR_ROLE,
+    COLLECTION_OWNER_ROLE,
+    COLLECTION_READ_PERMISSION,
+    COLLECTION_UPDATE_PERMISSION,
+    COLLECTION_VIEWER_ROLE,
+    PLATFORM_ADMIN_ROLE,
+    ROLE_MANAGE_PERMISSION,
+    TENANT_ADMIN_ROLE,
+    USER_MANAGE_PERMISSION,
     ArtifactValidationError,
+    ControlPlaneConflictError,
+    ControlPlaneValidationError,
     AuthContext,
     AuthorizationError,
     DocumentNotFoundError,
     DocumentProcessingError,
     UploadTooLargeError,
     UploadValidationError,
+    VerifiedGoogleIdentity,
     SandboxManifestResource,
     SandboxProviderFile,
 )
-from bothesis.services.identity_access.access_requests import AccessRequestService
+from bothesis.services.approval_request import ApprovalRequestService
+from bothesis.services.dashboard.dashboard import DashboardService
 from bothesis.services.artifact import ArtifactService
+from bothesis.services.identity_access.auth import AuthenticationService
+from bothesis.services.identity_access.access_session import AccessSessionService
 from bothesis.services.identity_access.identity_store import IdentityStoreService
+from bothesis.services.identity_access.jwt_tokens import JwtTokenService
 from bothesis.services.citation import CitationService
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services.identity_access.authorization import AuthorizationService
+from bothesis.services.identity_access.role_assignments import RoleAssignmentService
+from bothesis.services.identity_access.roles import RoleService
+from bothesis.services.identity_access.users import UserService
 from bothesis.services.conversation import ConversationService
 from bothesis.services.integration_connections import IntegrationConnectionService
 from bothesis.services.integration_credential import IntegrationCredentialService
@@ -84,13 +107,146 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory.begin() as session:
+        await IdentityStoreService(session).sync_system_roles()
+
     try:
-        yield async_sessionmaker(engine, expire_on_commit=False)
+        yield factory
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:
             await connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         await admin_engine.dispose()
+
+
+async def join_tenant(
+    session: AsyncSession,
+    user: User,
+    tenant_id: UUID,
+    *,
+    permission_codes: tuple[str, ...] = (),
+    role_code: str = "member",
+    system_role: str | None = None,
+) -> None:
+    """Add a member and give them one role, the way the services do.
+
+    Membership and role assignment are separate writes now, so tests that only
+    need "this user can do X here" go through the same two steps the product
+    does rather than a shortcut that would not prove anything.
+    """
+
+    identity = IdentityStoreService(session)
+    await identity.assign_membership(user.id, tenant_id)
+    if system_role is not None:
+        role_id = await session.scalar(
+            select(Role.id).where(Role.code == system_role, Role.is_system)
+        )
+    else:
+        # Reuse the tenant's role when several members share one, which is the
+        # normal shape: a role is a bundle, not a per-user record.
+        role_id = await session.scalar(
+            select(Role.id).where(Role.tenant_id == tenant_id, Role.code == role_code)
+        )
+        if role_id is None:
+            role = await identity.create_role(
+                tenant_id, role_code, role_code.replace("-", " ").title(),
+                permission_codes=permission_codes,
+            )
+            role_id = role.id
+    await RoleAssignmentService(session).replace_tenant_roles(
+        user_id=user.id, tenant_id=tenant_id, role_ids=[role_id]
+    )
+
+
+@pytest.mark.asyncio
+async def test_tenant_access_administration_cannot_escalate_or_lock_out_a_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Access managers cannot alter their own authority or remove the sole admin."""
+
+    async with session_factory.begin() as session:
+        identity = IdentityStoreService(session)
+        tenant = await identity.create_tenant("access-controls", "Access controls")
+        administrator = await identity.create_user("administrator@example.com")
+        operator = await identity.create_user("operator@example.com")
+        member = await identity.create_user("member@example.com")
+        await join_tenant(
+            session, administrator, tenant.id, system_role=TENANT_ADMIN_ROLE
+        )
+        await join_tenant(
+            session,
+            operator,
+            tenant.id,
+            role_code="access-operator",
+            permission_codes=(ROLE_MANAGE_PERMISSION, USER_MANAGE_PERMISSION),
+        )
+        await join_tenant(session, member, tenant.id)
+        operator_context = await identity.get_context(operator.id, tenant_id=tenant.id)
+        administrator_role_id = await session.scalar(
+            select(Role.id).where(
+                Role.code == TENANT_ADMIN_ROLE,
+                Role.is_system,
+            )
+        )
+        operator_role_id = await session.scalar(
+            select(Role.id).where(
+                Role.tenant_id == tenant.id,
+                Role.code == "access-operator",
+            )
+        )
+        assert administrator_role_id is not None
+        assert operator_role_id is not None
+
+        with pytest.raises(ControlPlaneValidationError, match="already held"):
+            await RoleService(session).create_role(
+                operator_context,
+                code="elevated",
+                display_name="Elevated",
+                permission_codes=["tenant.manage"],
+            )
+
+        with pytest.raises(ControlPlaneConflictError, match="own workspace access"):
+            await UserService(session).update_user(
+                operator_context,
+                operator.id,
+                role_ids=[administrator_role_id],
+            )
+
+        with pytest.raises(ControlPlaneConflictError, match="role they hold"):
+            await RoleService(session).update_role(
+                operator_context,
+                operator_role_id,
+                permission_codes=[USER_MANAGE_PERMISSION],
+            )
+
+        with pytest.raises(ControlPlaneValidationError, match="beyond the acting"):
+            await UserService(session).update_user(
+                operator_context,
+                member.id,
+                role_ids=[administrator_role_id],
+            )
+
+        with pytest.raises(ControlPlaneConflictError, match="last active workspace administrator"):
+            await UserService(session).update_user(
+                operator_context,
+                administrator.id,
+                status=False,
+            )
+
+
+async def grant_collection_role(
+    session: AsyncSession, item_id: UUID, *, user: User, role_code: str
+) -> None:
+    """Give a user one Collection role directly, without the console's policy."""
+
+    await RoleAssignmentService(session).grant_collection_role(
+        item_id,
+        principal_type="user",
+        principal_id=user.id,
+        role_code=role_code,
+        created_by_user_id=user.id,
+    )
 
 
 @pytest.mark.asyncio
@@ -102,20 +258,14 @@ async def test_identity_supports_multiple_tenant_memberships(
         first_tenant = await auth.create_tenant("acme", "Acme")
         second_tenant = await auth.create_tenant("labs", "Labs")
         user = await auth.create_user("USER@EXAMPLE.COM")
-        first_role = await auth.create_role(
-            first_tenant.id,
-            "reader",
-            "Reader",
-            permission_codes=["knowledge.read"],
+        await join_tenant(
+            session, user, first_tenant.id,
+            role_code="reader", permission_codes=("knowledge.read",),
         )
-        second_role = await auth.create_role(
-            second_tenant.id,
-            "manager",
-            "Manager",
-            permission_codes=["knowledge.read", "source.manage"],
+        await join_tenant(
+            session, user, second_tenant.id,
+            role_code="manager", permission_codes=("knowledge.read", "source.manage"),
         )
-        await auth.assign_membership(user.id, first_tenant.id, first_role.id)
-        await auth.assign_membership(user.id, second_tenant.id, second_role.id)
 
         with pytest.raises(AuthorizationError, match="tenant ID is required"):
             await auth.get_context(user.id)
@@ -126,6 +276,200 @@ async def test_identity_supports_multiple_tenant_memberships(
         assert user.email == "user@example.com"
         assert first_context.permission_codes == ("knowledge.read",)
         assert second_context.permission_codes == ("knowledge.read", "source.manage")
+        assert first_context.role_codes == ("reader",)
+
+
+@pytest.mark.asyncio
+async def test_platform_admin_holds_platform_permissions_only(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Administering the platform must not admit anyone to a workspace.
+
+    This is the bypass the model used to have: a root-admin flag resolved to
+    every permission inside any tenant, membership or not.
+    """
+
+    async with session_factory.begin() as session:
+        auth = IdentityStoreService(session)
+        home = await auth.create_tenant("home", "Home")
+        other = await auth.create_tenant("other", "Other Workspace")
+        operator = await auth.create_user("operator@example.com")
+        await join_tenant(
+            session, operator, home.id, role_code="reader",
+            permission_codes=("knowledge.read",),
+        )
+        await RoleAssignmentService(session).ensure_platform_role(
+            operator.id, PLATFORM_ADMIN_ROLE
+        )
+
+        context = await auth.get_context(operator.id, tenant_id=home.id)
+        assert context.platform_permissions == (
+            "platform.audit.read",
+            "platform.health.read",
+            "platform.tenant.read",
+            "platform.user.read",
+        )
+        # Platform capability never leaks into the workspace.
+        assert context.permission_codes == ("knowledge.read",)
+        assert not context.has_permissions("user.manage")
+
+        with pytest.raises(AuthorizationError, match="not a member"):
+            await auth.get_context(operator.id, tenant_id=other.id)
+
+
+@pytest.mark.asyncio
+async def test_platform_role_grant_is_idempotent_and_audited(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        authentication = AuthenticationService(
+            session,
+            tokens=JwtTokenService(
+                secret="a" * 32,
+                issuer="bothesis",
+                audience="bothesis-api",
+                expires_in_seconds=900,
+            ),
+            platform_admin_emails=frozenset({"root@example.com"}),
+        )
+
+        first = await authentication.complete_verified_external_session(
+            VerifiedGoogleIdentity(
+                issuer="https://accounts.google.com",
+                subject="root-google-subject",
+                email="ROOT@EXAMPLE.COM",
+                display_name="Root User",
+            )
+        )
+        second = await authentication.complete_verified_external_session(
+            VerifiedGoogleIdentity(
+                issuer="https://accounts.google.com",
+                subject="root-google-subject",
+                email="root@example.com",
+                display_name="Root User",
+            )
+        )
+        user = await IdentityStoreService(session).get_user_by_email("root@example.com")
+
+        assert first.platform_permissions == (
+            "platform.audit.read",
+            "platform.health.read",
+            "platform.tenant.read",
+            "platform.user.read",
+        )
+        assert second.platform_permissions == first.platform_permissions
+        # The personal workspace owner is a tenant_admin assignment, not a wildcard.
+        assert "user.manage" in first.permissions
+        assert "*:*" not in first.permissions
+
+        grants = list(
+            await session.scalars(
+                select(RoleAssignment).where(
+                    RoleAssignment.user_id == user.id,
+                    RoleAssignment.tenant_id.is_(None),
+                    RoleAssignment.item_id.is_(None),
+                    RoleAssignment.deleted_at.is_(None),
+                )
+            )
+        )
+        assert len(grants) == 1
+
+        events = list(
+            await session.scalars(
+                select(AuditLog).where(
+                    AuditLog.action == "role_assignment.platform_admin.granted"
+                )
+            )
+        )
+        assert len(events) == 1
+        assert events[0].tenant_id is None
+
+
+@pytest.mark.asyncio
+async def test_guest_session_is_claimed_without_moving_the_conversation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        identity = IdentityStoreService(session)
+        public = await identity.create_tenant(
+            "public-demo", "Public Demo", visibility="public"
+        )
+        authentication = AuthenticationService(
+            session,
+            tokens=JwtTokenService(
+                secret="g" * 32,
+                issuer="bothesis",
+                audience="bothesis-api",
+                expires_in_seconds=900,
+            ),
+            public_tenant_code=public.code,
+        )
+        guest = await authentication.create_session(method="guest")
+        conversation = Conversation(
+            tenant_id=public.id,
+            owner_user_id=None,
+            created_by_session_id=guest.session_id,
+            title="Guest question",
+        )
+        session.add(conversation)
+        await session.flush()
+
+        with pytest.raises(AuthorizationError, match="sign in is required"):
+            await authentication.update_session(
+                current_session_id=guest.session_id,
+                active_workspace_id=public.id,
+            )
+
+        claimed = await authentication.complete_verified_external_session(
+            VerifiedGoogleIdentity(
+                issuer="https://accounts.google.com",
+                subject="claimed-google-subject",
+                email="claimed@example.com",
+                display_name="Claimed User",
+            ),
+            guest_session_id=guest.session_id,
+        )
+        await session.refresh(conversation)
+        retired_guest = await session.get(AccessSession, guest.session_id)
+
+        assert claimed.session_kind == "user"
+        assert claimed.active_tenant_id == public.id
+        assert conversation.tenant_id == public.id
+        assert conversation.owner_user_id == claimed.user_id
+        assert conversation.created_by_session_id == guest.session_id
+        assert retired_guest is not None
+        assert retired_guest.status == "superseded"
+
+
+@pytest.mark.asyncio
+async def test_platform_reporting_is_gated_and_reads_roles_not_memberships(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Platform reads need a platform grant, and find the workspace admin."""
+
+    async with session_factory.begin() as session:
+        auth = IdentityStoreService(session)
+        tenant = await auth.create_tenant("acme", "Acme")
+        admin = await auth.create_user("workspace-admin@example.com")
+        operator = await auth.create_user("operator@example.com")
+        await join_tenant(session, admin, tenant.id, system_role=TENANT_ADMIN_ROLE)
+        await join_tenant(session, operator, tenant.id, role_code="reader")
+        await RoleAssignmentService(session).ensure_platform_role(
+            operator.id, PLATFORM_ADMIN_ROLE
+        )
+
+        dashboard = DashboardService(session)
+        admin_context = await auth.get_context(admin.id, tenant_id=tenant.id)
+        operator_context = await auth.get_context(operator.id, tenant_id=tenant.id)
+
+        # A workspace administrator is not a platform administrator.
+        with pytest.raises(AuthorizationError, match="platform permissions"):
+            await dashboard.platform_overview(admin_context)
+
+        overview = await dashboard.platform_overview(operator_context)
+        assert overview["metrics"]["workspaces"] == 1
+        workspaces = await dashboard.list_platform_workspaces(operator_context)
+        assert workspaces["items"][0]["owner"]["email"] == admin.email
 
 
 @pytest.mark.asyncio
@@ -136,9 +480,10 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
         auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
-        role = await auth.create_role(tenant.id, "member", "Member")
-        await auth.assign_membership(owner.id, tenant.id, role.id)
-        context = await auth.get_context(owner.id, tenant_id=tenant.id)
+        await join_tenant(session, owner, tenant.id)
+        context = await AccessSessionService(session).internal_user(
+            user=owner, tenant_id=tenant.id
+        )
 
         items = ItemService(session)
         item, created = await items.create_or_get_personal_upload(
@@ -166,7 +511,10 @@ async def test_personal_upload_and_message_relation_store_metadata_only(
         assert item.upload is not None and item.upload.status == "pending"
 
         conversation = Conversation(
-            tenant_id=tenant.id, user_id=owner.id, title="Review"
+            tenant_id=tenant.id,
+            owner_user_id=owner.id,
+            created_by_session_id=context.session_id,
+            title="Review",
         )
         session.add(conversation)
         await session.flush()
@@ -208,14 +556,17 @@ async def test_sandbox_recovery_state_is_private_to_its_conversation_owner(
         second_tenant = await identity.create_tenant("sandbox-two", "Sandbox two")
         owner = await identity.create_user("owner@sandbox.test")
         other = await identity.create_user("other@sandbox.test")
-        owner_role = await identity.create_role(first_tenant.id, "member", "Member")
-        other_role = await identity.create_role(second_tenant.id, "member", "Member")
-        await identity.assign_membership(owner.id, first_tenant.id, owner_role.id)
-        await identity.assign_membership(other.id, second_tenant.id, other_role.id)
-        owner_access = await identity.get_context(owner.id, tenant_id=first_tenant.id)
+        await join_tenant(session, owner, first_tenant.id)
+        await join_tenant(session, other, second_tenant.id)
+        owner_access = await AccessSessionService(session).internal_user(
+            user=owner, tenant_id=first_tenant.id
+        )
         other_access = await identity.get_context(other.id, tenant_id=second_tenant.id)
         conversation = Conversation(
-            tenant_id=first_tenant.id, user_id=owner.id, title="Sandbox work"
+            tenant_id=first_tenant.id,
+            owner_user_id=owner.id,
+            created_by_session_id=owner_access.session_id,
+            title="Sandbox work",
         )
         session.add(conversation)
         await session.flush()
@@ -258,9 +609,10 @@ async def test_referenced_resources_resolve_prior_turns_under_current_access(
 ) -> None:
     """A follow-up like "fill that form" resolves earlier Document IDs.
 
-    Only "attachment"/"reference" links come back — artifact "output" links
-    travel as working documents — newest reference first, and only while the
-    caller can still read the document's Collection.
+    Attachment, reference, and artifact "output" links all come back, newest
+    reference first, and only while the caller can still read the document's
+    Collection. A Collection role revoked after the turn that referenced a
+    document must drop it from context, not merely fail a later tool call.
     """
 
     async with session_factory.begin() as session:
@@ -268,19 +620,17 @@ async def test_referenced_resources_resolve_prior_turns_under_current_access(
         tenant = await auth.create_tenant("provenance", "Provenance")
         owner = await auth.create_user("owner@example.com")
         other = await auth.create_user("other@example.com")
-        role = await auth.create_role(
-            tenant.id,
-            "member",
-            "Member",
-            permission_codes=["knowledge.read", "access.manage"],
+        for member in (owner, other):
+            await join_tenant(
+                session, member, tenant.id,
+                permission_codes=("knowledge.read", "access.manage"),
+            )
+        actor = await AccessSessionService(session).internal_user(
+            user=owner, tenant_id=tenant.id
         )
-        await auth.assign_membership(owner.id, tenant.id, role.id)
-        await auth.assign_membership(other.id, tenant.id, role.id)
-        actor = await auth.get_context(owner.id, tenant_id=tenant.id)
         other_actor = await auth.get_context(other.id, tenant_id=tenant.id)
 
         items = ItemService(session)
-        access = CollectionAccessService(session)
         forms = await items.create_collection(
             tenant_id=tenant.id, title="Forms", created_by_user_id=owner.id
         )
@@ -288,12 +638,8 @@ async def test_referenced_resources_resolve_prior_turns_under_current_access(
             tenant_id=tenant.id, title="Restricted", created_by_user_id=owner.id
         )
         for collection in (forms, restricted):
-            await access.grant(
-                collection.id,
-                principal_type="user",
-                principal_id=owner.id,
-                role="owner",
-                actor=actor,
+            await grant_collection_role(
+                session, collection.id, user=owner, role_code=COLLECTION_OWNER_ROLE
             )
         expense_form = await items.create_document(
             tenant_id=tenant.id,
@@ -325,7 +671,10 @@ async def test_referenced_resources_resolve_prior_turns_under_current_access(
         )
 
         conversation = Conversation(
-            tenant_id=tenant.id, user_id=owner.id, title="Expenses"
+            tenant_id=tenant.id,
+            owner_user_id=owner.id,
+            created_by_session_id=actor.session_id,
+            title="Expenses",
         )
         session.add(conversation)
         await session.flush()
@@ -352,11 +701,11 @@ async def test_referenced_resources_resolve_prior_turns_under_current_access(
         await items.link_message(
             messages[2].id, expense_form.id, "reference", access=actor
         )
-        # The answer's produced document is an output, not a reference.
+        # An artifact the turn exported stays reachable as a resource.
         await items.link_message(messages[2].id, draft.id, "output", access=actor)
         # Access revoked between turns must remove the document from context.
-        await access.revoke(
-            restricted.id, principal_type="user", principal_id=owner.id, actor=actor
+        await RoleAssignmentService(session).revoke_collection_role(
+            restricted.id, principal_type="user", principal_id=owner.id
         )
         conversation_id = conversation.id
 
@@ -364,12 +713,15 @@ async def test_referenced_resources_resolve_prior_turns_under_current_access(
     references = await conversations.referenced_resources(
         conversation_id, access=actor
     )
-    assert [reference.title for reference in references] == [
-        "Expense report form",
-        "Leave policy",
-    ]
-    assert references[0].id == str(expense_form.id)
-    assert references[0].mime_type == "application/octet-stream"
+    # "Secret" sat in the Collection whose grant was revoked above, so it is
+    # gone even though an earlier turn referenced it. The two documents the
+    # latest turn touched come before the one only an earlier turn did; within
+    # one turn the order is unspecified, so it is not asserted.
+    names = [reference.name for reference in references]
+    assert set(names[:2]) == {"Expense report form", "Filled expense report"}
+    assert names[2:] == ["Leave policy"]
+    by_id = {reference.id: reference for reference in references}
+    assert by_id[str(expense_form.id)].mime_type == "application/octet-stream"
     # A conversation is private to its user: another member resolves nothing.
     assert (
         await conversations.referenced_resources(conversation_id, access=other_actor)
@@ -467,8 +819,7 @@ async def test_integration_credentials_are_encrypted_and_owner_models_are_explic
         auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
-        role = await auth.create_role(tenant.id, "member", "Member")
-        await auth.assign_membership(owner.id, tenant.id, role.id)
+        await join_tenant(session, owner, tenant.id)
 
         personal = IntegrationConnection(
             tenant_id=tenant.id,
@@ -530,13 +881,10 @@ async def test_integration_list_eager_loads_optional_credentials(
         auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme", "Acme")
         owner = await auth.create_user("owner@example.com")
-        role = await auth.create_role(
-            tenant.id,
-            "source-manager",
-            "Source Manager",
-            permission_codes=["source.manage"],
+        await join_tenant(
+            session, owner, tenant.id, role_code="source-manager",
+            permission_codes=("source.manage",),
         )
-        await auth.assign_membership(owner.id, tenant.id, role.id)
         actor = await auth.get_context(owner.id, tenant_id=tenant.id)
         session.add(
             IntegrationConnection(
@@ -573,13 +921,10 @@ async def test_authorized_item_is_projectable_without_further_database_io(
         auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("viewer", "Viewer")
         owner = await auth.create_user("viewer@example.com")
-        role = await auth.create_role(
-            tenant.id,
-            "reader",
-            "Reader",
-            permission_codes=["knowledge.read", "access.manage"],
+        await join_tenant(
+            session, owner, tenant.id, role_code="reader",
+            permission_codes=("knowledge.read", "access.manage"),
         )
-        await auth.assign_membership(owner.id, tenant.id, role.id)
         actor = await auth.get_context(owner.id, tenant_id=tenant.id)
         items = ItemService(session)
         collection = await items.create_collection(
@@ -587,12 +932,8 @@ async def test_authorized_item_is_projectable_without_further_database_io(
             title="Policies",
             created_by_user_id=owner.id,
         )
-        await CollectionAccessService(session).grant(
-            collection.id,
-            principal_type="user",
-            principal_id=owner.id,
-            role="owner",
-            actor=actor,
+        await grant_collection_role(
+            session, collection.id, user=owner, role_code=COLLECTION_OWNER_ROLE
         )
         # A connector-ingested document has no upload row at all.
         ingested = await items.create_document(
@@ -623,8 +964,7 @@ async def test_external_resource_mapping_preserves_canonical_item_identity(
         auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("source-map", "Source mapping")
         owner = await auth.create_user("source-map@example.com")
-        role = await auth.create_role(tenant.id, "source-manager", "Source Manager")
-        await auth.assign_membership(owner.id, tenant.id, role.id)
+        await join_tenant(session, owner, tenant.id, role_code="source-manager")
         collection = await ItemService(session).create_collection(
             tenant_id=tenant.id,
             title="External knowledge",
@@ -635,7 +975,7 @@ async def test_external_resource_mapping_preserves_canonical_item_identity(
             connector_key="confluence",
             owner_type="tenant",
             display_name="Company wiki",
-            status="active",
+            status="connected",
             created_by_user_id=owner.id,
         )
         session.add(connection)
@@ -644,7 +984,7 @@ async def test_external_resource_mapping_preserves_canonical_item_identity(
             integration_connection_id=connection.id,
             target_item_id=collection.id,
             checkpoint={},
-            status="active",
+            status="ready",
             created_by_user_id=owner.id,
         )
         session.add(source)
@@ -659,6 +999,7 @@ async def test_external_resource_mapping_preserves_canonical_item_identity(
             document_type="confluence_page",
             title="Existing title",
             status="ready",
+            index_status="ready",
         )
         session.add(existing_item)
         await session.flush()
@@ -706,13 +1047,13 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         auth = IdentityStoreService(session)
         tenant = await auth.create_tenant("acme-knowledge", "Acme Knowledge")
         owner = await auth.create_user("knowledge-owner@example.com")
-        role = await auth.create_role(
-            tenant.id,
-            "knowledge-admin",
-            "Knowledge Admin",
-            permission_codes=["access.manage", "item.manage"],
+        await join_tenant(
+            session, owner, tenant.id, role_code="knowledge-admin",
+            permission_codes=(
+                "access.manage", "item.manage", "collection.read",
+                "collection.share", "collection.update",
+            ),
         )
-        await auth.assign_membership(owner.id, tenant.id, role.id)
         actor = await auth.get_context(owner.id, tenant_id=tenant.id)
 
         created = await ItemCatalogService(session).create_collection(
@@ -727,11 +1068,11 @@ async def test_admin_collection_creation_is_tenant_scoped_and_audited(
         assert created["inherit_access"] is True
         assert created["metadata"] == {"description": "Governed engineering knowledge"}
         assert created["created_by_user_id"] == str(owner.id)
-        assert created["collection_access"] == [
+        assert created["role_assignments"] == [
             {
                 "principal_type": "user",
                 "principal_id": str(owner.id),
-                "role": "owner",
+                "role_code": COLLECTION_OWNER_ROLE,
             }
         ]
         listed = await ItemCatalogService(session).list_items(
@@ -841,9 +1182,19 @@ class _UnavailableIngestion:
         raise DocumentProcessingError("indexing is outside this integration test")
 
 
+class _RecordingIndexWorkflow:
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    async def start_native_upload_indexing(self, input: object) -> dict[str, bool]:
+        self.requests.append(input)
+        return {"started": True}
+
+
 def _uploads(
     session_factory: async_sessionmaker[AsyncSession],
     storage: _UploadStorage,
+    workflows: _RecordingIndexWorkflow | None = None,
     **kwargs: object,
 ) -> DocumentUploadService:
     return DocumentUploadService(
@@ -851,6 +1202,7 @@ def _uploads(
         object_storage=storage,
         ingestion_service=_UnavailableIngestion(),  # type: ignore[arg-type]
         document_source=object(),  # type: ignore[arg-type]
+        workflows=workflows or _RecordingIndexWorkflow(),  # type: ignore[arg-type]
         **kwargs,
     )
 
@@ -866,26 +1218,12 @@ async def _collection_upload_contexts(
         editor = await auth.create_user("upload-editor@example.com")
         viewer = await auth.create_user("upload-viewer@example.com")
         outsider = await auth.create_user("upload-outsider@example.com")
-        admin_role = await auth.create_role(
-            tenant.id,
-            "upload-admin",
-            "Upload admin",
-            permission_codes=["admin"],
+        await join_tenant(session, owner, tenant.id, system_role=TENANT_ADMIN_ROLE)
+        for member in (editor, viewer):
+            await join_tenant(session, member, tenant.id, role_code="upload-member")
+        await join_tenant(
+            session, outsider, other_tenant.id, role_code="upload-outsider"
         )
-        member_role = await auth.create_role(
-            tenant.id,
-            "upload-member",
-            "Upload member",
-        )
-        outsider_role = await auth.create_role(
-            other_tenant.id,
-            "upload-outsider",
-            "Upload outsider",
-        )
-        await auth.assign_membership(owner.id, tenant.id, admin_role.id)
-        await auth.assign_membership(editor.id, tenant.id, member_role.id)
-        await auth.assign_membership(viewer.id, tenant.id, member_role.id)
-        await auth.assign_membership(outsider.id, other_tenant.id, outsider_role.id)
         owner_context = await auth.get_context(owner.id, tenant_id=tenant.id)
         editor_context = await auth.get_context(editor.id, tenant_id=tenant.id)
         viewer_context = await auth.get_context(viewer.id, tenant_id=tenant.id)
@@ -897,28 +1235,14 @@ async def _collection_upload_contexts(
             title="Upload destination",
             created_by_user_id=owner.id,
         )
-        access = CollectionAccessService(session)
-        await access.grant(
-            collection.id,
-            principal_type="user",
-            principal_id=owner.id,
-            role="owner",
-            actor=owner_context,
-        )
-        await access.grant(
-            collection.id,
-            principal_type="user",
-            principal_id=editor.id,
-            role="editor",
-            actor=owner_context,
-        )
-        await access.grant(
-            collection.id,
-            principal_type="user",
-            principal_id=viewer.id,
-            role="viewer",
-            actor=owner_context,
-        )
+        for member, role_code in (
+            (owner, COLLECTION_OWNER_ROLE),
+            (editor, COLLECTION_EDITOR_ROLE),
+            (viewer, COLLECTION_VIEWER_ROLE),
+        ):
+            await grant_collection_role(
+                session, collection.id, user=member, role_code=role_code
+            )
         return (
             collection.id,
             editor_context,
@@ -935,7 +1259,8 @@ async def test_collection_upload_is_authorized_parented_and_retry_safe(
         session_factory
     )
     storage = _UploadStorage()
-    uploads = _uploads(session_factory, storage)
+    workflows = _RecordingIndexWorkflow()
+    uploads = _uploads(session_factory, storage, workflows)
 
     first = await uploads.upload_to_collection(
         editor,
@@ -970,6 +1295,9 @@ async def test_collection_upload_is_authorized_parented_and_retry_safe(
     assert first.item.upload is not None
     assert first.item.upload.owner_user_id == editor.user_id
     assert first.item.upload.status == "available"
+    assert first.item.status == "ready"
+    assert first.item.index_status == "pending"
+    assert len(workflows.requests) == 3
     assert len(storage.uploads) == 2
     assert storage.uploads[0][1] == b"governed policy"
     async with session_factory() as session:
@@ -980,11 +1308,11 @@ async def test_collection_upload_is_authorized_parented_and_retry_safe(
             first.item.id,
             viewer,
         )
-        with pytest.raises(AuthorizationError, match="editor collection access"):
+        with pytest.raises(AuthorizationError, match="collection.update"):
             await ItemService(session).get_upload_for_access(
                 first.item.id,
                 viewer,
-                minimum_role="editor",
+                permission=COLLECTION_UPDATE_PERMISSION,
             )
     assert external_resource is None
     assert visible.id == first.item.id
@@ -1001,7 +1329,7 @@ async def test_collection_upload_rejects_tenant_permission_and_collection_states
     viewer_content = _AsyncUpload(b"viewer")
     outsider_content = _AsyncUpload(b"outsider")
 
-    with pytest.raises(AuthorizationError, match="editor collection access"):
+    with pytest.raises(AuthorizationError, match="collection.update"):
         await uploads.upload_to_collection(
             viewer,
             collection_id,
@@ -1032,15 +1360,50 @@ async def test_collection_upload_rejects_tenant_permission_and_collection_states
     assert outsider_content.read_count == 0
 
     async with session_factory.begin() as session:
-        request = await AccessRequestService(session).create_request(
+        request = await ApprovalRequestService(session).create_request(
             viewer,
             requester_user_id=viewer.user_id,
-            collection_item_id=collection_id,
-            requested_role="editor",
+            request_type="resource_access",
+            target_id=str(collection_id),
+            details={"role": COLLECTION_EDITOR_ROLE},
             reason="Upload files to this knowledge base",
         )
     assert request["status"] == "pending"
-    assert request["requested_role"] == "editor"
+    assert request["requested_role"]["code"] == COLLECTION_EDITOR_ROLE
+
+    async with session_factory.begin() as session:
+        collection = await session.get(Item, collection_id)
+        assert collection is not None and collection.created_by_user_id is not None
+        owner = await session.get(User, collection.created_by_user_id)
+        assert owner is not None
+        assert collection.tenant_id is not None
+        owner_context = await IdentityStoreService(session).get_context(
+            owner.id, tenant_id=collection.tenant_id
+        )
+        with pytest.raises(ControlPlaneConflictError, match="equivalent approval request"):
+            await ApprovalRequestService(session).create_request(
+                viewer,
+                requester_user_id=viewer.user_id,
+                request_type="resource_access",
+                target_id=str(collection_id),
+                details={"role": COLLECTION_VIEWER_ROLE},
+            )
+        approved = await ApprovalRequestService(session).update_request(
+            owner_context,
+            UUID(request["id"]),
+            status="approved",
+        )
+        assert approved["status"] == "approved"
+        granted_role = await session.scalar(
+            select(Role.code)
+            .join(RoleAssignment, RoleAssignment.role_id == Role.id)
+            .where(
+                RoleAssignment.item_id == collection_id,
+                RoleAssignment.user_id == viewer.user_id,
+                RoleAssignment.deleted_at.is_(None),
+            )
+        )
+        assert granted_role == COLLECTION_EDITOR_ROLE
 
     async with session_factory.begin() as session:
         collection = await session.get(Item, collection_id)
@@ -1182,12 +1545,14 @@ async def test_conversation_files_keep_every_revision_under_a_private_collection
         tenant = await auth.create_tenant("artifacts", "Artifacts")
         writer = await auth.create_user("writer@example.com")
         reader = await auth.create_user("reader@example.com")
-        role = await auth.create_role(
-            tenant.id, "member", "Member", permission_codes=["knowledge.read", "access.manage"]
+        for member in (writer, reader):
+            await join_tenant(
+                session, member, tenant.id,
+                permission_codes=("knowledge.read", "access.manage"),
+            )
+        writer_context = await AccessSessionService(session).internal_user(
+            user=writer, tenant_id=tenant.id
         )
-        await auth.assign_membership(writer.id, tenant.id, role.id)
-        await auth.assign_membership(reader.id, tenant.id, role.id)
-        writer_context = await auth.get_context(writer.id, tenant_id=tenant.id)
         reader_context = await auth.get_context(reader.id, tenant_id=tenant.id)
 
         items = ItemService(session)
@@ -1199,8 +1564,8 @@ async def test_conversation_files_keep_every_revision_under_a_private_collection
             title="Legal documents",
             created_by_user_id=writer.id,
         )
-        await CollectionAccessService(session).grant(
-            library.id, principal_type="user", principal_id=writer.id, role="editor", actor=writer_context
+        await grant_collection_role(
+            session, library.id, user=writer, role_code=COLLECTION_EDITOR_ROLE
         )
         source_document = await items.create_document(
             tenant_id=tenant.id,
@@ -1221,10 +1586,15 @@ async def test_conversation_files_keep_every_revision_under_a_private_collection
             title="Reader's private notes",
             created_by_user_id=reader.id,
         )
-        await CollectionAccessService(session).grant(
-            viewer_only.id, principal_type="user", principal_id=writer.id, role="viewer", actor=reader_context
+        await grant_collection_role(
+            session, viewer_only.id, user=writer, role_code=COLLECTION_VIEWER_ROLE
         )
-        conversation = Conversation(tenant_id=tenant.id, user_id=writer.id, title="Draft")
+        conversation = Conversation(
+            tenant_id=tenant.id,
+            owner_user_id=writer.id,
+            created_by_session_id=writer_context.session_id,
+            title="Draft",
+        )
         session.add(conversation)
         await session.flush()
     storage.objects[source_document.storage_key] = (b"# NDA\n\nBetween [A] and [B].\n", "text/markdown")

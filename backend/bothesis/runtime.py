@@ -22,6 +22,7 @@ from bothesis.agent.tools.materialize_resource import MaterializeResource
 from bothesis.agent.tools.materialize_sandbox_resource import MaterializeSandboxResource
 from bothesis.agent.tools.read_resource import ReadResource
 from bothesis.agent.tools.export_sandbox_file import ExportSandboxFile
+from bothesis.agent.tools.request_identity import RequestIdentity
 from bothesis.agent.transports.openai import OpenAITransport
 from bothesis.agent.transports.openrouter import OpenRouterTransport
 from bothesis.agent.transports.openrouter_execution_capability import (
@@ -33,7 +34,15 @@ from bothesis.document_index import ItemIndex, SemanticContextualizer
 from bothesis.health import HealthService, HealthSettings
 from bothesis.knowledge import ItemKnowledgeRetriever, SemanticReranker
 from bothesis.observability import create_tracer
-from bothesis.services.admin_console import AdminConsoleService
+from bothesis.integrations.atlassian import AtlassianConnectionProvider
+from bothesis.integrations.google import GoogleConnectionProvider
+from bothesis.integrations.oauth_state import OAuthStateCodec
+from bothesis.integrations.registry import ConnectionProviderRegistry
+from bothesis.services.workspace_control_plane import WorkspaceControlPlaneService
+from bothesis.services.integration_authorization import (
+    IntegrationAuthorizationService,
+)
+from bothesis.services.integration_lifecycle import IntegrationLifecycleService
 from bothesis.services.identity_access.auth import AuthenticationService
 from bothesis.services.identity_access.google import GoogleIdentityVerifier
 from bothesis.services.artifact import ArtifactService
@@ -80,6 +89,7 @@ class AppRuntime:
         self._contextualization_transport: OpenRouterTransport | None = None
         self._jwt_tokens: JwtTokenService | None = None
         self._google_identity: GoogleIdentityVerifier | None = None
+        self._connection_providers: ConnectionProviderRegistry | None = None
 
     @property
     def config(self) -> AppConfig:
@@ -121,13 +131,56 @@ class AppRuntime:
             presenter=self.document_presenter(),
         )
 
-    def admin_console_service(self) -> AdminConsoleService:
-        return AdminConsoleService(
+    def workspace_control_plane_service(self) -> WorkspaceControlPlaneService:
+        return WorkspaceControlPlaneService(
+            self.sessions(),
+            vector_index=self._config.vector_index,
+        )
+
+    def integration_lifecycle_service(self) -> IntegrationLifecycleService:
+        return IntegrationLifecycleService(
             self.sessions(),
             workflows=self.workflow_service(),
             integration=self._config.integration,
-            vector_index=self._config.vector_index,
+            providers=self.connection_providers(),
+            authorization=self.integration_authorization_service(),
         )
+
+    def integration_authorization_service(self) -> IntegrationAuthorizationService:
+        oauth = self._config.integration.oauth
+        return IntegrationAuthorizationService(
+            self.connection_providers(),
+            state=OAuthStateCodec(oauth.state_secret),
+            client_origin=oauth.client_origin,
+        )
+
+    def connection_providers(self) -> ConnectionProviderRegistry:
+        """Register only the providers this deployment actually configured.
+
+        An unconfigured provider is still registered: the catalogue has to be
+        able to say a connector exists but cannot be connected here, which is a
+        different answer from the connector not existing at all.
+        """
+
+        if self._connection_providers is None:
+            oauth = self._config.integration.oauth
+            self._connection_providers = ConnectionProviderRegistry(
+                (
+                    GoogleConnectionProvider(
+                        client_id=oauth.google.client_id,
+                        client_secret=oauth.google.client_secret,
+                        redirect_uri=oauth.redirect_uri,
+                        timeout_seconds=oauth.timeout_seconds,
+                    ),
+                    AtlassianConnectionProvider(
+                        client_id=oauth.atlassian.client_id,
+                        client_secret=oauth.atlassian.client_secret,
+                        redirect_uri=oauth.redirect_uri,
+                        timeout_seconds=oauth.timeout_seconds,
+                    ),
+                )
+            )
+        return self._connection_providers
 
     def health_service(self) -> HealthService:
         model = self._config.model
@@ -153,7 +206,15 @@ class AppRuntime:
     def authentication_service(self, session: AsyncSession) -> AuthenticationService:
         """Build a request-scoped authentication workflow from durable identity state."""
 
-        return AuthenticationService(session, tokens=self.jwt_token_service())
+        return AuthenticationService(
+            session,
+            tokens=self.jwt_token_service(),
+            platform_admin_emails=self._config.identity.platform_admin_emails,
+            public_tenant_code=self._config.identity.public_tenant_code,
+            guest_session_expires_in_seconds=(
+                self._config.identity.guest_session_expires_in_seconds
+            ),
+        )
 
     # -- Shared collaborators ----------------------------------------------
 
@@ -283,6 +344,7 @@ class AppRuntime:
                 object_storage=self.object_storage(),
                 ingestion_service=self.ingestion_service(),
                 document_source=self.stored_file_content(),
+                workflows=self.workflow_service(),
                 max_upload_bytes=upload.max_upload_bytes,
                 upload_url_seconds=upload.upload_url_seconds,
             )
@@ -371,6 +433,7 @@ class AppRuntime:
                     tracer=tracer,
                 )
             )
+            registry.register(RequestIdentity())
             registry.register(InspectResource())
             registry.register(
                 ReadResource(max_characters=agent.max_resource_read_characters)

@@ -12,8 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bothesis.agent import ResourceRef
 from bothesis.db.models import Conversation, Item, Message, MessageItem
-from bothesis.services import AuthContext, DocumentNotFoundError
-from bothesis.services.identity_access.collection_access import CollectionAccessService
+from bothesis.services import AuthContext, DocumentNotFoundError, conversation_access_filter
+from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.item import ItemService
 
 
@@ -40,6 +40,8 @@ class ConversationService:
             raise ValueError("message content must not be blank")
         if access.tenant_id is None:
             raise DocumentNotFoundError(f"conversation not found: {conversation_id}")
+        if access.session_id is None:
+            raise DocumentNotFoundError(f"conversation not found: {conversation_id}")
         async with self._session_factory.begin() as session:
             now = datetime.now(UTC)
             await session.execute(
@@ -47,7 +49,8 @@ class ConversationService:
                 .values(
                     id=conversation_id,
                     tenant_id=access.tenant_id,
-                    user_id=access.user_id,
+                    owner_user_id=access.user_id,
+                    created_by_session_id=access.session_id,
                     title=_title(normalized_content),
                     last_message_at=now,
                 )
@@ -58,11 +61,7 @@ class ConversationService:
                 .where(Conversation.id == conversation_id)
                 .with_for_update()
             )
-            if conversation is None or (
-                conversation.user_id != access.user_id
-                or conversation.tenant_id != access.tenant_id
-                or conversation.status != "active"
-            ):
+            if conversation is None or not _can_access(conversation, access):
                 raise DocumentNotFoundError(
                     f"conversation not found: {conversation_id}"
                 )
@@ -112,7 +111,7 @@ class ConversationService:
                 .where(
                     Conversation.id == conversation_id,
                     Conversation.tenant_id == access.tenant_id,
-                    Conversation.user_id == access.user_id,
+                    conversation_access_filter(access),
                     Conversation.status == "active",
                 )
                 .with_for_update()
@@ -203,7 +202,7 @@ class ConversationService:
                 .where(
                     Message.conversation_id == conversation_id,
                     Conversation.tenant_id == access.tenant_id,
-                    Conversation.user_id == access.user_id,
+                    conversation_access_filter(access),
                     MessageItem.relation_type.in_(("attachment", "reference", "output")),
                     MessageItem.deleted_at.is_(None),
                     Item.tenant_id == access.tenant_id,
@@ -219,11 +218,11 @@ class ConversationService:
             # Access is re-checked at read time: a Collection permission
             # revoked after the turn that referenced a document must remove
             # it from context, not merely fail later tool calls.
-            collections = CollectionAccessService(session)
+            collections = AuthorizationService(session)
             allowed = set(await collections.allowed_collection_ids(access))
             references: list[ResourceRef] = []
             for item in candidates:
-                collection_id = await collections.authorization_collection_id(
+                collection_id = await collections.governing_collection_id(
                     item.id, tenant_id=access.tenant_id
                 )
                 if collection_id is None or collection_id not in allowed:
@@ -246,12 +245,25 @@ def _title(content: str) -> str:
     return normalized[:120]
 
 
+def _can_access(conversation: Conversation, access: AuthContext) -> bool:
+    if conversation.tenant_id != access.tenant_id or conversation.status != "active":
+        return False
+    if access.is_guest:
+        return (
+            access.session_id is not None
+            and conversation.created_by_session_id == access.session_id
+            and conversation.owner_user_id is None
+        )
+    return access.user_id is not None and conversation.owner_user_id == access.user_id
+
+
 def _resource_ref(item: Item) -> ResourceRef:
     return ResourceRef(
         id=str(item.id),
         name=str(item.metadata_.get("file_name") or item.title),
         mime_type=item.mime_type or "application/octet-stream",
         size_bytes=item.size_bytes,
+        index_status=item.index_status,
     )
 
 

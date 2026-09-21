@@ -9,6 +9,7 @@ connector development.
 - [uv](https://docs.astral.sh/uv/)
 - Docker and Docker Compose
 - Node.js 20 or newer with npm
+- [Bun](https://bun.sh/) to run the WebUI
 - An OpenAI API key for chat and an OpenRouter API key for document vision and embeddings
 
 The Flutter app under `app/bothesis/` is optional. It needs a current Flutter
@@ -26,8 +27,8 @@ make init
 
 `make init` performs the complete local bootstrap:
 
-1. Creates `backend/.env` and `web/.env.local` when missing.
-2. Writes local dependency endpoints and the development identity.
+1. Creates `backend/.env` when missing.
+2. Writes local dependency endpoints and enables the backend's local development identity.
 3. Starts PostgreSQL, Qdrant, MinIO, Temporal, and the Temporal UI.
 4. Creates the configured MinIO bucket.
 5. Rebuilds PostgreSQL from the current SQLAlchemy models.
@@ -64,12 +65,13 @@ uv run python main.py
 Start the WebUI in a separate terminal:
 
 ```bash
-npm --prefix web run dev
+bun run web
 ```
 
-The local WebUI uses the seeded identity from `web/.env.local`. The API accepts
-it only while `BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true`; it is not an
-authentication mechanism for deployment.
+The WebUI has deterministic local API and development-identity defaults. The
+API accepts that identity only while `BOTHESIS_ALLOW_INSECURE_DEV_IDENTITY=true`;
+it is not an authentication mechanism for deployment. `bun run web` does not
+create or require `web/.env.local` (or any WebUI environment file).
 
 ## Local service endpoints
 

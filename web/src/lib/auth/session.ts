@@ -1,9 +1,10 @@
-export interface AuthTenant {
+import { invalidateApiData } from "@/lib/api/revision";
+
+export interface AuthWorkspace {
   id: string;
   code: string;
   name: string;
-  role_id: string;
-  role_code: string;
+  role_codes: string[];
   permissions: string[];
 }
 
@@ -11,28 +12,30 @@ export interface AuthSession {
   access_token: string;
   token_type: "bearer";
   expires_at: string;
-  user_id: string;
-  email: string;
+  session_id: string;
+  user_id: string | null;
+  email: string | null;
   display_name: string | null;
-  active_tenant_id: string;
+  active_workspace_id: string;
   permissions: string[];
-  tenants: AuthTenant[];
+  workspaces: AuthWorkspace[];
+  platform_permissions: string[];
+  session_kind: "user" | "guest";
 }
 
 const storageKey = "bothesis.auth.session";
 
 /**
  * Keep the browser's navigation decisions aligned with the authorization
- * semantics enforced by the API. `admin` and `*:*` are tenant-wide grants.
+ * semantics enforced by the API. The token carries the caller's resolved
+ * permissions in full, so there is no wildcard to interpret here either.
  */
 export function hasSessionPermission(
   session: AuthSession | null,
   permission: string,
 ): boolean {
   if (!session) return false;
-  return session.permissions.includes("*:*") ||
-    session.permissions.includes("admin") ||
-    session.permissions.includes(permission);
+  return session.permissions.includes(permission);
 }
 
 /** A surface is available when any of its governing permissions is granted. */
@@ -43,7 +46,38 @@ export function hasAnySessionPermission(
   return permissions.some((permission) => hasSessionPermission(session, permission));
 }
 
+/** Platform capability is its own scope, never implied by a workspace role. */
+export function hasPlatformPermission(
+  session: AuthSession | null,
+  permission: string,
+): boolean {
+  return Boolean(session?.platform_permissions.includes(permission));
+}
+
+export const PLATFORM_CONTROL_PERMISSIONS = [
+  "platform.tenant.read",
+  "platform.user.read",
+  "platform.audit.read",
+  "platform.health.read",
+] as const;
+
+/** The platform console is available to anyone holding any platform grant. */
+export function canAccessPlatformControl(session: AuthSession | null): boolean {
+  return PLATFORM_CONTROL_PERMISSIONS.some((permission) =>
+    hasPlatformPermission(session, permission),
+  );
+}
+
 export function getAuthSession(): AuthSession | null {
+  return getStoredAuthSession();
+}
+
+export function isGuestSession(session: AuthSession | null): boolean {
+  return session?.session_kind === "guest";
+}
+
+/** The authenticated browser session, or null when nobody is signed in. */
+export function getStoredAuthSession(): AuthSession | null {
   if (typeof window === "undefined") return null;
   const serialized = window.sessionStorage.getItem(storageKey);
   if (!serialized) return null;
@@ -65,10 +99,13 @@ export function storeAuthSession(session: AuthSession): void {
     throw new Error("The sign-in response did not contain a valid session.");
   }
   window.sessionStorage.setItem(storageKey, JSON.stringify(session));
+  // Views hold the previous workspace's rows until they are told to read again.
+  invalidateApiData();
 }
 
 export function clearAuthSession(): void {
   if (typeof window !== "undefined") window.sessionStorage.removeItem(storageKey);
+  invalidateApiData();
 }
 
 function isAuthSession(value: unknown): value is AuthSession {
@@ -80,10 +117,15 @@ function isAuthSession(value: unknown): value is AuthSession {
     session.token_type === "bearer" &&
     typeof session.expires_at === "string" &&
     !Number.isNaN(Date.parse(session.expires_at)) &&
-    typeof session.user_id === "string" &&
-    typeof session.email === "string" &&
-    typeof session.active_tenant_id === "string" &&
+    typeof session.session_id === "string" &&
+    session.session_id.length > 0 &&
+    (session.user_id === null || typeof session.user_id === "string") &&
+    (session.email === null || typeof session.email === "string") &&
+    typeof session.active_workspace_id === "string" &&
     Array.isArray(session.permissions) &&
-    Array.isArray(session.tenants)
+    Array.isArray(session.workspaces) &&
+    Array.isArray(session.platform_permissions) &&
+    (session.session_kind === "user" || session.session_kind === "guest") &&
+    (session.session_kind === "guest" ? session.user_id === null : typeof session.user_id === "string")
   );
 }

@@ -39,12 +39,18 @@ interface DataTableProps<T> {
   selectable?: boolean;
   selectedRowIds?: string[];
   onSelectedRowIdsChange?: (ids: string[]) => void;
+  /**
+   * The row an open inspector is describing. Distinct from `selectedRowIds`,
+   * which is the checkbox selection a bulk action would apply to — a person
+   * can be reading one record while several are ticked.
+   */
+  activeRowId?: string | null;
   emptyState?: React.ReactNode;
   className?: string;
   ariaLabel?: string;
 }
 
-export function DataTable<T extends Record<string, unknown>>({
+export function DataTable<T extends object>({
   columns,
   data,
   keyField = "id",
@@ -54,6 +60,7 @@ export function DataTable<T extends Record<string, unknown>>({
   selectable = false,
   selectedRowIds,
   onSelectedRowIdsChange,
+  activeRowId,
   emptyState,
   className,
   ariaLabel,
@@ -65,7 +72,7 @@ export function DataTable<T extends Record<string, unknown>>({
   const selectedIds = selectedRowIds ?? internalSelected;
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const rowId = useCallback(
-    (row: T) => (getRowId ? getRowId(row) : String(row[keyField])),
+    (row: T) => (getRowId ? getRowId(row) : String(row[keyField as keyof T])),
     [getRowId, keyField],
   );
 
@@ -80,8 +87,8 @@ export function DataTable<T extends Record<string, unknown>>({
   const sorted = useMemo(() => {
     if (!sortKey) return data;
     return [...data].sort((a, b) => {
-      const left = a[sortKey];
-      const right = b[sortKey];
+      const left = a[sortKey as keyof T];
+      const right = b[sortKey as keyof T];
       if (left == null) return 1;
       if (right == null) return -1;
       const comparison = String(left).localeCompare(String(right), undefined, {
@@ -109,8 +116,8 @@ export function DataTable<T extends Record<string, unknown>>({
   const someSelected = !allSelected && visibleIds.some((id) => selectedSet.has(id));
 
   return (
-    <div className={cn("adm-table-wrap", className)}>
-      <table aria-label={ariaLabel} className="adm-table">
+    <div className={cn("ctl-table-wrap", className)}>
+      <table aria-label={ariaLabel} className="ctl-table">
         <thead>
           <tr>
             {selectable && (
@@ -118,7 +125,7 @@ export function DataTable<T extends Record<string, unknown>>({
                 <input
                   aria-label="Select every row"
                   checked={allSelected}
-                  className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand-accent)]"
+                  className="h-3.5 w-3.5 cursor-pointer accent-[var(--text-accent)]"
                   onChange={() =>
                     setSelected(
                       allSelected
@@ -143,9 +150,9 @@ export function DataTable<T extends Record<string, unknown>>({
                     : undefined
                 }
                 className={cn(
-                  column.align === "right" && "adm-table__num",
+                  column.align === "right" && "ctl-table__num",
                   responsiveClass(column),
-                  column.key === primaryKey && "adm-table__primary",
+                  column.key === primaryKey && "ctl-table__primary",
                   column.className,
                 )}
                 key={column.key}
@@ -156,7 +163,7 @@ export function DataTable<T extends Record<string, unknown>>({
                   <button
                     // Negative margin plus matching padding makes the whole
                     // header cell the hit area instead of just the label.
-                    className="-mx-3.5 -my-2 inline-flex items-center gap-1 px-3.5 py-2 transition-colors hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--focus-ring)]"
+                    className="-mx-3.5 -my-2 inline-flex items-center gap-1 px-3.5 py-2 transition-colors hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--focus-ring)]"
                     onClick={() => {
                       if (sortKey === column.key) {
                         setSortDirection(sortDirection === "asc" ? "desc" : "asc");
@@ -181,7 +188,7 @@ export function DataTable<T extends Record<string, unknown>>({
               </th>
             ))}
             {rowActions && (
-              <th className="adm-table__actions-cell" scope="col">
+              <th className="ctl-table__actions-cell" scope="col">
                 <span className="sr-only">Row actions</span>
               </th>
             )}
@@ -193,6 +200,8 @@ export function DataTable<T extends Record<string, unknown>>({
             const selected = selectedSet.has(id);
             return (
               <tr
+                aria-current={id === activeRowId ? "true" : undefined}
+                data-active={id === activeRowId ? "true" : undefined}
                 data-clickable={onRowClick ? "true" : undefined}
                 data-selected={selected ? "true" : undefined}
                 key={id}
@@ -213,7 +222,7 @@ export function DataTable<T extends Record<string, unknown>>({
                     <input
                       aria-label="Select row"
                       checked={selected}
-                      className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand-accent)]"
+                      className="h-3.5 w-3.5 cursor-pointer accent-[var(--text-accent)]"
                       onChange={() =>
                         setSelected(
                           selected
@@ -228,9 +237,9 @@ export function DataTable<T extends Record<string, unknown>>({
                 {columns.map((column) => (
                   <td
                     className={cn(
-                      column.align === "right" && "adm-table__num",
+                      column.align === "right" && "ctl-table__num",
                       responsiveClass(column),
-                      column.key === primaryKey && "adm-table__primary",
+                      column.key === primaryKey && "ctl-table__primary",
                       column.className,
                     )}
                     key={column.key}
@@ -238,15 +247,15 @@ export function DataTable<T extends Record<string, unknown>>({
                   >
                     {column.render
                       ? column.render(row)
-                      : String(row[column.key] ?? "—")}
+                      : String(row[column.key as keyof T] ?? "—")}
                   </td>
                 ))}
                 {rowActions && (
                   <td
-                    className="adm-table__actions-cell"
+                    className="ctl-table__actions-cell"
                     onClick={(event) => event.stopPropagation()}
                   >
-                    <div className="adm-table__actions">{rowActions(row)}</div>
+                    <div className="ctl-table__actions">{rowActions(row)}</div>
                   </td>
                 )}
               </tr>
@@ -272,9 +281,9 @@ export function CellTitle({
     <div className="flex min-w-0 items-center gap-2.5">
       {icon}
       <span className="min-w-0">
-        <span className="block truncate font-medium text-[var(--text)]">{title}</span>
+        <span className="block truncate font-medium text-[var(--text-primary)]">{title}</span>
         {subtitle && (
-          <span className="block truncate text-[0.75rem] text-[var(--text-muted)]">
+          <span className="block truncate text-[length:var(--text-size-meta)] text-[var(--text-tertiary)]">
             {subtitle}
           </span>
         )}

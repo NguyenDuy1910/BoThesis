@@ -9,6 +9,8 @@ from dataclasses import dataclass
 INGESTION_ACTIVITY_NAME = "bothesis.ingest_items"
 INGESTION_TASK_QUEUE = "bothesis-ingestion"
 INGESTION_WORKFLOW_NAME = "bothesis.ingestion"
+NATIVE_UPLOAD_INDEXING_ACTIVITY_NAME = "bothesis.index_native_upload"
+NATIVE_UPLOAD_INDEXING_WORKFLOW_NAME = "bothesis.native_upload_indexing"
 TEMPORAL_DEFAULT_NAMESPACE = "default"
 TEMPORAL_DEFAULT_TARGET = "127.0.0.1:7233"
 
@@ -90,6 +92,28 @@ class IngestionResult:
     duration_ms: int
 
 
+@dataclass(frozen=True, slots=True)
+class NativeUploadIndexingInput:
+    """Stable native-upload identity passed to the background index worker."""
+
+    document_id: str
+    tenant_id: str
+    owner_user_id: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (self.document_id, self.tenant_id, self.owner_user_id)
+        ):
+            raise ValueError("native upload indexing identifiers must not be blank")
+
+
+@dataclass(frozen=True, slots=True)
+class NativeUploadIndexingResult:
+    document_id: str
+    index_status: str
+
+
 class WorkflowExecutionNotFoundError(LookupError):
     """Raised when a Temporal workflow or schedule is not present."""
 
@@ -106,6 +130,13 @@ def ingestion_schedule_id(source_id: str) -> str:
     if not normalized:
         raise ValueError("source_id must not be blank")
     return f"ingestion-schedule:{normalized}"
+
+
+def native_upload_indexing_workflow_id(document_id: str) -> str:
+    normalized = document_id.strip()
+    if not normalized:
+        raise ValueError("document_id must not be blank")
+    return f"native-upload-indexing:{normalized}"
 
 
 def _environment_boolean(name: str, *, default: bool = False) -> bool:
@@ -125,11 +156,16 @@ __all__ = [
     "INGESTION_ACTIVITY_NAME",
     "INGESTION_TASK_QUEUE",
     "INGESTION_WORKFLOW_NAME",
+    "NATIVE_UPLOAD_INDEXING_ACTIVITY_NAME",
+    "NATIVE_UPLOAD_INDEXING_WORKFLOW_NAME",
     "IngestionProgress",
     "IngestionResult",
     "IngestionWorkflowInput",
+    "NativeUploadIndexingInput",
+    "NativeUploadIndexingResult",
     "TemporalSettings",
     "WorkflowExecutionNotFoundError",
     "ingestion_schedule_id",
     "ingestion_workflow_id",
+    "native_upload_indexing_workflow_id",
 ]

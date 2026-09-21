@@ -10,11 +10,13 @@ import { finalTurnText } from "./message-stream.ts";
 
 const CONVERSATIONS_KEY_BASE = "bothesis-conversations";
 const MESSAGE_PREFIX_BASE = "bothesis-messages:";
+const SELECTED_CONVERSATION_KEY_BASE = "bothesis-selected-conversation";
 const ANONYMOUS_USER_NAMESPACE = "anonymous";
 const DEFAULT_CONVERSATION_TITLE = "New conversation";
 let memoryConversations: ChatConversation[] = [];
 const memoryMessages = new Map<string, CachedChatMessage[]>();
 let activeUserNamespace = ANONYMOUS_USER_NAMESPACE;
+let activeSessionKind: "user" | "guest" = "user";
 
 function normalizeUserNamespace(identity: string | null | undefined) {
   const value = String(identity ?? "").trim().toLowerCase();
@@ -25,14 +27,68 @@ function normalizeUserNamespace(identity: string | null | undefined) {
 export function setConversationUser(
   identity: string | null | undefined,
   tenantId?: string | null,
+  sessionKind: "user" | "guest" = "user",
 ) {
   const user = normalizeUserNamespace(identity);
   const tenant = normalizeUserNamespace(tenantId);
   const next = `${user}:${tenant}`;
-  if (next === activeUserNamespace) return;
+  if (next === activeUserNamespace && sessionKind === activeSessionKind) return;
   activeUserNamespace = next;
+  activeSessionKind = sessionKind;
   memoryConversations = [];
   memoryMessages.clear();
+}
+
+function conversationStorage(): Storage {
+  return activeSessionKind === "guest" ? window.sessionStorage : window.localStorage;
+}
+
+/** Move browser-held conversation presentation state after a guest is claimed. */
+export function migrateConversationUser(
+  fromUserId: string,
+  fromTenantId: string,
+  toUserId: string,
+  toTenantId: string,
+): void {
+  if (typeof window === "undefined") return;
+  const from = `${normalizeUserNamespace(fromUserId)}:${normalizeUserNamespace(fromTenantId)}`;
+  const to = `${normalizeUserNamespace(toUserId)}:${normalizeUserNamespace(toTenantId)}`;
+  if (from === to) return;
+  try {
+    const conversationSource = `${CONVERSATIONS_KEY_BASE}:${from}`;
+    const conversationTarget = `${CONVERSATIONS_KEY_BASE}:${to}`;
+    const conversations = window.sessionStorage.getItem(conversationSource);
+    if (conversations) {
+      const guestConversations = normalizeConversations(
+        JSON.parse(conversations) as ChatConversation[],
+      );
+      const existing = window.localStorage.getItem(conversationTarget);
+      const authenticatedConversations = normalizeConversations(
+        existing ? JSON.parse(existing) as ChatConversation[] : [],
+      );
+      const merged = [...guestConversations, ...authenticatedConversations].filter(
+        (conversation, index, all) => all.findIndex(
+          (candidate) => candidate.id === conversation.id,
+        ) === index,
+      );
+      window.localStorage.setItem(conversationTarget, JSON.stringify(merged));
+      for (const conversation of guestConversations) {
+        const source = `${MESSAGE_PREFIX_BASE}${from}:${conversation.sessionId}`;
+        const target = `${MESSAGE_PREFIX_BASE}${to}:${conversation.sessionId}`;
+        const messages = window.sessionStorage.getItem(source);
+        if (messages) window.localStorage.setItem(target, messages);
+      }
+    }
+    const selected = window.sessionStorage.getItem(
+      `${SELECTED_CONVERSATION_KEY_BASE}:${from}`,
+    );
+    if (selected !== null) {
+      window.sessionStorage.setItem(`${SELECTED_CONVERSATION_KEY_BASE}:${to}`, selected);
+    }
+  } catch {
+    // Server ownership still transfers; restricted storage only loses local UI metadata.
+  }
+  setConversationUser(toUserId, toTenantId, "user");
 }
 
 function conversationsKey() {
@@ -41,6 +97,41 @@ function conversationsKey() {
 
 function messageKey(sessionId: string) {
   return `${MESSAGE_PREFIX_BASE}${activeUserNamespace}:${sessionId}`;
+}
+
+function selectedConversationKey() {
+  return `${SELECTED_CONVERSATION_KEY_BASE}:${activeUserNamespace}`;
+}
+
+/** A tab remembers whether it was showing a conversation or an empty draft. */
+export function readSelectedConversation(): string | null | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const stored = window.sessionStorage.getItem(selectedConversationKey());
+    return stored === null ? undefined : stored || null;
+  } catch {
+    return undefined;
+  }
+}
+
+export function rememberSelectedConversation(id: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(selectedConversationKey(), id ?? "");
+  } catch {
+    // Restricted storage should not prevent navigation within Chat.
+  }
+}
+
+/** An explicit empty draft must not silently reopen the newest conversation. */
+export function resolveSelectedConversation(
+  conversations: ChatConversation[],
+  requestedId: string | null | undefined,
+): string | null {
+  if (requestedId === null) return null;
+  return requestedId && conversations.some((item) => item.id === requestedId)
+    ? requestedId
+    : conversations[0]?.id ?? null;
 }
 
 export interface ConversationAdapter {
@@ -63,7 +154,7 @@ export interface ConversationAdapter {
 
 function readConversations(): ChatConversation[] {
   try {
-    const raw = window.localStorage.getItem(conversationsKey());
+    const raw = conversationStorage().getItem(conversationsKey());
     return normalizeConversations(
       raw ? (JSON.parse(raw) as ChatConversation[]) : memoryConversations
     );
@@ -75,7 +166,7 @@ function readConversations(): ChatConversation[] {
 function writeConversations(conversations: ChatConversation[]) {
   memoryConversations = conversations;
   try {
-    window.localStorage.setItem(conversationsKey(), JSON.stringify(conversations));
+    conversationStorage().setItem(conversationsKey(), JSON.stringify(conversations));
   } catch {
     // Keep local-only conversations usable when browser storage is unavailable.
   }
@@ -84,7 +175,7 @@ function writeConversations(conversations: ChatConversation[]) {
 function readStoredMessages(id: string): CachedChatMessage[] {
   const sessionId = resolveSessionId(id);
   try {
-    const raw = window.localStorage.getItem(messageKey(sessionId));
+    const raw = conversationStorage().getItem(messageKey(sessionId));
     return raw
       ? normalizeCachedMessages(JSON.parse(raw) as CachedChatMessage[])
       : normalizeCachedMessages(memoryMessages.get(sessionId) ?? []);
@@ -258,7 +349,7 @@ export const conversationAdapter: ConversationAdapter = {
     const sessionId = resolveSessionId(id);
     memoryMessages.set(sessionId, nextMessages);
     try {
-      window.localStorage.setItem(
+      conversationStorage().setItem(
         messageKey(sessionId),
         JSON.stringify(nextMessages)
       );

@@ -1,13 +1,11 @@
-"""Chat routes: stream one grounded turn and list selectable Collections."""
+"""Canonical grounded chat resource."""
 
 from __future__ import annotations
-
-from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from api.deps import Caller, Chat, ChatCaller, Documents
+from api.deps import Chat, ChatCaller
 from api.routers import ChatRequest
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -18,7 +16,17 @@ _STREAM_HEADERS = {
 }
 
 
-@router.post("/chat")
+@router.post(
+    "/chat",
+    operation_id="streamAgentChat",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Server-Sent Events chat stream",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }
+    },
+)
 async def chat_stream(
     body: ChatRequest,
     caller: ChatCaller,
@@ -30,7 +38,7 @@ async def chat_stream(
         message=body.message,
         conversation_id=body.conversation_id,
         history=[(message.role, message.content) for message in body.history],
-        collection_item_ids=body.collection_item_ids,
+        collection_item_ids=body.collection_ids,
         attachment_ids=body.attachment_ids,
         is_disconnected=request.is_disconnected,
     )
@@ -39,10 +47,3 @@ async def chat_stream(
         media_type="text/event-stream",
         headers=_STREAM_HEADERS,
     )
-
-
-@router.get("/collections")
-async def list_chat_collections(
-    caller: Caller, documents: Documents
-) -> dict[str, Any]:
-    return await documents.list_collections(caller)

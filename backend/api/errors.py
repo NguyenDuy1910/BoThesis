@@ -6,14 +6,16 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 from bothesis.services import (
-    AdminConflictError,
-    AdminExternalUnavailableError,
-    AdminNotFoundError,
-    AdminValidationError,
+    ControlPlaneConflictError,
+    ControlPlaneExternalUnavailableError,
+    ControlPlaneNotFoundError,
+    ControlPlaneValidationError,
     ArtifactValidationError,
     AuthorizationError,
+    ConnectionAuthorizationRequiredError,
     DocumentNotFoundError,
     IdentityInactiveError,
+    IdentityConflictError,
     IdentityNotFoundError,
     IdentityProviderUnavailableError,
     IdentityServiceError,
@@ -32,28 +34,35 @@ _UNAUTHENTICATED_MARKERS = (
 )
 
 _STATUS_BY_ERROR: tuple[tuple[type[Exception], int], ...] = (
-    (AdminNotFoundError, status.HTTP_404_NOT_FOUND),
+    (ControlPlaneNotFoundError, status.HTTP_404_NOT_FOUND),
     (IdentityNotFoundError, status.HTTP_404_NOT_FOUND),
     (DocumentNotFoundError, status.HTTP_404_NOT_FOUND),
-    (AdminConflictError, status.HTTP_409_CONFLICT),
+    # Nothing about the request is wrong; the grant behind it is gone, and the
+    # only thing that resolves it is a person authorizing the account again.
+    (ConnectionAuthorizationRequiredError, status.HTTP_409_CONFLICT),
+    (ControlPlaneConflictError, status.HTTP_409_CONFLICT),
     (UploadConflictError, status.HTTP_409_CONFLICT),
-    (AdminValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    (ControlPlaneValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
     (ArtifactValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
     (UploadValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
     (UploadTooLargeError, status.HTTP_413_CONTENT_TOO_LARGE),
     (IdentityInactiveError, status.HTTP_401_UNAUTHORIZED),
+    (IdentityConflictError, status.HTTP_409_CONFLICT),
     (IdentityProviderUnavailableError, status.HTTP_503_SERVICE_UNAVAILABLE),
     (IdentityServiceError, status.HTTP_401_UNAUTHORIZED),
     (PermissionError, status.HTTP_403_FORBIDDEN),
+    (ValueError, status.HTTP_422_UNPROCESSABLE_CONTENT),
 )
 
 HANDLED_ERRORS: tuple[type[Exception], ...] = (
-    AdminNotFoundError,
+    ControlPlaneNotFoundError,
     IdentityNotFoundError,
+    IdentityConflictError,
     DocumentNotFoundError,
-    AdminConflictError,
+    ControlPlaneConflictError,
+    ConnectionAuthorizationRequiredError,
     UploadConflictError,
-    AdminValidationError,
+    ControlPlaneValidationError,
     ArtifactValidationError,
     UploadValidationError,
     UploadTooLargeError,
@@ -61,7 +70,7 @@ HANDLED_ERRORS: tuple[type[Exception], ...] = (
     IdentityInactiveError,
     IdentityServiceError,
     PermissionError,
-    AdminExternalUnavailableError,
+    ControlPlaneExternalUnavailableError,
     ObjectStorageError,
     RuntimeError,
     ValueError,

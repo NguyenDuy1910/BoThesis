@@ -13,9 +13,9 @@ export function Card({ children, className, elevation = "flat" }: CardProps) {
   return (
     <section
       className={cn(
-        "adm-card",
-        elevation === "raised" && "adm-card--raised",
-        elevation === "quiet" && "adm-card--quiet",
+        "ctl-card",
+        elevation === "raised" && "ctl-card--raised",
+        elevation === "quiet" && "ctl-card--quiet",
         className,
       )}
     >
@@ -40,13 +40,13 @@ export function CardHeader({
   actions,
 }: CardHeaderProps) {
   if (children) {
-    return <div className={cn("adm-card__head", className)}>{children}</div>;
+    return <div className={cn("ctl-card__head", className)}>{children}</div>;
   }
   return (
-    <div className={cn("adm-card__head", className)}>
+    <div className={cn("ctl-card__head", className)}>
       <div className="min-w-0">
-        {title && <h2 className="adm-card__title">{title}</h2>}
-        {description && <p className="adm-card__sub">{description}</p>}
+        {title && <h2 className="ctl-card__title">{title}</h2>}
+        {description && <p className="ctl-card__sub">{description}</p>}
       </div>
       {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
     </div>
@@ -60,7 +60,7 @@ export function CardBody({
   children: React.ReactNode;
   className?: string;
 }) {
-  return <div className={cn("adm-card__body", className)}>{children}</div>;
+  return <div className={cn("ctl-card__body", className)}>{children}</div>;
 }
 
 export function CardFooter({
@@ -70,5 +70,5 @@ export function CardFooter({
   children: React.ReactNode;
   className?: string;
 }) {
-  return <div className={cn("adm-card__foot", className)}>{children}</div>;
+  return <div className={cn("ctl-card__foot", className)}>{children}</div>;
 }

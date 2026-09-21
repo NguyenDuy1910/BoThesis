@@ -13,6 +13,7 @@ interface SearchInputProps {
   ariaLabel?: string;
   className?: string;
   debounceMs?: number;
+  autoFocus?: boolean;
 }
 
 export function SearchInput({
@@ -22,6 +23,7 @@ export function SearchInput({
   ariaLabel = "Search",
   className,
   debounceMs = 250,
+  autoFocus = false,
 }: SearchInputProps) {
   const [draft, setDraft] = useState(value);
 
@@ -40,10 +42,11 @@ export function SearchInput({
     <div className={cn("relative", className)}>
       <Search
         aria-hidden="true"
-        className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--text-muted)]"
+        className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--text-tertiary)]"
       />
       <input
         aria-label={ariaLabel}
+        autoFocus={autoFocus}
         autoComplete="off"
         className={cn(ui.control, "pl-8", draft && "pr-8")}
         name="search"

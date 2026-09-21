@@ -14,21 +14,21 @@ export type BadgeTone =
 type BadgeVariant = BadgeTone | "default" | "primary";
 
 const toneClasses: Record<BadgeTone, string> = {
-  neutral: "bg-[var(--neutral-soft)] text-[var(--neutral-text)]",
-  brand: "bg-[var(--brand-accent-soft)] text-[var(--brand-accent)]",
-  success: "bg-[var(--success-soft)] text-[var(--success-text)]",
-  warning: "bg-[var(--warning-soft)] text-[var(--warning-text)]",
-  danger: "bg-[var(--danger-soft)] text-[var(--danger-text)]",
-  info: "bg-[var(--info-soft)] text-[var(--info-text)]",
+  neutral: "bg-[var(--status-neutral-bg)] text-[var(--status-neutral-text)]",
+  brand: "bg-[var(--accent-soft)] text-[var(--text-accent)]",
+  success: "bg-[var(--status-success-bg)] text-[var(--status-success-text)]",
+  warning: "bg-[var(--status-warning-bg)] text-[var(--status-warning-text)]",
+  danger: "bg-[var(--status-danger-bg)] text-[var(--status-danger-text)]",
+  info: "bg-[var(--status-info-bg)] text-[var(--status-info-text)]",
 };
 
 const dotClasses: Record<BadgeTone, string> = {
-  neutral: "bg-[var(--neutral)]",
-  brand: "bg-[var(--brand-accent)]",
-  success: "bg-[var(--success)]",
-  warning: "bg-[var(--warning)]",
-  danger: "bg-[var(--danger)]",
-  info: "bg-[var(--info)]",
+  neutral: "bg-[var(--status-neutral-solid)]",
+  brand: "bg-[var(--text-accent)]",
+  success: "bg-[var(--status-success-solid)]",
+  warning: "bg-[var(--status-warning-solid)]",
+  danger: "bg-[var(--status-danger-solid)]",
+  info: "bg-[var(--status-info-solid)]",
 };
 
 function normalizeTone(value: BadgeVariant): BadgeTone {
@@ -62,8 +62,8 @@ export function Badge({
   return (
     <span
       className={cn(
-        "inline-flex max-w-full items-center gap-1.5 rounded-[var(--adm-r-xs)] px-1.5 py-0.5",
-        "text-[0.75rem] font-medium leading-4",
+        "inline-flex max-w-full items-center gap-1.5 rounded-[var(--radius-xs)] px-1.5 py-0.5",
+        "text-[length:var(--text-size-meta)] font-medium leading-4",
         toneClasses[resolved],
         className,
       )}

@@ -22,6 +22,9 @@ import {
 } from "react";
 
 import { appBrand } from "@/lib/brand";
+import { useAuthPrompt } from "@/components/auth/AuthPrompt";
+import { isGuestSession } from "@/lib/auth/session";
+import { useAuthSession } from "@/lib/hooks/useAuthSession";
 import { type Collection, listCollections } from "../api";
 import type { ConversationDocument } from "../types";
 import { FileTypeIcon } from "./ResourceIcon";
@@ -40,6 +43,7 @@ export interface ComposerAttachment {
 interface ChatComposerProps {
   attachments: ComposerAttachment[];
   contextCollections: Collection[];
+  enterToSend: boolean;
   input: string;
   isConfigured: boolean;
   isStreaming: boolean;
@@ -57,6 +61,7 @@ interface ChatComposerProps {
 export function ChatComposer({
   attachments,
   contextCollections,
+  enterToSend,
   input,
   isConfigured,
   isStreaming,
@@ -69,6 +74,8 @@ export function ChatComposer({
   onSubmit,
   textareaRef,
 }: ChatComposerProps) {
+  const { requestSignIn } = useAuthPrompt();
+  const session = useAuthSession();
   const [addOpen, setAddOpen] = useState(false);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [collectionsError, setCollectionsError] = useState<string>();
@@ -140,7 +147,7 @@ export function ChatComposer({
           <div className="composer-attachments">
             {contextCollections.map((collection) => (
               <span className="composer-attachment composer-attachment--collection" key={collection.id}>
-                <LibraryBig aria-hidden="true" size={13} />
+                <LibraryBig aria-hidden="true" size={14} />
                 <span>{collection.title}</span>
                 <small>Collection</small>
                 <button
@@ -164,7 +171,7 @@ export function ChatComposer({
                 title={item.error ?? item.fileName}
               >
                 {item.progress !== "ready" && item.progress !== "failed"
-                  ? <LoaderCircle aria-hidden="true" className="composer-attachment__spin" size={13} />
+                  ? <LoaderCircle aria-hidden="true" className="composer-attachment__spin" size={14} />
                   : <FileTypeIcon name={item.fileName} />}
                 <span>{item.fileName}</span>
                 <small>{attachmentProgressLabel(item)}</small>
@@ -192,13 +199,13 @@ export function ChatComposer({
         />
         <textarea
           aria-describedby="composer-help"
-          aria-label="Message Enterprise Agent"
+          aria-label="Message BoThesis"
           autoComplete="off"
           disabled={!isConfigured}
           name="message"
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+            if (enterToSend && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               void onSubmit(input);
             }
@@ -219,7 +226,7 @@ export function ChatComposer({
               ref={addButtonRef}
               type="button"
             >
-              <Plus aria-hidden="true" size={15} />
+              <Plus aria-hidden="true" size={16} />
               <span>Add</span>
             </button>
             {addOpen && (
@@ -237,7 +244,14 @@ export function ChatComposer({
                   <button
                     className="composer-add-popover__row"
                     disabled={attachments.length >= 12}
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={() => {
+                      if (isGuestSession(session)) {
+                        setAddOpen(false);
+                        requestSignIn("Sign in to upload a private file into this conversation.");
+                        return;
+                      }
+                      fileInputRef.current?.click();
+                    }}
                     type="button"
                   >
                     <FileUp aria-hidden="true" size={16} />
@@ -252,7 +266,7 @@ export function ChatComposer({
                   >
                     <LibraryBig aria-hidden="true" size={16} />
                     <span>Choose from collection</span>
-                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={15} />
+                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={16} />
                   </button>
                   <button
                     aria-controls="chat-context-collections"
@@ -266,7 +280,7 @@ export function ChatComposer({
                   >
                     <LibraryBig aria-hidden="true" size={16} />
                     <span>Recent collections</span>
-                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={15} />
+                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={16} />
                   </button>
                   <button
                     aria-controls="chat-context-collections"
@@ -280,14 +294,14 @@ export function ChatComposer({
                   >
                     <LibraryBig aria-hidden="true" size={16} />
                     <span>Browse all collections</span>
-                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={15} />
+                    <ChevronRight aria-hidden="true" className="composer-add-popover__row-caret" size={16} />
                   </button>
                 </div>
                 {collectionsExpanded && (
                   <div className="composer-add-popover__collections" id="chat-context-collections">
                     <div className="composer-add-popover__section-title">
                       <span>{showAllCollections ? "All collections" : "Recent collections"}</span>
-                      {collectionsLoading && <LoaderCircle aria-label="Loading collections" className="composer-attachment__spin" size={13} />}
+                      {collectionsLoading && <LoaderCircle aria-label="Loading collections" className="composer-attachment__spin" size={14} />}
                     </div>
                     {collectionsError ? (
                       <div className="composer-add-popover__error" role="alert">
@@ -306,7 +320,7 @@ export function ChatComposer({
                                 onClick={() => toggleCollection(collection)}
                                 type="button"
                               >
-                                <LibraryBig aria-hidden="true" size={15} />
+                                <LibraryBig aria-hidden="true" size={16} />
                                 <span>{collection.title}</span>
                               </button>
                             </li>
@@ -322,9 +336,11 @@ export function ChatComposer({
             )}
           </span>
           <span className="composer-context-indicator composer-context-indicator--knowledge"><LibraryBig aria-hidden="true" size={14} />Knowledge: Company</span>
-          <span className="composer-context-indicator"><Bot aria-hidden="true" size={14} />Enterprise Agent</span>
-          <span className="composer-context-indicator composer-context-indicator--model">Managed model <ChevronDown aria-hidden="true" size={13} /></span>
-          <span className="composer__shortcut">Enter to send · Shift + Enter for new line</span>
+          <span className="composer-context-indicator"><Bot aria-hidden="true" size={14} />BoThesis</span>
+          <span className="composer-context-indicator composer-context-indicator--model">Managed model <ChevronDown aria-hidden="true" size={14} /></span>
+          <span className="composer__shortcut">
+            {enterToSend ? "Enter to send · Shift + Enter for new line" : "Use the send button · Enter for new line"}
+          </span>
           <button
             aria-label={isStreaming ? "Stop generating" : "Send message"}
             className={clsx("composer-send", isStreaming && "composer-send--stop")}
@@ -336,7 +352,7 @@ export function ChatComposer({
             onClick={isStreaming ? onStop : undefined}
             type={isStreaming ? "button" : "submit"}
           >
-            {isStreaming ? <Square aria-hidden="true" className="composer-send__stop-icon" size={11} strokeWidth={0} /> : <Send aria-hidden="true" className="composer-send__send-icon" size={17} />}
+            {isStreaming ? <Square aria-hidden="true" className="composer-send__stop-icon" size={12} strokeWidth={0} /> : <Send aria-hidden="true" className="composer-send__send-icon" size={16} />}
           </button>
         </div>
       </form>

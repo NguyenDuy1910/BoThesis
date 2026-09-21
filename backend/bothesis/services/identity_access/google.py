@@ -137,6 +137,8 @@ def _identity_from_claims(
         raise AuthenticationError("Google credential identity is invalid")
     name = claims.get("name")
     return VerifiedGoogleIdentity(
+        issuer=str(claims["iss"]),
+        subject=subject.strip(),
         email=email,
         display_name=name if isinstance(name, str) and name.strip() else None,
     )
