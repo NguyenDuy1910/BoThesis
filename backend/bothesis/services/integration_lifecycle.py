@@ -22,7 +22,7 @@ from temporalio.service import RPCError
 
 from config import IntegrationConfig
 
-from bothesis.db.engine import SessionFactory, session_scope
+from bothesis.db.engine import SessionFactory, transaction_scope
 from bothesis.integrations.registry import ConnectionProviderRegistry
 from bothesis.services.audit import AuditService
 from bothesis.services.identity_access.identity_store import IdentityStoreService
@@ -439,7 +439,7 @@ class IntegrationLifecycleService:
     @asynccontextmanager
     async def _unit_of_work(self) -> AsyncIterator[AsyncSession]:
         try:
-            async with session_scope(self._sessions) as session:
+            async with transaction_scope(self._sessions) as session:
                 yield session
         except IntegrityError as exc:
             raise ControlPlaneConflictError(

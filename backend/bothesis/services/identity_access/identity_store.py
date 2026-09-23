@@ -17,7 +17,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.db.engine import SessionFactory
+from bothesis.db.engine import SessionFactory, transaction_scope
 from bothesis.db.models import (
     AuthIdentity,
     Group,
@@ -837,7 +837,7 @@ async def resolve_agent_access(
         tenant = UUID(tenant_id)
     except (TypeError, ValueError) as exc:
         raise AuthorizationError("agent context carries an invalid identity") from exc
-    async with session_factory() as session:
+    async with transaction_scope(session_factory) as session:
         return await IdentityStoreService(session).get_context(user, tenant_id=tenant)
 
 

@@ -7,7 +7,7 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
-from bothesis.db.engine import session_scope
+from bothesis.db.engine import transaction_scope
 from bothesis.health import HealthService
 from bothesis.runtime import AppRuntime
 from bothesis.services import AuthenticationError, AuthContext, AuthorizationError, JwtClaims
@@ -47,7 +47,7 @@ async def get_auth_context(
 ) -> AuthContext:
     """Resolve the trusted caller before any service sees the request."""
 
-    async with session_scope(runtime.sessions()) as session:
+    async with transaction_scope(runtime.sessions()) as session:
         return await resolve_auth_context(
             identity,
             session,
@@ -64,7 +64,7 @@ async def get_chat_auth_context(
 ) -> AuthContext:
     """Resolve the caller and reject a chat body that claims another tenant."""
 
-    async with session_scope(runtime.sessions()) as session:
+    async with transaction_scope(runtime.sessions()) as session:
         return await resolve_auth_context(
             identity,
             session,

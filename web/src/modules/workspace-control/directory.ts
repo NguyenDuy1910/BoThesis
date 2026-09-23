@@ -116,7 +116,7 @@ export interface PlatformUser {
 }
 
 export interface WorkspaceOverview {
-  tenant: { id: string; code: string; name: string; status: string; updated_at: string | null };
+  workspace: { id: string; code: string; name: string; status: string };
   metrics: Record<string, number>;
   attention: Record<string, number>;
   recent_activity: AuditEvent[];

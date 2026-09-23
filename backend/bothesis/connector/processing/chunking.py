@@ -20,13 +20,11 @@ from docling_core.types.doc import (
     TableCell,
     TableData,
     TableItem,
-    TextItem,
     TitleItem,
 )
 
 from bothesis.connector.protocol import (
     AnyContentPart,
-    BoundingBox,
     Chunk,
     CitationInfo,
     CitationSpan,
@@ -45,7 +43,6 @@ from .mapper import (
     _docling_item_text,
     _element_id,
     _heading_paths,
-    _item_kind,
     _normalized_bbox,
 )
 

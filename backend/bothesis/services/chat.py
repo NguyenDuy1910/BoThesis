@@ -26,7 +26,7 @@ from bothesis.agent.protocol import (
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
 )
-from bothesis.db.engine import SessionFactory, session_scope
+from bothesis.db.engine import SessionFactory, transaction_scope
 from bothesis.services import (
     KNOWLEDGE_READ_PERMISSION,
     AuthContext,
@@ -196,7 +196,7 @@ class ChatService:
     ) -> tuple[UUID, ...]:
         """Bind the turn to Collections the caller may actually read."""
 
-        async with session_scope(self._sessions) as session:
+        async with transaction_scope(self._sessions) as session:
             allowed_ids = await AuthorizationService(session).allowed_collection_ids(
                 access
             )

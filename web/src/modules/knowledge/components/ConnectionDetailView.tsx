@@ -20,7 +20,6 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { Tooltip } from "@/components/ui/Tooltip";
 import {
-  accountLine,
   connectionState,
   needsReconnect,
   relativeTime,

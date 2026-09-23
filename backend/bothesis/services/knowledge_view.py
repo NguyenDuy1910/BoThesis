@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from bothesis.connector.protocol import CitationInfo
-from bothesis.db.engine import SessionFactory, session_scope
+from bothesis.db.engine import SessionFactory, transaction_scope
 from bothesis.db.models import ExternalResource, IngestionSource, Item
 from bothesis.document_index import ItemIndex
 from bothesis.knowledge import CitationResolver
@@ -55,7 +55,7 @@ class KnowledgeViewService:
     ) -> dict[str, Any]:
         """Return one canonical citation with its stored source links."""
 
-        async with session_scope(self._sessions) as session:
+        async with transaction_scope(self._sessions) as session:
             item, collection_id = await self._authorized_item(
                 session, access, item_id, missing="citation not found"
             )
@@ -94,7 +94,7 @@ class KnowledgeViewService:
     ) -> dict[str, Any]:
         """Return the viewer elements for one Item, optionally focused."""
 
-        async with session_scope(self._sessions) as session:
+        async with transaction_scope(self._sessions) as session:
             item, collection_id = await self._authorized_item(
                 session, access, item_id, missing="item not found"
             )
@@ -135,7 +135,7 @@ class KnowledgeViewService:
         """Return the caller's governed Collection home without leaking Items."""
 
         tenant_id = require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
-        async with session_scope(self._sessions) as session:
+        async with transaction_scope(self._sessions) as session:
             access_service = AuthorizationService(session)
             collection_ids = await access_service.allowed_collection_ids(access)
             if not collection_ids:

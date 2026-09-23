@@ -10,7 +10,7 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bothesis.db.engine import SessionFactory, session_scope
+from bothesis.db.engine import SessionFactory, transaction_scope
 from bothesis.document_index import ItemIndex
 from bothesis.services import (
     COLLECTION_SHARE_PERMISSION,
@@ -355,7 +355,7 @@ class WorkspaceControlPlaneService:
         """Commit one control-plane change, reporting write conflicts."""
 
         try:
-            async with session_scope(self._sessions) as session:
+            async with transaction_scope(self._sessions) as session:
                 yield session
         except IntegrityError as exc:
             raise ControlPlaneConflictError(

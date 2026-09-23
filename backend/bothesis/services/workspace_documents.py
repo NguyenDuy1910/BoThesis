@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload
 
-from bothesis.db.engine import SessionFactory, session_scope
+from bothesis.db.engine import SessionFactory, transaction_scope
 from bothesis.db.models import Item
 from bothesis.services import (
     KNOWLEDGE_READ_PERMISSION,
@@ -44,7 +44,7 @@ class WorkspaceDocumentService:
     async def list_collections(self, access: AuthContext) -> dict[str, Any]:
         """List the Collections the caller may select for a chat turn."""
 
-        async with session_scope(self._sessions) as session:
+        async with transaction_scope(self._sessions) as session:
             ids = await AuthorizationService(session).allowed_collection_ids(access)
             if not ids:
                 return {"items": [], "total": 0}
@@ -75,7 +75,7 @@ class WorkspaceDocumentService:
         user_id = require_user_identity(access)
         tenant_id = require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         collection_id = ItemService.upload_collection_id(tenant_id, user_id)
-        async with session_scope(self._sessions) as session:
+        async with transaction_scope(self._sessions) as session:
             items = ItemService(session)
             await items.ensure_personal_collection(
                 user_id,
@@ -185,7 +185,7 @@ class WorkspaceDocumentService:
         collection_id: UUID | None = None,
         status: str | None = None,
     ) -> dict[str, Any]:
-        async with session_scope(self._sessions) as session:
+        async with transaction_scope(self._sessions) as session:
             allowed = await AuthorizationService(session).allowed_collection_ids(access)
             if collection_id is not None:
                 allowed = tuple(item for item in allowed if item == collection_id)
@@ -290,7 +290,7 @@ class WorkspaceDocumentService:
         document_id: UUID,
         details: dict[str, Any],
     ) -> None:
-        async with session_scope(self._sessions) as session:
+        async with transaction_scope(self._sessions) as session:
             await AuditService(session).record(
                 access,
                 action=action,

@@ -7,7 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from bothesis.agent.models import AgentContext
-from bothesis.db.engine import SessionFactory, session_scope
+from bothesis.db.engine import SessionFactory, transaction_scope
 from bothesis.knowledge import ItemKnowledgeRetriever
 from bothesis.services import (
     KNOWLEDGE_READ_PERMISSION,
@@ -40,7 +40,7 @@ class KnowledgeQueryService:
         """Return ranked evidence with its citation and source lineage."""
 
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
-        async with session_scope(self._sessions) as session:
+        async with transaction_scope(self._sessions) as session:
             allowed_ids = await AuthorizationService(session).allowed_collection_ids(
                 access
             )

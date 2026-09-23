@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bothesis.db.engine import transaction_scope
 from bothesis.db.models import Conversation, SandboxSession
 from bothesis.services import (
     AuthContext,
@@ -45,7 +46,7 @@ class SandboxSessionService:
         user_id = require_user_identity(access)
         tenant_id = _tenant_id(access)
         normalized_provider = _provider(provider)
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             await _conversation(session, access, conversation_id)
             row = await session.scalar(
                 select(SandboxSession).where(
@@ -73,7 +74,7 @@ class SandboxSessionService:
         user_id = require_user_identity(access)
         tenant_id = _tenant_id(access)
         normalized_provider = _provider(provider)
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             await _conversation(session, access, conversation_id)
             row = await session.scalar(
                 select(SandboxSession)
@@ -102,7 +103,7 @@ class SandboxSessionService:
         user_id = require_user_identity(access)
         tenant_id = _tenant_id(access)
         normalized_provider = _provider(provider)
-        async with self._sessions.begin() as session:
+        async with transaction_scope(self._sessions) as session:
             await _conversation(session, access, conversation_id, lock=True)
             row = await session.scalar(
                 select(SandboxSession)
@@ -143,7 +144,7 @@ class SandboxSessionService:
     ) -> SandboxSessionState:
         """Record a successfully uploaded durable resource for workspace rebuild."""
 
-        async with self._sessions.begin() as session:
+        async with transaction_scope(self._sessions) as session:
             row = await _active_session(session, access, session_id)
             resources = list(_manifest_resources(row.manifest))
             if not any(item.resource_id == resource.resource_id for item in resources):
@@ -169,7 +170,7 @@ class SandboxSessionService:
     ) -> SandboxSessionState:
         """Add a durable resource to the rebuild manifest without a provider call."""
 
-        async with self._sessions.begin() as session:
+        async with transaction_scope(self._sessions) as session:
             row = await _active_session(session, access, session_id)
             resources = list(_manifest_resources(row.manifest))
             if not any(item.resource_id == resource.resource_id for item in resources):
@@ -193,7 +194,7 @@ class SandboxSessionService:
 
         normalized_environment = _identifier(environment_id, "sandbox environment")
         observed = _unique_files(files)
-        async with self._sessions.begin() as session:
+        async with transaction_scope(self._sessions) as session:
             row = await _active_session(session, access, session_id)
             row.provider_state = _provider_state(
                 row.provider_state,
@@ -212,7 +213,7 @@ class SandboxSessionService:
     ) -> None:
         """Tombstone a provider binding that can no longer be resumed."""
 
-        async with self._sessions.begin() as session:
+        async with transaction_scope(self._sessions) as session:
             row = await _active_session(session, access, session_id)
             row.status = "expired"
             row.last_used_at = datetime.now(UTC)

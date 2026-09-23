@@ -10,6 +10,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bothesis.db.engine import transaction_scope
 from bothesis.connector.file import FinxFileExtensions
 from bothesis.db.models import Item
 from bothesis.storage import (
@@ -90,7 +91,7 @@ class DocumentUploadService:
         self._validate_upload_size(size_bytes)
 
         try:
-            async with self._session_factory.begin() as session:
+            async with transaction_scope(self._session_factory) as session:
                 if access.tenant_id is None:
                     raise UploadValidationError("an active tenant is required")
                 await self._require_writable_collection(access, collection_id, session=session)
@@ -155,7 +156,7 @@ class DocumentUploadService:
         temporary_path, size_bytes = await self._spool(content, normalized_name)
         try:
             try:
-                async with self._session_factory.begin() as session:
+                async with transaction_scope(self._session_factory) as session:
                     await self._require_writable_collection(
                         access, collection_id, session=session
                     )
@@ -206,7 +207,7 @@ class DocumentUploadService:
                         access, item.id, error_code="object_storage_failed"
                     )
                     raise ObjectStorageError("object storage upload failed") from exc
-                async with self._session_factory.begin() as session:
+                async with transaction_scope(self._session_factory) as session:
                     item = await ItemService(session).mark_upload_available(
                         item.id,
                         user_id,
@@ -231,7 +232,7 @@ class DocumentUploadService:
             raise AuthorizationError("sign in is required for private uploads")
         if access.tenant_id is None:
             raise UploadValidationError("an active tenant is required")
-        async with self._session_factory() as session:
+        async with transaction_scope(self._session_factory) as session:
             item = await ItemService(session).get_upload_for_access(
                 document_id, access, permission=COLLECTION_UPDATE_PERMISSION
             )
@@ -266,7 +267,7 @@ class DocumentUploadService:
                 error_code="object_validation_failed",
             )
             raise
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             item = await ItemService(session).mark_upload_available(
                 document_id,
                 item.upload.owner_user_id,
@@ -318,7 +319,7 @@ class DocumentUploadService:
     ) -> Item:
         if access.tenant_id is None:
             raise UploadValidationError("an active tenant is required")
-        async with self._session_factory() as session:
+        async with transaction_scope(self._session_factory) as session:
             return await ItemService(session).get_upload_for_access(
                 document_id,
                 access,
@@ -335,7 +336,7 @@ class DocumentUploadService:
         if access.tenant_id is None:
             return
         user_id = require_user_identity(access)
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             await ItemService(session).mark_upload_failed(
                 document_id,
                 user_id,
@@ -409,7 +410,7 @@ class DocumentUploadService:
         if access.tenant_id is None:
             raise UploadValidationError("an active tenant is required")
         if session is None:
-            async with self._session_factory() as owned_session:
+            async with transaction_scope(self._session_factory) as owned_session:
                 await self._require_writable_collection(
                     access, collection_id, session=owned_session
                 )

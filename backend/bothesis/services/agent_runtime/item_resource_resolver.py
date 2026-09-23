@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bothesis.db.engine import transaction_scope
 from bothesis.agent import ModelContent, ResourceRef
 from bothesis.agent.protocol import InputImage
 from bothesis.services import (
@@ -70,7 +71,7 @@ class ItemResourceResolver:
             item_id = UUID(resource.id)
         except ValueError as exc:
             raise DocumentNotFoundError("resource not found") from exc
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             return await ItemService(session).get_item(item_id, access=self._access)
 
 

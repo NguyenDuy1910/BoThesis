@@ -98,22 +98,36 @@ function RouteLoading({ pathname }: { pathname: string }) {
   if (pathname === "/library") return <LibraryLoadingSkeleton />;
   if (pathname === "/workspaces") return <WorkspaceDiscoveryLoadingSkeleton />;
   if (pathname === "/workspace-control" || pathname.startsWith("/workspace-control/")) {
-    return <ControlPlaneLoadingSkeleton variant={controlLoadingVariant(pathname)} />;
+    const variant = controlLoadingVariant(pathname);
+    return variant ? <ControlPlaneLoadingSkeleton variant={variant} /> : <AuthLoadingSkeleton />;
   }
   return <AuthLoadingSkeleton />;
 }
 
-function controlLoadingVariant(pathname: string): ControlPlaneLoadingVariant {
-  const section = pathname.replace(/^\/workspace-control\/?/, "").split("/")[0];
+function controlLoadingVariant(pathname: string): ControlPlaneLoadingVariant | undefined {
+  const sections = pathname.replace(/^\/workspace-control\/?/, "").split("/");
+  const section = sections[0];
+  if (!section) return "overview";
   if (section === "settings") return "settings";
   if (section === "access") return "access";
   if (section === "activity") return "audit";
   if (section === "knowledge") return "knowledge";
-  if (section === "platform-integrations") return "integrations";
-  if (section === "platform-tenants") return "platform-tenants";
-  if (section === "platform-users") return "platform-users";
-  if (section === "platform-system") return "platform-system";
-  return "overview";
+  if (section !== "platform") return undefined;
+
+  switch (sections[1] ?? "tenants") {
+    case "tenants":
+      return "platform-tenants";
+    case "users":
+      return "platform-users";
+    case "integrations":
+      return "integrations";
+    case "audit":
+      return "audit";
+    case "system":
+      return "platform-system";
+    default:
+      return undefined;
+  }
 }
 
 function protectedRouteReason(pathname: string): string | undefined {

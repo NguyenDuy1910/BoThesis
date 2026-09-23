@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 
 from bothesis.db import engine as engine_module
-from bothesis.db.engine import LazySessionFactory
+from bothesis.db.engine import LazySessionFactory, transaction_scope
 
 # Every attribute the application reaches for on its session factory. A proxy
 # that forwards only ``__call__`` breaks ``session_factory.begin()`` at runtime
@@ -107,3 +107,33 @@ def test_runtime_hands_services_a_usable_session_factory(
 
     for attribute in FORWARDED_ATTRIBUTES:
         assert getattr(sessions, attribute) is getattr(real, attribute)
+
+
+@pytest.mark.asyncio
+async def test_transaction_scope_uses_factory_begin_and_releases_scope() -> None:
+    events: list[str] = []
+
+    class BeginScope:
+        async def __aenter__(self):
+            events.append("begin")
+            return "session"
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            events.append("rollback" if exc_type else "commit")
+
+    class Factory:
+        def begin(self):
+            return BeginScope()
+
+    async with transaction_scope(Factory()) as session:
+        assert session == "session"
+        events.append("work")
+
+    assert events == ["begin", "work", "commit"]
+
+    events.clear()
+    with pytest.raises(RuntimeError):
+        async with transaction_scope(Factory()):
+            events.append("work")
+            raise RuntimeError("boom")
+    assert events == ["begin", "work", "rollback"]

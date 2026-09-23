@@ -11,6 +11,8 @@ from uuid import UUID
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from bothesis.db.engine import transaction_scope
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -130,7 +132,7 @@ class IngestionActivity:
     async def _ingest(
         self, source_id: UUID, *, test_connection: bool
     ) -> PipelineResult:
-        async with self._session_factory() as session:
+        async with transaction_scope(self._session_factory) as session:
             source, connector = await self._sources(session).runtime_for_source(
                 source_id
             )
@@ -196,7 +198,7 @@ class IngestionActivity:
         rotated = getattr(connector, "refreshed_credentials", None)
         if not rotated:
             return
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             await IntegrationConnectionService(
                 session,
                 registry=self._registry,
@@ -209,7 +211,7 @@ class IngestionActivity:
         connector: FileConnector,
         source_id: UUID,
     ) -> None:
-        async with self._session_factory() as session:
+        async with transaction_scope(self._session_factory) as session:
             rows = (
                 await session.execute(
                     select(Item, ExternalResource)
@@ -247,7 +249,7 @@ class IngestionActivity:
         )
 
     async def _complete(self, source_id: UUID, result: PipelineResult) -> None:
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             source = await session.scalar(
                 select(IngestionSource)
                 .where(IngestionSource.id == source_id)

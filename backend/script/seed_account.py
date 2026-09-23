@@ -19,7 +19,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 load_dotenv(BACKEND_ROOT / ".env", override=False)
 
-from bothesis.db.engine import get_session_factory
+from bothesis.db.engine import get_session_factory, transaction_scope
 from bothesis.db.models import Tenant
 from bothesis.services import (
     ACTIVE_STATUS,
@@ -89,7 +89,7 @@ async def seed_accounts(*, password: str, reset_password: bool) -> list[dict[str
     """Create or elevate deterministic local accounts in one transaction."""
 
     factory = get_session_factory()
-    async with factory.begin() as session:
+    async with transaction_scope(factory) as session:
         identity = IdentityStoreService(session)
         assignments = RoleAssignmentService(session)
         await identity.sync_system_roles()

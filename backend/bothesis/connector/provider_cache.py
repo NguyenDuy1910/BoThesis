@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from bothesis.db.engine import transaction_scope
 from bothesis.db.models import Item
 from bothesis.connector.protocol import ProviderCacheEntry, ProviderFileCache
 
@@ -38,7 +39,7 @@ class PostgresProviderFileCache:
         provider_version: str,
     ) -> ProviderCacheEntry | None:
         normalized_provider = _provider(provider)
-        async with self._session_factory() as session:
+        async with transaction_scope(self._session_factory) as session:
             metadata = await session.scalar(
                 select(Item.metadata_).where(
                     Item.id == document_id,
@@ -86,7 +87,7 @@ class PostgresProviderFileCache:
             raise ValueError(
                 "provider cache entry exceeds the configured metadata limit"
             )
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             document = await session.scalar(
                 select(Item).where(Item.id == document_id).with_for_update()
             )
@@ -100,7 +101,7 @@ class PostgresProviderFileCache:
 
     async def invalidate(self, document_id: UUID, *, provider: str) -> None:
         normalized_provider = _provider(provider)
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             document = await session.scalar(
                 select(Item).where(Item.id == document_id).with_for_update()
             )
@@ -119,7 +120,7 @@ class PostgresProviderFileCache:
             document.metadata_ = metadata
 
     async def clear(self, document_id: UUID) -> None:
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             document = await session.scalar(
                 select(Item).where(Item.id == document_id).with_for_update()
             )

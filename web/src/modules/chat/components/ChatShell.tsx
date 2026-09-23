@@ -410,7 +410,6 @@ function ChatConversation({
   const isUploading = composerAttachments.some((item) => (
     item.progress !== "ready" && item.progress !== "failed"
   ));
-  const activeConnectorLabel = "permitted knowledge";
 
   useEffect(() => {
     for (const message of messages) {
@@ -657,7 +656,6 @@ function ChatConversation({
                   <MessageList
                     activeArtifactId={activity?.type === "artifact" ? activity.artifactId : undefined}
                     activeCitationId={activity?.type === "knowledge_document" ? activity.citationId : undefined}
-                    activityConnectorLabel={activeConnectorLabel}
                     isStreaming={isStreaming}
                     lastMessageId={lastMessage?.id}
                     messages={messages}
@@ -720,7 +718,6 @@ function ChatConversation({
 function MessageList({
   activeArtifactId,
   activeCitationId,
-  activityConnectorLabel,
   isStreaming,
   lastMessageId,
   messages,
@@ -734,7 +731,6 @@ function MessageList({
 }: {
   activeArtifactId?: string;
   activeCitationId?: string;
-  activityConnectorLabel?: string;
   isStreaming: boolean;
   lastMessageId?: string;
   messages: ChatMessage[];
@@ -752,7 +748,6 @@ function MessageList({
         <MessageView
           activeArtifactId={activeArtifactId}
           activeCitationId={activeCitationId}
-          activityConnectorLabel={isStreaming && message.id === lastMessageId ? activityConnectorLabel : undefined}
           isStreaming={isStreaming && message.id === lastMessageId}
           key={message.id}
           message={message}
@@ -771,7 +766,6 @@ function MessageList({
 const MessageView = memo(function MessageView({
   activeArtifactId,
   activeCitationId,
-  activityConnectorLabel,
   isStreaming,
   message,
   onEditArtifact,
@@ -783,7 +777,6 @@ const MessageView = memo(function MessageView({
 }: {
   activeArtifactId?: string;
   activeCitationId?: string;
-  activityConnectorLabel?: string;
   isStreaming: boolean;
   message: ChatMessage;
   onEditArtifact: (artifact: TurnArtifact) => void;

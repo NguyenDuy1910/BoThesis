@@ -29,7 +29,7 @@ import {
   type Role,
 } from "@/modules/workspace-control/directory";
 import { useControlPlaneData } from "@/modules/workspace-control/queries";
-import { ControlPlaneLoadingSkeleton } from "@/modules/workspace-control/components/ControlPlaneLoadingSkeleton";
+import { Skeleton, TableSkeleton } from "@/components/ui/Skeleton";
 
 type AccessTab = "members" | "groups" | "roles";
 
@@ -43,38 +43,54 @@ export function AccessPage() {
   const [routeTab, setRouteTab] = useRouteState("tab", "members");
   const session = useAuthSession();
   const tab = tabs.some((item) => item.id === routeTab) ? (routeTab as AccessTab) : "members";
+
+  return (
+    <>
+      <Tabs activeTab={tab} ariaLabel="Access sections" className="mb-4" onChange={setRouteTab} tabs={tabs} />
+      {tab === "members" && <MembersSection actorUserId={session?.user_id ?? null} />}
+      {tab === "groups" && <GroupsSection />}
+      {tab === "roles" && <RolesSection />}
+    </>
+  );
+}
+
+function MembersSection({ actorUserId }: { actorUserId: string | null }) {
   const members = useControlPlaneData(() => workspaceDirectoryApi.members());
-  const groups = useControlPlaneData(() => workspaceDirectoryApi.groups());
   const roles = useControlPlaneData(() => workspaceDirectoryApi.roles());
-  const error = members.error || groups.error || roles.error;
+  const error = members.error || roles.error;
 
   if (error) {
-    return (
-      <ErrorState
-        description={error}
-        onAction={() => { members.reload(); groups.reload(); roles.reload(); }}
-      />
-    );
+    return <ErrorState description={error} layout="inline" onAction={() => { members.reload(); roles.reload(); }} />;
   }
+  if (!members.data || !roles.data) return <AccessDataLoading />;
+  return <MembersPanel actorUserId={actorUserId} roles={roles.data.items} rows={members.data.items} />;
+}
 
-  if (!members.data || !groups.data || !roles.data) {
-    return <ControlPlaneLoadingSkeleton variant="access" />;
-  }
+function GroupsSection() {
+  const groups = useControlPlaneData(() => workspaceDirectoryApi.groups());
 
-  return <>
-    <Tabs activeTab={tab} ariaLabel="Access sections" className="mb-4" onChange={setRouteTab} tabs={tabs} />
-    {tab === "members" && (
-      <MembersPanel
-        actorUserId={session?.user_id ?? null}
-        roles={(roles.data?.items ?? []).filter((role) =>
-          role.permission_codes.every((permission) => session?.permissions.includes(permission)),
-        )}
-        rows={members.data?.items ?? []}
-      />
-    )}
-    {tab === "groups" && <GroupsPanel rows={groups.data?.items ?? []} />}
-    {tab === "roles" && <RolesPanel rows={roles.data?.items ?? []} />}
-  </>;
+  if (groups.error) return <ErrorState description={groups.error} layout="inline" onAction={groups.reload} />;
+  if (!groups.data) return <AccessDataLoading columns={3} />;
+  return <GroupsPanel rows={groups.data.items} />;
+}
+
+function RolesSection() {
+  const roles = useControlPlaneData(() => workspaceDirectoryApi.roles());
+
+  if (roles.error) return <ErrorState description={roles.error} layout="inline" onAction={roles.reload} />;
+  if (!roles.data) return <AccessDataLoading />;
+  return <RolesPanel rows={roles.data.items} />;
+}
+
+function AccessDataLoading({ columns = 4 }: { columns?: number }) {
+  return (
+    <section aria-busy="true" aria-label="Loading access records" role="status">
+      <span className="sr-only">Loading access records</span>
+      <div className="ctl-card overflow-hidden">
+        <TableSkeleton columns={columns} rows={6} />
+      </div>
+    </section>
+  );
 }
 
 function MembersPanel({
@@ -455,7 +471,7 @@ function RolesPanel({ rows }: { rows: Role[] }) {
       data={rows}
       emptyState={<EmptyState description="Create a role to assign permissions." icon={<ShieldCheck size={20} />} title="No roles" />}
     />
-    <RoleDialog onClose={() => setOpen(false)} open={open} />
+    {open && <RoleDialog onClose={() => setOpen(false)} open />}
   </>;
 }
 
@@ -509,26 +525,37 @@ function RoleDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
         </label>
         <fieldset>
           <legend className="mb-2 text-sm font-medium">Permissions</legend>
-          <div className="grid gap-2">
-            {choices.map((permission) => (
-              <label className="flex items-start gap-2 text-sm" key={permission.code}>
-                <input
-                  checked={permissions.includes(permission.code)}
-                  className="mt-1"
-                  onChange={() => setPermissions((current) =>
-                    current.includes(permission.code)
-                      ? current.filter((item) => item !== permission.code)
-                      : [...current, permission.code],
-                  )}
-                  type="checkbox"
-                />
-                <span>
-                  <span className="font-medium">{permission.code}</span>
-                  <span className="block text-xs text-[var(--text-tertiary)]">{permission.description}</span>
-                </span>
-              </label>
-            ))}
-          </div>
+          {catalogue.error ? (
+            <ErrorState description={catalogue.error} layout="inline" onAction={catalogue.reload} />
+          ) : catalogue.loading ? (
+            <div aria-busy="true" className="grid gap-2" role="status">
+              <span className="sr-only">Loading permissions</span>
+              {Array.from({ length: 4 }).map((_, index) => (
+                <Skeleton className="h-10 w-full" key={index} />
+              ))}
+            </div>
+          ) : (
+            <div className="grid gap-2">
+              {choices.map((permission) => (
+                <label className="flex items-start gap-2 text-sm" key={permission.code}>
+                  <input
+                    checked={permissions.includes(permission.code)}
+                    className="mt-1"
+                    onChange={() => setPermissions((current) =>
+                      current.includes(permission.code)
+                        ? current.filter((item) => item !== permission.code)
+                        : [...current, permission.code],
+                    )}
+                    type="checkbox"
+                  />
+                  <span>
+                    <span className="font-medium">{permission.code}</span>
+                    <span className="block text-xs text-[var(--text-tertiary)]">{permission.description}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
         </fieldset>
         {error && <ErrorState description={error} layout="inline" />}
       </div>

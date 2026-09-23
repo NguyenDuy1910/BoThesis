@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bothesis.agent import ResourceRef
+from bothesis.db.engine import transaction_scope
 from bothesis.db.models import Conversation, Item, Message, MessageItem
 from bothesis.services import AuthContext, DocumentNotFoundError, conversation_access_filter
 from bothesis.services.identity_access.authorization import AuthorizationService
@@ -42,7 +43,7 @@ class ConversationService:
             raise DocumentNotFoundError(f"conversation not found: {conversation_id}")
         if access.session_id is None:
             raise DocumentNotFoundError(f"conversation not found: {conversation_id}")
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             now = datetime.now(UTC)
             await session.execute(
                 insert(Conversation)
@@ -105,7 +106,7 @@ class ConversationService:
             raise DocumentNotFoundError(f"conversation not found: {conversation_id}")
         unique_references = list(dict.fromkeys(referenced_document_ids))
         unique_artifacts = list(dict.fromkeys(artifact_ids))
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             conversation = await session.scalar(
                 select(Conversation)
                 .where(
@@ -161,7 +162,7 @@ class ConversationService:
 
         if access.tenant_id is None:
             return ()
-        async with self._session_factory() as session:
+        async with transaction_scope(self._session_factory) as session:
             items = ItemService(session)
             result: list[ResourceRef] = []
             for resource_id in dict.fromkeys(resource_ids):
@@ -192,7 +193,7 @@ class ConversationService:
 
         if access.tenant_id is None or limit < 1:
             return ()
-        async with self._session_factory() as session:
+        async with transaction_scope(self._session_factory) as session:
             last_reference = func.max(Message.sequence_number)
             rows = await session.execute(
                 select(Item)

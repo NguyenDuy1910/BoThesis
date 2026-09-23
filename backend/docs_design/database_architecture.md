@@ -11,6 +11,32 @@ storage nor Qdrant is a source of truth for domain state.
 
 ## Design decisions
 
+### Database operation lifecycle
+
+Every application database operation uses `bothesis.db.engine.transaction_scope`:
+
+```text
+transaction_scope(session_factory)
+  -> create session and begin transaction
+  -> perform one atomic database operation
+  -> commit on success
+     or rollback on failure
+  -> close session and release connection
+```
+
+This rule applies to reads and writes. Services do not use bare
+`session_factory()` sessions, manual commit/rollback blocks, or transactions
+that span object storage, connector, index, model, or other long-running work.
+External work runs between separate database operation scopes.
+Internal `begin_nested()` calls are savepoints inside the current
+`transaction_scope`, not alternate session lifecycles.
+
+PostgreSQL advisory-lock workflows use `advisory_lock_scope` as the one
+intentional exception: it owns one autocommit connection for the lock lifetime,
+performs no application transaction on that connection, and releases the lock
+before releasing the connection. Atomic state changes still use
+`transaction_scope` inside the lock.
+
 ### Relationship keys
 
 `user_id` means **who**: owner, creator, requester, approver, actor, or memory

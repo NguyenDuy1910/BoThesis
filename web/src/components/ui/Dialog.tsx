@@ -76,9 +76,3 @@ export function Dialog({
   );
 }
 
-function focusableElements(container: HTMLDivElement | null) {
-  if (!container) return [];
-  return Array.from(container.querySelectorAll<HTMLElement>(
-    'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
-  ));
-}

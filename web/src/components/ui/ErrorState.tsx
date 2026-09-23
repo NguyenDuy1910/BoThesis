@@ -23,6 +23,7 @@ export function ErrorState({
   layout = "block",
   className,
 }: ErrorStateProps) {
+  const resolvedActionLabel = actionLabel ?? (onAction ? "Retry" : undefined);
   if (layout === "inline") {
     return (
       <div
@@ -34,7 +35,14 @@ export function ErrorState({
         role="alert"
       >
         <AlertTriangle aria-hidden="true" className="mt-px h-4 w-4 shrink-0" />
-        <p className="min-w-0 leading-5">{description}</p>
+        <div className="min-w-0">
+          <p className="leading-5">{description}</p>
+          {resolvedActionLabel && onAction && (
+            <Button className="mt-2" onClick={onAction} size="sm" variant="ghost">
+              {resolvedActionLabel}
+            </Button>
+          )}
+        </div>
       </div>
     );
   }
@@ -50,14 +58,14 @@ export function ErrorState({
         </span>
         <h3 className="ctl-empty__title">{title}</h3>
         <p className="ctl-empty__desc">{description}</p>
-        {actionLabel && onAction && (
+        {resolvedActionLabel && onAction && (
           <div className="ctl-empty__actions">
             <Button
               icon={<RotateCw aria-hidden="true" className="h-4 w-4" />}
               onClick={onAction}
               variant="ghost"
             >
-              {actionLabel}
+              {resolvedActionLabel}
             </Button>
           </div>
         )}

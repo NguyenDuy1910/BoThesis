@@ -9,7 +9,7 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from bothesis.agent import ResourceRef, duration_ms
-from bothesis.agent.models import Evidence, ToolObservation, ToolResult
+from bothesis.agent.models import ToolObservation, ToolResult
 from bothesis.agent.protocol import FunctionCallOutputItem, ToolCall
 from bothesis.agent.tools import (
     ToolCallSource,

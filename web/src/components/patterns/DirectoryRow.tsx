@@ -17,12 +17,16 @@ export function DirectoryRow({
   provider,
   tone = "accent",
   onOpen,
+  disabled = false,
+  loading = false,
 }: {
   title: string;
   description: string;
   provider: string;
   tone?: WorkspaceMarkTone;
   onOpen?: () => void;
+  disabled?: boolean;
+  loading?: boolean;
 }) {
   return (
     <button
@@ -31,7 +35,10 @@ export function DirectoryRow({
         "transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)]",
         "hover:bg-[var(--surface-hover)]",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
+        "disabled:pointer-events-none disabled:opacity-60",
       )}
+      aria-busy={loading || undefined}
+      disabled={disabled || loading}
       onClick={onOpen}
       type="button"
     >
@@ -48,7 +55,7 @@ export function DirectoryRow({
         </span>
       </span>
       <span className="flex shrink-0 items-center gap-1 text-[length:var(--text-size-nav)] font-medium text-[var(--text-secondary)] group-hover:text-[var(--text-accent)]">
-        Open
+        {loading ? "Opening…" : "Open"}
         <ChevronRight aria-hidden="true" size={18} />
       </span>
     </button>

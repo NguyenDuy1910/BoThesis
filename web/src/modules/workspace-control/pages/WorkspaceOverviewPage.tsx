@@ -29,15 +29,24 @@ export function WorkspaceOverviewPage() {
   const query = useControlPlaneData(() => workspaceDirectoryApi.overview());
   if (query.error) return <ErrorState description={query.error} onAction={query.reload} />;
   if (!query.data) return <ControlPlaneLoadingSkeleton variant="overview" />;
-  const { tenant, metrics, attention, recent_activity } = query.data;
+  if (!query.data.workspace) {
+    return (
+      <ErrorState
+        description="Workspace information was unavailable. Retry to load the overview."
+        onAction={query.reload}
+        title="Workspace overview unavailable"
+      />
+    );
+  }
+  const { workspace, metrics, attention, recent_activity } = query.data;
 
   return (
     <div className="configuration">
       <div className="flex items-start gap-4 py-6">
-        <WorkspaceMark name={tenant.name} size="lg" />
+        <WorkspaceMark name={workspace.name} size="lg" />
         <div className="min-w-0 flex-1">
-          <h1 className="text-xl font-semibold">{tenant.name}</h1>
-          <p className="my-2 text-sm text-[var(--text-secondary)]">Workspace code {tenant.code}</p>
+          <h1 className="text-xl font-semibold">{workspace.name}</h1>
+          <p className="my-2 text-sm text-[var(--text-secondary)]">Workspace code {workspace.code}</p>
         </div>
         <Link href="/app">
           <Button variant="ghost">Open workspace <ArrowRight size={16} /></Button>

@@ -7,7 +7,6 @@ from typing import Any, Generic, TypeVar
 from bothesis.connector.protocol import (
     AnyItem,
     Chunk,
-    CollectionItem,
     ConnectorCheckpoint,
     ConnectorScope,
     DocumentItem,

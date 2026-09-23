@@ -11,7 +11,6 @@ from bothesis.services.identity_access.access_session import AccessSessionServic
 from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services import (
     AuthContext,
-    AuthenticationError,
     AuthorizationError,
     JwtClaims,
 )

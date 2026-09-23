@@ -24,7 +24,7 @@ import {
   canAccessPlatformControl,
   isGuestSession,
 } from "@/lib/auth/session";
-import { switchWorkspace } from "@/modules/auth/api";
+import { useWorkspaceSwitch } from "@/modules/auth/queries";
 import { useAuthSession } from "@/lib/hooks/useAuthSession";
 
 import { AccountDialog } from "./AccountDialog";
@@ -59,8 +59,7 @@ export function WorkspaceContextMenu({
   const [accountOpen, setAccountOpen] = useState(false);
   const [workspaceSwitcherOpen, setWorkspaceSwitcherOpen] = useState(false);
   const session = useAuthSession();
-  const [switching, setSwitching] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { error, switchingId: switching, switchWorkspace: selectWorkspace } = useWorkspaceSwitch();
 
   const current = session?.workspaces.find((tenant) => tenant.id === session.active_workspace_id);
   const workspaceName = current?.name ?? "Workspace";
@@ -72,20 +71,12 @@ export function WorkspaceContextMenu({
   const canUsePlatformControl = canAccessPlatformControl(session);
   const isGuest = isGuestSession(session);
 
-  const changeWorkspace = async (tenantId: string) => {
-    if (!session || tenantId === session.active_workspace_id) return;
-    setSwitching(tenantId);
-    setError(null);
-    try {
-      await switchWorkspace(tenantId);
+  const changeWorkspace = async (workspaceId: string) => {
+    if (await selectWorkspace(workspaceId)) {
       setWorkspaceSwitcherOpen(false);
       setOpen(false);
-      setSwitching(null);
       onNavigate?.();
       router.replace("/app?action=new");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not change workspace.");
-      setSwitching(null);
     }
   };
 

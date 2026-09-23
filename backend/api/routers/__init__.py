@@ -274,12 +274,6 @@ class CollectionPage(BaseModel):
     total: int = Field(ge=0)
 
 
-class CollectionUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    title: str | None = Field(default=None, min_length=1, max_length=255)
-    description: str | None = Field(default=None, max_length=2_000)
-    status: Literal["active", "archived"] | None = None
 
 
 class CollectionAccess(BaseModel):

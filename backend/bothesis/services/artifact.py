@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bothesis.agent.models import AgentContext, ConversationArtifact
-from bothesis.db.engine import SessionFactory
+from bothesis.db.engine import SessionFactory, transaction_scope
 from bothesis.db.models import ArtifactRevision, Item
 from bothesis.services import (
     COLLECTION_READ_PERMISSION,
@@ -130,7 +130,7 @@ class ArtifactService:
 
         if access.tenant_id is None:
             return ()
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             items = await self._conversation_items(session, access, conversation_id)
             revisions = {
                 item.id: await self._revisions(session, item.id) for item in items
@@ -222,7 +222,7 @@ class ArtifactService:
         """
 
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             source = await AuthorizationService(session).require_item(
                 document_id, access=access
             )
@@ -260,7 +260,7 @@ class ArtifactService:
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         if access.tenant_id is None:
             return ()
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             items = list(await self._conversation_items(session, access, conversation_id))
             selected = items[-limit:]
             current = {
@@ -288,7 +288,7 @@ class ArtifactService:
 
         if access.tenant_id is None:
             return None
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             items = await self._conversation_items(session, access, conversation_id)
         return next(
             (item for item in items if _stored_file_name(item) == file_name), None
@@ -343,7 +343,7 @@ class ArtifactService:
         require_user_identity(access)
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
         item, current = await self._load(access, artifact_id)
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             target = await AuthorizationService(session).require_item(
                 collection_id, access=access, permission=COLLECTION_UPDATE_PERMISSION
             )
@@ -361,7 +361,7 @@ class ArtifactService:
             content_type=current.mime_type,
             content=_BytesStream(await self._bytes(current.storage_key)),
         )
-        async with self._sessions.begin() as session:
+        async with transaction_scope(self._sessions) as session:
             await AuditService(session).record(
                 access,
                 action="artifact.published",
@@ -388,7 +388,7 @@ class ArtifactService:
 
     async def get(self, access: AuthContext, artifact_id: UUID) -> dict[str, Any]:
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             item = await self._authorized_item(session, access, artifact_id)
             revisions = await self._revisions(session, item.id)
         return self._payload(item, revisions)
@@ -399,7 +399,7 @@ class ArtifactService:
         """Return one revision's text for in-app preview."""
 
         require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             item = await self._authorized_item(session, access, artifact_id)
             revisions = await self._revisions(session, item.id)
         selected = revisions[-1]
@@ -437,7 +437,7 @@ class ArtifactService:
         item_id = uuid4()
         key = _revision_key(tenant_id, item_id, 1, document.file_name)
         await self._store_revision_objects(document, key)
-        async with self._sessions.begin() as session:
+        async with transaction_scope(self._sessions) as session:
             items = ItemService(session)
             collection_id = await items.ensure_personal_collection(
                 user_id,
@@ -507,7 +507,7 @@ class ArtifactService:
         request_id: str | None,
     ) -> dict[str, Any]:
         user_id = require_user_identity(access)
-        async with self._sessions.begin() as session:
+        async with transaction_scope(self._sessions) as session:
             item = await session.get(Item, item_id, with_for_update=True)
             if item is None or item.status == "deleted" or item.deleted_at is not None:
                 raise DocumentNotFoundError(f"artifact not found: {item_id}")
@@ -565,7 +565,7 @@ class ArtifactService:
         *,
         permission: str = COLLECTION_READ_PERMISSION,
     ) -> tuple[Item, ArtifactRevision]:
-        async with self._sessions() as session:
+        async with transaction_scope(self._sessions) as session:
             item = await self._authorized_item(
                 session, access, artifact_id, permission=permission
             )

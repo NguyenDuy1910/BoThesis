@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any
+from typing import Protocol
 
+from sqlalchemy import text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import (
@@ -70,7 +72,12 @@ def get_session_factory(
     )
 
 
-SessionFactory = Callable[[], AsyncSession]
+class SessionFactory(Protocol):
+    """Factory surface required by application database operation scopes."""
+
+    def __call__(self, **local_kw: Any) -> AsyncSession: ...
+
+    def begin(self) -> Any: ...
 
 
 class LazySessionFactory:
@@ -107,49 +114,57 @@ class LazySessionFactory:
         return getattr(self.resolve(), name)
 
 
-async def get_session() -> AsyncIterator[AsyncSession]:
-    """Yield a request-scoped session suitable for a FastAPI dependency."""
-
-    async with get_session_factory()() as session:
-        yield session
-
-
-async def get_transactional_session() -> AsyncIterator[AsyncSession]:
-    """Yield one request unit of work with commit/rollback semantics."""
-
-    async with get_session_factory()() as session:
-        try:
-            yield session
-            await session.commit()
-        except BaseException:
-            await session.rollback()
-            raise
-
-
 @asynccontextmanager
-async def session_scope(
-    session_factory: async_sessionmaker[AsyncSession] | None = None,
+async def transaction_scope(
+    session_factory: SessionFactory | None = None,
 ) -> AsyncIterator[AsyncSession]:
-    """Commit a unit of work, rolling it back when the operation fails."""
+    """Run exactly one database operation scope.
+
+    ``async_sessionmaker.begin()`` owns session creation, transaction start,
+    commit/rollback, and connection release. Callers must finish all database
+    work inside this scope and perform external or long-running work after it.
+    """
 
     factory = session_factory or get_session_factory()
-    async with factory() as session:
-        try:
-            yield session
-            await session.commit()
-        except BaseException:
-            await session.rollback()
-            raise
+    async with factory.begin() as session:
+        yield session
 
 
 @asynccontextmanager
 async def get_connection(
     engine: AsyncEngine | None = None,
 ) -> AsyncIterator[AsyncConnection]:
-    """Yield a low-level async connection for health checks and migrations."""
+    """Yield one explicit low-level transaction for health checks/migrations."""
+
+    async with (engine or get_engine()).begin() as connection:
+        yield connection
+
+
+@asynccontextmanager
+async def advisory_lock_scope(
+    lock_key: int,
+    *,
+    engine: AsyncEngine | None = None,
+) -> AsyncIterator[None]:
+    """Hold one PostgreSQL advisory lock without holding a transaction.
+
+    Session-level advisory locks must stay on one connection, but indexing and
+    other long-running work must not keep an implicit transaction open. An
+    autocommit connection gives the lock session ownership and releases it on
+    connection close.
+    """
 
     async with (engine or get_engine()).connect() as connection:
-        yield connection
+        connection = await connection.execution_options(isolation_level="AUTOCOMMIT")
+        await connection.execute(
+            text("SELECT pg_advisory_lock(:lock_key)"), {"lock_key": lock_key}
+        )
+        try:
+            yield
+        finally:
+            await connection.execute(
+                text("SELECT pg_advisory_unlock(:lock_key)"), {"lock_key": lock_key}
+            )
 
 
 __all__ = [
@@ -157,8 +172,7 @@ __all__ = [
     "SessionFactory",
     "get_connection",
     "get_engine",
-    "get_session",
     "get_session_factory",
-    "get_transactional_session",
-    "session_scope",
+    "advisory_lock_scope",
+    "transaction_scope",
 ]

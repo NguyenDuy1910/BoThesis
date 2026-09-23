@@ -32,11 +32,11 @@ export function WorkspaceSwitcherDialog({ error, onClose, onSelect, open, switch
   return (
     <Dialog className="max-w-[26rem]" initialFocusRef={searchRef} onClose={onClose} open={open} title="Switch workspace">
       <SearchInput ariaLabel="Search workspaces" autoFocus inputRef={searchRef} onChange={setSearch} placeholder="Search workspaces…" value={search} />
-      <div className="max-h-[55vh] overflow-y-auto py-3">
+      <div aria-busy={Boolean(switchingId) || undefined} className="max-h-[55vh] overflow-y-auto py-3">
         {groups.map((group) => group.rows.length > 0 && <section key={group.label} aria-label={group.label}>
           <h3 className="px-2 pb-1 pt-3 text-[length:var(--text-size-caption)] uppercase tracking-wide text-[var(--text-tertiary)]">{group.label}</h3>
           {group.rows.map((item) => <button key={item.id} aria-current={item.id === session?.active_workspace_id ? "true" : undefined} className="flex min-h-14 w-full items-center gap-3 rounded-[var(--radius-sm)] p-2 text-left transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-raised)]" disabled={Boolean(switchingId)} onClick={() => item.id === session?.active_workspace_id ? onClose() : onSelect(item.id)} type="button">
-            <WorkspaceMark name={item.name} size="md" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{item.name}</span><span className="block text-xs text-[var(--text-tertiary)]">{switchingId === item.id ? "Switching…" : isVisitor(item) ? "Available to everyone" : "Organization member"}</span></span>{item.id === session?.active_workspace_id && <Check aria-label="Current workspace" size={16} />}
+            <WorkspaceMark name={item.name} size="md" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{item.name}</span><span className="block text-xs text-[var(--text-tertiary)]">{switchingId === item.id ? "Switching…" : isVisitor(item) ? "Available to everyone" : "Organization member"}</span></span>{item.id === session?.active_workspace_id && <Check aria-hidden="true" size={16} />}
           </button>)}
         </section>)}
         {!matches.length && <EmptyState title="No workspaces found" description="Try a different name." />}

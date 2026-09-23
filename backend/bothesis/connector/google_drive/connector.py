@@ -521,7 +521,7 @@ class GoogleDriveConnector(BaseSourceConnector):
         self._credentials_refreshed = True
 
     def _validate_scope(self, scope: ConnectorScope) -> None:
-        expected = (awaitable_scope := self._scope)
+        expected = self._scope
         if scope.scope_value != expected:
             raise ValueError("Google Drive source scope does not match the runtime configuration")
 

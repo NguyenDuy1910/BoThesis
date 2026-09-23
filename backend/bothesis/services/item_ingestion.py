@@ -7,10 +7,11 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import joinedload
 
+from bothesis.db.engine import advisory_lock_scope, transaction_scope
 from bothesis.connector.protocol import (
     AnyItem,
     Chunk,
@@ -73,22 +74,12 @@ class ItemIngestionService:
 
         engine = self._require_engine()
         lock_key = self._advisory_lock_key(document_id)
-        async with engine.connect() as connection:
-            await connection.execute(
-                text("SELECT pg_advisory_lock(:lock_key)"),
-                {"lock_key": lock_key},
+        async with advisory_lock_scope(lock_key, engine=engine):
+            return await self._index_upload_under_lock(
+                document_id,
+                access=access,
+                source=source,
             )
-            try:
-                return await self._index_upload_under_lock(
-                    document_id,
-                    access=access,
-                    source=source,
-                )
-            finally:
-                await connection.execute(
-                    text("SELECT pg_advisory_unlock(:lock_key)"),
-                    {"lock_key": lock_key},
-                )
 
     async def index_available_upload(
         self,
@@ -117,24 +108,14 @@ class ItemIngestionService:
         )
         engine = self._require_engine()
         lock_key = self._advisory_lock_key(document_id)
-        async with engine.connect() as connection:
-            await connection.execute(
-                text("SELECT pg_advisory_lock(:lock_key)"),
-                {"lock_key": lock_key},
+        async with advisory_lock_scope(lock_key, engine=engine):
+            return await self._index_available_upload_under_lock(
+                document_id,
+                owner_user_id=owner_user_id,
+                tenant_id=tenant_id,
+                access=access,
+                source=source,
             )
-            try:
-                return await self._index_available_upload_under_lock(
-                    document_id,
-                    owner_user_id=owner_user_id,
-                    tenant_id=tenant_id,
-                    access=access,
-                    source=source,
-                )
-            finally:
-                await connection.execute(
-                    text("SELECT pg_advisory_unlock(:lock_key)"),
-                    {"lock_key": lock_key},
-                )
 
     async def remove_upload(
         self,
@@ -149,44 +130,34 @@ class ItemIngestionService:
         user_id = require_user_identity(access)
         engine = self._require_engine()
         lock_key = self._advisory_lock_key(document_id)
-        async with engine.connect() as connection:
-            await connection.execute(
-                text("SELECT pg_advisory_lock(:lock_key)"),
-                {"lock_key": lock_key},
-            )
-            try:
-                async with self._session_factory.begin() as session:
-                    items = ItemService(session)
-                    document = await items.get_owned_upload(
-                        document_id,
-                        user_id,
-                        access.tenant_id,
-                        include_deleted=True,
-                    )
-                    if document.status == "deleted":
-                        return
-                    await items.mark_index_processing(document.id)
+        async with advisory_lock_scope(lock_key, engine=engine):
+            async with transaction_scope(self._session_factory) as session:
+                items = ItemService(session)
+                document = await items.get_owned_upload(
+                    document_id,
+                    user_id,
+                    access.tenant_id,
+                    include_deleted=True,
+                )
+                if document.status == "deleted":
+                    return
+                await items.mark_index_processing(document.id)
 
-                await self._index.remove_item_content(
-                    str(document_id),
-                    tenant_id=str(access.tenant_id),
-                )
-                async with self._session_factory.begin() as session:
-                    items = ItemService(session)
-                    await CitationService(session).replace_for_item(document_id, ())
-                    await items.soft_delete_item(document_id, actor=access)
-            finally:
-                await connection.execute(
-                    text("SELECT pg_advisory_unlock(:lock_key)"),
-                    {"lock_key": lock_key},
-                )
+            await self._index.remove_item_content(
+                str(document_id),
+                tenant_id=str(access.tenant_id),
+            )
+            async with transaction_scope(self._session_factory) as session:
+                items = ItemService(session)
+                await CitationService(session).replace_for_item(document_id, ())
+                await items.soft_delete_item(document_id, actor=access)
 
     async def remove_item(self, item_id: UUID, *, actor: AuthContext) -> None:
         """Tombstone an authorized Item and all of its derived content."""
 
         if actor.tenant_id is None:
             raise DocumentUnavailableError("an active tenant is required")
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             items = ItemService(session)
             item = await items.get_item(item_id, access=actor)
             if item.status == "deleted":
@@ -197,7 +168,7 @@ class ItemIngestionService:
             str(item_id),
             tenant_id=str(actor.tenant_id),
         )
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             await CitationService(session).replace_for_item(item_id, ())
             await ItemService(session).soft_delete_item(item_id, actor=actor)
 
@@ -260,7 +231,7 @@ class ItemIngestionService:
     ) -> None:
         if not tenant_id.strip():
             raise ValueError("tenant_id must not be blank")
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             source = await session.scalar(
                 select(IngestionSource)
                 .options(joinedload(IngestionSource.integration_connection))
@@ -299,14 +270,14 @@ class ItemIngestionService:
         """Index canonical connector output through the source-neutral path."""
 
         try:
-            async with self._session_factory.begin() as session:
+            async with transaction_scope(self._session_factory) as session:
                 await ItemService(session).mark_index_processing(stored.id)
             if item.id != str(stored.id):
                 raise ValueError("canonical item does not match the stored document")
             if any(chunk.item_id != item.id for chunk in chunks):
                 raise ValueError("canonical chunk belongs to a different document")
 
-            async with self._session_factory.begin() as session:
+            async with transaction_scope(self._session_factory) as session:
                 await CitationService(session).replace_for_item(stored.id, chunks)
 
             count = await self._index.index_item_content(
@@ -315,7 +286,7 @@ class ItemIngestionService:
                 context=context,
             )
 
-            async with self._session_factory.begin() as session:
+            async with transaction_scope(self._session_factory) as session:
                 items = ItemService(session)
                 if processing_metadata is not None:
                     await items.merge_metadata(
@@ -325,7 +296,7 @@ class ItemIngestionService:
                 await items.mark_index_ready(stored.id)
             return count
         except Exception:
-            async with self._session_factory.begin() as session:
+            async with transaction_scope(self._session_factory) as session:
                 await ItemService(session).mark_index_failed(stored.id)
             raise
 
@@ -394,7 +365,7 @@ class ItemIngestionService:
         try:
             canonical = await source.canonicalize(document, access=access)
         except Exception as exc:
-            async with self._session_factory.begin() as session:
+            async with transaction_scope(self._session_factory) as session:
                 await ItemService(session).mark_index_failed(document.id)
             if isinstance(exc, DocumentProcessingError):
                 raise
@@ -424,7 +395,7 @@ class ItemIngestionService:
     ) -> Item:
         if access.tenant_id is None:
             raise DocumentUnavailableError("an active tenant is required")
-        async with self._session_factory() as session:
+        async with transaction_scope(self._session_factory) as session:
             document = await ItemService(session).get_upload_for_access(
                 document_id,
                 access,
@@ -442,7 +413,7 @@ class ItemIngestionService:
         owner_user_id: UUID,
         tenant_id: UUID,
     ) -> Item:
-        async with self._session_factory() as session:
+        async with transaction_scope(self._session_factory) as session:
             document = await ItemService(session).get_owned_upload(
                 document_id,
                 owner_user_id,
@@ -528,7 +499,7 @@ class ItemIngestionService:
         }
         if original is not None:
             metadata["storage"] = original.model_dump(mode="json", exclude_none=True)
-        async with self._session_factory.begin() as session:
+        async with transaction_scope(self._session_factory) as session:
             source = await session.scalar(
                 select(IngestionSource)
                 .options(
@@ -593,7 +564,7 @@ class ItemIngestionService:
             preview_metadata = manifest.model_dump(mode="json")
             if stored.metadata_.get("preview") == preview_metadata:
                 return
-            async with self._session_factory.begin() as session:
+            async with transaction_scope(self._session_factory) as session:
                 await ItemService(session).merge_metadata(
                     stored.id,
                     {"preview": preview_metadata},
