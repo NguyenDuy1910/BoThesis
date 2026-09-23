@@ -82,6 +82,7 @@ class AuthenticationService:
         *,
         method: str,
         email: str | None = None,
+        username: str | None = None,
         password: str | None = None,
         credential: str | None = None,
         guest_session_id: UUID | None = None,
@@ -91,16 +92,20 @@ class AuthenticationService:
         if method == "guest":
             return await self._create_guest_access_session()
         if method == "password":
-            if email is None or password is None:
-                raise AuthenticationError("email or password is incorrect")
+            if password is None or (email is None) == (username is None):
+                raise AuthenticationError("email or username and password are incorrect")
             try:
-                user = await self._identities.get_user_by_email(email)
+                user = (
+                    await self._identities.get_user_by_email(email)
+                    if email is not None
+                    else await self._identities.get_user_by_username(username or "")
+                )
             except IdentityNotFoundError as exc:
-                raise AuthenticationError("email or password is incorrect") from exc
+                raise AuthenticationError("email or username and password are incorrect") from exc
             if user.password_hash is None or not PasswordCredentialService.verify(
                 password, user.password_hash
             ):
-                raise AuthenticationError("email or password is incorrect")
+                raise AuthenticationError("email or username and password are incorrect")
             return await self._issue_user_session(
                 user,
                 authentication_method="password",

@@ -1137,11 +1137,13 @@ components:
     PasswordSessionCreate:
       type: object
       additionalProperties: false
-      required: [method, email, password]
+      required: [method, password]
       properties:
         method: {type: string, const: password}
-        email: {type: string, format: email}
+        email: {type: [string, 'null'], format: email}
+        username: {type: [string, 'null'], minLength: 3, maxLength: 64}
         password: {type: string, format: password, minLength: 8, maxLength: 128, writeOnly: true}
+      description: Provide exactly one of email or username.
     GuestSessionCreate:
       type: object
       additionalProperties: false

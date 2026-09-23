@@ -160,7 +160,7 @@ export function Dropdown({
     : { position: "fixed", top: -9999, left: -9999, visibility: "hidden" };
 
   return (
-    <div ref={triggerRef} className={cn("relative inline-flex", className)}>
+    <div ref={triggerRef} className={cn("group/dropdown relative inline-flex", className)}>
       <button
         ref={triggerButtonRef}
         type="button"
@@ -169,7 +169,6 @@ export function Dropdown({
         aria-controls={open ? menuId : undefined}
         aria-expanded={open}
         aria-haspopup="menu"
-        title={title}
         onClick={() => {
           initialFocusRef.current = "first";
           setOpen(!open);
@@ -188,6 +187,19 @@ export function Dropdown({
         {label}
         {showChevron && <ChevronDown aria-hidden="true" className={cn("h-4 w-4 transition-transform", open && "rotate-180")} />}
       </button>
+      {title && (
+        <span
+          className={cn(
+            "pointer-events-none invisible absolute left-1/2 top-full z-[70] mt-1.5 -translate-x-1/2 whitespace-nowrap opacity-0",
+            "rounded-[var(--radius-xs)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-1.5 py-1 text-[length:var(--text-size-caption)] font-medium text-[var(--text-secondary)]",
+            "shadow-[var(--elevation-2)] transition-[opacity,visibility] duration-[var(--duration-fast)] ease-[var(--ease-out)]",
+            "group-focus-within/dropdown:visible group-focus-within/dropdown:opacity-100 group-hover/dropdown:visible group-hover/dropdown:opacity-100",
+          )}
+          role="tooltip"
+        >
+          {title}
+        </span>
+      )}
       {(open || closing) &&
         typeof document !== "undefined" &&
         createPortal(
@@ -266,7 +278,7 @@ export function DropdownItem({
       role="menuitem"
       className={cn(
         "text-[length:var(--text-size-ui)]",
-        "flex min-h-9 w-full items-center gap-2.5 rounded-[var(--radius-sm)] px-2.5 py-1.5 text-left font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]",
+        "flex min-h-9 w-full items-center gap-2.5 rounded-[var(--radius-sm)] px-2.5 py-1.5 text-left font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-raised)]",
         destructive
           ? "text-[var(--status-danger-text)] hover:bg-[var(--status-danger-bg)]"
           : selected

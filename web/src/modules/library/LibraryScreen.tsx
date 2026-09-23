@@ -15,6 +15,7 @@ import { useRouteState } from "@/lib/hooks/useRouteState";
 import { DocumentViewer } from "@/modules/knowledge/components/DocumentViewer";
 import { FileTypeIcon } from "@/modules/knowledge/components/FileTypeIcon";
 import { libraryActions, useLibrary } from "./queries";
+import { LibraryLoadingSkeleton } from "./LibraryLoadingSkeleton";
 
 /**
  * The documents that belong to this person rather than to the workspace.
@@ -48,12 +49,12 @@ export function LibraryScreen() {
     setType("");
   };
 
+  if (query.loading) return <LibraryLoadingSkeleton />;
+
   const list = (
     <div className="library-list px-[var(--page-gutter)] pb-5">
       <h2 className="document-heading">{query.data?.collectionTitle ?? "My documents"}</h2>
-      {query.loading ? (
-        <p role="status">Loading your documents…</p>
-      ) : !rows.length ? (
+      {!rows.length ? (
         <EmptyState
           action={
             hasFilters ? (

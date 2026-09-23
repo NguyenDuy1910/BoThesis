@@ -1,10 +1,11 @@
 "use client";
 
-import { Check, LockKeyhole, MessageSquareText, ShieldCheck } from "lucide-react";
-import { createContext, use, useCallback, useEffect, useRef, useState } from "react";
+import { KeyRound } from "lucide-react";
+import { createContext, use, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 import { Dialog } from "@/components/ui/Dialog";
-import { completeGoogleSignIn } from "@/modules/auth/api";
+import { Input } from "@/components/ui/Input";
+import { completeGoogleSignIn, completePasswordSignIn } from "@/modules/auth/api";
 import { renderGoogleSignInButton } from "@/modules/auth/google";
 
 interface AuthPromptContextValue {
@@ -31,8 +32,13 @@ export function AuthPromptProvider({
   const [reason, setReason] = useState<string | null>(requiredReason ?? null);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [identifier, setIdentifier] = useState("");
+  const [password, setPassword] = useState("");
   const googleButtonHost = useRef<HTMLDivElement>(null);
+  const identifierRef = useRef<HTMLInputElement>(null);
   const open = reason !== null;
+  const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID?.trim();
+  const googleAvailable = Boolean(googleClientId);
 
   useEffect(() => {
     if (requiredReason) setReason(requiredReason);
@@ -40,6 +46,8 @@ export function AuthPromptProvider({
 
   const requestSignIn = useCallback((nextReason = "Sign in to continue.") => {
     setError(null);
+    setIdentifier("");
+    setPassword("");
     setReason(nextReason);
   }, []);
 
@@ -58,17 +66,12 @@ export function AuthPromptProvider({
 
   useEffect(() => {
     if (!open) return;
-    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID?.trim();
     const host = googleButtonHost.current;
-    if (!clientId) {
-      setError("Google sign-in is not configured for this deployment.");
-      return;
-    }
-    if (!host) return;
+    if (!googleClientId || !host) return;
     let mounted = true;
     void renderGoogleSignInButton(
       host,
-      clientId,
+      googleClientId,
       (credential) => { if (mounted) void finishSignIn(credential); },
       (message) => { if (mounted) setError(message); },
     ).catch((cause: unknown) => {
@@ -77,43 +80,62 @@ export function AuthPromptProvider({
       }
     });
     return () => { mounted = false; };
-  }, [finishSignIn, open]);
+  }, [finishSignIn, googleClientId, open]);
+
+  const submitPassword = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setIsSigningIn(true);
+    setError(null);
+    try {
+      await completePasswordSignIn(identifier, password);
+      setReason(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Sign-in could not be completed.");
+    } finally {
+      setIsSigningIn(false);
+    }
+  }, [identifier, password]);
 
   return (
     <AuthPromptContext value={{ requestSignIn }}>
       {children}
       <Dialog
-        className="max-w-[27rem]"
+        className="max-w-[26rem]"
+        initialFocusRef={identifierRef}
         onClose={() => setReason(null)}
         open={open}
-        title="Keep going with your account"
+        title="Sign in to continue"
       >
-        <div className="grid gap-5">
-          <div className="auth-prompt__continuity" aria-hidden="true">
-            <span><MessageSquareText size={17} /></span>
-            <i />
-            <span><LockKeyhole size={17} /></span>
-            <i />
-            <span><Check size={17} /></span>
+        <div className="auth-prompt__body">
+          <div>
+            <p className="auth-prompt__reason">{reason}</p>
+            <p className="auth-prompt__copy">Your conversation stays right where you left it.</p>
           </div>
-          <div className="grid gap-2">
-            <p className="text-sm font-medium text-[var(--text-primary)]">{reason}</p>
-            <p className="text-sm leading-6 text-[var(--text-secondary)]">
-              Sign in without leaving this chat. Guest messages and current position stay intact.
-            </p>
-          </div>
-          <div
-            aria-busy={isSigningIn || undefined}
-            aria-label="Continue with Google Workspace"
-            className="auth-prompt__google"
-            ref={googleButtonHost}
-          />
-          {isSigningIn && <p className="text-sm text-[var(--text-secondary)]" role="status">Connecting your account…</p>}
+          <form className="auth-prompt__form" onSubmit={submitPassword}>
+            <label className="auth-prompt__field">
+              <span>Username or email</span>
+              <Input autoCapitalize="none" autoComplete="username" ref={identifierRef} onChange={(event) => setIdentifier(event.target.value)} required value={identifier} />
+            </label>
+            <label className="auth-prompt__field">
+              <span>Password</span>
+              <Input autoComplete="current-password" minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
+            </label>
+            <button className="auth-prompt__submit" disabled={isSigningIn} type="submit">
+              <KeyRound aria-hidden="true" size={16} />
+              <span>{isSigningIn ? "Signing in…" : "Sign in"}</span>
+            </button>
+          </form>
+          {googleAvailable && <>
+            <div aria-hidden="true" className="auth-prompt__divider"><span>or</span></div>
+            <div
+              aria-busy={isSigningIn || undefined}
+              aria-label="Continue with Google Workspace"
+              className="auth-prompt__google"
+              ref={googleButtonHost}
+            />
+          </>}
           {error && <p className="text-sm text-[var(--status-danger-text)]" role="alert">{error}</p>}
-          <div className="flex gap-2.5 rounded-[var(--radius-sm)] bg-[var(--surface-inset)] p-3 text-xs leading-5 text-[var(--text-secondary)]">
-            <ShieldCheck aria-hidden="true" className="mt-0.5 shrink-0 text-[var(--text-accent)]" size={17} />
-            <span>Workspace permissions apply after sign-in. Public citations remain available in this conversation.</span>
-          </div>
+          <p className="auth-prompt__hint">Workspace access applies after sign-in.</p>
         </div>
       </Dialog>
     </AuthPromptContext>

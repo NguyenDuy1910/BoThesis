@@ -1,11 +1,23 @@
 "use client";
 
-import { LogIn, LogOut, Settings, ShieldCheck } from "lucide-react";
+import {
+  Check,
+  ChevronRight,
+  LogIn,
+  LogOut,
+  SlidersHorizontal,
+  Settings,
+  ShieldCheck,
+  UserRound,
+  UsersRound,
+} from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Dropdown, DropdownItem, DropdownSeparator } from "@/components/ui/Dropdown";
 import { useAuthPrompt } from "@/components/auth/AuthPrompt";
+import { WorkspaceMark } from "@/components/patterns";
+import { Avatar } from "@/components/ui/Avatar";
 import {
   clearAuthSession,
   hasAnySessionPermission,
@@ -67,8 +79,10 @@ export function WorkspaceContextMenu({
     try {
       await switchWorkspace(tenantId);
       setWorkspaceSwitcherOpen(false);
+      setOpen(false);
       setSwitching(null);
-      router.push("/app?action=new");
+      onNavigate?.();
+      router.replace("/app?action=new");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not change workspace.");
       setSwitching(null);
@@ -78,7 +92,6 @@ export function WorkspaceContextMenu({
   const signOut = () => {
     clearAuthSession();
     router.replace("/app");
-    router.refresh();
   };
 
   return (
@@ -98,40 +111,107 @@ export function WorkspaceContextMenu({
           workspaceName={workspaceName}
         />
       }
-      menuClassName="w-[17.75rem] border border-[var(--border-subtle)] p-2"
+      menuClassName="w-[26rem] max-w-[calc(100vw-1rem)] border border-[var(--border-subtle)] p-2"
       onOpenChange={setOpen}
       open={open}
       showChevron={false}
       title={`${workspaceName} — ${userName}`}
     >
-      {otherWorkspaces.length > 0 && (
+      <div className="px-2.5 pb-2 pt-1" role="presentation">
+        <p className="truncate text-[length:var(--text-size-meta)] text-[var(--text-secondary)]">
+          {session?.email ?? (isGuest ? "Guest session" : "Signed in")}
+        </p>
+        <div className="mt-2 flex items-center gap-3">
+          <Avatar name={userName} size="lg" />
+          <div className="min-w-0">
+            <p className="truncate text-[length:var(--text-size-body)] font-semibold text-[var(--text-primary)]">
+              {userName}
+            </p>
+            <p className="text-[length:var(--text-size-meta)] text-[var(--text-tertiary)]">
+              {isGuest ? "Guest session" : "Member"}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {session && !isGuest && <DropdownSeparator />}
+      {session && !isGuest && (
+        <div className="px-2.5 pb-1 pt-2 text-[length:var(--text-size-meta)] font-medium text-[var(--text-tertiary)]" role="presentation">
+          Switch workspace
+        </div>
+      )}
+
+      {current && (
+        <DropdownItem
+          aria-current="true"
+          className="min-h-12 py-2"
+          disabled={Boolean(switching)}
+          selected
+          onClick={() => undefined}
+        >
+          <WorkspaceMark name={current.name} size="md" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{current.name}</span>
+            <span className="block text-[length:var(--text-size-meta)] font-normal text-[var(--text-tertiary)]">Current workspace</span>
+          </span>
+          <Check aria-hidden="true" className="h-4 w-4" />
+        </DropdownItem>
+      )}
+
+      {otherWorkspaces.slice(0, 1).map((workspace) => (
+        <DropdownItem
+          className="min-h-12 py-2"
+          disabled={Boolean(switching)}
+          key={workspace.id}
+          onClick={() => void changeWorkspace(workspace.id)}
+        >
+          <WorkspaceMark name={workspace.name} size="md" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{workspace.name}</span>
+            <span className="block text-[length:var(--text-size-meta)] font-normal text-[var(--text-tertiary)]">
+              {switching === workspace.id ? "Switching…" : "Available workspace"}
+            </span>
+          </span>
+        </DropdownItem>
+      ))}
+
+      {otherWorkspaces.length > 1 && (
         <DropdownItem onClick={() => setWorkspaceSwitcherOpen(true)}>
-          <span className="flex-1">Switch workspace</span>
+          <UsersRound aria-hidden="true" className="h-[18px] w-[18px]" />
+          <span className="flex-1">View all workspaces</span>
+          <ChevronRight aria-hidden="true" className="h-4 w-4 text-[var(--text-tertiary)]" />
         </DropdownItem>
       )}
 
-      {canManageWorkspace && (
-        <DropdownItem
-          onClick={() => {
-            onNavigate?.();
-            router.push("/workspace-control");
-          }}
-        >
-          <Settings aria-hidden="true" className="h-[18px] w-[18px]" />
-          <span className="flex-1">Manage workspace</span>
-        </DropdownItem>
-      )}
-
-      {canUsePlatformControl && (
-        <DropdownItem
-          onClick={() => {
-            onNavigate?.();
-            router.push("/workspace-control/platform");
-          }}
-        >
-          <ShieldCheck aria-hidden="true" className="h-[18px] w-[18px]" />
-          <span className="flex-1">Platform control</span>
-        </DropdownItem>
+      {(canManageWorkspace || canUsePlatformControl) && (
+        <>
+          <DropdownSeparator />
+          <div className="px-2.5 pb-1 pt-2 text-[length:var(--text-size-meta)] font-medium text-[var(--text-tertiary)]" role="presentation">
+            Workspace &amp; platform
+          </div>
+          {canManageWorkspace && (
+            <DropdownItem
+              onClick={() => {
+                onNavigate?.();
+                router.push("/workspace-control");
+              }}
+            >
+              <Settings aria-hidden="true" className="h-[18px] w-[18px]" />
+              <span className="flex-1">Manage workspace</span>
+            </DropdownItem>
+          )}
+          {canUsePlatformControl && (
+            <DropdownItem
+              onClick={() => {
+                onNavigate?.();
+                router.push("/workspace-control/platform");
+              }}
+            >
+              <ShieldCheck aria-hidden="true" className="h-[18px] w-[18px]" />
+              <span className="flex-1">Platform control</span>
+            </DropdownItem>
+          )}
+        </>
       )}
 
       {isGuest && (
@@ -141,26 +221,32 @@ export function WorkspaceContextMenu({
         </DropdownItem>
       )}
 
-      {session && !isGuest && (otherWorkspaces.length > 0 || canManageWorkspace || canUsePlatformControl) && <DropdownSeparator />}
-
       {session && !isGuest && (
         <>
+          <DropdownSeparator />
+          <div className="px-2.5 pb-1 pt-2 text-[length:var(--text-size-meta)] font-medium text-[var(--text-tertiary)]" role="presentation">
+            Personal
+          </div>
           <DropdownItem
+            className="min-h-10"
             onClick={() => {
               onNavigate?.();
               setAccountTab("profile");
               setAccountOpen(true);
             }}
           >
+            <UserRound aria-hidden="true" className="h-[18px] w-[18px]" />
             <span className="flex-1">Profile</span>
           </DropdownItem>
           <DropdownItem
+            className="min-h-10"
             onClick={() => {
               onNavigate?.();
               setAccountTab("preferences");
               setAccountOpen(true);
             }}
           >
+            <SlidersHorizontal aria-hidden="true" className="h-[18px] w-[18px]" />
             <span className="flex-1">Preferences</span>
           </DropdownItem>
         </>

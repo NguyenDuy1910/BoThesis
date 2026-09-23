@@ -302,7 +302,7 @@ function isHtmlSource(viewer: KnowledgeItemViewer): boolean {
 
 /** Every reason a page image is not available, told apart honestly. */
 function UnrenderedSource({ viewer }: { viewer: KnowledgeItemViewer }) {
-  if (viewer.status === "pending" || viewer.status === "processing") {
+  if (viewer.status === "pending_content") {
     return (
       <PreviewNotice
         icon="spinner"
@@ -310,9 +310,6 @@ function UnrenderedSource({ viewer }: { viewer: KnowledgeItemViewer }) {
         detail="This source has been indexed. Its page previews are still rendering."
       />
     );
-  }
-  if (viewer.status === "deleted") {
-    return <PreviewNotice icon="warning" title="This source has been removed" />;
   }
   return (
     <PreviewNotice

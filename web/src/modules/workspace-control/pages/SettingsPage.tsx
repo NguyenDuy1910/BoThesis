@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/Input";
 import { useAuthSession } from "@/lib/hooks/useAuthSession";
 import { workspaceDirectoryApi, type Workspace } from "@/modules/workspace-control/directory";
 import { useControlPlaneData } from "@/modules/workspace-control/queries";
+import { ControlPlaneLoadingSkeleton } from "@/modules/workspace-control/components/ControlPlaneLoadingSkeleton";
 
 export function SettingsPage() {
   const session = useAuthSession();
@@ -19,7 +20,7 @@ export function SettingsPage() {
   if (query.error) return <ErrorState description={query.error} onAction={query.reload} />;
   return query.data
     ? <WorkspaceSettings key={query.data.id} workspace={query.data} />
-    : <p role="status">Loading settings…</p>;
+    : <ControlPlaneLoadingSkeleton variant="settings" />;
 }
 
 function WorkspaceSettings({ workspace }: { workspace: Workspace }) {

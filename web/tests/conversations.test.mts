@@ -112,7 +112,7 @@ test("retains collection context on a persisted user turn", async () => {
   assert.equal(restored[0]?.parts[1]?.type, "data-collection");
 });
 
-test("restores the selected chat or empty New chat draft within the same tab and workspace", () => {
+test("restores selection and conversation data only within the active workspace", async () => {
   Object.defineProperty(globalThis, "window", {
     configurable: true,
     value: { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage() },
@@ -120,14 +120,21 @@ test("restores the selected chat or empty New chat draft within the same tab and
   setConversationUser("chat-restore-test", "workspace-a");
   assert.equal(readSelectedConversation(), undefined);
 
+  await conversationAdapter.createConversation("Workspace A chat", "conversation-1");
   rememberSelectedConversation("conversation-1");
   assert.equal(readSelectedConversation(), "conversation-1");
-  rememberSelectedConversation(null);
-  assert.equal(readSelectedConversation(), null);
 
   setConversationUser("chat-restore-test", "workspace-b");
   assert.equal(readSelectedConversation(), undefined);
+  assert.deepEqual(await conversationAdapter.listConversations(), []);
+
   setConversationUser("chat-restore-test", "workspace-a");
+  assert.deepEqual(
+    (await conversationAdapter.listConversations()).map(({ id }) => id),
+    ["conversation-1"],
+  );
+  assert.equal(readSelectedConversation(), "conversation-1");
+  rememberSelectedConversation(null);
   assert.equal(readSelectedConversation(), null);
 });
 

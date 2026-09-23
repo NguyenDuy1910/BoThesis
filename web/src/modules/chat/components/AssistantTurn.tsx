@@ -9,6 +9,7 @@ import type { AnswerSource } from "../sources";
 import type { RuntimeActivity, TurnState } from "../types";
 import { appBrand } from "@/lib/brand";
 import { ProductMark } from "@/components/ui/ProductMark";
+import { ThinkingIndicator } from "@/components/patterns/ThinkingIndicator";
 import {
   CitationRenderingProvider,
   citationRenderingSources,
@@ -53,9 +54,8 @@ export const AssistantTurn = memo(function AssistantTurn({
       <div className="assistant-turn">
         {(isStreaming || hasRuntimeActivity) && (
           <div className="assistant-turn__identity">
-            <ProductMark decorative size="sm" />
+            <ProductMark decorative size="md" />
             <span className="assistant-turn__identity-name">{appBrand.productName} AI</span>
-            <span className="assistant-turn__identity-badge">Grounded response</span>
           </div>
         )}
         {renderItems.map((item) => {
@@ -86,9 +86,7 @@ export const AssistantTurn = memo(function AssistantTurn({
           return showAgentActivity ? <HostedExecutionActivity execution={item} key={item.id} /> : null;
         })}
         {showPending && (
-          <span aria-label={`${appBrand.productName} is understanding the request`} className="assistant-turn__pending" role="status">
-            Understanding the request
-          </span>
+          <ThinkingIndicator label={thinkingLabel(turn)} />
         )}
       </div>
     </CitationRenderingProvider>
@@ -106,6 +104,29 @@ function usePendingIndicator(pending: boolean) {
     return () => window.clearTimeout(timeout);
   }, [pending]);
   return { visible: pending && visible };
+}
+
+function thinkingLabel(turn: TurnState | undefined) {
+  const active = (turn?.runtimeActivities ?? []).filter((activity) => activity.state === "active");
+  if (active.length > 0) return activityThinkingLabel(active.at(-1));
+  if ((turn?.runtimeActivities ?? []).some((activity) => activity.state === "completed")) {
+    return "Preparing your answer";
+  }
+  return "Understanding the request";
+}
+
+function activityThinkingLabel(activity: RuntimeActivity | undefined) {
+  switch (activity?.toolName) {
+    case "knowledge_search": return "Searching your knowledge";
+    case "read_resource":
+    case "inspect_resource": return "Reading relevant sources";
+    case "artifact_create":
+    case "document_edit":
+    case "materialize_resource":
+    case "materialize_sandbox_resource":
+    case "export_sandbox_file": return "Preparing your answer";
+    default: return "Analyzing information";
+  }
 }
 
 function HostedExecutionActivity({
@@ -153,75 +174,45 @@ function ActivityGroup({
 }: {
   activities: RuntimeActivity[];
 }) {
-  const active = activities.some((activity) => activity.state === "active");
-  const failed = activities.some((activity) => (
-    activity.state === "failed" || activity.state === "timeout"
-  ));
-  const statusLabel = active ? "Working" : failed ? "Needs attention" : "Completed";
+  const activeActivities = activities.filter((activity) => activity.state === "active");
+  const active = activeActivities.length > 0;
+  const completed = activities.filter((activity) => activity.state === "completed");
+  const summary = activitySummary(completed.length > 0 ? completed : activities);
   return (
     <div
       aria-busy={active}
-      aria-label={`${statusLabel}. ${activities.length} steps.`}
-      className={clsx(
-        "assistant-turn__activity-group",
-        active && "assistant-turn__activity-group--active",
-        failed && "assistant-turn__activity-group--failed",
-      )}
+      aria-label={active ? activityThinkingLabel(activeActivities.at(-1)) : summary}
+      className="assistant-turn__activity-group"
       role="status"
     >
-      <div className="assistant-turn__progress-heading">
-        <span className="assistant-turn__progress-kicker">{statusLabel}</span>
-        <span className="assistant-turn__progress-count">{activities.length} step{activities.length === 1 ? "" : "s"}</span>
-      </div>
-      <div className="assistant-turn__progress-list">
-        {activities.map((activity) => <ToolActivity activity={activity} key={activity.callId} />)}
-      </div>
+      {completed.length > 0 && (
+        <p className="assistant-turn__activity-summary">
+          <Check aria-hidden="true" className="assistant-turn__activity-summary-icon" size={14} />
+          <span>{summary}</span>
+        </p>
+      )}
+      {active && (
+        <ThinkingIndicator label={activityThinkingLabel(activeActivities.at(-1))} />
+      )}
+      {!active && completed.length === 0 && <p className="assistant-turn__activity-summary">{summary}</p>}
     </div>
   );
 }
 
-function ToolActivity({ activity }: { activity: RuntimeActivity }) {
-  const presentation = toolPresentation(activity);
-  const active = activity.state === "active";
-  const error = activity.state === "failed" || activity.state === "timeout";
-  const elapsed = useElapsedSeconds(activity.startedAt, active);
-  const Icon = active ? LoaderCircle : error ? CircleAlert : Check;
-  const elapsedLabel = active && elapsed >= 10 ? `${elapsed}s` : undefined;
-  const accessibleLabel = [presentation.label, presentation.detail, elapsedLabel]
-    .filter(Boolean)
-    .join(" · ");
-
-  return (
-    <div
-      aria-label={accessibleLabel}
-      className={clsx("assistant-turn__activity", "assistant-turn__progress-row", `assistant-turn__activity--${activity.state}`)}
-      role={active ? "status" : undefined}
-      title={accessibleLabel}
-    >
-      <span className="assistant-turn__progress-node">
-        <Icon aria-hidden="true" className="assistant-turn__activity-icon" size={14} />
-      </span>
-      <span className="assistant-turn__progress-copy">
-        <span className="assistant-turn__activity-label">{presentation.label}</span>
-        {(presentation.detail || elapsedLabel) && (
-          <span className="assistant-turn__progress-detail">
-            {presentation.detail ?? elapsedLabel}
-          </span>
-        )}
-      </span>
-    </div>
-  );
-}
-
-function useElapsedSeconds(startedAt: number, active: boolean) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (!active) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, [active, startedAt]);
-  return Math.max(0, Math.floor((now - startedAt) / 1_000));
+function activitySummary(activities: RuntimeActivity[]) {
+  const primary = activities.at(-1);
+  const search = [...activities].reverse().find((activity) => activity.toolName === "knowledge_search");
+  if (search) {
+    const resultCount = search.resultCount ?? numericProgress(search.progress, "result_count");
+    const stepSuffix = activities.length > 1 ? ` · ${activities.length} steps` : "";
+    return `Researched ${resultCount ?? activities.length} source${resultCount === 1 ? "" : "s"}${stepSuffix}`;
+  }
+  const presentation = primary
+    ? toolPresentation(primary)
+    : { label: "Working on your request", detail: undefined };
+  const count = activities.length;
+  const suffix = count > 1 ? ` · ${count} steps` : "";
+  return `${presentation.label}${presentation.detail ? ` · ${presentation.detail}` : ""}${suffix}`;
 }
 
 function toolPresentation(activity: RuntimeActivity) {

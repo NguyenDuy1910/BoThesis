@@ -220,14 +220,15 @@ export function ChatComposer({
             <button
               aria-expanded={addOpen}
               aria-haspopup="dialog"
+              aria-label="Add context or upload a file"
               className="composer-tool"
               disabled={!isConfigured}
               onClick={() => setAddOpen((open) => !open)}
               ref={addButtonRef}
+              title="Add context or upload a file"
               type="button"
             >
               <Plus aria-hidden="true" size={16} />
-              <span>Add</span>
             </button>
             {addOpen && (
               <div aria-label="Add context" className="composer-add-popover" ref={addPopoverRef} role="dialog">
@@ -242,7 +243,7 @@ export function ChatComposer({
                 </div>
                 <div className="composer-add-popover__actions">
                   <button
-                    className="composer-add-popover__row"
+                    className="composer-add-popover__row composer-add-popover__row--upload"
                     disabled={attachments.length >= 12}
                     onClick={() => {
                       if (isGuestSession(session)) {

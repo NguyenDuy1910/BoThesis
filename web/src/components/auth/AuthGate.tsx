@@ -4,9 +4,15 @@ import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
 import { AuthPromptProvider } from "@/components/auth/AuthPrompt";
+import { AuthLoadingSkeleton } from "@/components/auth/AuthLoadingSkeleton";
+import { ErrorState } from "@/components/ui/ErrorState";
 import { getStoredAuthSession, isGuestSession } from "@/lib/auth/session";
 import { useAuthSession } from "@/lib/hooks/useAuthSession";
 import { createSession } from "@/modules/auth/api";
+import { ChatLoadingSkeleton } from "@/modules/chat/components/ChatLoadingSkeleton";
+import { WorkspaceDiscoveryLoadingSkeleton } from "@/modules/auth/components/WorkspaceDiscoveryLoadingSkeleton";
+import { LibraryLoadingSkeleton } from "@/modules/library/LibraryLoadingSkeleton";
+import { ControlPlaneLoadingSkeleton, type ControlPlaneLoadingVariant } from "@/modules/workspace-control/components/ControlPlaneLoadingSkeleton";
 
 const publicPathPrefix = "/auth/";
 
@@ -20,6 +26,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   const session = useAuthSession();
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
   const [requiredPrompt, setRequiredPrompt] = useState<{
     reason: string;
     requestId: number;
@@ -43,7 +50,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       })
       .finally(() => { if (mounted) setChecking(false); });
     return () => { mounted = false; };
-  }, [isPublicRoute]);
+  }, [isPublicRoute, retryCount]);
 
   useEffect(() => {
     if (!isGuestSession(session)) {
@@ -70,13 +77,43 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       </AuthPromptProvider>
     );
   }
-  return (
-    <div aria-busy="true" className="auth-gate" role="status">
-      <span aria-hidden="true" className="shell__route-boundary-indicator" />
-      <span>{error ?? "Opening public workspace…"}</span>
-      {error && <button onClick={() => window.location.reload()} type="button">Try again</button>}
-    </div>
-  );
+  if (error) {
+    return (
+      <ErrorState
+        actionLabel="Try again"
+        description={error}
+        onAction={() => {
+          setError(null);
+          setRetryCount((value) => value + 1);
+        }}
+        title="Workspace could not be opened"
+      />
+    );
+  }
+  return <RouteLoading pathname={pathname} />;
+}
+
+function RouteLoading({ pathname }: { pathname: string }) {
+  if (pathname === "/app") return <ChatLoadingSkeleton />;
+  if (pathname === "/library") return <LibraryLoadingSkeleton />;
+  if (pathname === "/workspaces") return <WorkspaceDiscoveryLoadingSkeleton />;
+  if (pathname === "/workspace-control" || pathname.startsWith("/workspace-control/")) {
+    return <ControlPlaneLoadingSkeleton variant={controlLoadingVariant(pathname)} />;
+  }
+  return <AuthLoadingSkeleton />;
+}
+
+function controlLoadingVariant(pathname: string): ControlPlaneLoadingVariant {
+  const section = pathname.replace(/^\/workspace-control\/?/, "").split("/")[0];
+  if (section === "settings") return "settings";
+  if (section === "access") return "access";
+  if (section === "activity") return "audit";
+  if (section === "knowledge") return "knowledge";
+  if (section === "platform-integrations") return "integrations";
+  if (section === "platform-tenants") return "platform-tenants";
+  if (section === "platform-users") return "platform-users";
+  if (section === "platform-system") return "platform-system";
+  return "overview";
 }
 
 function protectedRouteReason(pathname: string): string | undefined {

@@ -16,6 +16,7 @@ from api.routers import (
     DocumentPage,
     DocumentSearchRequest,
     DocumentSearchResponse,
+    DocumentStatus,
 )
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -69,7 +70,7 @@ async def list_documents(
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     search: Annotated[str | None, Query(max_length=255)] = None,
     collection_id: UUID | None = None,
-    status: str | None = None,
+    status: DocumentStatus | None = None,
 ) -> DocumentPage:
     return DocumentPage.model_validate(await documents.list_documents(
         caller, page=page, page_size=page_size, search=search,

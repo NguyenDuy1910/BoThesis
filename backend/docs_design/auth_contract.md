@@ -33,10 +33,10 @@ has no recovery lifecycle.
 }
 ```
 
-`email` is the canonical local credential identifier. `username` is optional
-profile metadata retained for existing users and display; it is not accepted by
-the login request. Account creation returns `201` and the same `AuthSession`
-shape as login. `409` uses `ACCOUNT_ALREADY_EXISTS`; `422` uses
+`email` is the canonical local credential identifier for account creation.
+Password sign-in accepts either the account email or the optional username;
+exactly one identifier is required. Account creation returns `201` and the
+same `AuthSession` shape as login. `409` uses `ACCOUNT_ALREADY_EXISTS`; `422` uses
 `VALIDATION_ERROR`.
 
 ## Session creation
@@ -46,6 +46,12 @@ shape as login. `409` uses `ACCOUNT_ALREADY_EXISTS`; `422` uses
 
 ```json
 { "method": "password", "email": "user@example.com", "password": "..." }
+```
+
+Username sign-in is also supported for accounts that have one:
+
+```json
+{ "method": "password", "username": "analyst", "password": "..." }
 ```
 
 ```json

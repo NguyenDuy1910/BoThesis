@@ -101,7 +101,6 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       )}
       disabled={disabled || loading}
       type={type}
-      title={iconOnly ? props["aria-label"] : undefined}
       {...props}
     >
       {loading ? (

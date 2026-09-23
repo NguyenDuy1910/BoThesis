@@ -1,7 +1,7 @@
 "use client";
 
 import { Search, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { type RefObject, useEffect, useState } from "react";
 
 import { ui } from "@/components/ui/design-system";
 import { cn } from "@/lib/cn";
@@ -14,6 +14,7 @@ interface SearchInputProps {
   className?: string;
   debounceMs?: number;
   autoFocus?: boolean;
+  inputRef?: RefObject<HTMLInputElement | null>;
 }
 
 export function SearchInput({
@@ -24,6 +25,7 @@ export function SearchInput({
   className,
   debounceMs = 250,
   autoFocus = false,
+  inputRef,
 }: SearchInputProps) {
   const [draft, setDraft] = useState(value);
 
@@ -58,6 +60,7 @@ export function SearchInput({
           onChange("");
         }}
         placeholder={placeholder}
+        ref={inputRef}
         spellCheck={false}
         type="text"
         value={draft}

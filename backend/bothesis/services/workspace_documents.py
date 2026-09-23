@@ -6,6 +6,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import joinedload
 
 from bothesis.db.engine import SessionFactory, session_scope
 from bothesis.db.models import Item
@@ -192,12 +193,17 @@ class WorkspaceDocumentService:
                 Item.item_type == "document",
                 Item.parent_item_id.in_(allowed),
                 Item.deleted_at.is_(None),
-            )
+            ).options(joinedload(Item.upload))
             if search:
                 statement = statement.where(Item.title.ilike(f"%{search}%"))
             if status:
-                internal = {"pending_content": "pending", "available": "ready", "failed": "failed"}.get(status, status)
-                statement = statement.where(Item.status == internal)
+                internal_statuses = {
+                    "pending_content": ("pending",),
+                    "available": ("processing", "ready"),
+                    "failed": ("failed", "unsupported"),
+                }.get(status)
+                if internal_statuses is not None:
+                    statement = statement.where(Item.status.in_(internal_statuses))
             total = await session.scalar(select(func.count()).select_from(statement.subquery())) or 0
             items = list(await session.scalars(
                 statement.order_by(Item.updated_at.desc(), Item.id)

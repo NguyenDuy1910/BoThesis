@@ -9,6 +9,7 @@ import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { useConnectorCatalogue } from "@/modules/knowledge/queries";
+import { ControlPlaneLoadingSkeleton } from "@/modules/workspace-control/components/ControlPlaneLoadingSkeleton";
 
 const COLUMNS = [
   { id: "connector", label: "Connector" },
@@ -38,6 +39,8 @@ export function PlatformIntegrationsPage() {
     return <ErrorState description={error} onAction={reload} title="Connectors could not be loaded" />;
   }
 
+  if (loading && !data) return <ControlPlaneLoadingSkeleton variant="integrations" />;
+
   return (
     <Card>
       <CardHeader
@@ -50,9 +53,7 @@ export function PlatformIntegrationsPage() {
           placeholder="Search connectors…"
           value={search}
         />
-        {loading ? (
-          <p role="status">Loading connectors…</p>
-        ) : rows.length ? (
+        {rows.length ? (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[42rem] text-left">
               <thead className="border-b border-[var(--border-subtle)]">

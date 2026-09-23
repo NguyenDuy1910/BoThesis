@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, CheckCircle2, CircleAlert } from "lucide-react";
+import { CheckCircle2, CircleAlert } from "lucide-react";
 
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { ErrorState } from "@/components/ui/ErrorState";
@@ -8,6 +8,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { StatGrid, StatTile } from "@/components/ui/StatTile";
 import { workspaceDirectoryApi } from "@/modules/workspace-control/directory";
 import { useControlPlaneData } from "@/modules/workspace-control/queries";
+import { ControlPlaneLoadingSkeleton } from "@/modules/workspace-control/components/ControlPlaneLoadingSkeleton";
 
 export function SystemHealthPage() {
   const health = useControlPlaneData(workspaceDirectoryApi.platform.health);
@@ -15,11 +16,7 @@ export function SystemHealthPage() {
     return <ErrorState description={health.error} onAction={health.reload} />;
   }
   if (!health.data) {
-    return (
-      <p className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-        <Activity className="h-4 w-4 animate-pulse" />Checking platform services…
-      </p>
-    );
+    return <ControlPlaneLoadingSkeleton variant="platform-system" />;
   }
   const { services, status, checked_at, duration_ms } = health.data;
   const required = services.filter((service) => service.required);

@@ -11,12 +11,15 @@ export async function completeGoogleSignIn(credential: string): Promise<AuthSess
   );
 }
 
-export async function completePasswordSignIn(email: string, password: string): Promise<AuthSession> {
+export async function completePasswordSignIn(identifier: string, password: string): Promise<AuthSession> {
   const current = getAuthSession();
+  const normalizedIdentifier = identifier.trim();
   return requestSession(
-    { method: "password", email, password },
+    normalizedIdentifier.includes("@")
+      ? { method: "password", email: normalizedIdentifier, password }
+      : { method: "password", username: normalizedIdentifier, password },
     current?.session_kind === "guest" ? current.access_token : undefined,
-    "Email or password is incorrect.",
+    "Sign-in details are incorrect.",
   );
 }
 

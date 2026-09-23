@@ -10,6 +10,7 @@ import { StatGrid, StatTile } from "@/components/ui/StatTile";
 import { workspaceDirectoryApi } from "@/modules/workspace-control/directory";
 import { useControlPlaneData } from "@/modules/workspace-control/queries";
 import { describeAuditAction, formatRelative } from "@/modules/workspace-control/format";
+import { ControlPlaneLoadingSkeleton } from "@/modules/workspace-control/components/ControlPlaneLoadingSkeleton";
 
 const METRICS: { key: string; label: string }[] = [
   { key: "active_users", label: "Members" },
@@ -27,7 +28,7 @@ const ATTENTION: { key: string; label: string; href: string }[] = [
 export function WorkspaceOverviewPage() {
   const query = useControlPlaneData(() => workspaceDirectoryApi.overview());
   if (query.error) return <ErrorState description={query.error} onAction={query.reload} />;
-  if (!query.data) return <p role="status">Loading workspace…</p>;
+  if (!query.data) return <ControlPlaneLoadingSkeleton variant="overview" />;
   const { tenant, metrics, attention, recent_activity } = query.data;
 
   return (

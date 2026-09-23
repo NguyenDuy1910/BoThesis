@@ -22,7 +22,11 @@ from bothesis.services import (
 )
 from bothesis.services.citation import CitationService
 from bothesis.services.identity_access.authorization import AuthorizationService
-from bothesis.services.document_presentation import DocumentPresenter, viewer_elements
+from bothesis.services.document_presentation import (
+    DocumentPresenter,
+    public_document_status,
+    viewer_elements,
+)
 from bothesis.services.item import ItemService
 
 VIEWER_CHUNK_LIMIT = 100
@@ -115,7 +119,7 @@ class KnowledgeViewService:
                 "item_id": str(item.id),
                 "title": item.title,
                 "content_type": item.mime_type or "text/plain",
-                "status": item.status,
+                "status": public_document_status(item.status),
                 "external_url": CitationResolver.original_url(
                     self._presenter.source_identity(item), focus_citation
                 ),
@@ -189,91 +193,6 @@ class KnowledgeViewService:
             "total": len(collections),
             "recent_documents": [_document_payload(item) for item in recent_documents],
             "personal_collection_id": personal_collection_id,
-        }
-
-    async def get_collection_workspace(
-        self,
-        access: AuthContext,
-        *,
-        collection_id: UUID,
-        search: str | None,
-        page: int,
-        page_size: int,
-    ) -> dict[str, Any]:
-        """Return direct child Items only after collection access is confirmed."""
-
-        tenant_id = require_tenant_permission(access, KNOWLEDGE_READ_PERMISSION)
-        async with session_scope(self._sessions) as session:
-            access_service = AuthorizationService(session)
-            collection = await access_service.require_item(
-                collection_id, access=access
-            )
-            if collection.item_type != "collection":
-                raise DocumentNotFoundError("collection not found")
-            allowed_ids = await access_service.allowed_collection_ids(access)
-            document_counts, source_counts = await self._collection_counts(
-                session, (collection.id,)
-            )
-            child_collections = list(
-                await session.scalars(
-                    select(Item)
-                    .where(
-                        Item.tenant_id == tenant_id,
-                        Item.item_type == "collection",
-                        Item.parent_item_id == collection.id,
-                        Item.id.in_(allowed_ids),
-                        Item.status != "deleted",
-                        Item.deleted_at.is_(None),
-                    )
-                    .order_by(Item.title, Item.id)
-                )
-            )
-            child_counts, child_source_counts = await self._collection_counts(
-                session, tuple(item.id for item in child_collections)
-            )
-            document_filters = [
-                Item.tenant_id == tenant_id,
-                Item.item_type == "document",
-                Item.parent_item_id == collection.id,
-                Item.status != "deleted",
-                Item.deleted_at.is_(None),
-            ]
-            normalized_search = (search or "").strip()
-            if normalized_search:
-                document_filters.append(Item.title.ilike(f"%{normalized_search}%"))
-            total = await session.scalar(
-                select(func.count()).select_from(Item).where(*document_filters)
-            )
-            documents = list(
-                await session.scalars(
-                    self._document_statement(
-                        tenant_id=tenant_id,
-                        collection_ids=(collection.id,),
-                        filters=document_filters,
-                    )
-                    .order_by(Item.updated_at.desc(), Item.id)
-                    .limit(page_size)
-                    .offset((page - 1) * page_size)
-                )
-            )
-        return {
-            "collection": _collection_payload(
-                collection,
-                document_count=document_counts.get(collection.id, 0),
-                source_count=source_counts.get(collection.id, 0),
-            ),
-            "child_collections": [
-                _collection_payload(
-                    item,
-                    document_count=child_counts.get(item.id, 0),
-                    source_count=child_source_counts.get(item.id, 0),
-                )
-                for item in child_collections
-            ],
-            "documents": [_document_payload(item) for item in documents],
-            "total": int(total or 0),
-            "page": page,
-            "page_size": page_size,
         }
 
     async def _authorized_item(
@@ -470,16 +389,11 @@ def _document_payload(item: Item) -> dict[str, Any]:
         "content_type": item.mime_type,
         "size_bytes": item.size_bytes or 0,
         "purpose": (item.metadata_ or {}).get("purpose", "knowledge"),
-        "status": {
-            "pending": "pending_content", "processing": "available",
-            "ready": "available", "failed": "failed", "unsupported": "failed",
-        }.get(item.status, "pending_content"),
+        "status": public_document_status(item.status),
         "latest_ingestion_id": None,
         "created_at": item.created_at.isoformat(),
         "updated_at": item.updated_at.isoformat(),
         "document_type": item.document_type,
-        "status": item.status,
-        "updated_at": item.updated_at.isoformat(),
         "source": source,
     }
 

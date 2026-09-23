@@ -112,9 +112,9 @@ top-level route.
 always resolved from the bearer session; no caller identity fields are accepted
 by `GET`, `PATCH`, or `DELETE /auth/session`.
 
-Password login uses `method: "password"` with canonical `email` and
-`password`. Account `username` is optional profile metadata, not a login
-identifier.
+Password login uses `method: "password"` with exactly one of `email` or
+`username`, plus `password`. Account `email` remains the canonical credential
+identifier; optional account `username` is also accepted for local sign-in.
 Google login uses `method: "google"` with the verified provider credential.
 Guest access uses `method: "guest"` and no credential fields. Workspace
 switching uses `PATCH /auth/session` with `active_workspace_id` and requires

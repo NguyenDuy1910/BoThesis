@@ -25,9 +25,10 @@ export function Tooltip({ label, children, side = "bottom", className }: Tooltip
       {children}
       <span
         className={cn(
-          "pointer-events-none absolute left-1/2 z-[70] hidden -translate-x-1/2 whitespace-nowrap",
-          "rounded-[var(--radius-xs)] bg-[var(--text-primary)] px-1.5 py-1 text-[length:var(--text-size-caption)] font-medium text-[var(--surface-base)]",
-          "shadow-[var(--elevation-2)] group-focus-within/tooltip:block group-hover/tooltip:block",
+          "pointer-events-none invisible absolute left-1/2 z-[70] -translate-x-1/2 whitespace-nowrap opacity-0",
+          "rounded-[var(--radius-xs)] border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-1.5 py-1 text-[length:var(--text-size-caption)] font-medium text-[var(--text-secondary)]",
+          "shadow-[var(--elevation-2)] transition-[opacity,visibility] duration-[var(--duration-fast)] ease-[var(--ease-out)]",
+          "group-focus-within/tooltip:visible group-focus-within/tooltip:opacity-100 group-hover/tooltip:visible group-hover/tooltip:opacity-100",
           sideClasses[side],
         )}
         role="tooltip"

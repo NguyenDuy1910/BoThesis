@@ -15,6 +15,22 @@ from bothesis.services.preview import KnowledgePreview
 
 log = logging.getLogger(__name__)
 
+_PUBLIC_DOCUMENT_STATUS = {
+    "pending_content": "pending_content",
+    "pending": "pending_content",
+    "available": "available",
+    "processing": "available",
+    "ready": "available",
+    "failed": "failed",
+    "unsupported": "failed",
+}
+
+
+def public_document_status(status: str | None) -> str:
+    """Map internal Item lifecycle values to the public Document contract."""
+
+    return _PUBLIC_DOCUMENT_STATUS.get(status or "", "pending_content")
+
 
 class DocumentPresenter:
     """Turn one Item into metadata, preview, and citation-ready payloads."""
@@ -35,7 +51,7 @@ class DocumentPresenter:
     def metadata(self, document: Any) -> dict[str, Any]:
         """Describe one uploaded document for the workspace document API."""
 
-        upload = document.upload
+        upload = _loaded_upload(document)
         index_status = getattr(document, "index_status", None)
         return {
             "id": str(document.id),
@@ -47,7 +63,7 @@ class DocumentPresenter:
             ),
             "content_type": document.mime_type or "application/octet-stream",
             "size_bytes": document.size_bytes or 0,
-            "status": document.status,
+            "status": public_document_status(getattr(document, "status", None)),
             "index_status": index_status,
             "indexed": index_status == "ready",
             "upload_status": upload.status if upload is not None else None,
@@ -63,14 +79,16 @@ class DocumentPresenter:
     def contract_document(self, document: Any) -> dict[str, Any]:
         """Map internal Item/upload state to the public Document contract."""
 
-        upload = getattr(document, "upload", None)
+        upload = _loaded_upload(document)
         raw_status = getattr(document, "status", None)
         if upload is not None and upload.status == "available":
             public_status = "available"
-        elif raw_status == "failed" or (upload is not None and upload.status == "failed"):
+        elif raw_status in {"failed", "unsupported"} or (
+            upload is not None and upload.status == "failed"
+        ):
             public_status = "failed"
         else:
-            public_status = "pending_content"
+            public_status = public_document_status(raw_status)
         metadata = getattr(document, "metadata_", {}) or {}
         return {
             "id": document.id,
@@ -102,7 +120,7 @@ class DocumentPresenter:
     def preview_payload(self, document: Any) -> dict[str, Any] | None:
         """Resolve a renderable preview, degrading to none on failure."""
 
-        upload = getattr(document, "upload", None)
+        upload = _loaded_upload(document)
         if upload is not None and getattr(upload, "status", None) != "available":
             return None
         if getattr(document, "status", None) == "deleted":
@@ -247,8 +265,18 @@ def _bounded_seconds(value: int) -> int:
     return max(1, min(600, value))
 
 
+def _loaded_upload(document: Any) -> Any | None:
+    """Read upload relation without triggering async lazy IO after query scope."""
+
+    values = getattr(document, "__dict__", None)
+    if isinstance(values, dict):
+        return values.get("upload")
+    return getattr(document, "upload", None)
+
+
 __all__ = [
     "DocumentPresenter",
     "payload_citation",
+    "public_document_status",
     "viewer_elements",
 ]

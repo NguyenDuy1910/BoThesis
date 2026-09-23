@@ -9,6 +9,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { useWorkspaces } from "@/modules/auth/queries";
 import { switchWorkspace } from "@/modules/auth/api";
+import { WorkspaceDiscoveryLoadingSkeleton } from "./WorkspaceDiscoveryLoadingSkeleton";
 
 /**
  * The workspaces this person can open.
@@ -27,6 +28,8 @@ export function WorkspaceDiscovery() {
   const rows = (query.data ?? []).filter(
     (item) => !term || `${item.name} ${item.code}`.toLowerCase().includes(term),
   );
+
+  if (query.loading) return <WorkspaceDiscoveryLoadingSkeleton />;
 
   return (
     <section aria-label="Your workspaces" className="mx-auto w-full max-w-6xl p-[var(--page-gutter)]">
@@ -47,9 +50,7 @@ export function WorkspaceDiscovery() {
           title="Workspace could not be opened"
         />
       ) : null}
-      {query.loading ? (
-        <p role="status">Loading workspaces…</p>
-      ) : !rows.length ? (
+      {!rows.length ? (
         <EmptyState
           description="You belong to no workspace yet. An administrator can add you to one."
           title="No workspaces"

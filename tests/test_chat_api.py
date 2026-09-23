@@ -708,14 +708,14 @@ async def test_collection_upload_reports_ingestion_dispatch_failure(
 
     assert result["created"] is True
     assert result["ingestion_status"] == "failed"
-    assert result["document"]["status"] == "ready"
+    assert result["document"]["status"] == "available"
     assert result["document"]["parent_item_id"] == str(collection_id)
 
     retried = await service.retry_indexing(access, document.id)
 
     assert retried["created"] is False
     assert retried["ingestion_status"] == "ready"
-    assert retried["document"]["status"] == "ready"
+    assert retried["document"]["status"] == "available"
     assert retried["document"]["indexed"] is True
 
 

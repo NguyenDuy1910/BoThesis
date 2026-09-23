@@ -24,8 +24,8 @@ import {
 } from "@/components/shell/ProductShell";
 import { getApiConfiguration } from "@/lib/api/config";
 import { getAuthSession } from "@/lib/auth/session";
+import { useAuthSession } from "@/lib/hooks/useAuthSession";
 import { WorkspaceMark } from "@/components/patterns";
-import { WorkspaceLoadingSkeleton } from "@/components/ui/WorkspaceLoadingSkeleton";
 import {
   listCollections,
   releaseConversationDocument,
@@ -68,6 +68,7 @@ import { ChatComposer, type ComposerAttachment } from "./ChatComposer";
 import { ConversationReuse } from "./ConversationReuse";
 import { RecoveryNotice } from "./RecoveryNotice";
 import { RightActivityPanel } from "./RightActivityPanel";
+import { ChatLoadingSkeleton } from "./ChatLoadingSkeleton";
 
 const suggestions = [
   {
@@ -99,6 +100,7 @@ export default function ChatShell() {
   const searchParams = useSearchParams();
   const shellNavigation = useProductShellNavigation();
   const { setSidebarContent } = useProductShellSidebar();
+  const authSession = useAuthSession();
   const [conversations, setConversations] = useState<ChatConversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [draftId, setDraftId] = useState(createDraftConversationId);
@@ -109,7 +111,9 @@ export default function ChatShell() {
   const restoreRequestRef = useRef(0);
   const visibleConversationRef = useRef(activeId ?? draftId);
   const handledProductActionRef = useRef<string | null>(null);
+  const scopeRef = useRef<string | null>(null);
   const requestedProductAction = searchParams.get("action");
+  const currentSession = authSession ?? getAuthSession();
 
   const refresh = useCallback(async (requestedId?: string | null) => {
     const requestId = ++restoreRequestRef.current;
@@ -141,14 +145,33 @@ export default function ChatShell() {
       router.replace("/auth/login");
       return;
     }
-    const session = getAuthSession();
+    const conversationIdentity = currentSession?.user_id
+      ?? currentSession?.session_id
+      ?? configuration.userId;
+    const workspaceId = currentSession?.active_workspace_id ?? configuration.tenantId;
+    const sessionKind = currentSession?.session_kind ?? "user";
+    const scope = `${conversationIdentity}:${workspaceId}:${sessionKind}`;
+    const scopeChanged = scopeRef.current !== null && scopeRef.current !== scope;
+    scopeRef.current = scope;
     setConversationUser(
-      configuration.userId,
-      configuration.tenantId,
-      session?.session_kind ?? "user",
+      conversationIdentity,
+      workspaceId,
+      sessionKind,
     );
+    if (scopeChanged) {
+      const nextDraftId = createDraftConversationId();
+      visibleConversationRef.current = nextDraftId;
+      setDraftId(nextDraftId);
+      setActiveId(null);
+      setInitialMessages([]);
+      setLoadError(null);
+      setIsLoading(true);
+      rememberSelectedConversation(null);
+      void refresh(null);
+      return;
+    }
     void refresh(readSelectedConversation());
-  }, [refresh, router]);
+  }, [currentSession?.active_workspace_id, currentSession?.session_id, currentSession?.session_kind, currentSession?.user_id, refresh, router]);
 
   useEffect(() => {
     if (!shellNavigation.mobileOpen) return;
@@ -309,7 +332,7 @@ export default function ChatShell() {
               }} type="button">Try again</button>
             </>
           ) : (
-            <WorkspaceLoadingSkeleton />
+            <ChatLoadingSkeleton />
           )}
         </div>
       </section>

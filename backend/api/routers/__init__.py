@@ -28,8 +28,15 @@ class PasswordSessionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     method: Literal["password"]
-    email: EmailStr
+    email: EmailStr | None = None
+    username: str | None = Field(default=None, min_length=3, max_length=64)
     password: str = Field(min_length=8, max_length=128)
+
+    @model_validator(mode="after")
+    def require_one_identifier(self) -> "PasswordSessionCreate":
+        if (self.email is None) == (self.username is None):
+            raise ValueError("provide exactly one of email or username")
+        return self
 
 
 class GuestSessionCreate(BaseModel):

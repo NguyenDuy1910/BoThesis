@@ -38,13 +38,7 @@ export interface ViewerCitationSpan {
   bounding_box?: ViewerBoundingBox | null;
 }
 
-export type ItemStatus =
-  | "pending"
-  | "processing"
-  | "ready"
-  | "failed"
-  | "unsupported"
-  | "deleted";
+export type DocumentStatus = "pending_content" | "available" | "failed";
 
 export type PreviewRepresentation = "original" | "image" | "pages";
 
@@ -83,7 +77,7 @@ export interface KnowledgeItemViewer {
   item_id: string;
   title: string;
   content_type: string;
-  status: ItemStatus;
+  status: DocumentStatus;
   external_url?: string | null;
   document_url?: string | null;
   preview?: KnowledgePreview | null;
@@ -100,57 +94,4 @@ export interface KnowledgeCitationResponse {
   external_url?: string | null;
   preview?: KnowledgePreview | null;
   citation: ViewerCitation;
-}
-
-export interface KnowledgeSourceSummary {
-  display_name: string;
-  connector_key?: string | null;
-  source_url?: string | null;
-}
-
-export interface KnowledgeDocumentSummary {
-  id: string;
-  title: string;
-  content_type?: string | null;
-  document_type?: string | null;
-  status: Exclude<ItemStatus, "deleted">;
-  updated_at: string;
-  source?: KnowledgeSourceSummary | null;
-}
-
-export interface KnowledgeCollectionSummary {
-  id: string;
-  title: string;
-  description?: string | null;
-  parent_item_id?: string | null;
-  document_count: number;
-  source_count: number;
-  updated_at: string;
-}
-
-export interface KnowledgeHome {
-  collections: KnowledgeCollectionSummary[];
-  recent_documents: KnowledgeDocumentSummary[];
-  personal_collection_id?: string | null;
-}
-
-export interface KnowledgeCollectionWorkspace {
-  collection: KnowledgeCollectionSummary;
-  child_collections: KnowledgeCollectionSummary[];
-  documents: KnowledgeDocumentSummary[];
-  total: number;
-  page: number;
-  page_size: number;
-}
-
-export interface KnowledgeSearchResult {
-  id: string;
-  collection_item_id: string;
-  title: string;
-  excerpt: string;
-  score: number;
-  url?: string | null;
-  metadata: {
-    chunk_id?: string;
-  };
 }

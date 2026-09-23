@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from api.deps import Caller, KnowledgeView
 from api.routers import Collection, Document, DocumentStatus, KnowledgeHomeResponse
+from bothesis.services.document_presentation import public_document_status
 
 
 class KnowledgeDocumentViewer(BaseModel):
@@ -61,11 +62,7 @@ async def get_knowledge_document(
         caller, item_id=str(document_id), chunk_id=chunk
     )
     value["document_id"] = value.pop("item_id")
-    value["status"] = {
-        "pending": "pending_content",
-        "ready": "available",
-        "processing": "available",
-    }.get(value["status"], value["status"])
+    value["status"] = public_document_status(value.get("status"))
     return KnowledgeDocumentViewer.model_validate(value)
 
 

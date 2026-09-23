@@ -13,6 +13,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { formatDateTime } from "@/modules/workspace-control/format";
 import { workspaceDirectoryApi, type WorkspaceHealth } from "@/modules/workspace-control/directory";
 import { useControlPlaneData } from "@/modules/workspace-control/queries";
+import { ControlPlaneLoadingSkeleton } from "@/modules/workspace-control/components/ControlPlaneLoadingSkeleton";
 
 /**
  * Every workspace on the platform, with the administrator behind it.
@@ -48,6 +49,7 @@ export function PlatformTenantsPage() {
   ];
 
   if (query.error) return <ErrorState description={query.error} onAction={query.reload} />;
+  if (!query.data) return <ControlPlaneLoadingSkeleton variant="platform-tenants" />;
 
   return <>
     <CommandBar

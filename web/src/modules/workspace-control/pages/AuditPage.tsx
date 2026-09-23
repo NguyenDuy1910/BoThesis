@@ -13,6 +13,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { describeAuditAction, formatDateTime, formatRelative } from "@/modules/workspace-control/format";
 import { workspaceDirectoryApi, type AuditEvent } from "@/modules/workspace-control/directory";
 import { useControlPlaneData } from "@/modules/workspace-control/queries";
+import { ControlPlaneLoadingSkeleton } from "@/modules/workspace-control/components/ControlPlaneLoadingSkeleton";
 
 export function AuditPage() {
   return <ActivityTable platform={false} />;
@@ -86,6 +87,7 @@ export function ActivityTable({ platform }: { platform: boolean }) {
   ];
 
   if (events.error) return <ErrorState description={events.error} onAction={events.reload} />;
+  if (!events.data) return <ControlPlaneLoadingSkeleton variant="audit" />;
 
   return <>
     <CommandBar

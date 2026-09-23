@@ -51,6 +51,7 @@ from bothesis.services import (
     TENANT_ADMIN_ROLE,
     USER_MANAGE_PERMISSION,
     ArtifactValidationError,
+    AuthenticationError,
     ControlPlaneConflictError,
     ControlPlaneValidationError,
     AuthContext,
@@ -70,6 +71,7 @@ from bothesis.services.identity_access.auth import AuthenticationService
 from bothesis.services.identity_access.access_session import AccessSessionService
 from bothesis.services.identity_access.identity_store import IdentityStoreService
 from bothesis.services.identity_access.jwt_tokens import JwtTokenService
+from bothesis.services.identity_access.passwords import PasswordCredentialService
 from bothesis.services.citation import CitationService
 from bothesis.services.identity_access.authorization import AuthorizationService
 from bothesis.services.identity_access.role_assignments import RoleAssignmentService
@@ -280,6 +282,50 @@ async def test_identity_supports_multiple_tenant_memberships(
 
 
 @pytest.mark.asyncio
+async def test_switch_session_replaces_session_and_resolves_new_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        identity = IdentityStoreService(session)
+        home = await identity.create_tenant("switch-home", "Switch home")
+        destination = await identity.create_tenant("switch-destination", "Switch destination")
+        user = await identity.create_user("switch@example.com")
+        await join_tenant(session, user, home.id, role_code="reader", permission_codes=("knowledge.read",))
+        await join_tenant(session, user, destination.id, role_code="manager", permission_codes=("knowledge.read", "source.manage"))
+        authentication = AuthenticationService(
+            session,
+            tokens=JwtTokenService(
+                secret="s" * 32,
+                issuer="bothesis",
+                audience="bothesis-api",
+                expires_in_seconds=900,
+            ),
+        )
+        initial = await authentication.complete_verified_external_session(
+            VerifiedGoogleIdentity(
+                issuer="https://accounts.google.com",
+                subject="switch-subject",
+                email="switch@example.com",
+                display_name="Switch User",
+            )
+        )
+
+        switched = await authentication.update_session(
+            current_session_id=initial.session_id,
+            active_workspace_id=destination.id,
+        )
+        previous = await session.get(AccessSession, initial.session_id)
+
+        assert switched.session_id != initial.session_id
+        assert switched.active_tenant_id == destination.id
+        assert switched.permissions == ("knowledge.read", "source.manage")
+        assert previous is not None
+        assert previous.status == "superseded"
+        with pytest.raises(AuthenticationError, match="access session is unavailable"):
+            await authentication.current_session(initial.session_id)
+
+
+@pytest.mark.asyncio
 async def test_platform_admin_holds_platform_permissions_only(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -383,6 +429,39 @@ async def test_platform_role_grant_is_idempotent_and_audited(
         )
         assert len(events) == 1
         assert events[0].tenant_id is None
+
+
+@pytest.mark.asyncio
+async def test_password_session_accepts_username_login(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with session_factory.begin() as session:
+        identity = IdentityStoreService(session)
+        tenant = await identity.create_tenant("username-login", "Username Login")
+        user = await identity.create_user(
+            "analyst@example.com",
+            username="analyst",
+            password_hash=PasswordCredentialService.hash("correct horse battery staple"),
+        )
+        await join_tenant(session, user, tenant.id)
+        authentication = AuthenticationService(
+            session,
+            tokens=JwtTokenService(
+                secret="u" * 32,
+                issuer="bothesis",
+                audience="bothesis-api",
+                expires_in_seconds=900,
+            ),
+        )
+
+        authenticated = await authentication.create_session(
+            method="password",
+            username="ANALYST",
+            password="correct horse battery staple",
+        )
+
+        assert authenticated.user_id == user.id
+        assert authenticated.email == "analyst@example.com"
 
 
 @pytest.mark.asyncio

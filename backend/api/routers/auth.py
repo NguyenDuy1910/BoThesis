@@ -43,7 +43,10 @@ async def create_session(body: CreateSessionRequest, claims: OptionalTokenClaims
         else:
             result = await authentication.create_session(
                 method=body.method,
-                email=str(body.email) if isinstance(body, PasswordSessionCreate) else None,
+                email=(str(body.email) if body.email is not None else None)
+                if isinstance(body, PasswordSessionCreate)
+                else None,
+                username=body.username if isinstance(body, PasswordSessionCreate) else None,
                 password=body.password if isinstance(body, PasswordSessionCreate) else None,
                 guest_session_id=guest_session_id,
             )

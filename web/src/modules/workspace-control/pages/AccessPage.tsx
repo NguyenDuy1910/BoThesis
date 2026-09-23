@@ -29,6 +29,7 @@ import {
   type Role,
 } from "@/modules/workspace-control/directory";
 import { useControlPlaneData } from "@/modules/workspace-control/queries";
+import { ControlPlaneLoadingSkeleton } from "@/modules/workspace-control/components/ControlPlaneLoadingSkeleton";
 
 type AccessTab = "members" | "groups" | "roles";
 
@@ -54,6 +55,10 @@ export function AccessPage() {
         onAction={() => { members.reload(); groups.reload(); roles.reload(); }}
       />
     );
+  }
+
+  if (!members.data || !groups.data || !roles.data) {
+    return <ControlPlaneLoadingSkeleton variant="access" />;
   }
 
   return <>

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
@@ -11,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 import api.app as api_app
 import api.deps as api_deps
 from bothesis.services import AuthContext
+from bothesis.services.document_presentation import public_document_status
+from bothesis.services.knowledge_view import _document_payload
 
 
 def _caller() -> AuthContext:
@@ -102,7 +106,36 @@ def test_knowledge_and_collection_routes_follow_resource_contract(monkeypatch) -
 
     assert home.status_code == 200, home.text
     assert home.json()["recent_documents"][0]["id"] == str(document_id)
+    assert home.json()["recent_documents"][0]["status"] == "available"
     assert collections.status_code == 200, collections.text
     assert created.status_code == 201, created.text
     assert collection.status_code == 200, collection.text
     assert calls == ["home", "list", "create", "get"]
+
+
+def test_knowledge_projection_maps_internal_ready_status_to_public_available() -> None:
+    now = datetime.now(timezone.utc)
+    item = SimpleNamespace(
+        id=uuid4(),
+        parent_item_id=uuid4(),
+        title="Policy.pdf",
+        mime_type="application/pdf",
+        size_bytes=100,
+        metadata_={"purpose": "knowledge"},
+        status="ready",
+        created_at=now,
+        updated_at=now,
+        document_type="pdf",
+        external_resources=[],
+    )
+
+    payload = _document_payload(item)
+
+    assert payload["status"] == "available"
+
+
+def test_public_document_status_collapses_internal_lifecycle_values() -> None:
+    assert public_document_status("pending") == "pending_content"
+    assert public_document_status("processing") == "available"
+    assert public_document_status("ready") == "available"
+    assert public_document_status("unsupported") == "failed"

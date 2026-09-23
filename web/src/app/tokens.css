@@ -82,11 +82,11 @@
   --palette-ivory-200: #eeebe7;
   --palette-ivory-300: #cfcbc7;
   --palette-ivory-400: #b9b5b1;
-  --palette-warm-500: #736f6c;
-  --palette-warm-600: #5f5b56;
-  --palette-warm-700: #423f3c;
-  --palette-warm-900: #22211f;
-  --palette-warm-950: #1c1b19;
+  --palette-warm-500: #625d58;
+  --palette-warm-600: #4e4945;
+  --palette-warm-700: #332f2c;
+  --palette-warm-900: #181716;
+  --palette-warm-950: #11100f;
 
   /* Accent — the soft lavender the warm theme pairs with the ivory ground. */
   --palette-lavender-25: #faf8ff;
@@ -143,17 +143,20 @@
      one step firmer. Neither state competes with data/status colours. */
   --surface-hover: var(--palette-ivory-150);
   --surface-selected: var(--palette-ivory-200);
+  /* User messages need a firmer surface than the white chat canvas while
+     staying within the warm-neutral ramp. */
+  --surface-user-message: var(--palette-ivory-200);
   --surface-inverse: var(--palette-warm-900);
   --surface-header: rgb(253 252 251 / 88%);
 
-  --text-primary: var(--palette-warm-900);
-  /* Darkened for stronger hierarchy on white surfaces and long chat sessions. */
-  --text-secondary: #4f4b47;
-  --text-tertiary: #625e59;
+  --text-primary: var(--palette-warm-950);
+  /* Supporting copy stays charcoal, never low-contrast gray, on white canvas. */
+  --text-secondary: #2f2b28;
+  --text-tertiary: #4b4641;
   /* Long-form reading. The interface ink is 15.5:1 on the chat ground, which
      is right for a label and tiring for a paragraph — a transcript is read,
      not scanned. This sits at ~10:1: still past AAA, without the glare. */
-  --text-reading: #2d2b29;
+  --text-reading: #211f1d;
   --text-inverse: var(--palette-ivory-0);
   --text-accent: var(--palette-warm-700);
   --text-on-accent: #ffffff;
@@ -176,6 +179,8 @@
   --accent-soft-hover: var(--palette-ivory-200);
   --accent-soft-pressed: var(--palette-ivory-300);
   --accent-secondary: var(--palette-warm-600);
+
+  --agent-complete: var(--palette-green-600);
 
   /* Primary actions use the strongest ink step, keeping their hierarchy above
      the warm-neutral selected and navigation treatment. */
@@ -262,8 +267,8 @@
      size, too small for the supporting line under a row title. */
   /* Figma specifies SF Pro. Prefer its text cut, then retain the native
      platform fallback so the interface remains stable off macOS. */
-  --font-ui: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont,
-    "Segoe UI", sans-serif;
+  --font-ui: "Avenir Next", "SF Pro Text", "SF Pro Display", -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-geist-mono: "Geist Mono", "SF Mono", Monaco, "Cascadia Code",
     "Roboto Mono", Consolas, monospace;
   --font-sans: var(--font-ui);
@@ -280,6 +285,8 @@
   --text-lh-h3: 1.625rem;
   --text-size-body: 1rem; /* 16px — readable prose and form values */
   --text-lh-body: 1.5rem;
+  --text-size-chat: 0.9375rem; /* 15px — compact transcript and composer copy */
+  --text-lh-chat: 1.5;
   --text-size-ui: 0.875rem; /* 14px — controls, table cells */
   --text-lh-ui: 1.25rem;
   /* 14px Medium is the size the Figma NavItem component is drawn at. It sits
@@ -344,6 +351,7 @@ html.dark {
   --surface-raised: var(--palette-night-800);
   --surface-hover: rgb(255 255 255 / 5%);
   --surface-selected: rgb(255 255 255 / 10%);
+  --surface-user-message: rgb(255 255 255 / 10%);
   --surface-inverse: var(--palette-pearl-0);
   --surface-header: rgb(20 18 29 / 84%);
 
@@ -369,6 +377,7 @@ html.dark {
   --accent-soft-hover: rgb(255 255 255 / 16%);
   --accent-soft-pressed: rgb(255 255 255 / 22%);
   --accent-secondary: var(--palette-ivory-200);
+  --agent-complete: var(--palette-green-300);
 
   /* Preserve the same action hierarchy in dark mode without reintroducing a
      coloured hover. The warm light fill keeps its dark ink label legible. */
@@ -434,6 +443,7 @@ html.dark {
   --color-surface-raised: var(--surface-raised);
   --color-surface-hover: var(--surface-hover);
   --color-surface-selected: var(--surface-selected);
+  --color-surface-user-message: var(--surface-user-message);
   --color-surface-inverse: var(--surface-inverse);
 
   --color-text-primary: var(--text-primary);

@@ -14,6 +14,7 @@ import { ErrorState } from "@/components/ui/ErrorState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { workspaceDirectoryApi, memberName, type PlatformUser } from "@/modules/workspace-control/directory";
 import { useControlPlaneData } from "@/modules/workspace-control/queries";
+import { ControlPlaneLoadingSkeleton } from "@/modules/workspace-control/components/ControlPlaneLoadingSkeleton";
 
 /**
  * Identities across every workspace.
@@ -66,6 +67,7 @@ export function PlatformUsersPage() {
   ];
 
   if (users.error) return <ErrorState description={users.error} onAction={users.reload} />;
+  if (!users.data) return <ControlPlaneLoadingSkeleton variant="platform-users" />;
 
   return <>
     <CommandBar

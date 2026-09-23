@@ -122,10 +122,10 @@ export default function AuthForm({ mode }: { mode: "login" | "signup" }) {
           <div aria-hidden="true" className="auth-welcome__divider"><span>or use email</span></div>
           <form className="auth-welcome__password-form" onSubmit={submitPassword}>
             {isSignup ? <label><span>Display name</span><input autoComplete="name" onChange={(event) => setDisplayName(event.target.value)} value={displayName} /></label> : null}
-            <label><span>Email</span><input autoCapitalize="none" autoComplete="email" onChange={(event) => setEmail(event.target.value)} required type="email" value={email} /></label>
+            <label><span>{isSignup ? "Email" : "Username or email"}</span><input autoCapitalize="none" autoComplete={isSignup ? "email" : "username"} onChange={(event) => setEmail(event.target.value)} required type={isSignup ? "email" : "text"} value={email} /></label>
             {isSignup ? <label><span>Username (optional)</span><input autoCapitalize="none" autoComplete="username" onChange={(event) => setUsername(event.target.value)} value={username} /></label> : null}
             <label><span>Password</span><input autoComplete={isSignup ? "new-password" : "current-password"} minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></label>
-            <button className="auth-welcome__password-submit" disabled={isSigningIn} type="submit"><KeyRound aria-hidden="true" size={17} strokeWidth={1.9} /><span>{isSignup ? "Create account" : "Sign in with email"}</span></button>
+            <button className="auth-welcome__password-submit" disabled={isSigningIn} type="submit"><KeyRound aria-hidden="true" size={17} strokeWidth={1.9} /><span>{isSignup ? "Create account" : "Sign in"}</span></button>
           </form>
           <p className="auth-welcome__switch">{isSignup ? "Already have an account?" : "New to BoThesis?"} <Link href={isSignup ? "/auth/login" : "/auth/signup"}>{isSignup ? "Sign in" : "Create an account"}</Link></p>
           <section aria-labelledby="access-title" className="auth-welcome__access"><h3 id="access-title">Your access stays governed</h3><ul>{accessCommitments.map(([title, detail]) => <li key={title}><Check aria-hidden="true" size={16} strokeWidth={2.2} /><strong>{title}</strong><small>{detail}</small></li>)}</ul></section>

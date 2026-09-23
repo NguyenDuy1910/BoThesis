@@ -43,8 +43,10 @@ export function PlatformContextMenu({
     try {
       await switchWorkspace(tenantId);
       setWorkspaceSwitcherOpen(false);
+      setOpen(false);
       setSwitching(null);
-      router.push("/app?action=new");
+      onNavigate?.();
+      router.replace("/app?action=new");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not change workspace.");
       setSwitching(null);
